@@ -1,0 +1,627 @@
+{% extends "pages/layout.html" %}
+
+{% block page %}
+<style>
+    @keyframes cursor-blink {
+
+        0%,
+        49% {
+            opacity: 1;
+        }
+
+        50%,
+        100% {
+            opacity: 0;
+        }
+    }
+
+    .cursor-blink {
+        animation: cursor-blink 1s step-end infinite;
+    }
+
+    @keyframes fade-up {
+        from {
+            opacity: 0;
+            transform: translateY(6px);
+        }
+
+        to {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    }
+
+    .stagger {
+        opacity: 0;
+        animation: fade-up 0.4s ease forwards;
+    }
+
+    .stagger-1 {
+        animation-delay: 0s;
+    }
+
+    .stagger-2 {
+        animation-delay: 0.07s;
+    }
+
+    .stagger-3 {
+        animation-delay: 0.14s;
+    }
+
+    .stagger-4 {
+        animation-delay: 0.21s;
+    }
+
+    .stagger-5 {
+        animation-delay: 0.28s;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .stagger {
+            opacity: 1;
+            animation: none;
+        }
+    }
+</style>
+
+<script>
+    function player() {
+        return {
+            ws: null,
+            status: 'connecting',
+            token: '{{ token }}',
+            apiUrl: '{{ api_url }}',
+            audioUrl: '{{ audio_url }}',
+            audioCtx: null,
+            analyser: null,
+            sourceNode: null,
+            freqData: null,
+            timeData: null,
+            bandBins: null,
+            vizInterval: null,
+            heartbeatInterval: null,
+            copied: null,
+            volumePercent: 30,
+            wsRetries: 0,
+            audioRetries: 0,
+
+            init() {
+                this.$refs.audio.src = this.audioUrl;
+                this.$refs.audio.volume = this.volumePercent / 100;
+
+                this.$refs.audio.addEventListener('error', (e) => {
+                    if (this.status === 'disconnected') return;
+                    console.error('Audio stream error', e);
+                    this.handleAudioError();
+                });
+
+                this.$refs.audio.addEventListener('ended', () => {
+                    if (this.status === 'disconnected') return;
+                    console.warn('Audio stream ended unexpectedly');
+                    this.handleAudioError();
+                });
+
+                if (this.token) {
+                    this.connectWs();
+                }
+            },
+
+            handleAudioError() {
+                this.audioRetries++;
+                if (this.audioRetries > 10) {
+                    console.error('Audio stream failed 10 times consecutively, giving up.');
+                    this.disconnect();
+                    return;
+                }
+                
+                this.status = 'buffering';
+                console.log(`Reconnecting audio stream... (attempt ${this.audioRetries})`);
+                
+                setTimeout(() => {
+                    if (this.status !== 'disconnected') {
+                        const audio = this.$refs.audio;
+                        const separator = this.audioUrl.includes('?') ? '&' : '?';
+                        audio.src = `${this.audioUrl}${separator}t=${Date.now()}`;
+                        audio.load();
+                        audio.play().then(() => {
+                            this.audioRetries = 0;
+                            this.status = 'playing';
+                            if (!this.audioCtx || this.audioCtx.state !== 'running') {
+                                this.startAnalyzer();
+                            }
+                        }).catch(e => {
+                            console.error("Playback restart failed:", e);
+                            this.handleAudioError();
+                        });
+                    }
+                }, 2000);
+            },
+
+            copy(text) {
+                navigator.clipboard.writeText(text);
+                this.copied = text;
+                setTimeout(() => this.copied = null, 2000);
+            },
+
+            connectWs() {
+                if (this.status !== 'playing' && this.status !== 'buffering') {
+                    this.status = 'connecting';
+                }
+
+                const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const wsUrl = `${protocol}//${this.apiUrl}/api/ws/pair?token=${this.token}`;
+
+                this.ws = new WebSocket(wsUrl);
+
+                this.ws.onopen = () => {
+                    this.wsRetries = 0;
+                    this.sendClientState();
+                    if (this.status !== 'playing' && this.status !== 'buffering') {
+                        this.status = 'ready';
+                    }
+                };
+
+                this.ws.onmessage = (event) => {
+                    let payload;
+                    try {
+                        payload = JSON.parse(event.data);
+                    } catch (e) {
+                        console.error('Invalid WS payload', e);
+                        return;
+                    }
+
+                    switch (payload.event) {
+                        case 'toggle_mute':
+                            this.toggleLocalMute();
+                            break;
+                        case 'volume_up':
+                            this.adjustLocalVolume(5);
+                            break;
+                        case 'volume_down':
+                            this.adjustLocalVolume(-5);
+                            break;
+                    }
+                };
+
+                this.ws.onclose = () => {
+                    if (this.status === 'disconnected') return;
+                    
+                    this.wsRetries++;
+                    if (this.wsRetries > 10) {
+                        console.error('WS failed 10 times consecutively, giving up.');
+                        return;
+                    }
+
+                    // Attempt to reconnect after a short delay
+                    setTimeout(() => {
+                        if (this.status !== 'disconnected' && this.token) {
+                            this.connectWs();
+                        }
+                    }, 2000);
+                };
+
+                this.ws.onerror = (e) => {
+                    console.error('WS Error', e);
+                };
+            },
+
+            startPlayback() {
+                this.status = 'buffering';
+
+                // Reconnect WS if it was closed during disconnect
+                if (this.token && (!this.ws || this.ws.readyState !== WebSocket.OPEN)) {
+                    this.wsRetries = 0;
+                    this.connectWs();
+                }
+
+                // Apple requires AudioContext creation/resume to be synchronous to user interaction
+                const AudioCtx = window.AudioContext || window.webkitAudioContext;
+                if (AudioCtx) {
+                    if (!this.audioCtx) {
+                        this.audioCtx = new AudioCtx();
+                        const audio = this.$refs.audio;
+                        this.sourceNode = this.audioCtx.createMediaElementSource(audio);
+                        this.analyser = this.audioCtx.createAnalyser();
+                        this.analyser.fftSize = 1024;
+                        this.analyser.minDecibels = -100;
+                        this.analyser.maxDecibels = -30;
+                        this.analyser.smoothingTimeConstant = 0.2;
+                        this.sourceNode.connect(this.analyser);
+                        this.analyser.connect(this.audioCtx.destination);
+
+                        this.freqData = new Uint8Array(this.analyser.frequencyBinCount);
+                        this.timeData = new Float32Array(this.analyser.fftSize);
+                        this.bandBins = this.buildLogBands(this.audioCtx.sampleRate, this.analyser.fftSize, 8);
+                    }
+                    if (this.audioCtx.state === 'suspended') {
+                        this.audioCtx.resume();
+                    }
+                }
+
+                const audio = this.$refs.audio;
+                const separator = this.audioUrl.includes('?') ? '&' : '?';
+                audio.src = `${this.audioUrl}${separator}t=${Date.now()}`;
+                audio.play().then(() => {
+                    this.audioRetries = 0;
+                    this.status = 'playing';
+                    this.startAnalyzer();
+                }).catch(e => {
+                    console.error("Playback failed:", e);
+                    this.handleAudioError();
+                });
+            },
+
+            disconnect() {
+                const audio = this.$refs.audio;
+                if (audio) {
+                    audio.pause();
+                    audio.src = '';
+                }
+
+                if (this.vizInterval) {
+                    clearInterval(this.vizInterval);
+                    this.vizInterval = null;
+                }
+                if (this.heartbeatInterval) {
+                    clearInterval(this.heartbeatInterval);
+                    this.heartbeatInterval = null;
+                }
+
+                if (this.audioCtx && this.audioCtx.state === 'running') {
+                    this.audioCtx.suspend();
+                }
+
+                if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+                    this.ws.close();
+                }
+
+                this.status = 'disconnected';
+            },
+
+            toggleLocalMute() {
+                const audio = this.$refs.audio;
+                audio.muted = !audio.muted;
+                this.sendClientState();
+            },
+
+            adjustLocalVolume(delta) {
+                this.volumePercent = Math.max(0, Math.min(100, this.volumePercent + delta));
+                this.$refs.audio.volume = this.volumePercent / 100;
+                this.sendClientState();
+            },
+
+            sendClientState() {
+                if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                    return;
+                }
+                this.ws.send(JSON.stringify({
+                    event: 'client_state',
+                    client_kind: 'browser',
+                    muted: this.$refs.audio ? this.$refs.audio.muted : false,
+                    volume_percent: this.volumePercent,
+                }));
+            },
+
+            startAnalyzer() {
+                // Resume existing AudioContext if suspended
+                if (this.audioCtx) {
+                    if (this.audioCtx.state === 'suspended') {
+                        this.audioCtx.resume();
+                    }
+                    this.startVizLoop();
+                    return;
+                }
+
+                console.warn('Web Audio API not initialized or not supported; falling back to heartbeat only');
+                this.startFallbackHeartbeat();
+            },
+
+            startVizLoop() {
+                if (this.vizInterval) {
+                    return;
+                }
+                this.vizInterval = setInterval(() => {
+                    if (this.status !== 'playing' || !this.ws || this.ws.readyState !== WebSocket.OPEN) {
+                        return;
+                    }
+                    const audio = this.$refs.audio;
+                    const bands = this.sampleBands();
+                    const rms = this.sampleRms();
+                    const payload = {
+                        event: 'viz',
+                        position_ms: Math.floor(audio.currentTime * 1000),
+                        bands: bands,
+                        rms: rms
+                    };
+                    this.ws.send(JSON.stringify(payload));
+                }, 100);
+            },
+
+            startFallbackHeartbeat() {
+                if (this.heartbeatInterval) {
+                    return;
+                }
+                this.heartbeatInterval = setInterval(() => {
+                    if (this.status === 'playing' && this.ws.readyState === WebSocket.OPEN) {
+                        const payload = {
+                            event: 'heartbeat',
+                            position_ms: Math.floor(this.$refs.audio.currentTime * 1000)
+                        };
+                        this.ws.send(JSON.stringify(payload));
+                    }
+                }, 1000);
+            },
+
+            buildLogBands(sampleRate, fftSize, bandCount) {
+                const nyquist = sampleRate / 2;
+                const minHz = 60.0;
+                const maxHz = Math.min(nyquist, 12000.0);
+                const logMin = Math.log(minHz);
+                const logMax = Math.log(maxHz);
+                const bins = [];
+                for (let i = 0; i < bandCount; i++) {
+                    const t0 = i / bandCount;
+                    const t1 = (i + 1) / bandCount;
+                    const f0 = Math.exp(logMin + (logMax - logMin) * t0);
+                    const f1 = Math.exp(logMin + (logMax - logMin) * t1);
+                    const b0 = Math.max(1, Math.floor((f0 / nyquist) * (fftSize / 2)));
+                    const b1 = Math.max(b0 + 1, Math.ceil((f1 / nyquist) * (fftSize / 2)));
+                    bins.push([b0, b1]);
+                }
+                return bins;
+            },
+
+            softCompress(x) {
+                const k = 2.0;
+                return (k * x) / (1.0 + k * x);
+            },
+
+            sampleBands() {
+                this.analyser.getByteFrequencyData(this.freqData);
+                const bands = [];
+                for (let i = 0; i < this.bandBins.length; i++) {
+                    const [start, end] = this.bandBins[i];
+                    let sum = 0.0;
+                    let count = 0;
+                    const max = Math.min(end, this.freqData.length);
+                    for (let j = start; j < max; j++) {
+                        sum += this.freqData[j];
+                        count += 1;
+                    }
+                    const avg = count > 0 ? sum / count : 0.0;
+                    const norm = avg / 255.0;
+                    bands.push(Math.min(1.0, this.softCompress(norm * 3.0)));
+                }
+                return bands;
+            },
+
+            sampleRms() {
+                this.analyser.getFloatTimeDomainData(this.timeData);
+                let sum = 0.0;
+                for (let i = 0; i < this.timeData.length; i++) {
+                    const v = this.timeData[i];
+                    sum += v * v;
+                }
+                const rms = Math.sqrt(sum / this.timeData.length);
+                return Math.min(1.0, this.softCompress(rms * 3.0));
+            }
+        }
+    }
+</script>
+
+<div x-data="player()" class="max-w-lg mx-auto pt-8 sm:pt-16">
+
+    {% if token.is_empty() %}
+    <!-- ═══ LANDING ═══ -->
+
+    <div class="stagger stagger-1 mb-14">
+        <h1 class="text-3xl sm:text-4xl text-green-500 tracking-tight">late.sh</h1>
+        <p class="text-gray-500 mt-2">a cozy terminal clubhouse for developers</p>
+    </div>
+
+    <div class="stagger stagger-2 mb-12">
+        <button @click="copy('ssh late.sh')"
+            class="group w-full text-left border border-gray-700 hover:border-green-900 px-5 py-4 transition-colors duration-200 bg-gray-900/40">
+            <div class="flex items-center justify-between gap-4">
+                <span class="text-lg min-w-0 truncate">
+                    <span class="text-gray-600">$ </span>
+                    <span class="text-gray-100">ssh late.sh</span>
+                    <span class="cursor-blink text-green-500 ml-px">&#9612;</span>
+                </span>
+                <span class="shrink-0 text-right text-xs">
+                    <span x-cloak x-show="copied !== 'ssh late.sh'"
+                        class="text-gray-700 group-hover:text-gray-500 transition-colors">copy</span>
+                    <span x-cloak x-show="copied === 'ssh late.sh'" class="text-green-600">copied</span>
+                </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-600">
+                if it fails, generate a key first: <span class="text-gray-400">ssh-keygen -t ed25519</span>
+            </div>
+        </button>
+    </div>
+
+    <div class="stagger stagger-3 mb-4">
+        <button @click="copy('curl -fsSL https://cli.late.sh/install.sh | bash')"
+            class="group w-full text-left border border-gray-800 hover:border-green-950 px-5 py-4 transition-colors duration-200 bg-gray-900/20">
+            <div class="flex items-center justify-between gap-4">
+                <span class="text-sm sm:text-base text-gray-300 min-w-0 truncate">
+                    <span class="text-gray-600">$ </span>
+                    <span class="text-gray-100">curl -fsSL https://cli.late.sh/install.sh | bash</span>
+                </span>
+                <span class="shrink-0 text-right text-xs">
+                    <span x-cloak x-show="copied !== 'curl -fsSL https://cli.late.sh/install.sh | bash'"
+                        class="text-gray-700 group-hover:text-gray-500 transition-colors">copy</span>
+                    <span x-cloak x-show="copied === 'curl -fsSL https://cli.late.sh/install.sh | bash'" class="text-green-600">copied</span>
+                </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-600">
+                installs the local `late` companion CLI
+            </div>
+        </button>
+    </div>
+
+    <div class="stagger stagger-3 mb-12">
+        <button @click="copy('git clone https://github.com/mpiorowski/late-sh && cd late-sh && cargo build --release --bin late')"
+            class="group w-full text-left border border-gray-800 hover:border-green-950 px-5 py-4 transition-colors duration-200 bg-gray-900/20">
+            <div class="flex items-center justify-between gap-4">
+                <span class="text-xs sm:text-sm text-gray-300 min-w-0 truncate">
+                    <span class="text-gray-600">$ </span>
+                    <span class="text-gray-100">git clone https://github.com/mpiorowski/late-sh &amp;&amp; cd late-sh &amp;&amp; cargo build --release</span>
+                </span>
+                <span class="shrink-0 text-right text-xs">
+                    <span x-cloak x-show="copied !== 'git clone https://github.com/mpiorowski/late-sh && cd late-sh && cargo build --release --bin late'"
+                        class="text-gray-700 group-hover:text-gray-500 transition-colors">copy</span>
+                    <span x-cloak x-show="copied === 'git clone https://github.com/mpiorowski/late-sh && cd late-sh && cargo build --release --bin late'"
+                        class="text-green-600">copied</span>
+                </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-600">
+                or build the companion CLI from source
+            </div>
+        </button>
+    </div>
+
+    <div class="stagger stagger-4 mb-14 text-sm leading-loose">
+        <div class="text-gray-500"><span class="text-gray-700">&#9500;&#9472;</span> lofi radio &amp; genre voting</div>
+        <div class="text-gray-500"><span class="text-gray-700">&#9500;&#9472;</span> the arcade <span class="text-gray-700">(2048, sudoku, nonograms, solitaire)</span></div>
+        <div class="text-gray-500"><span class="text-gray-700">&#9500;&#9472;</span> daily challenges &amp; streaks</div>
+        <div class="text-gray-500"><span class="text-gray-700">&#9500;&#9472;</span> live chat</div>
+        <div class="text-gray-500"><span class="text-gray-700">&#9500;&#9472;</span> share &amp; discuss news</div>
+        <div class="text-gray-500"><span class="text-gray-700">&#9492;&#9472;</span> multiplayer games <span class="text-gray-700">(coming soon)</span></div>
+    </div>
+
+    <div class="stagger stagger-5 mb-14 text-xs leading-relaxed">
+        <div class="text-gray-600 mb-3"><span class="text-gray-700">#</span> identity</div>
+        <div class="text-gray-500">no passwords. no OAuth. no accounts.</div>
+        <div class="text-gray-500">your <span class="text-green-600">ssh key</span> is your identity.</div>
+        <div class="text-gray-600 mt-3">chats, scores, and streaks are tied to your</div>
+        <div class="text-gray-600">public key fingerprint. same key, same data,</div>
+        <div class="text-gray-600">any machine.</div>
+    </div>
+
+    <div class="stagger stagger-5 mb-8 text-xs leading-relaxed">
+        <div class="text-gray-600 mb-3"><span class="text-gray-700">#</span> privacy</div>
+        <div class="text-gray-500">we store your key <span class="text-green-600">fingerprint</span>, not the full public key.</div>
+        <div class="text-gray-500">no IP logging. no tracking. no analytics.</div>
+        <div class="text-gray-600 mt-3">chat messages and game scores are stored in</div>
+        <div class="text-gray-600">postgres, tied only to your fingerprint.</div>
+        <div class="text-gray-600 mt-3">don't trust us? use a throwaway key:</div>
+    </div>
+
+    <div class="stagger stagger-5 mb-14">
+        <button @click="copy('ssh-keygen -t ed25519 -f ~/.ssh/late_throwaway && ssh -i ~/.ssh/late_throwaway late.sh')"
+            class="group w-full text-left border border-gray-800 hover:border-green-950 px-5 py-4 transition-colors duration-200 bg-gray-900/20">
+            <div class="flex items-center justify-between gap-4">
+                <span class="text-xs text-gray-300 min-w-0 truncate">
+                    <span class="text-gray-600">$ </span>
+                    <span class="text-gray-100">ssh-keygen -t ed25519 -f ~/.ssh/late_throwaway && ssh -i ~/.ssh/late_throwaway late.sh</span>
+                </span>
+                <span class="shrink-0 text-right text-xs">
+                    <span x-cloak x-show="copied !== 'ssh-keygen -t ed25519 -f ~/.ssh/late_throwaway && ssh -i ~/.ssh/late_throwaway late.sh'"
+                        class="text-gray-700 group-hover:text-gray-500 transition-colors">copy</span>
+                    <span x-cloak x-show="copied === 'ssh-keygen -t ed25519 -f ~/.ssh/late_throwaway && ssh -i ~/.ssh/late_throwaway late.sh'"
+                        class="text-green-600">copied</span>
+                </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-600">
+                generates a disposable key &mdash; zero risk, full experience
+            </div>
+        </button>
+    </div>
+
+    <div class="stagger stagger-5 border-t border-gray-800 pt-5 text-xs text-gray-600"
+        hx-get="/status?pairing=false" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    </div>
+
+    {% else %}
+    <!-- ═══ AUDIO PAIRING ═══ -->
+
+    <div class="mb-10">
+        <h1 class="text-2xl text-green-500 tracking-tight">late.sh</h1>
+        <p class="text-gray-600 mt-1 text-sm">audio link</p>
+    </div>
+
+    <div class="mb-8 text-sm" x-cloak>
+        <template x-if="status === 'connecting'">
+            <div class="flex items-center gap-2.5 text-yellow-600">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+                connecting to terminal...
+            </div>
+        </template>
+        <template x-if="status === 'ready'">
+            <div class="flex items-center gap-2.5 text-green-600">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-current"></span>
+                linked to your terminal
+            </div>
+        </template>
+        <template x-if="status === 'buffering'">
+            <div class="flex items-center gap-2.5 text-yellow-500">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+                buffering stream...
+            </div>
+        </template>
+        <template x-if="status === 'playing'">
+            <div class="flex items-center gap-2.5 text-green-500">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-current animate-pulse"></span>
+                streaming
+            </div>
+        </template>
+        <template x-if="status === 'disconnected'">
+            <div class="flex items-center gap-2.5 text-gray-600">
+                <span class="inline-block w-1.5 h-1.5 rounded-full bg-current"></span>
+                disconnected
+            </div>
+        </template>
+    </div>
+
+    <div class="mb-10 border-l-2 border-gray-800 pl-4"
+        hx-get="/status?pairing=true" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    </div>
+
+    <div class="space-y-3" x-cloak>
+        <button @click="startPlayback"
+            x-show="status === 'ready' || status === 'disconnected' || status === 'buffering'"
+            :disabled="status === 'buffering'"
+            class="w-full text-left border px-4 py-3 text-sm transition-colors duration-200" :class="status === 'buffering'
+                    ? 'border-gray-800 text-gray-600 cursor-wait'
+                    : 'border-gray-700 hover:border-green-900 text-gray-300 hover:text-green-500 bg-gray-900/40'"
+            x-text="status === 'buffering' ? '[ buffering... ]' : '[ start audio ]'">
+        </button>
+
+        <button @click="disconnect" x-show="status === 'playing'"
+            class="w-full text-left border border-gray-800 hover:border-gray-600 px-4 py-3 text-sm text-gray-600 hover:text-gray-400 transition-colors duration-200">
+            [ disconnect ]
+        </button>
+    </div>
+
+    <div x-cloak x-show="status === 'playing'" class="mt-8 text-xs text-gray-700">
+        keep this tab open in the background<br>
+        control volume from your terminal or OS
+    </div>
+
+    <div class="mt-14 border-t border-gray-800 pt-5">
+        <button @click="copy('curl -fsSL https://cli.late.sh/install.sh | bash')"
+            class="group w-full text-left px-4 py-3 transition-colors duration-200 border border-gray-800 hover:border-green-950 bg-gray-900/20">
+            <div class="flex items-center justify-between gap-4">
+                <span class="text-xs text-gray-400 min-w-0 truncate">
+                    <span class="text-gray-600">$ </span>
+                    <span class="text-gray-300">curl -fsSL https://cli.late.sh/install.sh | bash</span>
+                </span>
+                <span class="shrink-0 text-right text-xs">
+                    <span x-cloak x-show="copied !== 'curl -fsSL https://cli.late.sh/install.sh | bash'"
+                        class="text-gray-700 group-hover:text-gray-500 transition-colors">copy</span>
+                    <span x-cloak x-show="copied === 'curl -fsSL https://cli.late.sh/install.sh | bash'"
+                        class="text-green-600">copied</span>
+                </span>
+            </div>
+            <div class="mt-2 text-xs text-gray-600">
+                skip the browser &mdash; the companion CLI plays audio locally
+            </div>
+        </button>
+    </div>
+
+    {% endif %}
+
+    <audio x-ref="audio" preload="none" crossorigin="anonymous" class="hidden"></audio>
+</div>
+{% endblock %}

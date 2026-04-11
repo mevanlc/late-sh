@@ -1,0 +1,153 @@
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use tokio_postgres::Client;
+use uuid::Uuid;
+
+crate::user_scoped_model! {
+    table = "notifications";
+    user_field = user_id;
+    params = NotificationParams;
+    struct Notification {
+        @data
+        pub user_id: Uuid,
+        pub actor_id: Uuid,
+        pub message_id: Uuid,
+        pub room_id: Uuid,
+        pub read_at: Option<DateTime<Utc>>
+    }
+}
+
+/// Joined view used for display in the notifications list.
+#[derive(Debug, Clone)]
+pub struct NotificationView {
+    pub id: Uuid,
+    pub created: DateTime<Utc>,
+    pub user_id: Uuid,
+    pub actor_id: Uuid,
+    pub message_id: Uuid,
+    pub room_id: Uuid,
+    pub read_at: Option<DateTime<Utc>>,
+    pub actor_username: String,
+    pub room_slug: Option<String>,
+    pub message_preview: String,
+}
+
+impl Notification {
+    /// Bulk-insert mention notifications for multiple users.
+    pub async fn create_mentions_batch(
+        client: &Client,
+        user_ids: &[Uuid],
+        actor_id: Uuid,
+        message_id: Uuid,
+        room_id: Uuid,
+    ) -> Result<u64> {
+        if user_ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Build a multi-row INSERT: ($1, $2, $3, $4), ($5, $2, $3, $4), ...
+        // where $2=actor_id, $3=message_id, $4=room_id are shared, and each $N is a user_id.
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+            Vec::with_capacity(user_ids.len() + 3);
+        params.push(&actor_id); // $1
+        params.push(&message_id); // $2
+        params.push(&room_id); // $3
+
+        let mut value_clauses = Vec::with_capacity(user_ids.len());
+        for (i, uid) in user_ids.iter().enumerate() {
+            params.push(uid); // $4, $5, $6, ...
+            value_clauses.push(format!("(${}, $1, $2, $3)", i + 4));
+        }
+
+        let query = format!(
+            "INSERT INTO notifications (user_id, actor_id, message_id, room_id) VALUES {} ON CONFLICT DO NOTHING",
+            value_clauses.join(", ")
+        );
+
+        let count = client.execute(&query, &params).await?;
+        Ok(count)
+    }
+
+    /// List recent notifications for a user with joined display data.
+    pub async fn list_for_user(
+        client: &Client,
+        user_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<NotificationView>> {
+        let rows = client
+            .query(
+                "SELECT n.id, n.created, n.user_id, n.actor_id, n.message_id, n.room_id, n.read_at,
+                        COALESCE(p.username, '') AS actor_username,
+                        r.slug AS room_slug,
+                        LEFT(m.body, 120) AS message_preview
+                 FROM notifications n
+                 JOIN profiles p ON p.user_id = n.actor_id
+                 JOIN chat_rooms r ON r.id = n.room_id
+                 JOIN chat_messages m ON m.id = n.message_id
+                 WHERE n.user_id = $1
+                 ORDER BY n.created DESC
+                 LIMIT $2",
+                &[&user_id, &limit],
+            )
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| NotificationView {
+                id: row.get("id"),
+                created: row.get("created"),
+                user_id: row.get("user_id"),
+                actor_id: row.get("actor_id"),
+                message_id: row.get("message_id"),
+                room_id: row.get("room_id"),
+                read_at: row.get("read_at"),
+                actor_username: row.get("actor_username"),
+                room_slug: row.get("room_slug"),
+                message_preview: row.get("message_preview"),
+            })
+            .collect())
+    }
+
+    /// Count unread notifications for a user.
+    pub async fn unread_count(client: &Client, user_id: Uuid) -> Result<i64> {
+        let row = client
+            .query_one(
+                "SELECT COUNT(*)::bigint AS cnt FROM notifications WHERE user_id = $1 AND read_at IS NULL",
+                &[&user_id],
+            )
+            .await?;
+        Ok(row.get("cnt"))
+    }
+
+    /// Mark all unread notifications as read for a user.
+    pub async fn mark_all_read(client: &Client, user_id: Uuid) -> Result<u64> {
+        let count = client
+            .execute(
+                "UPDATE notifications SET read_at = current_timestamp WHERE user_id = $1 AND read_at IS NULL",
+                &[&user_id],
+            )
+            .await?;
+        Ok(count)
+    }
+
+    /// Resolve @usernames to user IDs, excluding the actor.
+    pub async fn resolve_mentioned_user_ids(
+        client: &Client,
+        usernames: &[String],
+        exclude_user_id: Uuid,
+    ) -> Result<Vec<Uuid>> {
+        if usernames.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let lower: Vec<String> = usernames.iter().map(|u| u.to_ascii_lowercase()).collect();
+        let rows = client
+            .query(
+                "SELECT user_id FROM profiles WHERE LOWER(username) = ANY($1) AND user_id != $2",
+                &[&lower, &exclude_user_id],
+            )
+            .await?;
+
+        Ok(rows.iter().map(|r| r.get("user_id")).collect())
+    }
+}

@@ -1,0 +1,47 @@
+[package]
+name = "late-web"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+otel = [
+    "late-core/otel",
+    "opentelemetry",
+    "tracing-opentelemetry",
+    "opentelemetry-http",
+]
+
+[dependencies]
+# Workspace Crates
+late-core = { path = "../late-core", default-features = false }
+
+# Core Utils
+anyhow = { workspace = true }
+bytes = "1"
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Async Runtime
+tokio = { workspace = true }
+
+# Templating
+askama = "0.15.1"
+async-stream = "0.3"
+
+# Web / HTTP
+axum = { workspace = true }
+futures-util = "0.3"
+reqwest = { workspace = true, features = ["json"] }
+tower-http = { workspace = true, features = ["fs", "trace"] }
+
+# Telemetry (optional — gated behind "otel" feature)
+opentelemetry = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry-http = { workspace = true, optional = true }
+
+[dev-dependencies]
+tower = "0.5"

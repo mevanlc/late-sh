@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "packs": [
+    {
+      "size_key": "10x10",
+      "width": 10,
+      "height": 10,
+      "puzzle_count": 100,
+      "path": "10x10.json"
+    },
+    {
+      "size_key": "15x15",
+      "width": 15,
+      "height": 15,
+      "puzzle_count": 100,
+      "path": "15x15.json"
+    },
+    {
+      "size_key": "20x20",
+      "width": 20,
+      "height": 20,
+      "puzzle_count": 100,
+      "path": "20x20.json"
+    }
+  ]
+}

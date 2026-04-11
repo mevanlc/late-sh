@@ -1,0 +1,4 @@
+[tools]
+rust = "latest"
+mold = "latest"
+"cargo:cargo-nextest" = "latest"

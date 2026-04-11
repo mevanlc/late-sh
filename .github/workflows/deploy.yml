@@ -1,0 +1,92 @@
+name: deploy
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ !endsWith(github.ref, '-infra') && !endsWith(github.ref, '-cli') && !endsWith(github.ref, '-web') }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    name: ci
+    if: "!endsWith(github.ref, '-infra') && !endsWith(github.ref, '-cli') && !endsWith(github.ref, '-web')"
+    uses: ./.github/workflows/ci.yml
+    with:
+      package: late-ssh
+
+  build_ssh:
+    name: build_late_ssh_image
+    if: "!endsWith(github.ref, '-infra') && !endsWith(github.ref, '-cli') && !endsWith(github.ref, '-web')"
+    needs: ci
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      registry: ghcr.io
+      image_name: late-ssh
+      image_tag: ${{ github.event.release.tag_name }}
+      context: .
+      dockerfile: ./Dockerfile
+      docker_target: runtime-ssh
+      environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+
+  get_web_image:
+    name: get_current_web_image_tag
+    if: "!endsWith(github.ref, '-infra') && !endsWith(github.ref, '-cli') && !endsWith(github.ref, '-web')"
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+    outputs:
+      web_image_tag: ${{ steps.web_image.outputs.image_tag }}
+    steps:
+      - name: setup_kubectl
+        uses: azure/setup-kubectl@v5
+
+      - name: set_kubernetes_context
+        uses: azure/k8s-set-context@v5
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: get_web_image_tag
+        id: web_image
+        run: |
+          tag=$(kubectl get deployment service-web -n default -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+  terraform:
+    name: terraform_apply
+    if: "!endsWith(github.ref, '-infra') && !endsWith(github.ref, '-cli') && !endsWith(github.ref, '-web')"
+    needs: [build_ssh, get_web_image]
+    uses: ./.github/workflows/terraform.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      ssh_image_tag: ${{ needs.build_ssh.outputs.image_tag }}
+      web_image_tag: ${{ needs.get_web_image.outputs.web_image_tag }}
+      environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+
+  wait_for_ssh_rollout:
+    name: wait_for_ssh_rollout
+    if: "!endsWith(github.ref, '-infra') && !endsWith(github.ref, '-cli') && !endsWith(github.ref, '-web')"
+    needs: terraform
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+    steps:
+      - name: setup_kubectl
+        uses: azure/setup-kubectl@v5
+
+      - name: set_kubernetes_context
+        uses: azure/k8s-set-context@v5
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: wait_for_rollout
+        run: kubectl rollout status deployment service-ssh -n default --timeout=180s

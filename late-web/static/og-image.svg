@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630">
+    <rect width="1200" height="630" fill="#111827" />
+    <rect x="40" y="40" width="1120" height="550" rx="12" ry="12" fill="#1f2937" stroke="#374151" stroke-width="2" />
+    <!-- Terminal header -->
+    <circle cx="80" cy="80" r="10" fill="#ef4444" />
+    <circle cx="120" cy="80" r="10" fill="#eab308" />
+    <circle cx="160" cy="80" r="10" fill="#22c55e" />
+    <text x="600" y="86" fill="#9ca3af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="22" text-anchor="middle">guest@late.sh: ~</text>
+    <line x1="40" y1="120" x2="1160" y2="120" stroke="#374151" stroke-width="2" />
+    
+    <!-- Content -->
+    <!-- Green prompt arrow and command -->
+    <text x="100" y="240" fill="#22c55e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-weight="bold" font-size="72">➜</text>
+    <text x="160" y="240" fill="#f3f4f6" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-weight="bold" font-size="72">ssh late.sh<tspan fill="#22c55e" opacity="0.8">_</tspan></text>
+    
+    <text x="100" y="360" fill="#d1d5db" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="36">A cozy terminal clubhouse for developers.</text>
+    
+    <!-- Bullet points -->
+    <text x="100" y="460" fill="#22c55e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">✓</text>
+    <text x="140" y="460" fill="#9ca3af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">Multiplayer Arcade</text>
+    
+    <text x="560" y="460" fill="#22c55e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">✓</text>
+    <text x="600" y="460" fill="#9ca3af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">Daily Streaks</text>
+    
+    <text x="100" y="520" fill="#22c55e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">✓</text>
+    <text x="140" y="520" fill="#9ca3af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">Lofi &amp; Ambient Beats</text>
+    
+    <text x="560" y="520" fill="#22c55e" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">✓</text>
+    <text x="600" y="520" fill="#9ca3af" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="32">Developer Chat</text>
+</svg>

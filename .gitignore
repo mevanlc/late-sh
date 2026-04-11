@@ -1,0 +1,8 @@
+target
+node_modules
+.env
+.claude
+.codex
+late-ssh/assets/nonograms/.number-loom-validation/
+server_key
+server_key.pub

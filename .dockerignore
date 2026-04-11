@@ -1,0 +1,36 @@
+# Build artifacts
+target/
+**/*.rs.bk
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+LICENSE
+
+# Local config
+.env
+.env.*
+server_key
+
+# Music files (large, not needed for build)
+music/
+
+# Infrastructure configs (mounted separately)
+infra/
+
+# Tests artifacts
+*.profraw

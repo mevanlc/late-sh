@@ -1,0 +1,52 @@
+[package]
+name = "late-ssh"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+otel = ["late-core/otel", "opentelemetry", "tracing-opentelemetry", "opentelemetry-http"]
+
+[dependencies]
+# Workspace Crates
+late-core = { path = "../late-core", default-features = false }
+
+# Core Utils
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+ipnet = "2.11"
+
+# Async Runtime
+tokio = { workspace = true }
+
+# Database
+tokio-postgres = { workspace = true }
+
+# Terminal UI
+crossterm = "0.29"
+ratatui = "0.30"
+rand_core = { version = "0.6", features = ["std"] }
+base64 = "0.22"
+
+# SSH
+russh = "0.56.0"
+
+# Web / HTTP
+axum = { workspace = true, features = ["ws"] }
+reqwest = { workspace = true, features = ["json"] }
+tower-http = { workspace = true, features = ["cors", "trace"] }
+qrcodegen = "1.8.0"
+rumenx-sudoku = "1.0.0"
+
+# Telemetry (optional — gated behind "otel" feature)
+opentelemetry = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry-http = { workspace = true, optional = true }
+
+[dev-dependencies]
+late-core = { path = "../late-core", features = ["testing"] }

@@ -1,0 +1,102 @@
+name: terraform_apply
+
+on:
+  workflow_call:
+    inputs:
+      ssh_image_tag:
+        required: true
+        type: string
+      web_image_tag:
+        required: true
+        type: string
+      environment:
+        required: false
+        type: string
+
+jobs:
+  terraform:
+    name: terraform_apply
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ inputs.environment }}
+    env:
+      TF_VAR_LOG_LEVEL: ${{ vars.LOG_LEVEL }}
+      TF_VAR_DOMAIN: ${{ vars.DOMAIN }}
+      TF_VAR_GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+      TF_VAR_SSH_IMAGE_TAG: ${{ inputs.ssh_image_tag }}
+      TF_VAR_WEB_IMAGE_TAG: ${{ inputs.web_image_tag }}
+      TF_VAR_DOCKER_CONFIG_JSON: ${{ secrets.DOCKER_CONFIG_JSON }}
+      TF_VAR_SSH_HOST_KEY: ${{ secrets.SSH_HOST_KEY }}
+      TF_VAR_SSH_OPEN: ${{ vars.SSH_OPEN }}
+      TF_VAR_MAX_CONNS_GLOBAL: ${{ vars.MAX_CONNS_GLOBAL }}
+      TF_VAR_MAX_CONNS_PER_IP: ${{ vars.MAX_CONNS_PER_IP }}
+      TF_VAR_SSH_IDLE_TIMEOUT: ${{ vars.SSH_IDLE_TIMEOUT }}
+      TF_VAR_FRAME_DROP_LOG_EVERY: ${{ vars.FRAME_DROP_LOG_EVERY }}
+      TF_VAR_SSH_MAX_ATTEMPTS_PER_IP: ${{ vars.SSH_MAX_ATTEMPTS_PER_IP }}
+      TF_VAR_SSH_RATE_LIMIT_WINDOW_SECS: ${{ vars.SSH_RATE_LIMIT_WINDOW_SECS }}
+      TF_VAR_WS_PAIR_MAX_ATTEMPTS_PER_IP: ${{ vars.WS_PAIR_MAX_ATTEMPTS_PER_IP }}
+      TF_VAR_WS_PAIR_RATE_LIMIT_WINDOW_SECS: ${{ vars.WS_PAIR_RATE_LIMIT_WINDOW_SECS }}
+      TF_VAR_DB_POOL_SIZE: ${{ vars.DB_POOL_SIZE }}
+      TF_VAR_AI_ENABLED: ${{ vars.AI_ENABLED }}
+      TF_VAR_AI_MODEL: ${{ vars.AI_MODEL }}
+      TF_VAR_AI_API_KEY: ${{ secrets.AI_API_KEY }}
+      TF_VAR_VOTE_SWITCH_INTERVAL_SECS: ${{ vars.VOTE_SWITCH_INTERVAL_SECS }}
+      TF_VAR_S3_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      TF_VAR_S3_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      TF_VAR_S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+      TF_VAR_DB_BACKUPS_BUCKET: ${{ vars.DB_BACKUPS_BUCKET }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: setup_kubectl
+        uses: azure/setup-kubectl@v5
+
+      - name: set_kubernetes_context
+        uses: azure/k8s-set-context@v5
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: set_kubeconfig_path_for_terraform
+        run: echo "TF_VAR_KUBE_CONFIG_PATH=$KUBECONFIG" >> "$GITHUB_ENV"
+
+      - name: setup_terraform
+        uses: hashicorp/setup-terraform@v4
+
+      - name: terraform_init
+        working-directory: ./infra
+        run: terraform init
+
+      # Temporary workaround for kubernetes provider identity bug on service-ssh.
+      # Remove after provider/state issue is fully resolved.
+      - name: terraform_repair_service_ssh_state
+        working-directory: ./infra
+        run: |
+          if kubectl get deployment service-ssh -n default >/dev/null 2>&1; then
+            echo "service-ssh exists; repairing terraform state identity"
+            terraform state rm kubernetes_deployment_v1.service_ssh >/dev/null 2>&1 || true
+            terraform import kubernetes_deployment_v1.service_ssh default/service-ssh
+          else
+            echo "service-ssh does not exist; skipping state repair"
+          fi
+
+      - name: terraform_validate
+        working-directory: ./infra
+        run: terraform validate
+
+      # CRD-installing operators must be applied first because kubernetes_manifest
+      # resources validate against the API schema at plan time.
+      - name: terraform_apply_operators
+        working-directory: ./infra
+        run: |
+          terraform apply -auto-approve -compact-warnings \
+            -target=helm_release.cert_manager \
+            -target=helm_release.cloudnativepg \
+            -target=helm_release.barman_cloud_plugin \
+            -target=helm_release.local_path_provisioner
+
+      - name: terraform_apply
+        working-directory: ./infra
+        run: terraform apply -auto-approve

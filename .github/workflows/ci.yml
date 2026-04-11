@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  workflow_call:
+    inputs:
+      package:
+        description: "Cargo package to check (empty = whole workspace)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+      - name: install_rustfmt
+        run: rustup component add rustfmt
+      - name: cargo_fmt_check
+        run: cargo fmt --all -- --check
+
+  clippy-test:
+    name: clippy + test
+    needs: [fmt]
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+      - name: install_linux_build_dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config mold
+      - name: restore_rust_cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-rust
+      - name: install_clippy
+        run: rustup component add clippy
+      - name: cargo_clippy
+        run: cargo clippy ${{ inputs.package && format('-p {0}', inputs.package) || '--workspace' }} --all-targets --features otel -- -D warnings
+      - name: install_nextest
+        uses: taiki-e/install-action@nextest
+      - name: cargo_test
+        env:
+          TEST_DATABASE_URL: "host=127.0.0.1 port=5432 user=test password=test dbname=postgres"
+        run: cargo nextest run ${{ inputs.package && format('-p {0}', inputs.package) || '--workspace' }} --all-targets

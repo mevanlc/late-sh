@@ -1,0 +1,98 @@
+services:
+
+  service-web:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - postgres
+      - otel-collector
+
+  service-ssh:
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    depends_on:
+      - postgres
+      - otel-collector
+
+  otel-collector:
+    container_name: late-otel-collector
+    image: otel/opentelemetry-collector-contrib:0.147.0
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+    environment:
+      - TRACES_ENDPOINT=victoriatraces:4317
+      - LOGS_ENDPOINT=http://victorialogs:9428/insert/opentelemetry/v1/logs
+      - METRICS_ENDPOINT=http://victoriametrics:8428/api/v1/write
+    volumes:
+      - ./monitoring/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+    depends_on:
+      - victorialogs
+      - victoriatraces
+      - victoriametrics
+
+  victoriametrics:
+    container_name: victoriametrics
+    image: victoriametrics/victoria-metrics:latest
+    ports:
+      - "8428:8428"
+    volumes:
+      - vmdata:/storage
+    command:
+      - "--storageDataPath=/storage"
+      - "--retentionPeriod=1"
+    restart: always
+
+  victorialogs:
+    container_name: victorialogs
+    image: victoriametrics/victoria-logs:latest
+    ports:
+      - "9428:9428"
+    volumes:
+      - vldata:/victoria-logs-data
+    command:
+      - "--storageDataPath=/victoria-logs-data"
+      - "--retentionPeriod=7d"
+    restart: always
+
+  victoriatraces:
+    container_name: victoriatraces
+    image: victoriametrics/victoria-traces:latest
+    ports:
+      - "10428:10428"
+    volumes:
+      - vtdata:/victoria-traces-data
+    command:
+      - "--storageDataPath=/victoria-traces-data"
+      - "--retentionPeriod=3d"
+      - "--otlpGRPCListenAddr=:4317"
+      - "--otlpGRPC.tls=false"
+      - "--httpListenAddr=:10428"
+      - "--servicegraph.enableTask=true"
+    restart: always
+
+  grafana:
+    container_name: gofast-grafana
+    image: grafana/grafana-enterprise:12.4.0
+    ports:
+      - 3001:3000
+    volumes:
+      - ./monitoring/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
+      - ./monitoring/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml
+      - ./monitoring/dashboards:/etc/grafana/provisioning/dashboards/starter
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+      - GF_INSTALL_PLUGINS=victoriametrics-metrics-datasource,victoriametrics-logs-datasource
+    depends_on:
+      - victorialogs
+      - victoriatraces
+      - victoriametrics
+
+volumes:
+  vmdata:
+  vldata:
+  vtdata:

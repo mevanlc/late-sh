@@ -1,0 +1,302 @@
+use std::collections::VecDeque;
+
+use late_core::api_types::NowPlaying;
+use ratatui::{
+    Frame,
+    layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, Paragraph},
+};
+
+use super::primitives::Screen;
+use super::theme;
+use crate::app::bonsai::state::BonsaiState;
+use crate::app::visualizer::Visualizer;
+use crate::session::ClientAudioState;
+use crate::state::ActivityEvent;
+
+pub struct SidebarProps<'a> {
+    pub screen: Screen,
+    pub game_selection: usize,
+    pub is_playing_game: bool,
+    pub visualizer: &'a Visualizer,
+    pub now_playing: Option<&'a NowPlaying>,
+    pub paired_client: Option<&'a ClientAudioState>,
+    pub online_count: usize,
+    pub bonsai: &'a BonsaiState,
+    pub audio_beat: f32,
+    pub connect_url: &'a str,
+    pub activity: &'a VecDeque<ActivityEvent>,
+}
+
+pub fn draw_sidebar(frame: &mut Frame, area: Rect, props: &SidebarProps<'_>) {
+    let visualizer = props.visualizer;
+    let now_playing = props.now_playing;
+    let paired_client = props.paired_client;
+    let online_count = props.online_count;
+    let screen = props.screen;
+    let layout = Layout::vertical([
+        Constraint::Length(3),  // screen card
+        Constraint::Length(10), // visualizer
+        Constraint::Length(8),  // now playing
+        Constraint::Fill(1),    // activity (shrinks on small screens)
+        Constraint::Length(16), // bonsai tree (12 max art + 2 status + 2 border)
+    ])
+    .split(area);
+
+    draw_screen_card(frame, layout[0], screen);
+    visualizer.render(frame, layout[1]);
+    draw_now_playing(frame, layout[2], now_playing, paired_client);
+    draw_status(frame, layout[3], online_count, props.activity);
+    crate::app::bonsai::ui::draw_bonsai(frame, layout[4], props.bonsai, props.audio_beat);
+}
+
+fn draw_screen_card(frame: &mut Frame, area: Rect, screen: Screen) {
+    let tabs = [
+        (Screen::Dashboard, "1"),
+        (Screen::Chat, "2"),
+        (Screen::Games, "3"),
+        (Screen::Profile, "4"),
+    ];
+
+    let mut spans = Vec::new();
+    for (s, key) in tabs {
+        if s == screen {
+            spans.push(Span::styled(
+                format!(" {key} "),
+                Style::default()
+                    .fg(theme::BG_SELECTION)
+                    .bg(theme::AMBER)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else {
+            spans.push(Span::styled(
+                format!(" {key} "),
+                Style::default().fg(theme::TEXT_DIM),
+            ));
+        }
+    }
+
+    let label = match screen {
+        Screen::Dashboard => "Dashboard",
+        Screen::Chat => "Chat",
+        Screen::Profile => "Profile",
+        Screen::Games => "Games",
+    };
+
+    let block = Block::default()
+        .title(format!(" {label} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+fn draw_now_playing(
+    frame: &mut Frame,
+    area: Rect,
+    now_playing: Option<&NowPlaying>,
+    paired_client: Option<&ClientAudioState>,
+) {
+    let block = Block::default()
+        .title(" Now Playing ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let content = match now_playing {
+        Some(np) => {
+            let artist = np.track.artist.as_deref().unwrap_or("Unknown");
+            let title = &np.track.title;
+            let elapsed_secs = np.started_at.elapsed().as_secs();
+            let duration = np.track.duration_seconds;
+
+            let mut lines = vec![
+                Line::from(Span::styled(artist, Style::default().fg(theme::TEXT_DIM))),
+                Line::from(Span::styled(
+                    title.as_str(),
+                    Style::default().fg(theme::TEXT_BRIGHT),
+                )),
+            ];
+
+            if let Some(dur) = duration {
+                let elapsed = elapsed_secs.min(dur);
+                let elapsed_str = format!("{}:{:02}", elapsed / 60, elapsed % 60);
+                let total_str = format!("{}:{:02}", dur / 60, dur % 60);
+
+                let time_width = elapsed_str.len() + total_str.len() + 2;
+                let bar_width = (inner.width as usize).saturating_sub(time_width);
+
+                let progress = if dur > 0 {
+                    (elapsed as f64 / dur as f64).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let dot_pos =
+                    ((bar_width as f64 * progress) as usize).min(bar_width.saturating_sub(1));
+
+                let bar_before = "─".repeat(dot_pos);
+                let bar_after = "─".repeat(bar_width.saturating_sub(dot_pos + 1));
+
+                lines.push(Line::from(vec![
+                    Span::styled(elapsed_str, Style::default().fg(theme::AMBER)),
+                    Span::raw(" "),
+                    Span::styled(bar_before, Style::default().fg(theme::BORDER_DIM)),
+                    Span::styled("●", Style::default().fg(theme::AMBER_GLOW)),
+                    Span::styled(bar_after, Style::default().fg(theme::BORDER_DIM)),
+                    Span::raw(" "),
+                    Span::styled(total_str, Style::default().fg(theme::TEXT_FAINT)),
+                ]));
+            } else {
+                let elapsed_str = format!("{}:{:02}", elapsed_secs / 60, elapsed_secs % 60);
+                lines.push(Line::from(vec![
+                    Span::styled(elapsed_str, Style::default().fg(theme::AMBER)),
+                    Span::styled(" ▸", Style::default().fg(theme::AMBER_GLOW)),
+                ]));
+            }
+
+            lines.push(Line::from(vec![
+                Span::styled("- / =", Style::default().fg(theme::AMBER_DIM)),
+                Span::styled(" vol  ", Style::default().fg(theme::TEXT_FAINT)),
+                Span::styled("m", Style::default().fg(theme::AMBER_DIM)),
+                Span::styled(" mute", Style::default().fg(theme::TEXT_FAINT)),
+            ]));
+            lines.extend(paired_client_lines(paired_client));
+
+            lines
+        }
+        None => {
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "Waiting...",
+                    Style::default().fg(theme::TEXT_FAINT),
+                )),
+                Line::raw(""),
+            ];
+            lines.extend(paired_client_lines(paired_client));
+            lines
+        }
+    };
+
+    frame.render_widget(Paragraph::new(content), inner);
+}
+
+fn paired_client_lines(paired_client: Option<&ClientAudioState>) -> Vec<Line<'static>> {
+    match paired_client {
+        Some(state) => vec![
+            Line::from(vec![
+                Span::styled("Pair ", Style::default().fg(theme::TEXT_DIM)),
+                Span::styled(
+                    state.client_kind.label(),
+                    Style::default().fg(theme::TEXT_BRIGHT),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    if state.muted { "Muted" } else { "Live" },
+                    Style::default().fg(if state.muted {
+                        theme::AMBER
+                    } else {
+                        theme::TEXT_BRIGHT
+                    }),
+                ),
+                Span::styled("  ", Style::default().fg(theme::TEXT_DIM)),
+                Span::styled(
+                    format!("{}%", state.volume_percent),
+                    Style::default().fg(theme::AMBER_DIM),
+                ),
+            ]),
+        ],
+        None => vec![
+            Line::from(Span::styled(
+                "No pair",
+                Style::default().fg(theme::TEXT_FAINT),
+            )),
+            Line::from(Span::styled(
+                "Volume --",
+                Style::default().fg(theme::TEXT_FAINT),
+            )),
+        ],
+    }
+}
+
+fn draw_status(
+    frame: &mut Frame,
+    area: Rect,
+    online_count: usize,
+    activity: &VecDeque<ActivityEvent>,
+) {
+    if area.height < 3 {
+        return;
+    }
+
+    let block = Block::default()
+        .title(" Activity ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines = vec![Line::from(vec![
+        Span::styled("● ", Style::default().fg(theme::SUCCESS)),
+        Span::styled(
+            format!("{}", online_count),
+            Style::default()
+                .fg(theme::AMBER)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" online", Style::default().fg(theme::TEXT_DIM)),
+        Span::styled("  ", Style::default()),
+        Span::styled("?", Style::default().fg(theme::AMBER)),
+        Span::styled(" keys", Style::default().fg(theme::TEXT_DIM)),
+    ])];
+
+    let activity_rows = inner.height.saturating_sub(1).min(20) as usize;
+    let visible_events = (activity_rows / 2).max(1);
+    let meta_width = inner.width as usize;
+    let action_width = inner.width as usize;
+
+    for event in activity.iter().rev().take(visible_events) {
+        let elapsed = event.at.elapsed().as_secs();
+        let ago = if elapsed < 60 {
+            format!("{}s", elapsed)
+        } else {
+            format!("{}m", elapsed / 60)
+        };
+
+        let meta = truncate_chars(&format!("@{}  {}", event.username, ago), meta_width);
+        let action = truncate_chars(&event.action, action_width);
+
+        lines.push(Line::from(vec![Span::styled(
+            meta,
+            Style::default().fg(theme::TEXT_MUTED),
+        )]));
+        lines.push(Line::from(vec![Span::styled(
+            action,
+            Style::default().fg(theme::TEXT_DIM),
+        )]));
+    }
+
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 1 {
+        return "…".to_string();
+    }
+
+    let mut out: String = chars.into_iter().take(max_chars - 1).collect();
+    out.push('…');
+    out
+}

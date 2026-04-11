@@ -1,0 +1,92 @@
+name: deploy_web
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ endsWith(github.ref, '-web') }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  ci:
+    name: ci
+    if: endsWith(github.ref, '-web')
+    uses: ./.github/workflows/ci.yml
+    with:
+      package: late-web
+
+  build_web:
+    name: build_late_web_image
+    if: endsWith(github.ref, '-web')
+    needs: ci
+    uses: ./.github/workflows/build.yml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      registry: ghcr.io
+      image_name: late-web
+      image_tag: ${{ github.event.release.tag_name }}
+      context: .
+      dockerfile: ./Dockerfile
+      docker_target: runtime-web
+      environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+
+  get_ssh_image:
+    name: get_current_ssh_image_tag
+    if: endsWith(github.ref, '-web')
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+    outputs:
+      ssh_image_tag: ${{ steps.ssh_image.outputs.image_tag }}
+    steps:
+      - name: setup_kubectl
+        uses: azure/setup-kubectl@v5
+
+      - name: set_kubernetes_context
+        uses: azure/k8s-set-context@v5
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: get_ssh_image_tag
+        id: ssh_image
+        run: |
+          tag=$(kubectl get deployment service-ssh -n default -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+  terraform:
+    name: terraform_apply
+    if: endsWith(github.ref, '-web')
+    needs: [build_web, get_ssh_image]
+    uses: ./.github/workflows/terraform.yml
+    permissions:
+      contents: read
+    secrets: inherit
+    with:
+      ssh_image_tag: ${{ needs.get_ssh_image.outputs.ssh_image_tag }}
+      web_image_tag: ${{ needs.build_web.outputs.image_tag }}
+      environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+
+  wait_for_web_rollout:
+    name: wait_for_web_rollout
+    if: endsWith(github.ref, '-web')
+    needs: terraform
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.release.prerelease && 'staging' || 'production' }}
+    steps:
+      - name: setup_kubectl
+        uses: azure/setup-kubectl@v5
+
+      - name: set_kubernetes_context
+        uses: azure/k8s-set-context@v5
+        with:
+          kubeconfig: ${{ secrets.KUBE_CONFIG }}
+
+      - name: wait_for_rollout
+        run: kubectl rollout status deployment service-web -n default --timeout=180s

@@ -1,0 +1,70 @@
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  memory_limiter:
+    check_interval: 5s
+    limit_mib: 192
+    spike_limit_mib: 64
+  batch:
+
+connectors:
+  spanmetrics:
+    # Keep only the dimensions the dashboard needs; everything else stays on current defaults.
+    dimensions:
+      - name: http.request.method
+      - name: http.route
+      - name: http.response.status_code
+      - name: rpc.system
+      - name: rpc.service
+      - name: rpc.method
+    exemplars:
+      enabled: true
+    resource_metrics_key_attributes:
+      - service.name
+      - telemetry.sdk.language
+      - telemetry.sdk.name
+  servicegraph:
+    dimensions:
+      - rpc.system
+      - rpc.service
+      - rpc.method
+
+exporters:
+  otlp_grpc/victoriatraces:
+    endpoint: ${env:TRACES_ENDPOINT}
+    tls:
+      insecure: true
+
+  otlp_http/victorialogs:
+    logs_endpoint: ${env:LOGS_ENDPOINT}
+
+  prometheusremotewrite/victoriametrics:
+    endpoint: ${env:METRICS_ENDPOINT}
+    resource_to_telemetry_conversion:
+      enabled: true
+
+service:
+  extensions: [health_check]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/victoriatraces, spanmetrics, servicegraph]
+    metrics:
+      receivers: [otlp, spanmetrics, servicegraph]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite/victoriametrics]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_http/victorialogs]

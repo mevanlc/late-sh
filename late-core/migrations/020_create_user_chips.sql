@@ -1,0 +1,7 @@
+CREATE TABLE user_chips (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    balance BIGINT NOT NULL DEFAULT 0,
+    last_stipend_date DATE,
+    created TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

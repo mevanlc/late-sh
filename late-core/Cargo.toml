@@ -1,0 +1,55 @@
+[package]
+name = "late-core"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+testing = ["testcontainers"]
+otel = [
+    "opentelemetry",
+    "opentelemetry_sdk",
+    "opentelemetry-otlp",
+    "tracing-opentelemetry",
+    "opentelemetry-appender-tracing",
+    "opentelemetry-http",
+]
+
+[dependencies]
+# Core Utils
+anyhow = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+
+# Async Runtime
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+
+# Database
+deadpool-postgres = "0.14"
+tokio-postgres = { workspace = true }
+testcontainers = { version = "0.26.3", optional = true }
+
+# HTTP Client
+reqwest = { workspace = true, features = ["blocking"] }
+
+# Audio Processing
+rustfft = "6.4.1"
+symphonia = { version = "0.5.5", features = ["mp3"] }
+image = "0.25.9"
+axum.workspace = true
+
+# Telemetry (optional, heavy deps — gated behind "otel" feature)
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio"], optional = true }
+opentelemetry-otlp = { workspace = true, features = ["grpc-tonic", "trace", "metrics", "logs"], optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry-appender-tracing = { workspace = true, optional = true }
+opentelemetry-http = { workspace = true, optional = true }
+
+[dev-dependencies]
+late-core = { path = ".", features = ["testing"] }

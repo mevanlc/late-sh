@@ -1,0 +1,168 @@
+name: deploy_cli
+
+on:
+  release:
+    types: [published]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ endsWith(github.ref, '-cli') }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: ci
+    if: endsWith(github.ref, '-cli')
+    uses: ./.github/workflows/ci.yml
+    with:
+      package: late-cli
+
+  build_cli:
+    name: build_late_cli_${{ matrix.target }}
+    if: endsWith(github.ref, '-cli')
+    needs: ci
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: restore_rust_cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: cli-release-${{ matrix.target }}
+
+      - name: install_linux_build_dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2-dev pkg-config mold
+
+      - name: install_rust_target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: cargo_build_cli
+        run: cargo build --locked --release -p late-cli --bin late --target ${{ matrix.target }}
+
+      - name: stage_cli_artifact
+        run: |
+          mkdir -p dist/${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/late dist/${{ matrix.target }}/late
+
+      - name: upload_cli_artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: late-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/late
+          if-no-files-found: error
+
+  publish_cli:
+    name: publish_late_cli
+    if: endsWith(github.ref, '-cli')
+    needs: build_cli
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.release.prerelease == true && 'staging' || 'production' }}
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.S3_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      DIST_BUCKET: ${{ vars.BUCKET || 'late-sh-r' }}
+      S3_ENDPOINT: ${{ vars.S3_ENDPOINT }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      IS_PRERELEASE: ${{ github.event.release.prerelease }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@v5
+
+      - name: download_cli_artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: late-*
+          path: dist
+
+      - name: validate_publish_configuration
+        run: |
+          test -n "$AWS_ACCESS_KEY_ID"
+          test -n "$AWS_SECRET_ACCESS_KEY"
+          test -n "$DIST_BUCKET"
+          test -n "$S3_ENDPOINT"
+
+      - name: prepare_distribution_layout
+        run: |
+          chmod 755 scripts/install.sh
+          mkdir -p publish/releases/${RELEASE_TAG}
+
+          for artifact_dir in dist/late-*; do
+            target="${artifact_dir#dist/late-}"
+            mkdir -p "publish/releases/${RELEASE_TAG}/${target}"
+            cp "${artifact_dir}/late" "publish/releases/${RELEASE_TAG}/${target}/late"
+          done
+
+          cp scripts/install.sh publish/releases/${RELEASE_TAG}/install.sh
+          printf '%s\n' "${RELEASE_TAG}" > publish/releases/${RELEASE_TAG}/VERSION
+          (
+            cd publish/releases/${RELEASE_TAG}
+            sha256sum */late > sha256sums.txt
+          )
+
+          if [[ "${IS_PRERELEASE}" != "true" ]]; then
+            mkdir -p publish/latest
+            cp -R publish/releases/${RELEASE_TAG}/x86_64-unknown-linux-gnu publish/latest/
+            cp -R publish/releases/${RELEASE_TAG}/aarch64-unknown-linux-gnu publish/latest/
+            cp -R publish/releases/${RELEASE_TAG}/x86_64-apple-darwin publish/latest/
+            cp -R publish/releases/${RELEASE_TAG}/aarch64-apple-darwin publish/latest/
+            cp scripts/install.sh publish/latest/install.sh
+            cp scripts/install.sh publish/install.sh
+            cp scripts/install.sh publish/index.html
+            printf '%s\n' "${RELEASE_TAG}" > publish/latest/VERSION
+            printf '%s\n' "${RELEASE_TAG}" > publish/VERSION
+            cp publish/releases/${RELEASE_TAG}/sha256sums.txt publish/latest/sha256sums.txt
+          fi
+
+      - name: upload_release_distribution
+        run: |
+          aws s3 cp \
+            publish/releases/${RELEASE_TAG}/ \
+            "s3://${DIST_BUCKET}/releases/${RELEASE_TAG}/" \
+            --recursive \
+            --endpoint-url "${S3_ENDPOINT}"
+
+      - name: upload_latest_distribution
+        if: github.event.release.prerelease == false
+        run: |
+          aws s3 cp \
+            publish/latest/ \
+            "s3://${DIST_BUCKET}/latest/" \
+            --recursive \
+            --endpoint-url "${S3_ENDPOINT}"
+
+          aws s3 cp \
+            publish/install.sh \
+            "s3://${DIST_BUCKET}/install.sh" \
+            --endpoint-url "${S3_ENDPOINT}" \
+            --content-type "text/x-shellscript"
+
+          aws s3 cp \
+            publish/index.html \
+            "s3://${DIST_BUCKET}/index.html" \
+            --endpoint-url "${S3_ENDPOINT}" \
+            --content-type "text/x-shellscript"
+
+          aws s3 cp \
+            publish/VERSION \
+            "s3://${DIST_BUCKET}/VERSION" \
+            --endpoint-url "${S3_ENDPOINT}" \
+            --content-type "text/plain"
