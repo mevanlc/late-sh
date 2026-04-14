@@ -19,7 +19,7 @@ use super::{
         sidebar::{SidebarProps, draw_sidebar},
         theme,
     },
-    dashboard, profile,
+    dashboard, icon_picker, profile,
     state::App,
     visualizer::Visualizer,
 };
@@ -77,6 +77,9 @@ struct DrawContext<'a> {
     show_web_chat_qr: bool,
     web_chat_qr_url: Option<&'a str>,
     is_draining: bool,
+    icon_picker_open: bool,
+    icon_picker_state: &'a icon_picker::IconPickerState,
+    icon_catalog: Option<&'a icon_picker::catalog::IconCatalogData>,
 }
 
 impl App {
@@ -239,6 +242,9 @@ impl App {
                         show_web_chat_qr: self.show_web_chat_qr,
                         web_chat_qr_url: self.web_chat_qr_url.as_deref(),
                         is_draining: self.is_draining.load(std::sync::atomic::Ordering::Relaxed),
+                        icon_picker_open: self.icon_picker_open,
+                        icon_picker_state: &self.icon_picker_state,
+                        icon_catalog: self.icon_catalog.as_ref(),
                     },
                 )
             })
@@ -471,6 +477,12 @@ impl App {
                 ("Pair", "Scan to pair audio")
             };
             super::qr::draw_qr_overlay(frame, inner, url, title, subtitle);
+        }
+
+        if ctx.icon_picker_open
+            && let Some(catalog) = ctx.icon_catalog
+        {
+            icon_picker::picker::render(frame, area, ctx.icon_picker_state, catalog);
         }
     }
 }
