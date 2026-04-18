@@ -1,4 +1,4 @@
-use crate::app::input::ParsedInput;
+use crate::app::input::{ParsedInput, sanitize_paste_markers};
 use crate::app::state::App;
 
 use super::state::{PickerKind, Row};
@@ -22,12 +22,12 @@ pub fn handle_input(app: &mut App, event: ParsedInput) {
     match event {
         ParsedInput::Byte(0x1B) => app.show_welcome = false,
         ParsedInput::Byte(b'?') | ParsedInput::Char('?') => open_help(app),
-        ParsedInput::Byte(b'j' | b'J') | ParsedInput::Arrow(b'B') => {
-            app.welcome_modal_state.move_row(1)
-        }
-        ParsedInput::Byte(b'k' | b'K') | ParsedInput::Arrow(b'A') => {
-            app.welcome_modal_state.move_row(-1)
-        }
+        ParsedInput::Byte(b'j' | b'J')
+        | ParsedInput::Char('j' | 'J')
+        | ParsedInput::Arrow(b'B') => app.welcome_modal_state.move_row(1),
+        ParsedInput::Byte(b'k' | b'K')
+        | ParsedInput::Char('k' | 'K')
+        | ParsedInput::Arrow(b'A') => app.welcome_modal_state.move_row(-1),
         ParsedInput::Arrow(b'C') => app.welcome_modal_state.cycle_setting(true),
         ParsedInput::Arrow(b'D') => app.welcome_modal_state.cycle_setting(false),
         ParsedInput::Byte(b' ') | ParsedInput::Byte(b'\r') => activate_selected_row(app),
@@ -72,6 +72,14 @@ fn handle_username_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Byte(b'\r') => app.welcome_modal_state.submit_username(),
         ParsedInput::Byte(0x15) => app.welcome_modal_state.clear_username(),
         ParsedInput::Byte(0x7F) => app.welcome_modal_state.username_backspace(),
+        ParsedInput::Paste(pasted) => {
+            let cleaned = sanitize_paste_markers(&String::from_utf8_lossy(&pasted));
+            for ch in cleaned.chars() {
+                if !ch.is_control() && ch != '\n' && ch != '\r' {
+                    app.welcome_modal_state.username_push(ch);
+                }
+            }
+        }
         ParsedInput::Char(ch) if !ch.is_control() => app.welcome_modal_state.username_push(ch),
         ParsedInput::Byte(byte) if byte.is_ascii_graphic() || byte == b' ' => {
             app.welcome_modal_state.username_push(byte as char)
@@ -97,6 +105,15 @@ fn handle_bio_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Arrow(b'D') => composer.cursor_left(),
         ParsedInput::CtrlArrow(b'C') => composer.cursor_word_right(),
         ParsedInput::CtrlArrow(b'D') => composer.cursor_word_left(),
+        ParsedInput::Paste(pasted) => {
+            let cleaned = sanitize_paste_markers(&String::from_utf8_lossy(&pasted));
+            let normalized = cleaned.replace("\r\n", "\n").replace('\r', "\n");
+            for ch in normalized.chars() {
+                if ch == '\n' || (!ch.is_control() && ch != '\u{7f}') {
+                    app.welcome_modal_state.bio_push(ch);
+                }
+            }
+        }
         ParsedInput::Char(ch) if !ch.is_control() => app.welcome_modal_state.bio_push(ch),
         _ => {}
     }
@@ -107,12 +124,12 @@ fn handle_picker_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Byte(0x1B) => app.welcome_modal_state.close_picker(),
         ParsedInput::Byte(b'\r') => app.welcome_modal_state.apply_picker_selection(),
         ParsedInput::Byte(0x7F) => app.welcome_modal_state.picker_backspace(),
-        ParsedInput::Byte(b'j' | b'J') | ParsedInput::Arrow(b'B') => {
-            app.welcome_modal_state.picker_move(1)
-        }
-        ParsedInput::Byte(b'k' | b'K') | ParsedInput::Arrow(b'A') => {
-            app.welcome_modal_state.picker_move(-1)
-        }
+        ParsedInput::Byte(b'j' | b'J')
+        | ParsedInput::Char('j' | 'J')
+        | ParsedInput::Arrow(b'B') => app.welcome_modal_state.picker_move(1),
+        ParsedInput::Byte(b'k' | b'K')
+        | ParsedInput::Char('k' | 'K')
+        | ParsedInput::Arrow(b'A') => app.welcome_modal_state.picker_move(-1),
         ParsedInput::PageDown => {
             let page = app.welcome_modal_state.picker().visible_height.get().max(1) as isize;
             app.welcome_modal_state.picker_move(page);

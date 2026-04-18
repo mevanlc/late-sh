@@ -13,13 +13,13 @@ pub enum HelpTopic {
 impl HelpTopic {
     pub const ALL: [HelpTopic; 8] = [
         HelpTopic::Overview,
-        HelpTopic::Architecture,
         HelpTopic::Chat,
         HelpTopic::Music,
         HelpTopic::News,
         HelpTopic::Arcade,
         HelpTopic::Bonsai,
         HelpTopic::Profile,
+        HelpTopic::Architecture,
     ];
 
     pub fn title(self) -> &'static str {
@@ -51,13 +51,13 @@ impl HelpTopic {
     pub fn index(self) -> usize {
         match self {
             HelpTopic::Overview => 0,
-            HelpTopic::Architecture => 1,
-            HelpTopic::Chat => 2,
-            HelpTopic::Music => 3,
-            HelpTopic::News => 4,
-            HelpTopic::Arcade => 5,
-            HelpTopic::Bonsai => 6,
-            HelpTopic::Profile => 7,
+            HelpTopic::Chat => 1,
+            HelpTopic::Music => 2,
+            HelpTopic::News => 3,
+            HelpTopic::Arcade => 4,
+            HelpTopic::Bonsai => 5,
+            HelpTopic::Profile => 6,
+            HelpTopic::Architecture => 7,
         }
     }
 }
@@ -105,12 +105,6 @@ pub fn chat_help_lines() -> Vec<String> {
         "  /music             explain how music works",
         "  /help              open this guide",
         "",
-        "Rooms",
-        "  h / l              previous / next room",
-        "  Space              room jump hints",
-        "  Enter / i          start composing",
-        "  c                  copy a web-chat link to this session",
-        "",
         "Messages",
         "  j / k              select older / newer message",
         "  ↑ / ↓              same as j / k",
@@ -118,9 +112,16 @@ pub fn chat_help_lines() -> Vec<String> {
         "  PageUp / PageDown  half page up / down",
         "  End                jump to most recent",
         "  g / G              clear selection (back to live view)",
+        "  p                  open selected user's profile",
         "  r                  reply to selected message",
         "  e                  edit selected message",
         "  d                  delete selected message",
+        "",
+        "Rooms",
+        "  h / l              previous / next room",
+        "  Space              room jump hints",
+        "  Enter / i          start composing",
+        "  c                  copy a web-chat link to this session",
         "",
         "Compose",
         "  Enter              send and exit",
@@ -180,7 +181,7 @@ fn overview_lines() -> Vec<String> {
         "  q                 quit",
         "  m                 mute paired client",
         "  + / -             paired client volume",
-        "  p                 show browser pairing QR",
+        "  P                 show browser pairing QR",
         "",
         "This modal",
         "  h / l / ← / →     previous / next slide",
@@ -365,7 +366,7 @@ Don't trust the install script? Build from source:
 
 Option 2: Browser pairing
 
-Press `p` to open a QR code + copy the pairing URL. The browser connects to your session via a token-based WebSocket, streams audio, and feeds visualizer frames back to the sidebar.
+Press `P` to open a QR code + copy the pairing URL. The browser connects to your session via a token-based WebSocket, streams audio, and feeds visualizer frames back to the sidebar.
 
 Both options give you:
   m = mute | +/- = volume | visualizer in the sidebar
