@@ -988,20 +988,18 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
     match event {
         ParsedInput::Byte(b'\r') => apply_icon_selection(app, false),
         ParsedInput::AltEnter => apply_icon_selection(app, true),
-        ParsedInput::Byte(0x7f) => {
-            if app.icon_picker_state.search_cursor > 0 {
-                let byte_pos = app
-                    .icon_picker_state
-                    .search_query
-                    .char_indices()
-                    .nth(app.icon_picker_state.search_cursor - 1)
-                    .map(|(i, _)| i)
-                    .unwrap_or(0);
-                app.icon_picker_state.search_query.remove(byte_pos);
-                app.icon_picker_state.search_cursor -= 1;
-                app.icon_picker_state.selected_index = 0;
-                app.icon_picker_state.scroll_offset = 0;
-            }
+        ParsedInput::Byte(0x7f) if app.icon_picker_state.search_cursor > 0 => {
+            let byte_pos = app
+                .icon_picker_state
+                .search_query
+                .char_indices()
+                .nth(app.icon_picker_state.search_cursor - 1)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            app.icon_picker_state.search_query.remove(byte_pos);
+            app.icon_picker_state.search_cursor -= 1;
+            app.icon_picker_state.selected_index = 0;
+            app.icon_picker_state.scroll_offset = 0;
         }
         ParsedInput::Arrow(b'A') => picker_move_selection(app, -1),
         ParsedInput::Arrow(b'B') => picker_move_selection(app, 1),
