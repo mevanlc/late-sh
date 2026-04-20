@@ -62,6 +62,22 @@ async fn test_chat_room_public_and_private_topics() {
 }
 
 #[tokio::test]
+async fn test_chat_room_topic_slug_normalization() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+
+    let public_room = ChatRoom::get_or_create_public_room(&client, " Rust Nerds \n")
+        .await
+        .expect("create normalized public room");
+    let private_room = ChatRoom::create_private_room(&client, "vps/d9d0")
+        .await
+        .expect("create normalized private room");
+
+    assert_eq!(public_room.slug.as_deref(), Some("rust-nerds"));
+    assert_eq!(private_room.slug.as_deref(), Some("vps-d9d0"));
+}
+
+#[tokio::test]
 async fn test_chat_room_dm() {
     let test_db = test_db().await;
     let client = test_db.db.get().await.expect("db client");

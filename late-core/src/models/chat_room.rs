@@ -200,13 +200,7 @@ impl ChatRoom {
     /// Create or update a public auto-join room. Auto-join rooms are joined by
     /// all users on connect but can be left.
     pub async fn ensure_auto_join(client: &Client, slug: &str) -> Result<Self> {
-        let slug = slug.trim().to_lowercase();
-        if slug.is_empty() {
-            bail!("room name cannot be empty");
-        }
-        if slug == "general" {
-            bail!("cannot create room with reserved name 'general'");
-        }
+        let slug = normalize_topic_slug(slug)?;
 
         let existing = client
             .query_opt(
@@ -234,13 +228,7 @@ impl ChatRoom {
     /// Create or update a permanent public room. Permanent rooms are auto-joined
     /// by all users on connect and cannot be left.
     pub async fn ensure_permanent(client: &Client, slug: &str) -> Result<Self> {
-        let slug = slug.trim().to_lowercase();
-        if slug.is_empty() {
-            bail!("room name cannot be empty");
-        }
-        if slug == "general" {
-            bail!("cannot create room with reserved name 'general'");
-        }
+        let slug = normalize_topic_slug(slug)?;
 
         let existing = client
             .query_opt(
@@ -267,7 +255,7 @@ impl ChatRoom {
 
     /// Delete a permanent room by slug. Refuses to delete #general.
     pub async fn delete_permanent(client: &Client, slug: &str) -> Result<u64> {
-        let slug = slug.trim().to_lowercase();
+        let slug = normalize_room_slug(slug)?;
         if slug == "general" {
             bail!("cannot delete #general");
         }
@@ -303,12 +291,36 @@ pub fn canonical_dm_pair(user_a: Uuid, user_b: Uuid) -> (Uuid, Uuid) {
 }
 
 fn normalize_topic_slug(slug: &str) -> Result<String> {
-    let slug = slug.trim().to_lowercase();
-    if slug.is_empty() {
-        bail!("room name cannot be empty");
-    }
+    let slug = normalize_room_slug(slug)?;
     if slug == "general" {
         bail!("cannot create room with reserved name 'general'");
+    }
+    Ok(slug)
+}
+
+fn normalize_room_slug(slug: &str) -> Result<String> {
+    let trimmed = slug.trim().to_lowercase();
+    let mut normalized = String::with_capacity(trimmed.len());
+    let mut last_was_dash = false;
+
+    for ch in trimmed.chars() {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() {
+            normalized.push(ch);
+            last_was_dash = false;
+        } else if ch.is_whitespace() || matches!(ch, '-' | '_' | '.' | '/' | '\\') {
+            if !normalized.is_empty() && !last_was_dash {
+                normalized.push('-');
+                last_was_dash = true;
+            }
+        } else if !normalized.is_empty() && !last_was_dash {
+            normalized.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    let slug = normalized.trim_matches('-').to_string();
+    if slug.is_empty() {
+        bail!("room name cannot be empty");
     }
     Ok(slug)
 }
@@ -331,5 +343,28 @@ mod tests {
         let (x, y) = canonical_dm_pair(a, a);
         assert_eq!(x, a);
         assert_eq!(y, a);
+    }
+
+    #[test]
+    fn normalize_topic_slug_slugifies_room_names() {
+        assert_eq!(
+            normalize_topic_slug("  Rust Nerds  ").unwrap(),
+            "rust-nerds"
+        );
+        assert_eq!(normalize_topic_slug("room\nname").unwrap(), "room-name");
+        assert_eq!(normalize_topic_slug("vps/d9d0").unwrap(), "vps-d9d0");
+        assert_eq!(normalize_topic_slug("a___b...c").unwrap(), "a-b-c");
+    }
+
+    #[test]
+    fn normalize_topic_slug_rejects_empty_or_reserved_names() {
+        assert!(normalize_topic_slug("   ").is_err());
+        assert!(normalize_topic_slug("!!!").is_err());
+        assert!(normalize_topic_slug("general").is_err());
+    }
+
+    #[test]
+    fn normalize_room_slug_allows_general_for_non_creation_paths() {
+        assert_eq!(normalize_room_slug(" General ").unwrap(), "general");
     }
 }
