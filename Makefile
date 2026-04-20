@@ -5,6 +5,7 @@
 # --- General (Docker/dev containers) ---
 RUST_LOG ?= info,late_web=debug,late_ssh=debug,late_core=debug
 CARGO_TARGET_DIR ?= /app/target
+DEVTEST_ENV ?= 0
 
 # --- SSH ---
 LATE_FORCE_ADMIN ?= 0
@@ -60,6 +61,7 @@ LATE_AI_MODEL ?= gemini-3.1-pro-preview                     # Gemini model to us
 .env:
 	@echo "RUST_LOG=$(RUST_LOG)" > .env
 	@echo "CARGO_TARGET_DIR=$(CARGO_TARGET_DIR)" >> .env
+	@echo "DEVTEST_ENV=$(DEVTEST_ENV)" >> .env
 	@echo "LATE_FORCE_ADMIN=$(LATE_FORCE_ADMIN)" >> .env
 	@echo "LATE_SSH_PORT=$(LATE_SSH_PORT)" >> .env
 	@echo "LATE_API_PORT=$(LATE_API_PORT)" >> .env

@@ -1184,9 +1184,13 @@ fn resolve_devtest_jump(login_username: &str, is_new_user: bool) -> Option<Devte
     }
 
     let username = login_username.trim().to_ascii_lowercase();
-    if username.starts_with("artboard@") {
+    let stem = username
+        .split_once('@')
+        .map(|(left, _)| left)
+        .unwrap_or(&username);
+    if stem == "artboard" {
         Some(DevtestJump::Artboard)
-    } else if username.starts_with("sudoku@") {
+    } else if stem == "sudoku" {
         Some(DevtestJump::Sudoku)
     } else {
         None
@@ -1208,6 +1212,9 @@ fn reject_publickey_only() -> Auth {
 mod tests {
     use super::*;
     use std::str::FromStr;
+    use std::sync::Mutex;
+
+    static DEVTEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reject_publickey_only_advertises_only_publickey() {
@@ -1410,6 +1417,7 @@ mod tests {
 
     #[test]
     fn resolve_devtest_jump_requires_existing_user_and_exact_env_value() {
+        let _guard = DEVTEST_ENV_LOCK.lock().expect("lock devtest env");
         unsafe { std::env::remove_var("DEVTEST_ENV") };
         assert_eq!(resolve_devtest_jump("artboard@test", false), None);
 
@@ -1435,12 +1443,21 @@ mod tests {
 
     #[test]
     fn resolve_devtest_jump_only_uses_incoming_ssh_login_name() {
+        let _guard = DEVTEST_ENV_LOCK.lock().expect("lock devtest env");
         unsafe { std::env::set_var("DEVTEST_ENV", "1") };
 
         assert_eq!(resolve_devtest_jump("joe@test", false), None);
         assert_eq!(
+            resolve_devtest_jump("artboard", false),
+            Some(DevtestJump::Artboard)
+        );
+        assert_eq!(
             resolve_devtest_jump("artboard@test", false),
             Some(DevtestJump::Artboard)
+        );
+        assert_eq!(
+            resolve_devtest_jump("sudoku", false),
+            Some(DevtestJump::Sudoku)
         );
         assert_eq!(
             resolve_devtest_jump("SUDOKU@test", false),
