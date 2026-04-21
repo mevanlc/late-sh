@@ -154,10 +154,10 @@ pub struct SessionConfig {
     pub minesweeper_service: crate::app::games::minesweeper::svc::MinesweeperService,
     pub initial_minesweeper_games: Vec<late_core::models::minesweeper::Game>,
     pub blackjack_service: crate::app::games::blackjack::svc::BlackjackService,
-    /// Shared dartboard server. Each session only connects — consuming a
+    /// Shared in-proc dartboard server handle. Each session only connects — consuming a
     /// color slot and showing up in `peer_count` — when the user actually
     /// enters the dartboard game from the arcade.
-    pub dartboard_server: dartboard_server::ServerHandle,
+    pub dartboard_server: dartboard_local::ServerHandle,
     pub username: String,
     pub bonsai_service: crate::app::bonsai::svc::BonsaiService,
     pub initial_bonsai_tree: Option<late_core::models::bonsai::Tree>,
@@ -275,7 +275,7 @@ pub struct App {
     /// `Option` → the underlying client, so the seat is released on logout
     /// or connection loss.
     pub(crate) dartboard_state: Option<crate::app::games::artboard::state::State>,
-    pub(crate) dartboard_server: dartboard_server::ServerHandle,
+    pub(crate) dartboard_server: dartboard_local::ServerHandle,
     pub(crate) username: String,
 
     /// Late Chips balance (loaded on login, updated via leaderboard refresh)

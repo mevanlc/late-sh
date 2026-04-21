@@ -3,7 +3,7 @@ use std::{sync::mpsc, thread, time::Duration};
 use dartboard_core::{
     Canvas, CanvasOp, Client, ClientOpId, Peer, RgbColor, Seq, ServerMsg, UserId,
 };
-use dartboard_server::{ConnectOutcome, Hello, LocalClient, ServerHandle};
+use dartboard_local::{ConnectOutcome, Hello, LocalClient, ServerHandle};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 

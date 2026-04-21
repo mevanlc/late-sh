@@ -790,7 +790,7 @@ mod tests {
     use super::*;
     use dartboard_core::CellValue;
     use dartboard_editor::Clipboard;
-    use dartboard_server::InMemStore;
+    use dartboard_local::InMemStore;
     use std::{
         thread,
         time::{Duration, Instant},
@@ -812,7 +812,7 @@ mod tests {
     }
 
     fn test_state() -> State {
-        let server = dartboard_server::ServerHandle::spawn_local(InMemStore);
+        let server = dartboard_local::ServerHandle::spawn_local(InMemStore);
         let svc = DartboardService::new(server, Uuid::now_v7(), "painter");
         let rx = svc.subscribe_state();
         wait_for(|| rx.borrow().your_user_id.is_some().then_some(()));

@@ -693,7 +693,7 @@ Key behaviors that shape artist feel:
 - Control characters other than `\r`/`\n` are dropped. No tabs, no form feeds.
 - All pasted glyphs use the artist's color, not whatever was on the clipboard source.
 
-Late-sh's `paste_bytes` (`late-ssh/src/app/games/dartboard/state.rs:160-219`) implements the same shape but with per-cell `PaintCell` ops and a `std::str::from_utf8` gate — non-UTF-8 payloads are dropped rather than inserted as mojibake.
+Late-sh's `paste_bytes` (`late-ssh/src/app/games/artboard/state.rs`) implements the same shape but with per-cell `PaintCell` ops and a `std::str::from_utf8` gate — non-UTF-8 payloads are dropped rather than inserted as mojibake.
 
 Paste does **not** consume an active selection; it paints over it at the cursor. Any subsequent edit continues from wherever the paste left the cursor.
 
@@ -900,7 +900,7 @@ The server sends `OpBroadcast { from, op, seq }` to every connected client **inc
 
 ### `PeerLeft` fires on `Drop`
 
-`impl Drop for LocalClient` calls `server.disconnect(self.user_id)` which retains-without and broadcasts `PeerLeft` (`dartboard-server/src/lib.rs:238-244`; vendored copy at `dartboard-local`). A dropped `DartboardService` therefore leaves the room cleanly; no explicit teardown call is required.
+`impl Drop for LocalClient` calls `server.disconnect(self.user_id)` which retains-without and broadcasts `PeerLeft` (`dartboard-local/src/lib.rs`). A dropped `DartboardService` therefore leaves the room cleanly; no explicit teardown call is required.
 
 ### Color-collision remap is server-side
 
@@ -914,7 +914,7 @@ All direct canvas edits (typing, backspace, delete, paste, smart-fill, draw-bord
 
 ## 18. Known late-sh divergences to close
 
-Items in current late-sh (`late-ssh/src/app/games/dartboard/`) that do **not** match this spec and should be brought into line:
+Items in current late-sh (`late-ssh/src/app/games/artboard/`) that do **not** match this spec and should be brought into line:
 
 1. **Left-drag paints a sampled brush.** late-sh samples the glyph under the `Left Down` point and stamps it along the drag path (the `drag_brush` concept). Dartboard has **no such behavior**: left-drag outside floating mode is for selection only. Painting happens only through floating. This is a fundamental artist-feel mismatch — remove the drag-brush and route left-drag to rectangular selection.
 2. **`Ctrl + X` enters floating.** late-sh's `Ctrl + X` currently calls `lift_selection_to_floating` — it cuts the region AND enters floating immediately. In dartboard, `Ctrl + X` only cuts (pushes to swatch 0, blanks the region); entering floating is a separate step (`Ctrl + A..G` or swatch click). Align: `Ctrl + X` = cut only; floating requires activation.

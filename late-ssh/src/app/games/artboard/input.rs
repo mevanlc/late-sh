@@ -334,7 +334,7 @@ mod tests {
     use crate::app::games::artboard::svc::DartboardService;
     use dartboard_core::{Canvas, CellValue, RgbColor};
     use dartboard_editor::Clipboard;
-    use dartboard_server::{InMemStore, ServerHandle};
+    use dartboard_local::{InMemStore, ServerHandle};
     use uuid::Uuid;
 
     #[test]

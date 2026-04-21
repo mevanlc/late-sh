@@ -374,7 +374,7 @@ dependencies = [
  "sha1 0.10.6",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite",
  "tower",
  "tower-layer",
  "tower-service",
@@ -1166,15 +1166,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "dartboard-server"
+name = "dartboard-local"
 version = "0.1.0"
 dependencies = [
  "dartboard-core",
- "futures-util",
- "serde",
- "serde_json",
- "tokio",
- "tokio-tungstenite 0.24.0",
 ]
 
 [[package]]
@@ -2562,7 +2557,7 @@ dependencies = [
  "shlex",
  "symphonia",
  "tokio",
- "tokio-tungstenite 0.28.0",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2609,7 +2604,7 @@ dependencies = [
  "crossterm",
  "dartboard-core",
  "dartboard-editor",
- "dartboard-server",
+ "dartboard-local",
  "dartboard-tui",
  "emojis",
  "ipnet",
@@ -5746,18 +5741,6 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.24.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d25a406cddcc431a75d3d9afc6a7c0f7428d4891dd973e4d54c56b46127bf857"
@@ -5769,7 +5752,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.28.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -6007,24 +5990,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "tungstenite"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "18e5b8366ee7a95b16d32197d0b2604b43a0be89dc5fac9f8e96ccafbaedda8a"
-dependencies = [
- "byteorder",
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.8.5",
- "sha1 0.10.6",
- "thiserror 1.0.69",
- "utf-8",
-]
 
 [[package]]
 name = "tungstenite"

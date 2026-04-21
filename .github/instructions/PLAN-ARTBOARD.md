@@ -13,7 +13,7 @@ Every user-facing decision below should match this description of standalone dar
 - Wire types: `UserId = u64`, `ClientOpId = u64`, `Seq = u64`. Server assigns `UserId` on connect — late-sh's own `Uuid` stays local to the integration layer and never reaches the wire.
 - Client → server: `Hello { name, color }`, `Op { client_op_id, op }`.
 - Server → client: `Welcome { your_user_id, your_color, peers, snapshot }`, `Ack { client_op_id, seq }`, `OpBroadcast { from, op, seq }` (echoed to sender too), `PeerJoined`, `PeerLeft`, `Reject { client_op_id, reason }`.
-- Color assignment: the server remaps a requested color that collides with an in-use one to the next free palette entry. In the vendored `dartboard-local` the palette is 10 entries and doubles as the seat cap — the 11th connect is a `ConnectRejected`. Clients never pick their own final color; they must read `Welcome.your_color`.
+- Color assignment: the server remaps a requested color that collides with an in-use one to the next free palette entry. In upstream `dartboard-local` the palette is 10 entries and doubles as the seat cap — the 11th connect is a `ConnectRejected`. Clients never pick their own final color; they must read `Welcome.your_color`.
 - Canvas ops (`dartboard-core::ops`): `PaintCell { pos, ch, fg }`, `ClearCell { pos }`, `PaintRegion { cells: Vec<CellWrite> }` (batched writes used for multi-cell stamps), `ShiftRow { y, kind }` / `ShiftCol { x, kind }` (whole row/column moves, not N cell writes). Conflict resolution is last-write-wins by server-assigned `Seq`; there is no CRDT.
 - Per-peer cursors are **not** on the wire. `Peer` carries only `user_id`/`name`/`color`. Any cursor/selection/floating view in late-sh is strictly session-local.
 - Welcome race: Remote clients must drain until `Welcome` lands before letting the user submit the first op, or `Welcome.snapshot` will stomp it. For in-proc `LocalClient` the `Welcome` is enqueued synchronously during `connect_local`, but the drain-until-welcome invariant is still the cleanest contract.
@@ -97,11 +97,11 @@ Every user-facing decision below should match this description of standalone dar
 
 All Discovery items from the earlier plan are now either landed or superseded. What's actually true as of this branch:
 
-- `dartboard-server` no longer sits between late-sh and the canvas. `vendor/dartboard-local` is the in-proc server + `LocalClient` with no `tokio-tungstenite` dependency, and late-sh depends on `dartboard-{core,local,tui}`. The "Phase A crate split" prerequisite is obsolete — the split is done inside the vendored tree.
+- The upstream crate split is now in place: `dartboard-local` owns the in-proc server + `LocalClient`, while websocket transport lives in separate crates. `late-sh` depends on `dartboard-{core,editor,local,tui}` for Artboard and does not use `dartboard-server` on the embedded path.
 - `App::enter_alt_screen` in `late-ssh/src/app/state.rs` already enables `?1000h` + `?1003h` + `?1006h` (+ `?2004h` for bracketed paste), and `leave_alt_screen` tears them down in reverse order. Drag and `Moved` events reach the VTE layer today.
 - `ParsedInput` in `late-ssh/src/app/input.rs` already carries `ShiftArrow`, `AltArrow`, `CtrlShiftArrow`, `Home`, `End`, `PageUp`, `PageDown`, `Delete`, `CtrlDelete`, `AltC`, `BackTab`, `Paste(Vec<u8>)`, and `Mouse(MouseEvent)` with `kind ∈ {Down, Up, Drag, Moved, Scroll…}`, `button ∈ {Left, Middle, Right}`, SGR-decoded modifiers, and 1-based coords. Parser tests cover modifier bits and drag/move.
 - The arcade selector recognizes `GameRow::Artboard = 7`; the Games hub renders a tile with live peer count.
-- `late-ssh/src/app/games/dartboard/{mod,svc,state,ui,input}.rs` exist. `DartboardService` owns the `LocalClient`, spawns a dedicated thread for op submission + message drain, and publishes a `DartboardSnapshot` via `watch` plus `DartboardEvent` via `broadcast`. `ConnectRejected` is modeled on the snapshot because it fires before any caller can subscribe.
+- `late-ssh/src/app/games/artboard/{mod,svc,state,ui,input}.rs` exist. `DartboardService` owns the `LocalClient`, spawns a dedicated thread for op submission + message drain, and publishes a `DartboardSnapshot` via `watch` plus `DartboardEvent` via `broadcast`. `ConnectRejected` is modeled on the snapshot because it fires before any caller can subscribe.
 - `state.rs` implements cursor/viewport, type/backspace/delete, brush sampling from drag, `Rect`-only selection with lift / commit-as-`PaintRegion` / dismiss, bracketed paste with paste-origin x wrapping, and system-clipboard export. It drains `watch` + `broadcast` in `tick()`.
 
 ### What's actually left
@@ -117,7 +117,7 @@ Scope for the rest of this integration is now about **parity with dartboard's in
    - Swatch re-activation doesn't toggle transparency.
 4. **Row / column shifts.** `Ctrl+hjkl/yuio` unbound; the `ShiftRow` / `ShiftCol` ops are defined in `dartboard-core` but never emitted by late-sh.
 5. **Smart fill, draw border, transpose corner.** Unbound (`Ctrl+Space`, `Ctrl+B`, `Ctrl+T`).
-6. **Viewport pan.** `Alt+Arrow` and `Ctrl+Shift+Arrow` currently jump the cursor to the visible edge instead of panning (see `handle_event` in `app/games/dartboard/input.rs`). Right-drag pan is not implemented.
+6. **Viewport pan.** `Alt+Arrow` and `Ctrl+Shift+Arrow` currently jump the cursor to the visible edge instead of panning (see `handle_event` in `app/games/artboard/input.rs`). Right-drag pan is not implemented.
 7. **Emoji picker.** Not implemented. Open-key reservations (`Ctrl+]`, `Ctrl+5`, GS) should be decided one way or the other before the arcade's global keymap grows more claims on those codes.
 8. **Peer-presence UI.** Snapshot carries `peers: Vec<Peer>`, but the UI only shows a count. Listing connected peers with their assigned color matches standalone's help panel and makes the color-collision remap visible to users.
 9. **Leave-on-last-session semantics.** `DartboardService` threads one `LocalClient` per SSH session; no explicit teardown other than `Drop`. Worth a one-liner confirming the server stays alive at peer_count=0 (it does, because `ServerHandle` is held by `App` state).
@@ -126,7 +126,7 @@ Scope for the rest of this integration is now about **parity with dartboard's in
 
 - Embedded late-sh dartboard exits with `Ctrl+Q`; bare `Esc` remains local to the canvas (clears selection / dismisses floating).
 - v1 is one shared in-proc canvas for the lifetime of the `late-sh` process. In-memory only.
-- late-sh depends only on `dartboard-{core,local,tui}`; it must not transitively pull `dartboard-server` or `tokio-tungstenite`.
+- late-sh depends on `dartboard-{core,editor,local,tui}` for embedded Artboard; it must not transitively pull `dartboard-server` or `tokio-tungstenite` on that path.
 - Server-assigned `UserId` (`u64`) is the source of truth on the wire. late-sh's session `Uuid` + username go into `Hello` for thread naming and peer display, not onto the wire as an identity.
 - Per-peer cursors stay off the wire in v1, matching dartboard's protocol.
 - Undo/redo stays unbound in late-sh v1: a local snapshot stack is incoherent under LWW when other peers write, and this is the exact reason dartboard gates undo behind `undo_enabled()`.

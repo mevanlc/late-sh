@@ -47,7 +47,7 @@ cpal = "0.16"
 crossterm = "0.29"
 dartboard-core = { path = "../dartboard/dartboard-core" }
 dartboard-editor = { path = "../dartboard/dartboard-editor" }
-dartboard-server = { path = "../dartboard/dartboard-server" }
+dartboard-local = { path = "../dartboard/dartboard-local" }
 dartboard-tui = { path = "../dartboard/dartboard-tui" }
 deadpool-postgres = "0.14"
 emojis = "0.7"

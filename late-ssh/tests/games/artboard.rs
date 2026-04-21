@@ -4,7 +4,7 @@ use std::{
 };
 
 use dartboard_core::{CanvasOp, Pos, RgbColor};
-use dartboard_server::{InMemStore, MAX_PLAYERS, ServerHandle};
+use dartboard_local::{InMemStore, MAX_PLAYERS, ServerHandle};
 use late_ssh::app::games::artboard::state::State;
 use late_ssh::app::games::artboard::svc::{DartboardEvent, DartboardService};
 use uuid::Uuid;
