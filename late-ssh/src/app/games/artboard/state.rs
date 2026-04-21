@@ -639,9 +639,9 @@ impl State {
                     effects: Vec::new(),
                 })
             }
-            Some(EditorAction::Pan { .. }) | Some(EditorAction::ExportSystemClipboard) => {
-                FloatingOverride::PassThrough
-            }
+            Some(EditorAction::StrokeFloating { .. })
+            | Some(EditorAction::Pan { .. })
+            | Some(EditorAction::ExportSystemClipboard) => FloatingOverride::PassThrough,
             Some(EditorAction::Move { .. }) => FloatingOverride::PassThrough,
             Some(EditorAction::ActivateSwatch(_)) => FloatingOverride::PassThrough,
             _ => FloatingOverride::DismissAndContinue,

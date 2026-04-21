@@ -5,7 +5,7 @@ use dartboard_editor::{
 use crate::app::input::{MouseButton, MouseEvent, MouseEventKind, ParsedInput};
 
 use super::state::State;
-use super::ui::{SwatchHit, swatch_hit};
+use super::ui::{SwatchHit, info_hit, swatch_hit};
 
 pub enum InputAction {
     Ignored,
@@ -25,18 +25,13 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
                 modifiers: AppModifiers::default(),
             },
         ),
-        b'\r' => {
-            if state.commit_floating() {
-                return InputAction::Handled;
-            }
-            handle_app_key(
-                state,
-                AppKey {
-                    code: AppKeyCode::Enter,
-                    modifiers: AppModifiers::default(),
-                },
-            )
-        }
+        b'\r' => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Enter,
+                modifiers: AppModifiers::default(),
+            },
+        ),
         0x7f => handle_app_key(
             state,
             AppKey {
@@ -168,7 +163,20 @@ pub(crate) fn handle_event(
             jump_to_edge(state, screen_size, *key);
             InputAction::Handled
         }
-        ParsedInput::CtrlShiftArrow(_) => InputAction::Handled,
+        ParsedInput::CtrlShiftArrow(key) => handle_app_key(
+            state,
+            AppKey {
+                code: match arrow_key_code(*key) {
+                    Some(code) => code,
+                    None => return InputAction::Ignored,
+                },
+                modifiers: AppModifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                },
+            },
+        ),
         ParsedInput::Mouse(mouse) => handle_mouse(state, screen_size, mouse),
         ParsedInput::Paste(bytes) => {
             state.paste_bytes(bytes, screen_size);
@@ -234,6 +242,11 @@ fn handle_mouse(state: &mut State, screen_size: (u16, u16), mouse: &MouseEvent) 
         return InputAction::Handled;
     }
 
+    if info_hit(screen_size, state, mouse.x, mouse.y) {
+        state.clear_pending_canvas_click();
+        return InputAction::Handled;
+    }
+
     if matches!(mouse.kind, MouseEventKind::Down)
         && matches!(mouse.button, Some(MouseButton::Left))
         && !mouse.modifiers.shift
@@ -289,6 +302,10 @@ fn app_pointer_event_from_mouse(mouse: &MouseEvent) -> Option<AppPointerEvent> {
         MouseEventKind::Down => AppPointerKind::Down(map_button(mouse.button?)?),
         MouseEventKind::Up => AppPointerKind::Up(map_button(mouse.button?)?),
         MouseEventKind::Drag => AppPointerKind::Drag(map_button(mouse.button?)?),
+        MouseEventKind::ScrollUp => AppPointerKind::ScrollUp,
+        MouseEventKind::ScrollDown => AppPointerKind::ScrollDown,
+        MouseEventKind::ScrollLeft => AppPointerKind::ScrollLeft,
+        MouseEventKind::ScrollRight => AppPointerKind::ScrollRight,
     };
     Some(AppPointerEvent {
         column,
@@ -641,6 +658,73 @@ mod tests {
     }
 
     #[test]
+    fn raw_enter_stamps_floating_without_dismissing_it() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(5, 3);
+        state
+            .snapshot
+            .canvas
+            .set(dartboard_core::Pos { x: 1, y: 1 }, 'A');
+        state.editor.cursor = dartboard_core::Pos { x: 1, y: 1 };
+        state.begin_selection_from_cursor();
+        assert!(state.lift_selection_to_floating());
+        state.editor.cursor = dartboard_core::Pos { x: 3, y: 0 };
+
+        let action = handle_byte(&mut state, (80, 24), b'\r');
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 3, y: 0 }),
+            'A'
+        );
+        assert!(state.has_floating());
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 1, y: 1 }),
+            'A'
+        );
+    }
+
+    #[test]
+    fn ctrl_shift_arrow_strokes_floating_brush_and_keeps_it_active() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(6, 3);
+        state
+            .snapshot
+            .canvas
+            .set(dartboard_core::Pos { x: 0, y: 0 }, 'A');
+        state.editor.cursor = dartboard_core::Pos { x: 0, y: 0 };
+        state.begin_selection_from_cursor();
+        assert!(state.lift_selection_to_floating());
+        state.editor.cursor = dartboard_core::Pos { x: 2, y: 1 };
+
+        let action = handle_event(&mut state, (80, 24), &ParsedInput::CtrlShiftArrow(b'C'));
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(state.cursor(), dartboard_core::Pos { x: 3, y: 1 });
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 2, y: 1 }),
+            'A'
+        );
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 3, y: 1 }),
+            'A'
+        );
+        assert!(state.has_floating());
+    }
+
+    #[test]
     fn shift_arrow_starts_selection_and_moves_once() {
         let mut state = test_state();
 
@@ -682,6 +766,50 @@ mod tests {
         assert!(matches!(second, InputAction::Handled));
         assert_eq!(state.cursor(), dartboard_core::Pos { x: 0, y: 32 });
         assert_eq!(state.viewport_origin(), dartboard_core::Pos { x: 0, y: 11 });
+    }
+
+    #[test]
+    fn mouse_wheel_scroll_pans_viewport_via_shared_pointer_handler() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(80, 60);
+        state.set_viewport_for_screen((80, 24));
+
+        let action = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                button: None,
+                x: 10,
+                y: 10,
+                modifiers: Default::default(),
+            },
+        );
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(state.viewport_origin(), dartboard_core::Pos { x: 0, y: 1 });
+    }
+
+    #[test]
+    fn mouse_wheel_over_info_overlay_does_not_pan_canvas() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(80, 60);
+        state.set_viewport_for_screen((80, 24));
+
+        let action = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                button: None,
+                x: 30,
+                y: 3,
+                modifiers: Default::default(),
+            },
+        );
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(state.viewport_origin(), dartboard_core::Pos { x: 0, y: 0 });
     }
 
     fn test_state() -> State {

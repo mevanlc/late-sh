@@ -55,7 +55,6 @@ pub(crate) enum ParsedInput {
     Delete,
     CtrlBackspace,
     CtrlDelete,
-    Scroll(isize),
     Mouse(MouseEvent),
     BackTab,
     // Alt+Enter inserts a newline. `ESC`-prefixed control chords that would
@@ -98,6 +97,10 @@ pub enum MouseEventKind {
     Up,
     Drag,
     Moved,
+    ScrollUp,
+    ScrollDown,
+    ScrollLeft,
+    ScrollRight,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -358,20 +361,29 @@ impl Perform for VtCollector {
                 let raw = p0.unwrap_or_default();
                 let x = params.get(1).copied().unwrap_or(0);
                 let y = params.get(2).copied().unwrap_or(0);
-                // Wheel is a fixed pair — bits 6/0-1 (64/65); ignore modifier
-                // bits here since scroll handlers don't use them.
+                let modifiers = MouseModifiers {
+                    shift: raw & 4 != 0,
+                    alt: raw & 8 != 0,
+                    ctrl: raw & 16 != 0,
+                };
+                // SGR mouse encodes wheel directions in bit 6 plus the low
+                // button bits: 64..67 => up/down/left/right.
                 if raw & 64 != 0 {
-                    match raw & 0b0100_0011 {
-                        64 => self.events.push(ParsedInput::Scroll(1)),
-                        65 => self.events.push(ParsedInput::Scroll(-1)),
-                        _ => {}
-                    }
-                } else {
-                    let modifiers = MouseModifiers {
-                        shift: raw & 4 != 0,
-                        alt: raw & 8 != 0,
-                        ctrl: raw & 16 != 0,
+                    let kind = match raw & 0b0100_0011 {
+                        64 => MouseEventKind::ScrollUp,
+                        65 => MouseEventKind::ScrollDown,
+                        66 => MouseEventKind::ScrollLeft,
+                        67 => MouseEventKind::ScrollRight,
+                        _ => return,
                     };
+                    self.events.push(ParsedInput::Mouse(MouseEvent {
+                        kind,
+                        button: None,
+                        x,
+                        y,
+                        modifiers,
+                    }));
+                } else {
                     let motion = raw & 32 != 0;
                     let low = raw & 0b11;
                     // Low bits 0..=2 identify the button; 3 means "no button"
@@ -697,11 +709,15 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             }
         }
         ParsedInput::AltC => {}
-        ParsedInput::Scroll(delta) => handle_scroll_for_screen(app, ctx.screen, delta),
         // Mouse events only matter to a few specific consumers (icon picker,
-        // dartboard). The general dispatch path ignores them; anything that
-        // cares routes them earlier in `handle_parsed_input`.
-        ParsedInput::Mouse(_) => {}
+        // dartboard). The general dispatch path only uses vertical wheel
+        // events as a fallback for screens that scroll outside those richer
+        // handlers.
+        ParsedInput::Mouse(mouse) => {
+            if let Some(delta) = mouse_scroll_delta(mouse) {
+                handle_scroll_for_screen(app, ctx.screen, delta);
+            }
+        }
         ParsedInput::BackTab => {
             if ctx.screen == Screen::Chat && app.chat.room_jump_active {
                 return;
@@ -1035,6 +1051,14 @@ fn handle_scroll_for_screen(app: &mut App, screen: Screen, delta: isize) {
     }
 }
 
+fn mouse_scroll_delta(mouse: MouseEvent) -> Option<isize> {
+    match mouse.kind {
+        MouseEventKind::ScrollUp => Some(1),
+        MouseEventKind::ScrollDown => Some(-1),
+        _ => None,
+    }
+}
+
 fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
     // Route arrows to autocomplete when active
     if (screen == Screen::Chat || screen == Screen::Dashboard)
@@ -1308,7 +1332,18 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
         // Ctrl+K / Ctrl+J mirror vim-style up/down without stealing plain j/k from the search box.
         ParsedInput::Byte(0x0B) => picker_move_selection(app, -1),
         ParsedInput::Byte(0x0A) => picker_move_selection(app, 1),
-        ParsedInput::Scroll(delta) => picker_move_selection(app, -delta * 3),
+        ParsedInput::Mouse(MouseEvent {
+            kind: MouseEventKind::Down,
+            button: Some(MouseButton::Left),
+            x,
+            y,
+            ..
+        }) => handle_icon_picker_click(app, x, y),
+        ParsedInput::Mouse(mouse) => match mouse.kind {
+            MouseEventKind::ScrollUp => picker_move_selection(app, -3),
+            MouseEventKind::ScrollDown => picker_move_selection(app, 3),
+            _ => {}
+        },
         ParsedInput::Arrow(b'C') => app.icon_picker_state.search_cursor_right(),
         ParsedInput::Arrow(b'D') => app.icon_picker_state.search_cursor_left(),
         ParsedInput::CtrlArrow(b'C') => app.icon_picker_state.search_cursor_word_right(),
@@ -1334,13 +1369,6 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Byte(0x05) => app.icon_picker_state.search_cursor_end(),
         ParsedInput::Byte(0x19) => app.icon_picker_state.search_paste(),
         ParsedInput::Byte(0x1F) => app.icon_picker_state.search_undo(),
-        ParsedInput::Mouse(MouseEvent {
-            kind: MouseEventKind::Down,
-            button: Some(MouseButton::Left),
-            x,
-            y,
-            ..
-        }) => handle_icon_picker_click(app, x, y),
         ParsedInput::Char(ch) if !ch.is_control() => app.icon_picker_state.search_insert_char(ch),
         _ => {}
     }
@@ -1519,10 +1547,50 @@ mod tests {
     #[test]
     fn vt_parser_parses_scroll_events() {
         let mut parser = VtInputParser::default();
-        assert_eq!(parser.feed(b"\x1b[<64;10;5M"), vec![ParsedInput::Scroll(1)]);
+        assert_eq!(
+            parser.feed(b"\x1b[<64;10;5M"),
+            vec![ParsedInput::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                button: None,
+                x: 10,
+                y: 5,
+                modifiers: MouseModifiers::default(),
+            })]
+        );
         assert_eq!(
             parser.feed(b"\x1b[<65;10;5m"),
-            vec![ParsedInput::Scroll(-1)]
+            vec![ParsedInput::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                button: None,
+                x: 10,
+                y: 5,
+                modifiers: MouseModifiers::default(),
+            })]
+        );
+    }
+
+    #[test]
+    fn vt_parser_parses_horizontal_scroll_events() {
+        let mut parser = VtInputParser::default();
+        assert_eq!(
+            parser.feed(b"\x1b[<66;8;3M"),
+            vec![ParsedInput::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollLeft,
+                button: None,
+                x: 8,
+                y: 3,
+                modifiers: MouseModifiers::default(),
+            })]
+        );
+        assert_eq!(
+            parser.feed(b"\x1b[<67;8;3M"),
+            vec![ParsedInput::Mouse(MouseEvent {
+                kind: MouseEventKind::ScrollRight,
+                button: None,
+                x: 8,
+                y: 3,
+                modifiers: MouseModifiers::default(),
+            })]
         );
     }
 

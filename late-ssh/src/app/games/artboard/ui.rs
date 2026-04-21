@@ -31,17 +31,13 @@ pub(crate) enum SwatchHit {
 pub fn draw_game(frame: &mut Frame, area: Rect, state: &State) {
     let info = artboard_info_lines(state);
     let layout = artboard_layout(area);
-    let info_area = info_block_area(layout.sidebar, info.len());
-    draw_artboard_sidebar(frame, info_area, &info);
+    let info_area = info_block_area(layout.info_anchor, info.len());
     draw_canvas(frame, area, layout.canvas, info_area, state);
+    draw_artboard_sidebar(frame, info_area, &info);
 }
 
 pub fn canvas_area_for_screen(screen_size: (u16, u16)) -> Rect {
-    let screen = Rect::new(0, 0, screen_size.0, screen_size.1);
-    let app_inner = Block::default().borders(Borders::ALL).inner(screen);
-    let content_area =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(24)]).split(app_inner)[0];
-    artboard_layout(content_area).canvas
+    artboard_game_area_for_screen(screen_size)
 }
 
 fn dartboard_canvas_style() -> CanvasStyle {
@@ -62,6 +58,7 @@ fn draw_artboard_sidebar(frame: &mut Frame, info_area: Option<Rect>, info_lines:
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER()));
         let info_inner = info_block.inner(info_area);
+        frame.render_widget(Clear, info_area);
         frame.render_widget(info_block, info_area);
         if info_inner.width > 0 && info_inner.height > 0 {
             frame.render_widget(Paragraph::new(info_lines.to_vec()), info_inner);
@@ -198,18 +195,23 @@ fn rgb(color: dartboard_core::RgbColor) -> ratatui::style::Color {
 }
 
 fn artboard_layout(area: Rect) -> ArtboardLayout {
-    let cols =
-        Layout::horizontal([Constraint::Fill(1), Constraint::Length(INFO_WIDTH)]).split(area);
+    let info_width = area.width.min(INFO_WIDTH);
+    let info_anchor = Rect::new(
+        area.right().saturating_sub(info_width),
+        area.y,
+        info_width,
+        area.height,
+    );
     ArtboardLayout {
-        canvas: cols[0],
-        sidebar: cols[1],
+        canvas: area,
+        info_anchor,
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ArtboardLayout {
     canvas: Rect,
-    sidebar: Rect,
+    info_anchor: Rect,
 }
 
 fn draw_canvas(
@@ -270,10 +272,11 @@ fn draw_canvas(
     {
         let cx = canvas_area.x + (cursor.x - viewport_origin.x) as u16;
         let cy = canvas_area.y + (cursor.y - viewport_origin.y) as u16;
-        if !swatch_boxes
-            .iter()
-            .flatten()
-            .any(|rect| rect_contains(*rect, cx, cy))
+        if !info_area.is_some_and(|rect| rect_contains(rect, cx, cy))
+            && !swatch_boxes
+                .iter()
+                .flatten()
+                .any(|rect| rect_contains(*rect, cx, cy))
         {
             frame.set_cursor_position((cx, cy));
         }
@@ -651,7 +654,20 @@ fn artboard_game_area_for_screen(screen_size: (u16, u16)) -> Rect {
 fn artboard_info_area_for_screen(screen_size: (u16, u16), state: &State) -> Option<Rect> {
     let info_lines = artboard_info_lines(state);
     let layout = artboard_layout(artboard_game_area_for_screen(screen_size));
-    info_block_area(layout.sidebar, info_lines.len())
+    info_block_area(layout.info_anchor, info_lines.len())
+}
+
+pub(crate) fn info_hit(screen_size: (u16, u16), state: &State, sgr_x: u16, sgr_y: u16) -> bool {
+    let Some(info_area) = artboard_info_area_for_screen(screen_size, state) else {
+        return false;
+    };
+    let Some(col) = sgr_x.checked_sub(1) else {
+        return false;
+    };
+    let Some(row) = sgr_y.checked_sub(1) else {
+        return false;
+    };
+    rect_contains(info_area, col, row)
 }
 
 #[cfg(test)]
@@ -668,7 +684,16 @@ mod tests {
 
     #[test]
     fn canvas_area_matches_artboard_frame_layout() {
-        assert_eq!(canvas_area_for_screen((80, 24)), Rect::new(1, 1, 26, 22));
+        assert_eq!(canvas_area_for_screen((80, 24)), Rect::new(1, 1, 54, 22));
+    }
+
+    #[test]
+    fn info_box_overlays_top_right_of_full_canvas_width() {
+        let state = test_state();
+        assert_eq!(
+            artboard_info_area_for_screen((80, 24), &state),
+            Some(Rect::new(27, 1, 28, 6))
+        );
     }
 
     #[test]
