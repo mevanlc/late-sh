@@ -1,7 +1,7 @@
 use crate::app::input::{MouseEventKind, ParsedInput, sanitize_paste_markers};
 use crate::app::state::App;
 
-use super::state::{PickerKind, Row};
+use super::state::{PickerKind, Row, Tab};
 
 pub fn handle_input(app: &mut App, event: ParsedInput) {
     if app.settings_modal_state.picker_open() {
@@ -19,8 +19,27 @@ pub fn handle_input(app: &mut App, event: ParsedInput) {
         return;
     }
 
+    // Tab / Shift+Tab switch top-level tabs. Do this before close-event
+    // routing so Tab doesn't get eaten as "close".
+    match event {
+        ParsedInput::Byte(0x09) => {
+            app.settings_modal_state.cycle_tab(true);
+            return;
+        }
+        ParsedInput::BackTab => {
+            app.settings_modal_state.cycle_tab(false);
+            return;
+        }
+        _ => {}
+    }
+
     if is_close_event(&event) {
         app.show_settings = false;
+        return;
+    }
+
+    if app.settings_modal_state.selected_tab() == Tab::Bio {
+        handle_bio_tab_input(app, event);
         return;
     }
 
@@ -36,6 +55,18 @@ pub fn handle_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Arrow(b'D') => app.settings_modal_state.cycle_setting(false),
         ParsedInput::Byte(b' ') | ParsedInput::Byte(b'\r') => activate_selected_row(app),
         ParsedInput::Char('e') | ParsedInput::Char('E') => activate_selected_row(app),
+        _ => {}
+    }
+}
+
+/// Bio tab (not editing): Enter begins editing. Everything else ignored —
+/// close and tab-switch events were already handled above.
+fn handle_bio_tab_input(app: &mut App, event: ParsedInput) {
+    match event {
+        ParsedInput::Byte(b'\r') | ParsedInput::Char('e') | ParsedInput::Char('E') => {
+            app.settings_modal_state.start_bio_edit();
+        }
+        ParsedInput::Byte(b'?') | ParsedInput::Char('?') => open_help(app),
         _ => {}
     }
 }
@@ -60,20 +91,18 @@ fn is_close_event(event: &ParsedInput) -> bool {
 fn activate_selected_row(app: &mut App) {
     match app.settings_modal_state.selected_row() {
         Row::Username => app.settings_modal_state.start_username_edit(),
-        Row::Bio => app.settings_modal_state.start_bio_edit(),
         Row::Theme
         | Row::BackgroundColor
+        | Row::RightSidebar
+        | Row::GamesSidebar
         | Row::DirectMessages
         | Row::Mentions
         | Row::GameEvents
         | Row::Bell
-        | Row::Cooldown => app.settings_modal_state.cycle_setting(true),
+        | Row::Cooldown
+        | Row::NotifyFormat => app.settings_modal_state.cycle_setting(true),
         Row::Country => app.settings_modal_state.open_picker(PickerKind::Country),
         Row::Timezone => app.settings_modal_state.open_picker(PickerKind::Timezone),
-        Row::Save => {
-            app.settings_modal_state.save();
-            app.show_settings = false;
-        }
     }
 }
 
@@ -93,8 +122,12 @@ fn handle_username_input(app: &mut App, event: ParsedInput) {
         ParsedInput::CtrlDelete => state.username_delete_word_right(),
         ParsedInput::Arrow(b'C') => state.username_cursor_right(),
         ParsedInput::Arrow(b'D') => state.username_cursor_left(),
-        ParsedInput::CtrlArrow(b'C') => state.username_cursor_word_right(),
-        ParsedInput::CtrlArrow(b'D') => state.username_cursor_word_left(),
+        ParsedInput::CtrlArrow(b'C') | ParsedInput::AltArrow(b'C') => {
+            state.username_cursor_word_right()
+        }
+        ParsedInput::CtrlArrow(b'D') | ParsedInput::AltArrow(b'D') => {
+            state.username_cursor_word_left()
+        }
         ParsedInput::Paste(pasted) => {
             let cleaned = sanitize_paste_markers(&String::from_utf8_lossy(&pasted));
             for ch in cleaned.chars() {
@@ -129,8 +162,8 @@ fn handle_bio_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Arrow(b'B') => state.bio_cursor_down(),
         ParsedInput::Arrow(b'C') => state.bio_cursor_right(),
         ParsedInput::Arrow(b'D') => state.bio_cursor_left(),
-        ParsedInput::CtrlArrow(b'C') => state.bio_cursor_word_right(),
-        ParsedInput::CtrlArrow(b'D') => state.bio_cursor_word_left(),
+        ParsedInput::CtrlArrow(b'C') | ParsedInput::AltArrow(b'C') => state.bio_cursor_word_right(),
+        ParsedInput::CtrlArrow(b'D') | ParsedInput::AltArrow(b'D') => state.bio_cursor_word_left(),
         ParsedInput::Paste(pasted) => {
             let cleaned = sanitize_paste_markers(&String::from_utf8_lossy(&pasted));
             let normalized = cleaned.replace("\r\n", "\n").replace('\r', "\n");
@@ -150,12 +183,8 @@ fn handle_picker_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Byte(0x1B) => app.settings_modal_state.close_picker(),
         ParsedInput::Byte(b'\r') => app.settings_modal_state.apply_picker_selection(),
         ParsedInput::Byte(0x7F) => app.settings_modal_state.picker_backspace(),
-        ParsedInput::Byte(b'j' | b'J')
-        | ParsedInput::Char('j' | 'J')
-        | ParsedInput::Arrow(b'B') => app.settings_modal_state.picker_move(1),
-        ParsedInput::Byte(b'k' | b'K')
-        | ParsedInput::Char('k' | 'K')
-        | ParsedInput::Arrow(b'A') => app.settings_modal_state.picker_move(-1),
+        ParsedInput::Arrow(b'B') => app.settings_modal_state.picker_move(1),
+        ParsedInput::Arrow(b'A') => app.settings_modal_state.picker_move(-1),
         ParsedInput::PageDown => {
             let page = app
                 .settings_modal_state

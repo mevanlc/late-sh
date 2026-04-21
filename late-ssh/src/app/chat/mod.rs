@@ -1,5 +1,5 @@
+pub mod discover;
 pub mod input;
-pub(crate) mod mentions;
 pub mod news;
 pub mod notifications;
 pub mod state;

@@ -2,10 +2,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use late_core::{
     MutexRecover,
-    models::{article::NEWS_MARKER, chat_message::ChatMessage, chat_room::ChatRoom},
+    models::{
+        article::NEWS_MARKER, chat_message::ChatMessage,
+        chat_message_reaction::ChatMessageReactionSummary, chat_room::ChatRoom,
+    },
 };
 use ratatui::style::{Modifier, Style};
-use ratatui_textarea::{CursorMove, TextArea, WrapMode};
+use ratatui_textarea::{CursorMove, Input, TextArea, WrapMode};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -16,7 +19,7 @@ use crate::app::help_modal::data::HelpTopic;
 use crate::state::{ActiveUser, ActiveUsers};
 
 use super::{
-    news, notifications,
+    discover, news, notifications,
     notifications::svc::NotificationService,
     svc::{ChatEvent, ChatService, ChatSnapshot},
 };
@@ -49,6 +52,7 @@ pub(crate) enum RoomSlot {
     Room(Uuid),
     News,
     Notifications,
+    Discover,
 }
 
 pub struct ChatState {
@@ -77,7 +81,9 @@ pub struct ChatState {
     pub(crate) mention_ac: MentionAutocomplete,
     pub(crate) all_usernames: Vec<String>,
     pub(crate) bonsai_glyphs: HashMap<Uuid, String>,
+    pub(crate) message_reactions: HashMap<Uuid, Vec<ChatMessageReactionSummary>>,
     pub(crate) selected_message_id: Option<Uuid>,
+    pub(crate) reaction_leader_active: bool,
     pub(crate) highlighted_message_id: Option<Uuid>,
     pub(crate) edited_message_id: Option<Uuid>,
     pub(crate) reply_target: Option<ReplyTarget>,
@@ -90,6 +96,8 @@ pub struct ChatState {
     /// Notifications / mentions (shown as a virtual room in the room list)
     pub(crate) notifications_selected: bool,
     pub(crate) notifications: notifications::state::State,
+    pub(crate) discover_selected: bool,
+    pub(crate) discover: discover::state::State,
 
     /// Pending desktop notifications drained on render. `kind` matches the
     /// string identifiers stored in `users.settings.notify_kinds` ("dms", "mentions").
@@ -150,7 +158,9 @@ impl ChatState {
             mention_ac: MentionAutocomplete::default(),
             all_usernames: Vec::new(),
             bonsai_glyphs: HashMap::new(),
+            message_reactions: HashMap::new(),
             selected_message_id: None,
+            reaction_leader_active: false,
             highlighted_message_id: None,
             edited_message_id: None,
             reply_target: None,
@@ -159,6 +169,8 @@ impl ChatState {
             news: news::state::State::new(article_service, user_id, is_admin),
             notifications_selected: false,
             notifications: notifications::state::State::new(notification_service, user_id),
+            discover_selected: false,
+            discover: discover::state::State::new(),
             pending_notifications: Vec::new(),
             requested_help_topic: None,
             requested_settings_modal: false,
@@ -256,6 +268,7 @@ impl ChatState {
     }
 
     fn select_from_ids(&mut self, ids: &[Uuid], delta: isize) {
+        self.reaction_leader_active = false;
         if ids.is_empty() {
             self.selected_message_id = None;
             return;
@@ -288,10 +301,28 @@ impl ChatState {
     }
 
     pub fn clear_message_selection(&mut self) {
+        self.reaction_leader_active = false;
         self.selected_message_id = None;
     }
 
+    pub fn begin_reaction_leader(&mut self) -> bool {
+        if self.selected_message_id.is_none() {
+            return false;
+        }
+        self.reaction_leader_active = true;
+        true
+    }
+
+    pub fn cancel_reaction_leader(&mut self) {
+        self.reaction_leader_active = false;
+    }
+
+    pub fn is_reaction_leader_active(&self) -> bool {
+        self.reaction_leader_active
+    }
+
     pub fn begin_reply_to_selected_in_room(&mut self, room_id: Uuid) -> Option<Banner> {
+        self.reaction_leader_active = false;
         let message = self.selected_message_in_room(room_id)?;
         let message_user_id = message.user_id;
         let message_body = message.body.clone();
@@ -314,6 +345,7 @@ impl ChatState {
     }
 
     pub fn begin_edit_selected_in_room(&mut self, room_id: Uuid) -> Option<Banner> {
+        self.reaction_leader_active = false;
         let selected_id = self.selected_message_id?;
         let Some(message) = self.find_message_in_room(room_id, selected_id) else {
             return Some(Banner::error("Selected message not found"));
@@ -395,6 +427,18 @@ impl ChatState {
         Some((user_id, display_name))
     }
 
+    pub fn react_to_selected_message_in_room(
+        &mut self,
+        room_id: Uuid,
+        kind: i16,
+    ) -> Option<Banner> {
+        self.reaction_leader_active = false;
+        let message = self.selected_message_in_room(room_id)?;
+        self.service
+            .toggle_message_reaction_task(self.user_id, message.id, kind);
+        None
+    }
+
     fn find_message_in_room(&self, room_id: Uuid, message_id: Uuid) -> Option<&ChatMessage> {
         self.rooms
             .iter()
@@ -460,6 +504,9 @@ impl ChatState {
         // Mentions / notifications
         order.push(RoomSlot::Notifications);
 
+        // Discover
+        order.push(RoomSlot::Discover);
+
         // Public rooms (non-DM, non-permanent, alpha by slug)
         let mut public: Vec<_> = self
             .rooms
@@ -498,8 +545,17 @@ impl ChatState {
             .collect()
     }
 
+    fn adjacent_composer_room(&self, delta: isize) -> Option<Uuid> {
+        adjacent_composer_room(
+            &self.visual_order(),
+            self.composer_room_id.or(self.selected_room_id),
+            delta,
+        )
+    }
+
     fn select_room_slot(&mut self, slot: RoomSlot) -> bool {
         self.selected_message_id = None;
+        self.reaction_leader_active = false;
         self.highlighted_message_id = None;
 
         match slot {
@@ -517,16 +573,47 @@ impl ChatState {
                 }
                 changed
             }
+            RoomSlot::Discover => {
+                let changed = !self.discover_selected;
+                if changed {
+                    self.select_discover();
+                }
+                changed
+            }
             RoomSlot::Room(next_id) => {
                 let changed = self.news_selected
                     || self.notifications_selected
+                    || self.discover_selected
                     || self.selected_room_id != Some(next_id);
                 self.news_selected = false;
                 self.notifications_selected = false;
+                self.discover_selected = false;
                 self.selected_room_id = Some(next_id);
                 changed
             }
         }
+    }
+
+    /// Switch to the adjacent room while keeping an in-progress composer
+    /// draft in place. Reply/edit targets are dropped (they reference a
+    /// message in the prior room, and carrying them across would submit
+    /// to the wrong thread) and the composer is re-anchored to the new
+    /// room so `submit_composer` posts to the correct place.
+    ///
+    /// Returns `true` if the selection actually changed.
+    pub fn switch_room_preserving_draft(&mut self, delta: isize) -> bool {
+        let Some(next_room_id) = self.adjacent_composer_room(delta) else {
+            return false;
+        };
+        if !self.select_room_slot(RoomSlot::Room(next_room_id)) {
+            return false;
+        }
+        self.reply_target = None;
+        self.edited_message_id = None;
+        self.composer_room_id = Some(next_room_id);
+        self.mark_selected_room_read();
+        self.request_list();
+        true
     }
 
     pub fn move_selection(&mut self, delta: isize) -> bool {
@@ -537,6 +624,8 @@ impl ChatState {
 
         let current_item = if self.notifications_selected {
             RoomSlot::Notifications
+        } else if self.discover_selected {
+            RoomSlot::Discover
         } else if self.news_selected {
             RoomSlot::News
         } else {
@@ -575,6 +664,7 @@ impl ChatState {
         self.composing = false;
         self.room_jump_active = false;
         self.composer_room_id = None;
+        self.reaction_leader_active = false;
         self.reply_target = None;
         set_composer_cursor_visible(&mut self.composer, false);
     }
@@ -584,6 +674,7 @@ impl ChatState {
         self.composing = false;
         self.room_jump_active = false;
         self.composer_room_id = None;
+        self.reaction_leader_active = false;
         self.reply_target = None;
         self.edited_message_id = None;
         self.mention_ac = MentionAutocomplete::default();
@@ -594,6 +685,7 @@ impl ChatState {
         self.composing = false;
         self.room_jump_active = false;
         self.composer_room_id = None;
+        self.reaction_leader_active = false;
         self.reply_target = None;
         self.edited_message_id = None;
     }
@@ -602,6 +694,7 @@ impl ChatState {
         self.composer = new_chat_textarea();
         set_composer_cursor_visible(&mut self.composer, self.composing);
         self.room_jump_active = false;
+        self.reaction_leader_active = false;
         self.reply_target = None;
         self.edited_message_id = None;
     }
@@ -639,7 +732,7 @@ impl ChatState {
     pub fn submit_composer(&mut self, keep_open: bool) -> Option<Banner> {
         let body = self.composer.lines().join("\n").trim_end().to_string();
 
-        if body.trim() == "/help" {
+        if body.trim() == "/binds" {
             self.clear_composer_after_submit();
             self.requested_help_topic = Some(HelpTopic::Chat);
             return None;
@@ -651,7 +744,7 @@ impl ChatState {
             return None;
         }
 
-        if body.trim() == "/profile" {
+        if body.trim() == "/settings" {
             self.clear_composer_after_submit();
             self.requested_settings_modal = true;
             return None;
@@ -859,6 +952,19 @@ impl ChatState {
         self.composer.undo();
     }
 
+    /// Readline ^U: drop everything from the cursor back to the start of the
+    /// current line, leaving later lines intact. Replaces the earlier
+    /// clear-the-whole-composer behavior.
+    pub fn composer_kill_to_head(&mut self) {
+        self.composer.delete_line_by_head();
+    }
+
+    /// Forward a synthesized `Input` to the TextArea so it can dispatch via
+    /// its built-in emacs/readline keymap (^A/^E/^K/^F/^B/...).
+    pub fn composer_input(&mut self, input: Input) {
+        self.composer.input(input);
+    }
+
     pub fn tick(&mut self) -> Option<Banner> {
         let _ = self.room_tx.send(self.selected_room_id);
         self.drain_snapshot();
@@ -872,6 +978,7 @@ impl ChatState {
         self.room_jump_active = false;
         self.news_selected = true;
         self.notifications_selected = false;
+        self.discover_selected = false;
         self.selected_message_id = None;
         self.highlighted_message_id = None;
         self.news.list_articles();
@@ -886,10 +993,27 @@ impl ChatState {
         self.room_jump_active = false;
         self.notifications_selected = true;
         self.news_selected = false;
+        self.discover_selected = false;
         self.selected_message_id = None;
         self.highlighted_message_id = None;
         self.notifications.list();
         self.notifications.mark_read();
+    }
+
+    pub fn select_discover(&mut self) {
+        self.room_jump_active = false;
+        self.discover_selected = true;
+        self.notifications_selected = false;
+        self.news_selected = false;
+        self.selected_message_id = None;
+        self.highlighted_message_id = None;
+    }
+
+    pub fn join_selected_discover_room(&mut self) -> Option<Banner> {
+        let item = self.discover.selected_item()?.clone();
+        self.service
+            .join_public_room_task(self.user_id, item.room_id, item.slug.clone());
+        Some(Banner::success(&format!("Joining #{}...", item.slug)))
     }
 
     pub fn cursor_visible(&self) -> bool {
@@ -998,6 +1122,10 @@ impl ChatState {
         &self.bonsai_glyphs
     }
 
+    pub fn message_reactions(&self) -> &HashMap<Uuid, Vec<ChatMessageReactionSummary>> {
+        &self.message_reactions
+    }
+
     fn drain_snapshot(&mut self) {
         if !self.snapshot_rx.has_changed().unwrap_or(false) {
             return;
@@ -1012,10 +1140,12 @@ impl ChatState {
         self.countries = snapshot.countries;
         self.ignored_user_ids = snapshot.ignored_user_ids.into_iter().collect();
         self.rooms = self.merge_rooms(snapshot.chat_rooms);
+        self.discover.set_items(snapshot.discover_rooms);
         self.general_room_id = snapshot.general_room_id;
         self.unread_counts = self.merge_unread_counts(snapshot.unread_counts);
         self.all_usernames = snapshot.all_usernames;
         self.bonsai_glyphs = snapshot.bonsai_glyphs;
+        self.message_reactions = self.merge_message_reactions(snapshot.message_reactions);
         self.sync_selection();
     }
 
@@ -1053,7 +1183,7 @@ impl ChatState {
                             });
                         } else if let Some(me) = self.usernames.get(&self.user_id) {
                             let me_lc = me.to_ascii_lowercase();
-                            if super::mentions::extract_mentions(&message.body)
+                            if crate::app::common::mentions::extract_mentions(&message.body)
                                 .iter()
                                 .any(|m| m == &me_lc)
                             {
@@ -1094,6 +1224,9 @@ impl ChatState {
                     banner = Some(Banner::error(&message));
                 }
                 ChatEvent::DmOpened { user_id, room_id } if self.user_id == user_id => {
+                    self.news_selected = false;
+                    self.notifications_selected = false;
+                    self.discover_selected = false;
                     self.selected_room_id = Some(room_id);
                     self.request_list();
                     self.pending_chat_screen_switch = true;
@@ -1107,6 +1240,9 @@ impl ChatState {
                     room_id,
                     slug,
                 } if self.user_id == user_id => {
+                    self.news_selected = false;
+                    self.notifications_selected = false;
+                    self.discover_selected = false;
                     self.selected_room_id = Some(room_id);
                     self.request_list();
                     self.pending_chat_screen_switch = true;
@@ -1128,6 +1264,9 @@ impl ChatState {
                     room_id,
                     slug,
                 } if self.user_id == user_id => {
+                    self.news_selected = false;
+                    self.notifications_selected = false;
+                    self.discover_selected = false;
                     self.selected_room_id = Some(room_id);
                     self.request_list();
                     self.pending_chat_screen_switch = true;
@@ -1167,6 +1306,19 @@ impl ChatState {
                         continue;
                     }
                     self.replace_message(message);
+                }
+                ChatEvent::MessageReactionsUpdated {
+                    room_id: _,
+                    message_id,
+                    reactions,
+                    target_user_ids,
+                } => {
+                    if let Some(targets) = target_user_ids
+                        && !targets.contains(&self.user_id)
+                    {
+                        continue;
+                    }
+                    self.message_reactions.insert(message_id, reactions);
                 }
                 ChatEvent::EditSucceeded {
                     user_id,
@@ -1272,7 +1424,15 @@ impl ChatState {
         let room_id = message.room_id;
         messages.insert(0, message);
         if messages.len() > 1000 {
+            let removed_ids: Vec<Uuid> = messages
+                .iter()
+                .skip(1000)
+                .map(|message| message.id)
+                .collect();
             messages.truncate(1000);
+            for message_id in removed_ids {
+                self.message_reactions.remove(&message_id);
+            }
         }
 
         // Only mark the room as read if the user is actually viewing it.
@@ -1286,6 +1446,7 @@ impl ChatState {
         if let Some((_, messages)) = self.rooms.iter_mut().find(|(room, _)| room.id == room_id) {
             messages.retain(|m| m.id != message_id);
         }
+        self.message_reactions.remove(&message_id);
     }
 
     fn replace_message(&mut self, message: ChatMessage) {
@@ -1342,6 +1503,27 @@ impl ChatState {
                 None => true,
             });
         incoming
+    }
+
+    fn merge_message_reactions(
+        &self,
+        incoming: HashMap<Uuid, Vec<ChatMessageReactionSummary>>,
+    ) -> HashMap<Uuid, Vec<ChatMessageReactionSummary>> {
+        let visible_message_ids: HashSet<Uuid> = self
+            .rooms
+            .iter()
+            .flat_map(|(_, messages)| messages.iter().map(|message| message.id))
+            .collect();
+        let mut merged: HashMap<Uuid, Vec<ChatMessageReactionSummary>> = self
+            .message_reactions
+            .iter()
+            .filter(|(message_id, _)| visible_message_ids.contains(message_id))
+            .map(|(message_id, reactions)| (*message_id, reactions.clone()))
+            .collect();
+        for (message_id, reactions) in incoming {
+            merged.insert(message_id, reactions);
+        }
+        merged
     }
 
     fn filter_messages(&self, messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -1507,6 +1689,28 @@ fn format_active_user_lines(active_users: Option<&ActiveUsers>) -> Vec<String> {
 
 fn wrapped_index(current: isize, delta: isize, len: usize) -> usize {
     (current + delta).rem_euclid(len as isize) as usize
+}
+
+fn adjacent_composer_room(
+    order: &[RoomSlot],
+    current_room_id: Option<Uuid>,
+    delta: isize,
+) -> Option<Uuid> {
+    let rooms: Vec<Uuid> = order
+        .iter()
+        .filter_map(|slot| match slot {
+            RoomSlot::Room(room_id) => Some(*room_id),
+            RoomSlot::News | RoomSlot::Notifications | RoomSlot::Discover => None,
+        })
+        .collect();
+    if rooms.is_empty() {
+        return None;
+    }
+
+    let current = current_room_id
+        .and_then(|room_id| rooms.iter().position(|candidate| *candidate == room_id))
+        .unwrap_or(0) as isize;
+    Some(rooms[wrapped_index(current, delta, rooms.len())])
 }
 
 fn resolve_room_jump_target(targets: &[(u8, RoomSlot)], byte: u8) -> Option<RoomSlot> {
@@ -1795,12 +1999,47 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_composer_room_skips_virtual_slots() {
+        let room_a = Uuid::from_u128(1);
+        let room_b = Uuid::from_u128(2);
+        let room_c = Uuid::from_u128(3);
+        let order = vec![
+            RoomSlot::Room(room_a),
+            RoomSlot::News,
+            RoomSlot::Notifications,
+            RoomSlot::Discover,
+            RoomSlot::Room(room_b),
+            RoomSlot::Room(room_c),
+        ];
+
+        assert_eq!(
+            adjacent_composer_room(&order, Some(room_a), 1),
+            Some(room_b)
+        );
+        assert_eq!(
+            adjacent_composer_room(&order, Some(room_b), -1),
+            Some(room_a)
+        );
+        assert_eq!(
+            adjacent_composer_room(&order, Some(room_c), 1),
+            Some(room_a)
+        );
+    }
+
+    #[test]
+    fn adjacent_composer_room_returns_none_without_real_rooms() {
+        let order = vec![RoomSlot::News, RoomSlot::Notifications, RoomSlot::Discover];
+        assert_eq!(adjacent_composer_room(&order, None, 1), None);
+    }
+
+    #[test]
     fn resolve_room_jump_target_is_case_insensitive() {
         let room_id = Uuid::from_u128(7);
         let targets = [
             (b'a', RoomSlot::Room(room_id)),
             (b's', RoomSlot::News),
             (b'd', RoomSlot::Notifications),
+            (b'f', RoomSlot::Discover),
         ];
 
         assert_eq!(
@@ -1814,6 +2053,10 @@ mod tests {
         assert_eq!(
             resolve_room_jump_target(&targets, b'D'),
             Some(RoomSlot::Notifications)
+        );
+        assert_eq!(
+            resolve_room_jump_target(&targets, b'f'),
+            Some(RoomSlot::Discover)
         );
         assert_eq!(resolve_room_jump_target(&targets, b'x'), None);
     }

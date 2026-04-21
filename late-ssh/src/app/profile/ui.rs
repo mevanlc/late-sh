@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::app::{
     ai::ghost::{GRAYBEARD_CHAT_INTERVAL, GRAYBEARD_MENTION_COOLDOWN},
-    common::{composer::build_composer_rows, theme},
+    common::{markdown::render_body_to_lines, theme},
     settings_modal::{self, data::country_label},
 };
 
@@ -78,17 +78,17 @@ fn build_lines<'a>(view: &ProfileRenderInput<'a>) -> Vec<Line<'a>> {
         lines.push(Line::from(Span::styled("  Not set", dim)));
     } else {
         let wrap_width = settings_modal::ui::bio_text_width(settings_modal::ui::MODAL_WIDTH);
-        for row in build_composer_rows(&view.profile.bio, wrap_width) {
-            lines.push(Line::from(Span::styled(
-                format!("  {}", row.text),
-                Style::default().fg(theme::TEXT()),
-            )));
-        }
+        lines.extend(render_body_to_lines(
+            &view.profile.bio,
+            wrap_width + 2,
+            Span::raw("  "),
+            Style::default().fg(theme::TEXT()),
+        ));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "  Press Enter or e to edit profile settings",
+        "  Press Ctrl+O or use /settings to open settings",
         Style::default().fg(theme::AMBER_DIM()),
     )));
 
@@ -229,7 +229,7 @@ mod tests {
     use chrono::TimeZone;
 
     #[test]
-    fn build_lines_contains_profile_summary_and_edit_hint() {
+    fn build_lines_contains_profile_summary_and_settings_hint() {
         let profile = Profile::default();
         let view = ProfileRenderInput {
             profile: &profile,
@@ -253,7 +253,7 @@ mod tests {
             .join("\n");
 
         assert!(text.contains("Profile"));
-        assert!(text.contains("Press Enter or e to edit profile settings"));
+        assert!(text.contains("Press Ctrl+O or use /settings to open settings"));
         assert!(text.contains("Timezone"));
         assert!(text.contains("@graybeard"));
         assert!(text.contains("gemini-3-flash"));

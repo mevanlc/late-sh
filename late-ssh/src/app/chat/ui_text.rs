@@ -3,16 +3,13 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::app::common::theme;
-use late_core::models::article::NEWS_MARKER;
-
-use super::mentions::{is_mention_char, valid_mention_start};
+use crate::app::common::{
+    markdown::{pad_to_width, render_body_to_lines, wrap_plain_line},
+    theme,
+};
+use late_core::models::{article::NEWS_MARKER, chat_message_reaction::ChatMessageReactionSummary};
 
 const NEWS_SEPARATOR: &str = " || ";
-
-// ── Composer text processing ────────────────────────────────
-
-// ── Message wrapping ────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn wrap_message_to_lines(
@@ -33,7 +30,6 @@ pub(super) fn wrap_message_to_lines(
     };
 
     if !continuation {
-        // Line 1: author [time]
         lines.push(Line::from(vec![
             pad.clone(),
             Span::styled(prefix.to_string(), author_style),
@@ -44,52 +40,13 @@ pub(super) fn wrap_message_to_lines(
         ]));
     }
 
-    // Line 2+: body with word wrap, respecting newlines
     if body.is_empty() {
         return lines;
     }
 
-    // Each rendered line is prefixed with a 1-column pad span, so the
-    // wrappable body width is the area width minus that pad.
-    let body_width = width.saturating_sub(1).max(1);
-
-    let (reply_quote, body) = parse_reply_quote(body);
-    if let Some(reply_quote) = reply_quote {
-        for row in wrap_plain_line(&format!("> {reply_quote}"), body_width) {
-            lines.push(Line::from(vec![
-                pad.clone(),
-                Span::styled(row, Style::default().fg(theme::TEXT_FAINT())),
-            ]));
-        }
-    }
-
-    for paragraph in body.split('\n') {
-        if paragraph.is_empty() {
-            lines.push(Line::from(pad.clone()));
-            continue;
-        }
-        for chunk in wrap_plain_line(paragraph, body_width) {
-            let mut spans = vec![pad.clone()];
-            spans.extend(mention_spans(&chunk, body_style));
-            lines.push(Line::from(spans));
-        }
-    }
+    lines.extend(render_body_to_lines(body, width, pad, body_style));
 
     lines
-}
-
-fn parse_reply_quote(body: &str) -> (Option<String>, &str) {
-    let Some((first_line, rest)) = body.split_once('\n') else {
-        return (None, body);
-    };
-    let quote = first_line.trim().strip_prefix("> ").map(str::trim);
-    let rest = rest.trim_start_matches('\n');
-    match quote {
-        Some(quote) if !quote.is_empty() && !rest.trim().is_empty() => {
-            (Some(quote.to_string()), rest)
-        }
-        _ => (None, body),
-    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -102,20 +59,29 @@ pub(super) fn wrap_chat_entry_to_lines(
     body_style: Style,
     mentions_us: bool,
     continuation: bool,
+    reactions: &[ChatMessageReactionSummary],
 ) -> Vec<Line<'static>> {
-    if let Some(news) = parse_news_payload(body) {
-        return wrap_news_to_lines(stamp, prefix, width, author_style, news);
-    }
-    wrap_message_to_lines(
-        body,
-        stamp,
-        prefix,
-        width,
-        author_style,
-        body_style,
-        mentions_us,
-        continuation,
-    )
+    let pad = if mentions_us {
+        Span::styled("│", Style::default().fg(theme::MENTION()))
+    } else {
+        Span::raw(" ")
+    };
+    let mut lines = if let Some(news) = parse_news_payload(body) {
+        wrap_news_to_lines(stamp, prefix, width, author_style, news)
+    } else {
+        wrap_message_to_lines(
+            body,
+            stamp,
+            prefix,
+            width,
+            author_style,
+            body_style,
+            mentions_us,
+            continuation,
+        )
+    };
+    lines.extend(render_reaction_footer_lines(reactions, width, pad));
+    lines
 }
 
 // ── News formatting ─────────────────────────────────────────
@@ -260,6 +226,52 @@ fn wrap_news_to_lines(
     lines
 }
 
+fn render_reaction_footer_lines(
+    reactions: &[ChatMessageReactionSummary],
+    width: usize,
+    pad: Span<'static>,
+) -> Vec<Line<'static>> {
+    if reactions.is_empty() {
+        return Vec::new();
+    }
+
+    let mut footer_lines: Vec<Line<'static>> = Vec::new();
+    let available_width = width.saturating_sub(1).max(1);
+    let mut current_width = 0usize;
+    let mut current_spans = vec![pad.clone()];
+
+    for reaction in reactions {
+        let text = format!("[{} {}]", reaction_label(reaction.kind), reaction.count);
+        let chip_width = text.chars().count();
+        let extra_space = usize::from(current_width > 0);
+        if current_width > 0 && current_width + extra_space + chip_width > available_width {
+            footer_lines.push(Line::from(current_spans));
+            current_spans = vec![pad.clone()];
+            current_width = 0;
+        }
+        if current_width > 0 {
+            current_spans.push(Span::raw(" "));
+            current_width += 1;
+        }
+        current_spans.push(Span::styled(text, Style::default().fg(theme::TEXT_DIM())));
+        current_width += chip_width;
+    }
+
+    footer_lines.push(Line::from(current_spans));
+    footer_lines
+}
+
+fn reaction_label(kind: i16) -> &'static str {
+    match kind {
+        1 => "👍",
+        2 => "🧡",
+        3 => "😂",
+        4 => "👀",
+        5 => "🔥",
+        _ => "?",
+    }
+}
+
 // ── Text utilities ──────────────────────────────────────────
 
 fn normalize_inline_text(text: &str) -> String {
@@ -307,49 +319,6 @@ fn raw_ascii_preview_lines(ascii: &str, max_rows: usize) -> Vec<String> {
     rows
 }
 
-fn wrap_plain_line(text: &str, width: usize) -> Vec<String> {
-    if text.trim().is_empty() {
-        return Vec::new();
-    }
-    if width == 0 {
-        return vec![String::new()];
-    }
-
-    let chars: Vec<char> = text.chars().collect();
-    let mut out = Vec::new();
-    let mut idx = 0;
-    while idx < chars.len() {
-        let end = (idx + width).min(chars.len());
-        // Try to break at a space if we're not at the end
-        let break_at = if end < chars.len() {
-            // Look backwards for a space to break at
-            let mut pos = end;
-            while pos > idx && chars[pos - 1] != ' ' {
-                pos -= 1;
-            }
-            if pos > idx { pos } else { end }
-        } else {
-            end
-        };
-        let chunk: String = chars[idx..break_at].iter().collect();
-        out.push(chunk);
-        idx = break_at;
-    }
-
-    out
-}
-
-fn pad_to_width(text: &str, width: usize) -> String {
-    let len = text.chars().count();
-    if len >= width {
-        return text.chars().take(width).collect();
-    }
-    let mut out = String::with_capacity(width);
-    out.push_str(text);
-    out.push_str(&" ".repeat(width - len));
-    out
-}
-
 fn decode_escaped_field(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars();
@@ -371,69 +340,11 @@ fn decode_escaped_field(input: &str) -> String {
     out
 }
 
-// ── Mention span highlighting ───────────────────────────────
-
-pub(super) fn mention_spans(text: &str, body_style: Style) -> Vec<Span<'static>> {
-    let mention_style = body_style.fg(theme::MENTION()).add_modifier(Modifier::BOLD);
-    let mut spans = Vec::new();
-    let mut idx = 0;
-    let mut segment_start = 0;
-
-    while idx < text.len() {
-        let Some(ch) = text[idx..].chars().next() else {
-            break;
-        };
-
-        if ch == '@' && valid_mention_start(text, idx) {
-            let mut end = idx + ch.len_utf8();
-            let mut has_mention_chars = false;
-
-            while end < text.len() {
-                let Some(next) = text[end..].chars().next() else {
-                    break;
-                };
-                if !is_mention_char(next) {
-                    break;
-                }
-                has_mention_chars = true;
-                end += next.len_utf8();
-            }
-
-            if has_mention_chars {
-                if segment_start < idx {
-                    spans.push(Span::styled(
-                        text[segment_start..idx].to_string(),
-                        body_style,
-                    ));
-                }
-                spans.push(Span::styled(text[idx..end].to_string(), mention_style));
-                idx = end;
-                segment_start = end;
-                continue;
-            }
-        }
-
-        idx += ch.len_utf8();
-    }
-
-    if segment_start < text.len() {
-        spans.push(Span::styled(
-            text[segment_start..text.len()].to_string(),
-            body_style,
-        ));
-    }
-
-    spans
-}
-
-// ── Tests ───────────────────────────────────────────────────
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::common::composer::build_composer_rows;
-    use ratatui::style::Color;
-    use ratatui::style::Modifier;
+    use late_core::models::chat_message_reaction::ChatMessageReactionSummary;
 
     fn lines_to_strings(lines: &[Line]) -> Vec<String> {
         lines
@@ -445,35 +356,6 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
-    }
-
-    #[test]
-    fn mention_spans_highlight_mentions() {
-        let spans = mention_spans("hey @alice and @bob", Style::default());
-        assert_eq!(spans.len(), 4);
-        assert_eq!(spans[0].content.as_ref(), "hey ");
-        assert_eq!(spans[1].content.as_ref(), "@alice");
-        assert_eq!(spans[2].content.as_ref(), " and ");
-        assert_eq!(spans[3].content.as_ref(), "@bob");
-        assert_eq!(spans[1].style.fg, Some(Color::Rgb(228, 196, 78)));
-        assert_eq!(spans[3].style.fg, Some(Color::Rgb(228, 196, 78)));
-        assert!(spans[1].style.add_modifier.contains(Modifier::BOLD));
-    }
-
-    #[test]
-    fn mention_spans_ignore_email_addresses() {
-        let spans = mention_spans("mail me at hi@example.com", Style::default());
-        assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].content.as_ref(), "mail me at hi@example.com");
-        assert_eq!(spans[0].style.fg, None);
-    }
-
-    #[test]
-    fn mention_spans_stop_before_trailing_punctuation() {
-        let spans = mention_spans("@alice, nice one", Style::default());
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content.as_ref(), "@alice");
-        assert_eq!(spans[1].content.as_ref(), ", nice one");
     }
 
     #[test]
@@ -528,7 +410,26 @@ mod tests {
         assert!(rendered.contains("https://example.com"));
     }
 
-    // --- wrap_message_to_lines ---
+    #[test]
+    fn wrap_chat_entry_to_lines_appends_reaction_footer() {
+        let lines = wrap_chat_entry_to_lines(
+            "hello world",
+            "[1m]",
+            "alice",
+            80,
+            Style::default(),
+            Style::default(),
+            false,
+            false,
+            &[
+                ChatMessageReactionSummary { kind: 2, count: 3 },
+                ChatMessageReactionSummary { kind: 5, count: 1 },
+            ],
+        );
+        let rendered = lines_to_strings(&lines).join("\n");
+        assert!(rendered.contains("[🧡 3]"));
+        assert!(rendered.contains("[🔥 1]"));
+    }
 
     #[test]
     fn wrap_message_has_left_padding() {
@@ -543,9 +444,7 @@ mod tests {
             false,
         );
         let strings = lines_to_strings(&lines);
-        // Author line starts with space
         assert!(strings[0].starts_with(" alice"));
-        // Body line starts with space
         assert!(strings[1].starts_with(" hello"));
     }
 
@@ -562,94 +461,10 @@ mod tests {
             false,
         );
         let strings = lines_to_strings(&lines);
-        // 1 author line + 3 body lines
         assert_eq!(strings.len(), 4);
         assert!(strings[1].contains("line1"));
         assert!(strings[2].contains("line2"));
         assert!(strings[3].contains("line3"));
-    }
-
-    #[test]
-    fn wrap_message_empty_line_in_body() {
-        let lines = wrap_message_to_lines(
-            "above\n\nbelow",
-            "[1m]",
-            "mat",
-            80,
-            Style::default(),
-            Style::default(),
-            false,
-            false,
-        );
-        let strings = lines_to_strings(&lines);
-        // author + "above" + empty + "below"
-        assert_eq!(strings.len(), 4);
-        assert!(strings[1].contains("above"));
-        assert_eq!(strings[2].trim(), "");
-        assert!(strings[3].contains("below"));
-    }
-
-    #[test]
-    fn wrap_message_wraps_long_lines() {
-        let lines = wrap_message_to_lines(
-            "abcdefghij",
-            "[1m]",
-            "x",
-            6, // area width 6, minus 1 pad = 5 body cols
-            Style::default(),
-            Style::default(),
-            false,
-            false,
-        );
-        let strings = lines_to_strings(&lines);
-        // author + 2 wrapped body lines
-        assert_eq!(strings.len(), 3);
-        assert!(strings[1].contains("abcde"));
-        assert!(strings[2].contains("fghij"));
-    }
-
-    #[test]
-    fn wrap_message_prefers_word_boundaries() {
-        let lines = wrap_message_to_lines(
-            "hello wide world",
-            "[1m]",
-            "x",
-            8,
-            Style::default(),
-            Style::default(),
-            false,
-            false,
-        );
-        let strings = lines_to_strings(&lines);
-        assert_eq!(strings.len(), 4);
-        assert!(strings[1].contains("hello"));
-        assert!(strings[2].contains("wide"));
-        assert!(strings[3].contains("world"));
-    }
-
-    #[test]
-    fn composer_rows_soft_wrap_words() {
-        let rows = build_composer_rows("hello wide world", 8);
-        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
-        assert_eq!(texts, vec!["hello", "wide", "world"]);
-    }
-
-    #[test]
-    fn wrap_message_renders_reply_quote_separately() {
-        let lines = wrap_message_to_lines(
-            "> @alice: original text\nmy reply",
-            "[1m]",
-            "bob",
-            80,
-            Style::default(),
-            Style::default(),
-            false,
-            false,
-        );
-        let strings = lines_to_strings(&lines);
-        assert_eq!(strings.len(), 3);
-        assert!(strings[1].contains("> @alice: original text"));
-        assert!(strings[2].contains("my reply"));
     }
 
     #[test]
@@ -664,50 +479,13 @@ mod tests {
             false,
             false,
         );
-        // Only author line
         assert_eq!(lines.len(), 1);
     }
 
     #[test]
-    fn wrap_plain_line_preserves_leading_spaces() {
-        let result = wrap_plain_line("   hello", 40);
-        assert_eq!(result, vec!["   hello"]);
-    }
-
-    #[test]
-    fn wrap_plain_line_preserves_ascii_art() {
-        let art = "  .@@@@@@.";
-        let result = wrap_plain_line(art, 40);
-        assert_eq!(result, vec!["  .@@@@@@."]);
-    }
-
-    #[test]
-    fn wrap_plain_line_preserves_internal_spacing() {
-        let result = wrap_plain_line("a    b    c", 40);
-        assert_eq!(result, vec!["a    b    c"]);
-    }
-
-    #[test]
-    fn wrap_plain_line_wraps_at_width() {
-        let result = wrap_plain_line("hello world", 7);
-        assert_eq!(result, vec!["hello ", "world"]);
-    }
-
-    #[test]
-    fn wrap_plain_line_breaks_long_word() {
-        let result = wrap_plain_line("abcdefgh", 4);
-        assert_eq!(result, vec!["abcd", "efgh"]);
-    }
-
-    #[test]
-    fn wrap_plain_line_empty_returns_empty() {
-        let result = wrap_plain_line("", 40);
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn wrap_plain_line_whitespace_only_returns_empty() {
-        let result = wrap_plain_line("   ", 40);
-        assert!(result.is_empty());
+    fn composer_rows_soft_wrap_words() {
+        let rows = build_composer_rows("hello wide world", 8);
+        let texts: Vec<&str> = rows.iter().map(|row| row.text.as_str()).collect();
+        assert_eq!(texts, vec!["hello", "wide", "world"]);
     }
 }

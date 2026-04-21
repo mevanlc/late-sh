@@ -2,6 +2,7 @@ use super::{
     chat, dashboard, help_modal, icon_picker, profile, profile_modal, settings_modal, state::App,
 };
 use crate::app::common::primitives::Screen;
+use crate::app::common::readline::ctrl_byte_to_input;
 use std::{mem, time::Duration};
 use vte::{Params, Parser, Perform};
 
@@ -50,6 +51,10 @@ pub(crate) enum ParsedInput {
     Arrow(u8),
     CtrlArrow(u8),
     ShiftArrow(u8),
+    /// Arrow with the Alt/Meta modifier (xterm `CSI 1;3 {A|B|C|D}`).
+    /// Most terminals emit this for Option-Arrow on macOS or Alt-Arrow on
+    /// Linux; kitty does in its default (non-kitty-keyboard) mode. Consumers
+    /// treat `AltArrow` and `CtrlArrow` identically for word-jump bindings.
     AltArrow(u8),
     CtrlShiftArrow(u8),
     Delete,
@@ -72,9 +77,6 @@ pub(crate) enum ParsedInput {
     Home,
     FocusGained,
     FocusLost,
-    /// Payload of an XTVERSION (`CSI > q`) DCS reply — the bytes between
-    /// `ESC P > |` and `ESC \`, e.g. `kitty(0.31.0)`.
-    TerminalVersion(String),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -185,9 +187,6 @@ struct VtCollector {
     events: Vec<ParsedInput>,
     paste: Option<Vec<u8>>,
     ss3_pending: bool,
-    /// Buffer for an in-flight XTVERSION DCS reply. `Some` between
-    /// `hook()` (when we see the `|` final byte) and `unhook()`.
-    xtversion_buf: Option<Vec<u8>>,
 }
 
 impl VtCollector {
@@ -247,32 +246,11 @@ impl Perform for VtCollector {
         self.push_byte(byte);
     }
 
-    fn hook(&mut self, _: &Params, _: &[u8], _: bool, action: char) {
-        // XTVERSION reply: `ESC P > | <name>(<version>) ESC \`. The final
-        // byte is `|` (0x7C). We key off that rather than the `>` private
-        // marker because different vte versions surface the marker via
-        // params vs intermediates. Buffer up to 256 bytes of payload to
-        // guard against a runaway DCS.
-        if action == '|' {
-            self.xtversion_buf = Some(Vec::new());
-        }
-    }
+    fn hook(&mut self, _: &Params, _: &[u8], _: bool, _: char) {}
 
-    fn put(&mut self, byte: u8) {
-        if let Some(buf) = &mut self.xtversion_buf
-            && buf.len() < 256
-        {
-            buf.push(byte);
-        }
-    }
+    fn put(&mut self, _: u8) {}
 
-    fn unhook(&mut self) {
-        if let Some(buf) = self.xtversion_buf.take()
-            && let Ok(payload) = String::from_utf8(buf)
-        {
-            self.events.push(ParsedInput::TerminalVersion(payload));
-        }
-    }
+    fn unhook(&mut self) {}
 
     fn osc_dispatch(&mut self, _: &[&[u8]], _: bool) {}
 
@@ -467,77 +445,7 @@ pub fn flush_pending_escape(app: &mut App) {
     dispatch_escape(app);
 }
 
-/// Splice complete XTVERSION DCS replies out of `data`, returning the
-/// remaining bytes and the extracted payloads. Only matches the specific
-/// `ESC P > | ... ST` shape so other DCS traffic passes through untouched.
-/// An incomplete reply (no terminator found) is left in place for the main
-/// vt parser to buffer across subsequent reads.
-fn extract_xtversion_replies(data: &[u8]) -> (std::borrow::Cow<'_, [u8]>, Vec<String>) {
-    let mut out: Vec<u8> = Vec::new();
-    let mut payloads: Vec<String> = Vec::new();
-    let mut seg_start = 0usize;
-    let mut i = 0usize;
-    let mut any_stripped = false;
-
-    while i < data.len() {
-        let is_xtver_start = data[i] == 0x1B
-            && i + 3 < data.len()
-            && data[i + 1] == b'P'
-            && data[i + 2] == b'>'
-            && data[i + 3] == b'|';
-        if !is_xtver_start {
-            i += 1;
-            continue;
-        }
-
-        // Locate the String Terminator: BEL (0x07) or ESC `\`.
-        let payload_start = i + 4;
-        let mut j = payload_start;
-        let mut term_len = 0usize;
-        while j < data.len() {
-            if data[j] == 0x07 {
-                term_len = 1;
-                break;
-            }
-            if data[j] == 0x1B && j + 1 < data.len() && data[j + 1] == b'\\' {
-                term_len = 2;
-                break;
-            }
-            j += 1;
-        }
-        if term_len == 0 {
-            // Incomplete; leave the remainder untouched.
-            break;
-        }
-
-        out.extend_from_slice(&data[seg_start..i]);
-        if let Ok(s) = std::str::from_utf8(&data[payload_start..j]) {
-            payloads.push(s.to_string());
-        }
-        i = j + term_len;
-        seg_start = i;
-        any_stripped = true;
-    }
-
-    if !any_stripped {
-        return (std::borrow::Cow::Borrowed(data), payloads);
-    }
-    out.extend_from_slice(&data[seg_start..]);
-    (std::borrow::Cow::Owned(out), payloads)
-}
-
 pub fn handle(app: &mut App, data: &[u8]) {
-    // Pull any complete XTVERSION DCS replies out of the raw byte stream
-    // before the splash/welcome short-circuits below, which otherwise see
-    // the leading ESC byte and drop the reply on the floor (and dismiss
-    // the splash prematurely). The reply also passes through vt_input in
-    // the normal path after splash; `set_terminal_version` is idempotent.
-    let (stripped, xtversion_payloads) = extract_xtversion_replies(data);
-    for payload in xtversion_payloads {
-        app.set_terminal_version(&payload);
-    }
-    let data: &[u8] = &stripped;
-
     if app.show_splash {
         // Do not process input while splash screen is showing
         // Escape skips the rest of the intro animation
@@ -640,6 +548,13 @@ fn overlay_input_action(event: &ParsedInput) -> Option<OverlayInputAction> {
 }
 
 fn handle_parsed_input(app: &mut App, event: ParsedInput) {
+    // Ctrl+O is a plain C0 control byte (0x0F) across terminals/tmux, so
+    // treat it as the global "open settings" chord before any local routing.
+    if matches!(event, ParsedInput::Byte(0x0F)) {
+        open_settings_modal_globally(app);
+        return;
+    }
+
     // Help is the topmost modal: when both are open it owns input.
     if app.show_help {
         help_modal::input::handle_input(app, event);
@@ -680,7 +595,6 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
 
     match event {
         ParsedInput::FocusGained | ParsedInput::FocusLost => {}
-        ParsedInput::TerminalVersion(payload) => app.set_terminal_version(&payload),
         ParsedInput::Paste(pasted) => handle_bracketed_paste(app, &pasted),
         ParsedInput::AltEnter => {
             if (ctx.screen == Screen::Dashboard || ctx.screen == Screen::Chat) && ctx.chat_composing
@@ -819,7 +733,7 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         ParsedInput::CtrlDelete if ctx.screen == Screen::Chat && ctx.news_composing => {
             app.chat.news.composer_delete_word_right();
         }
-        ParsedInput::CtrlArrow(key)
+        ParsedInput::CtrlArrow(key) | ParsedInput::AltArrow(key)
             if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard)
                 && ctx.chat_composing
                 && !ctx.chat_ac_active =>
@@ -830,7 +744,9 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
                 app.chat.composer_cursor_word_left();
             }
         }
-        ParsedInput::CtrlArrow(key) if ctx.screen == Screen::Chat && ctx.news_composing => {
+        ParsedInput::CtrlArrow(key) | ParsedInput::AltArrow(key)
+            if ctx.screen == Screen::Chat && ctx.news_composing =>
+        {
             if key == b'C' {
                 app.chat.news.composer_cursor_word_right();
             } else if key == b'D' {
@@ -839,14 +755,12 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         }
         ParsedInput::Delete
         | ParsedInput::CtrlArrow(_)
+        | ParsedInput::AltArrow(_)
         | ParsedInput::CtrlBackspace
         | ParsedInput::CtrlDelete => {}
         // Modified arrows are only bound in games that opt-in via the early
         // `handle_event` hook (dartboard). Everywhere else they're inert.
-        ParsedInput::ShiftArrow(_)
-        | ParsedInput::AltArrow(_)
-        | ParsedInput::CtrlShiftArrow(_)
-        | ParsedInput::Home => {}
+        ParsedInput::ShiftArrow(_) | ParsedInput::CtrlShiftArrow(_) | ParsedInput::Home => {}
         ParsedInput::Arrow(key) => {
             if ctx.screen == Screen::Chat && app.chat.room_jump_active {
                 let _ = chat::input::handle_arrow(app, key);
@@ -963,6 +877,12 @@ fn dispatch_escape(app: &mut App) {
         return;
     }
     if handle_modal_input(app, ctx, 0x1B) {
+        return;
+    }
+    if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard)
+        && app.chat.is_reaction_leader_active()
+    {
+        app.chat.cancel_reaction_leader();
         return;
     }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && app.chat.has_overlay() {
@@ -1088,7 +1008,7 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
 
 fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
     if (ctx.screen == Screen::Dashboard || ctx.screen == Screen::Chat) && ctx.chat_composing {
-        chat::input::handle_compose_input(app, byte);
+        chat::input::handle_compose_input(app, byte, compose_room_switch_allowed(ctx.screen));
         return true;
     }
 
@@ -1100,9 +1020,27 @@ fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
     false
 }
 
+fn compose_room_switch_allowed(screen: Screen) -> bool {
+    screen == Screen::Chat
+}
+
 fn reset_composers_for_page_change(app: &mut App) {
     app.chat.reset_composer();
     app.chat.news.stop_composing();
+}
+
+fn open_settings_modal_globally(app: &mut App) {
+    app.show_help = false;
+    app.show_profile_modal = false;
+    app.show_web_chat_qr = false;
+    app.icon_picker_open = false;
+    app.chat.close_overlay();
+    app.chat.cancel_room_jump();
+    app.settings_modal_state.open_from_profile(
+        app.profile_state.profile(),
+        crate::app::settings_modal::ui::MODAL_WIDTH,
+    );
+    app.show_settings = true;
 }
 
 fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
@@ -1112,6 +1050,13 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             .open(crate::app::help_modal::data::HelpTopic::Overview);
         app.show_help = true;
         return true;
+    }
+
+    if matches!(byte, b'1' | b'2' | b'3' | b'4' | b'5')
+        && (ctx.screen == Screen::Dashboard || ctx.screen == Screen::Chat)
+        && app.chat.is_reaction_leader_active()
+    {
+        return false;
     }
 
     if ctx.screen == Screen::Games
@@ -1335,7 +1280,10 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
         ParsedInput::CtrlDelete => app.icon_picker_state.search_delete_word_right(),
         ParsedInput::Arrow(b'A') => picker_move_selection(app, -1),
         ParsedInput::Arrow(b'B') => picker_move_selection(app, 1),
-        // Ctrl+K / Ctrl+J mirror vim-style up/down without stealing plain j/k from the search box.
+        // Ctrl+K / Ctrl+J mirror vim-style up/down without stealing plain j/k
+        // from the search box. These stay claimed for list nav and are NOT
+        // forwarded to ratatui-textarea's keymap (which would kill-to-EOL /
+        // insert-newline respectively).
         ParsedInput::Byte(0x0B) => picker_move_selection(app, -1),
         ParsedInput::Byte(0x0A) => picker_move_selection(app, 1),
         ParsedInput::Mouse(MouseEvent {
@@ -1352,8 +1300,12 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
         },
         ParsedInput::Arrow(b'C') => app.icon_picker_state.search_cursor_right(),
         ParsedInput::Arrow(b'D') => app.icon_picker_state.search_cursor_left(),
-        ParsedInput::CtrlArrow(b'C') => app.icon_picker_state.search_cursor_word_right(),
-        ParsedInput::CtrlArrow(b'D') => app.icon_picker_state.search_cursor_word_left(),
+        ParsedInput::CtrlArrow(b'C') | ParsedInput::AltArrow(b'C') => {
+            app.icon_picker_state.search_cursor_word_right()
+        }
+        ParsedInput::CtrlArrow(b'D') | ParsedInput::AltArrow(b'D') => {
+            app.icon_picker_state.search_cursor_word_left()
+        }
         ParsedInput::PageUp => {
             let page = app.icon_picker_state.visible_height.get().max(1) as isize;
             picker_move_selection(app, -page);
@@ -1362,7 +1314,8 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
             let page = app.icon_picker_state.visible_height.get().max(1) as isize;
             picker_move_selection(app, page);
         }
-        // Ctrl+U / Ctrl+D half-page jumps mirror the chat viewport convention.
+        // Ctrl+U / Ctrl+D half-page jumps mirror the chat viewport convention
+        // and intentionally shadow ratatui-textarea's undo / delete-next-char.
         ParsedInput::Byte(0x15) => {
             let half = (app.icon_picker_state.visible_height.get() / 2).max(1) as isize;
             picker_move_selection(app, -half);
@@ -1371,11 +1324,17 @@ fn handle_icon_picker_input(app: &mut App, event: ParsedInput) {
             let half = (app.icon_picker_state.visible_height.get() / 2).max(1) as isize;
             picker_move_selection(app, half);
         }
-        ParsedInput::Byte(0x01) => app.icon_picker_state.search_cursor_home(),
-        ParsedInput::Byte(0x05) => app.icon_picker_state.search_cursor_end(),
-        ParsedInput::Byte(0x19) => app.icon_picker_state.search_paste(),
+        // ^/ (^_) stays on the app-level undo path so `reset_selection()` fires.
         ParsedInput::Byte(0x1F) => app.icon_picker_state.search_undo(),
         ParsedInput::Char(ch) if !ch.is_control() => app.icon_picker_state.search_insert_char(ch),
+        ParsedInput::Byte(byte) => {
+            // Fallthrough: forward remaining Ctrl+<letter> chords (^A/^E/^F/
+            // ^B/^Y/...) to ratatui-textarea's emacs keymap. The wrapper
+            // resets icon-list selection whenever the query is modified.
+            if let Some(input) = ctrl_byte_to_input(byte) {
+                app.icon_picker_state.search_input(input);
+            }
+        }
         _ => {}
     }
 }
@@ -1533,6 +1492,13 @@ mod tests {
     }
 
     #[test]
+    fn compose_room_switch_only_allowed_on_chat_screen() {
+        assert!(compose_room_switch_allowed(Screen::Chat));
+        assert!(!compose_room_switch_allowed(Screen::Dashboard));
+        assert!(!compose_room_switch_allowed(Screen::Profile));
+    }
+
+    #[test]
     fn vt_parser_reads_arrow_sequence() {
         let mut parser = VtInputParser::default();
         assert_eq!(parser.feed(b"\x1b[A"), vec![ParsedInput::Arrow(b'A')]);
@@ -1601,70 +1567,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_xtversion_strips_and_returns_payload() {
-        // Single, standalone reply.
-        let (rest, payloads) = extract_xtversion_replies(b"\x1bP>|kitty(0.31.0)\x1b\\");
-        assert_eq!(rest.as_ref(), b"");
-        assert_eq!(payloads, vec!["kitty(0.31.0)".to_string()]);
-    }
-
-    #[test]
-    fn extract_xtversion_strips_mixed_with_other_bytes() {
-        // Reply surrounded by other keystrokes — rest should keep those.
-        let (rest, payloads) = extract_xtversion_replies(b"abc\x1bP>|foo(1)\x1b\\def");
-        assert_eq!(rest.as_ref(), b"abcdef");
-        assert_eq!(payloads, vec!["foo(1)".to_string()]);
-    }
-
-    #[test]
-    fn extract_xtversion_incomplete_left_in_place() {
-        // No terminator → leave it; main vt parser will buffer across reads.
-        let (rest, payloads) = extract_xtversion_replies(b"\x1bP>|kitty");
-        assert_eq!(rest.as_ref(), b"\x1bP>|kitty");
-        assert!(payloads.is_empty());
-    }
-
-    #[test]
-    fn extract_xtversion_ignores_non_xtversion_dcs() {
-        // Different DCS final byte (`q`, e.g. Sixel) — leave it alone.
-        let (rest, payloads) = extract_xtversion_replies(b"\x1bPq...\x1b\\");
-        assert_eq!(rest.as_ref(), b"\x1bPq...\x1b\\");
-        assert!(payloads.is_empty());
-    }
-
-    #[test]
-    fn extract_xtversion_handles_bel_terminator() {
-        let (rest, payloads) = extract_xtversion_replies(b"\x1bP>|foo(1)\x07tail");
-        assert_eq!(rest.as_ref(), b"tail");
-        assert_eq!(payloads, vec!["foo(1)".to_string()]);
-    }
-
-    #[test]
-    fn vt_parser_reads_xtversion_dcs_reply() {
-        let mut parser = VtInputParser::default();
-        // `ESC P > | kitty(0.31.0) ESC \` — the reply shape we care about.
-        let events = parser.feed(b"\x1bP>|kitty(0.31.0)\x1b\\");
-        assert_eq!(
-            events,
-            vec![ParsedInput::TerminalVersion("kitty(0.31.0)".into())]
-        );
-    }
-
-    #[test]
-    fn vt_parser_reads_xtversion_dcs_reply_split_across_writes() {
-        // The DCS reply can arrive in multiple read() chunks over the wire;
-        // vte's state machine must hold state across feed calls.
-        let mut parser = VtInputParser::default();
-        let mut events = parser.feed(b"\x1bP>|WezTer");
-        events.extend(parser.feed(b"m(20240127)"));
-        events.extend(parser.feed(b"\x1b\\"));
-        assert_eq!(
-            events,
-            vec![ParsedInput::TerminalVersion("WezTerm(20240127)".into())]
-        );
-    }
-
-    #[test]
     fn vt_parser_parses_ctrl_sequences() {
         let mut parser = VtInputParser::default();
         assert_eq!(
@@ -1672,6 +1574,12 @@ mod tests {
             vec![ParsedInput::CtrlArrow(b'C')]
         );
         assert_eq!(parser.feed(b"\x1b[5D"), vec![ParsedInput::CtrlArrow(b'D')]);
+        // Alt+Arrow (xterm modifier 3). Kitty emits this for Option-Arrow /
+        // Alt-Arrow in its default mode; consumers alias it to word-jump.
+        assert_eq!(parser.feed(b"\x1b[1;3D"), vec![ParsedInput::AltArrow(b'D')]);
+        assert_eq!(parser.feed(b"\x1b[1;3C"), vec![ParsedInput::AltArrow(b'C')]);
+        // Unmodified Arrow falls through unchanged.
+        assert_eq!(parser.feed(b"\x1b[D"), vec![ParsedInput::Arrow(b'D')]);
         assert_eq!(parser.feed(b"\x1b[3~"), vec![ParsedInput::Delete]);
         assert_eq!(parser.feed(b"\x1b[3;5~"), vec![ParsedInput::CtrlDelete]);
         assert_eq!(
