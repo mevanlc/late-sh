@@ -33,6 +33,9 @@ pub struct State {
     floating_source_selection: Option<EditorSelection>,
     suppress_swatch_preview: bool,
     last_canvas_click: Option<(Instant, Pos)>,
+    help_open: bool,
+    help_tab: HelpTab,
+    help_scroll: u16,
     snapshot_rx: watch::Receiver<DartboardSnapshot>,
     event_rx: broadcast::Receiver<DartboardEvent>,
 }
@@ -52,6 +55,9 @@ impl State {
             floating_source_selection: None,
             suppress_swatch_preview: false,
             last_canvas_click: None,
+            help_open: false,
+            help_tab: HelpTab::default(),
+            help_scroll: 0,
             snapshot_rx,
             event_rx,
         }
@@ -354,7 +360,7 @@ impl State {
     }
 
     pub fn should_show_canvas_cursor(&self) -> bool {
-        !self.swatch_preview_suppressed()
+        !self.help_open && !self.swatch_preview_suppressed()
     }
 
     pub fn export_system_clipboard_text(&self) -> String {
@@ -521,6 +527,52 @@ impl State {
 
     pub fn clear_pending_canvas_click(&mut self) {
         self.last_canvas_click = None;
+    }
+
+    pub fn is_help_open(&self) -> bool {
+        self.help_open
+    }
+
+    pub fn toggle_help(&mut self) {
+        self.help_open = !self.help_open;
+    }
+
+    pub fn close_help(&mut self) {
+        self.help_open = false;
+    }
+
+    pub fn help_tab(&self) -> HelpTab {
+        self.help_tab
+    }
+
+    pub fn help_scroll(&self) -> u16 {
+        self.help_scroll
+    }
+
+    pub fn select_next_help_tab(&mut self) {
+        self.help_tab = self.help_tab.next();
+        self.help_scroll = 0;
+    }
+
+    pub fn select_prev_help_tab(&mut self) {
+        self.help_tab = self.help_tab.prev();
+        self.help_scroll = 0;
+    }
+
+    pub fn select_help_tab(&mut self, tab: HelpTab) {
+        if self.help_tab != tab {
+            self.help_tab = tab;
+            self.help_scroll = 0;
+        }
+    }
+
+    pub fn scroll_help(&mut self, delta: i16) {
+        let current = self.help_scroll as i32;
+        self.help_scroll = (current + delta as i32).max(0) as u16;
+    }
+
+    pub fn reset_help_scroll(&mut self) {
+        self.help_scroll = 0;
     }
 
     pub fn activate_temp_glyph_brush_at(&mut self, pos: Pos) -> bool {
@@ -692,6 +744,54 @@ pub enum BrushMode {
     None,
     Swatch,
     Glyph(char),
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum HelpTab {
+    #[default]
+    Guide,
+    Drawing,
+    Selection,
+    Clipboard,
+    Transform,
+    Session,
+}
+
+impl HelpTab {
+    pub const ALL: [HelpTab; 6] = [
+        HelpTab::Guide,
+        HelpTab::Drawing,
+        HelpTab::Selection,
+        HelpTab::Clipboard,
+        HelpTab::Transform,
+        HelpTab::Session,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            HelpTab::Guide => "guide",
+            HelpTab::Drawing => "drawing",
+            HelpTab::Selection => "selection",
+            HelpTab::Clipboard => "clipboard",
+            HelpTab::Transform => "transform",
+            HelpTab::Session => "session",
+        }
+    }
+
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|tab| *tab == self).unwrap_or(0)
+    }
+
+    pub fn next(self) -> Self {
+        let next = (self.index() + 1) % Self::ALL.len();
+        Self::ALL[next]
+    }
+
+    pub fn prev(self) -> Self {
+        let len = Self::ALL.len();
+        let prev = (self.index() + len - 1) % len;
+        Self::ALL[prev]
+    }
 }
 
 enum FloatingOverride {

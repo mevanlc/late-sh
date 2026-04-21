@@ -5,7 +5,7 @@ use dartboard_editor::{
 use crate::app::input::{MouseButton, MouseEvent, MouseEventKind, ParsedInput};
 
 use super::state::State;
-use super::ui::{SwatchHit, info_hit, swatch_hit};
+use super::ui::{SwatchHit, help_tab_hit, info_hit, swatch_hit};
 
 pub enum InputAction {
     Ignored,
@@ -16,6 +16,14 @@ pub enum InputAction {
 
 pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> InputAction {
     state.set_viewport_for_screen(screen_size);
+    if byte == 0x10 {
+        state.toggle_help();
+        state.clear_pending_canvas_click();
+        return InputAction::Handled;
+    }
+    if state.is_help_open() {
+        return handle_help_byte(state, byte);
+    }
     match byte {
         0x11 => InputAction::Leave, // Ctrl+Q
         0x1B => handle_app_key(
@@ -57,6 +65,17 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
     }
 }
 
+fn handle_help_byte(state: &mut State, byte: u8) -> InputAction {
+    match byte {
+        0x1B | b'q' | b'Q' | b'?' => state.close_help(),
+        b'\t' => state.select_next_help_tab(),
+        b'j' | b'J' => state.scroll_help(1),
+        b'k' | b'K' => state.scroll_help(-1),
+        _ => return InputAction::Ignored,
+    }
+    InputAction::Handled
+}
+
 fn app_key_from_raw_control_byte(byte: u8) -> Option<AppKey> {
     let ctrl = AppModifiers {
         ctrl: true,
@@ -79,6 +98,9 @@ fn app_key_from_raw_control_byte(byte: u8) -> Option<AppKey> {
 
 pub fn handle_arrow(state: &mut State, screen_size: (u16, u16), key: u8) -> bool {
     state.set_viewport_for_screen(screen_size);
+    if state.is_help_open() {
+        return handle_help_arrow(state, key);
+    }
     let Some(code) = arrow_key_code(key) else {
         return false;
     };
@@ -94,12 +116,26 @@ pub fn handle_arrow(state: &mut State, screen_size: (u16, u16), key: u8) -> bool
     )
 }
 
+fn handle_help_arrow(state: &mut State, key: u8) -> bool {
+    match key {
+        b'A' => state.scroll_help(-1),
+        b'B' => state.scroll_help(1),
+        b'C' => state.select_next_help_tab(),
+        b'D' => state.select_prev_help_tab(),
+        _ => return false,
+    }
+    true
+}
+
 pub(crate) fn handle_event(
     state: &mut State,
     screen_size: (u16, u16),
     event: &ParsedInput,
 ) -> InputAction {
     state.set_viewport_for_screen(screen_size);
+    if state.is_help_open() {
+        return handle_help_event(state, screen_size, event);
+    }
     match event {
         ParsedInput::Home => handle_app_key(
             state,
@@ -184,6 +220,37 @@ pub(crate) fn handle_event(
         }
         _ => InputAction::Ignored,
     }
+}
+
+fn handle_help_event(
+    state: &mut State,
+    screen_size: (u16, u16),
+    event: &ParsedInput,
+) -> InputAction {
+    match event {
+        ParsedInput::BackTab => state.select_prev_help_tab(),
+        ParsedInput::Home => state.reset_help_scroll(),
+        ParsedInput::PageUp => state.scroll_help(-5),
+        ParsedInput::PageDown => state.scroll_help(5),
+        ParsedInput::Mouse(mouse) => return handle_help_mouse(state, screen_size, mouse),
+        _ => return InputAction::Ignored,
+    }
+    InputAction::Handled
+}
+
+fn handle_help_mouse(
+    state: &mut State,
+    screen_size: (u16, u16),
+    mouse: &MouseEvent,
+) -> InputAction {
+    if matches!(mouse.kind, MouseEventKind::Down)
+        && matches!(mouse.button, Some(MouseButton::Left))
+        && let Some(tab) = help_tab_hit(screen_size, state, mouse.x, mouse.y)
+    {
+        state.select_help_tab(tab);
+    }
+    state.clear_pending_canvas_click();
+    InputAction::Handled
 }
 
 fn handle_app_key(state: &mut State, key: AppKey) -> InputAction {
@@ -722,6 +789,45 @@ mod tests {
             'A'
         );
         assert!(state.has_floating());
+    }
+
+    #[test]
+    fn ctrl_p_toggles_help_overlay() {
+        let mut state = test_state();
+
+        let open = handle_byte(&mut state, (80, 24), 0x10);
+        let close = handle_byte(&mut state, (80, 24), 0x10);
+
+        assert!(matches!(open, InputAction::Handled));
+        assert!(matches!(close, InputAction::Handled));
+        assert!(!state.is_help_open());
+    }
+
+    #[test]
+    fn help_overlay_routes_navigation_keys() {
+        let mut state = test_state();
+        assert!(matches!(
+            handle_byte(&mut state, (80, 24), 0x10),
+            InputAction::Handled
+        ));
+
+        assert!(handle_arrow(&mut state, (80, 24), b'C'));
+        assert_eq!(
+            state.help_tab(),
+            crate::app::games::artboard::state::HelpTab::Drawing
+        );
+
+        assert!(matches!(
+            handle_event(&mut state, (80, 24), &ParsedInput::PageDown),
+            InputAction::Handled
+        ));
+        assert_eq!(state.help_scroll(), 5);
+
+        assert!(matches!(
+            handle_event(&mut state, (80, 24), &ParsedInput::Home),
+            InputAction::Handled
+        ));
+        assert_eq!(state.help_scroll(), 0);
     }
 
     #[test]
