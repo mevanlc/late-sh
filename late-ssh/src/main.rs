@@ -57,6 +57,19 @@ async fn finish_ssh_drain(
     }
 }
 
+async fn flush_dartboard_snapshot(state: &State, fatal_error: &mut Option<anyhow::Error>) {
+    match late_ssh::dartboard::flush_server_snapshot(&state.db, &state.dartboard_server).await {
+        Ok(()) => tracing::info!("flushed artboard snapshot during shutdown"),
+        Err(err) => {
+            tracing::error!(error = ?err, "failed to flush artboard snapshot during shutdown");
+            if fatal_error.is_none() {
+                *fatal_error =
+                    Some(err.context("failed to flush artboard snapshot during shutdown"));
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let _telemetry = late_core::telemetry::init_telemetry("late-ssh")
@@ -134,7 +147,15 @@ async fn main() -> anyhow::Result<()> {
     );
     let bonsai_service =
         late_ssh::app::bonsai::svc::BonsaiService::new(db.clone(), activity_tx.clone());
-    let dartboard_server = late_ssh::dartboard::spawn_server();
+    let initial_dartboard_canvas = match late_ssh::dartboard::load_persisted_canvas(&db).await {
+        Ok(canvas) => canvas,
+        Err(error) => {
+            tracing::warn!(error = ?error, "failed to restore artboard snapshot");
+            None
+        }
+    };
+    let dartboard_server =
+        late_ssh::dartboard::spawn_persistent_server(db.clone(), initial_dartboard_canvas);
     let leaderboard_service =
         late_ssh::app::games::leaderboard::svc::LeaderboardService::new(db.clone());
     let nonogram_library = match late_ssh::app::games::nonogram::state::load_default_library() {
@@ -317,12 +338,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("starting late.sh ssh server");
     let mut fatal_error = None;
+    let mut should_finish_ssh_drain = false;
     tokio::select! {
         _ = late_core::shutdown::wait_for_shutdown_signal() => {
             tracing::info!("shutdown signal received, stopping new connections");
             begin_drain(&state, &accept_shutdown, &singleton_shutdown);
-            finish_ssh_drain(&mut ssh_task, &mut fatal_error).await;
-            session_shutdown.cancel();
+            should_finish_ssh_drain = true;
         }
         result = &mut ssh_task => {
             match result {
@@ -338,7 +359,6 @@ async fn main() -> anyhow::Result<()> {
             }
             tracing::warn!("ssh task exited prematurely, beginning shutdown");
             begin_drain(&state, &accept_shutdown, &singleton_shutdown);
-            session_shutdown.cancel();
         }
         Some(result) = tasks.join_next() => {
             match result {
@@ -354,9 +374,15 @@ async fn main() -> anyhow::Result<()> {
             }
             tracing::warn!("a task exited prematurely, beginning shutdown");
             begin_drain(&state, &accept_shutdown, &singleton_shutdown);
-            session_shutdown.cancel();
+            should_finish_ssh_drain = true;
         }
     }
+
+    if should_finish_ssh_drain {
+        finish_ssh_drain(&mut ssh_task, &mut fatal_error).await;
+    }
+    flush_dartboard_snapshot(&state, &mut fatal_error).await;
+    session_shutdown.cancel();
 
     if tokio::time::timeout(Duration::from_secs(6), async {
         while let Some(result) = tasks.join_next().await {

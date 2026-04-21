@@ -5,6 +5,7 @@ use std::{
 
 use dartboard_core::{CanvasOp, Pos, RgbColor};
 use dartboard_local::MAX_PLAYERS;
+use late_core::{models::artboard::Snapshot, test_utils::test_db};
 use late_ssh::app::games::artboard::state::State;
 use late_ssh::app::games::artboard::svc::{DartboardEvent, DartboardService};
 use late_ssh::dartboard;
@@ -139,4 +140,97 @@ fn dartboard_paste_bytes_lays_out_multiline_text_with_wrap() {
     assert_eq!(canvas.get(Pos { x: 6, y: 1 }), 'o');
     assert_eq!(canvas.get(Pos { x: 2, y: 2 }), 'w');
     assert_eq!(canvas.get(Pos { x: 6, y: 2 }), 'd');
+}
+
+#[tokio::test]
+async fn dartboard_persistent_server_saves_and_restores_snapshot() {
+    let test_db = test_db().await;
+    let server = dartboard::spawn_persistent_server_with_interval(
+        test_db.db.clone(),
+        None,
+        Duration::from_millis(50),
+    );
+    let painter = DartboardService::new(server, Uuid::now_v7(), "painter");
+    let rx = painter.subscribe_state();
+    wait_for(|| rx.borrow().your_user_id.is_some().then_some(()));
+
+    painter.submit_op(CanvasOp::PaintCell {
+        pos: Pos { x: 5, y: 4 },
+        ch: 'Z',
+        fg: test_color(),
+    });
+
+    let persisted = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let client = test_db.db.get().await.expect("db client");
+            if let Some(snapshot) = Snapshot::find_by_board_key(&client, Snapshot::MAIN_BOARD_KEY)
+                .await
+                .expect("query snapshot")
+            {
+                let canvas: dartboard_core::Canvas =
+                    serde_json::from_value(snapshot.canvas).expect("deserialize canvas");
+                if canvas.get(Pos { x: 5, y: 4 }) == 'Z' {
+                    break canvas;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for artboard snapshot");
+    assert_eq!(persisted.get(Pos { x: 5, y: 4 }), 'Z');
+
+    let restored = dartboard::load_persisted_canvas(&test_db.db)
+        .await
+        .expect("load persisted canvas");
+    let restored_server = dartboard::spawn_persistent_server_with_interval(
+        test_db.db.clone(),
+        restored,
+        Duration::from_millis(50),
+    );
+    let restorer = DartboardService::new(restored_server, Uuid::now_v7(), "restorer");
+    let restored_rx = restorer.subscribe_state();
+
+    wait_for(|| {
+        let snapshot = restored_rx.borrow().clone();
+        (snapshot.your_user_id.is_some() && snapshot.canvas.get(Pos { x: 5, y: 4 }) == 'Z')
+            .then_some(())
+    });
+}
+
+#[tokio::test]
+async fn dartboard_flush_server_snapshot_persists_immediately() {
+    let test_db = test_db().await;
+    let server = dartboard::spawn_persistent_server_with_interval(
+        test_db.db.clone(),
+        None,
+        Duration::from_secs(60 * 60),
+    );
+    let painter = DartboardService::new(server.clone(), Uuid::now_v7(), "painter");
+    let rx = painter.subscribe_state();
+    wait_for(|| rx.borrow().your_user_id.is_some().then_some(()));
+
+    painter.submit_op(CanvasOp::PaintCell {
+        pos: Pos { x: 9, y: 6 },
+        ch: 'Q',
+        fg: test_color(),
+    });
+
+    wait_for(|| {
+        let snapshot = rx.borrow().clone();
+        (snapshot.canvas.get(Pos { x: 9, y: 6 }) == 'Q' && snapshot.last_seq >= 1).then_some(())
+    });
+
+    dartboard::flush_server_snapshot(&test_db.db, &server)
+        .await
+        .expect("flush artboard snapshot");
+
+    let client = test_db.db.get().await.expect("db client");
+    let snapshot = Snapshot::find_by_board_key(&client, Snapshot::MAIN_BOARD_KEY)
+        .await
+        .expect("query snapshot")
+        .expect("snapshot exists");
+    let canvas: dartboard_core::Canvas =
+        serde_json::from_value(snapshot.canvas).expect("deserialize canvas");
+    assert_eq!(canvas.get(Pos { x: 9, y: 6 }), 'Q');
 }
