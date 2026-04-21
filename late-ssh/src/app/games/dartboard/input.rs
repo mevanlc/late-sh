@@ -25,37 +25,7 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
                 modifiers: AppModifiers::default(),
             },
         ),
-        0x03 => handle_app_key(
-            state,
-            AppKey {
-                code: AppKeyCode::Char('c'),
-                modifiers: AppModifiers {
-                    ctrl: true,
-                    ..Default::default()
-                },
-            },
-        ),
-        0x16 => handle_app_key(
-            state,
-            AppKey {
-                code: AppKeyCode::Char('v'),
-                modifiers: AppModifiers {
-                    ctrl: true,
-                    ..Default::default()
-                },
-            },
-        ),
-        0x18 => handle_app_key(
-            state,
-            AppKey {
-                code: AppKeyCode::Char('x'),
-                modifiers: AppModifiers {
-                    ctrl: true,
-                    ..Default::default()
-                },
-            },
-        ),
-        b'\r' | b'\n' => {
+        b'\r' => {
             if state.commit_floating() {
                 return InputAction::Handled;
             }
@@ -67,22 +37,49 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
                 },
             )
         }
-        0x08 | 0x7f => handle_app_key(
+        0x7f => handle_app_key(
             state,
             AppKey {
                 code: AppKeyCode::Backspace,
                 modifiers: AppModifiers::default(),
             },
         ),
-        _ if byte.is_ascii_graphic() || byte == b' ' => handle_app_key(
-            state,
-            AppKey {
-                code: AppKeyCode::Char(byte as char),
-                modifiers: AppModifiers::default(),
-            },
-        ),
-        _ => InputAction::Ignored,
+        _ => {
+            if let Some(key) = app_key_from_raw_control_byte(byte) {
+                handle_app_key(state, key)
+            } else if byte.is_ascii_graphic() || byte == b' ' {
+                handle_app_key(
+                    state,
+                    AppKey {
+                        code: AppKeyCode::Char(byte as char),
+                        modifiers: AppModifiers::default(),
+                    },
+                )
+            } else {
+                InputAction::Ignored
+            }
+        }
     }
+}
+
+fn app_key_from_raw_control_byte(byte: u8) -> Option<AppKey> {
+    let ctrl = AppModifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    let code = match byte {
+        0x00 => AppKeyCode::Char(' '),
+        0x01..=0x1A => match byte {
+            0x09 => AppKeyCode::Tab,
+            0x0D => return None,
+            _ => AppKeyCode::Char((b'a' + (byte - 1)) as char),
+        },
+        _ => return None,
+    };
+    Some(AppKey {
+        code,
+        modifiers: ctrl,
+    })
 }
 
 pub fn handle_arrow(state: &mut State, screen_size: (u16, u16), key: u8) -> bool {
@@ -417,6 +414,88 @@ mod tests {
         assert!(matches!(moved_over_canvas, InputAction::Handled));
         let floating = state.floating_view().expect("floating preview shown");
         assert_eq!(floating.anchor, dartboard_core::Pos { x: 18, y: 12 });
+    }
+
+    #[test]
+    fn raw_ctrl_b_draws_selection_border() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(4, 3);
+        state.begin_selection_from_cursor();
+        state.move_right((80, 24));
+        state.move_down((80, 24));
+
+        let action = handle_byte(&mut state, (80, 24), 0x02);
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .cell(dartboard_core::Pos { x: 0, y: 0 }),
+            Some(CellValue::Narrow('.'))
+        );
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .cell(dartboard_core::Pos { x: 1, y: 1 }),
+            Some(CellValue::Narrow('\''))
+        );
+    }
+
+    #[test]
+    fn raw_ctrl_space_smart_fills_selection() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(4, 3);
+        state.begin_selection_from_cursor();
+        state.move_right((80, 24));
+        state.move_down((80, 24));
+
+        let action = handle_byte(&mut state, (80, 24), 0x00);
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 0, y: 0 }),
+            '*'
+        );
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 1, y: 1 }),
+            '*'
+        );
+    }
+
+    #[test]
+    fn raw_lf_maps_to_ctrl_j_instead_of_enter() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(3, 3);
+        state
+            .snapshot
+            .canvas
+            .set(dartboard_core::Pos { x: 0, y: 0 }, 'A');
+
+        let action = handle_byte(&mut state, (80, 24), b'\n');
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 0, y: 1 }),
+            'A'
+        );
+        assert_eq!(
+            state
+                .snapshot
+                .canvas
+                .get(dartboard_core::Pos { x: 0, y: 0 }),
+            ' '
+        );
     }
 
     fn test_state() -> State {
