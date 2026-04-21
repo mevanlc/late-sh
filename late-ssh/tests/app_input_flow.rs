@@ -179,10 +179,10 @@ async fn active_game_blocks_screen_number_hotkeys() {
     wait_for_render_contains(&mut app, " The Arcade ").await;
 
     app.handle_input(b"\n");
-    wait_for_render_contains(&mut app, " 2048 ").await;
+    wait_for_render_contains(&mut app, "Artboard ").await;
 
     app.handle_input(b"1");
-    wait_for_render_contains(&mut app, " 2048 ").await;
+    wait_for_render_contains(&mut app, "Artboard ").await;
 }
 
 #[tokio::test]

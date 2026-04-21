@@ -61,7 +61,7 @@ pub(crate) const GAME_SELECTION_NONOGRAMS: usize = 4;
 pub(crate) const GAME_SELECTION_MINESWEEPER: usize = 5;
 pub(crate) const GAME_SELECTION_SOLITAIRE: usize = 6;
 pub(crate) const GAME_SELECTION_BLACKJACK: usize = 7;
-pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_2048;
+pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_ARTBOARD;
 
 impl DevtestJump {
     const fn game_selection(self) -> usize {

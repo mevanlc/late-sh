@@ -1179,7 +1179,7 @@ async fn ensure_user(state: &State, username: &str, fingerprint: &str) -> Result
 }
 
 fn resolve_devtest_jump(login_username: &str, is_new_user: bool) -> Option<DevtestJump> {
-    if is_new_user || !matches!(std::env::var("DEVTEST_ENV").as_deref(), Ok("1")) {
+    if is_new_user || !matches!(std::env::var("LATE_DEVTEST_ENV").as_deref(), Ok("1")) {
         return None;
     }
 
@@ -1214,7 +1214,7 @@ mod tests {
     use std::str::FromStr;
     use std::sync::Mutex;
 
-    static DEVTEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+    static LATE_DEVTEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn reject_publickey_only_advertises_only_publickey() {
@@ -1417,17 +1417,17 @@ mod tests {
 
     #[test]
     fn resolve_devtest_jump_requires_existing_user_and_exact_env_value() {
-        let _guard = DEVTEST_ENV_LOCK.lock().expect("lock devtest env");
-        unsafe { std::env::remove_var("DEVTEST_ENV") };
+        let _guard = LATE_DEVTEST_ENV_LOCK.lock().expect("lock devtest env");
+        unsafe { std::env::remove_var("LATE_DEVTEST_ENV") };
         assert_eq!(resolve_devtest_jump("artboard@test", false), None);
 
-        unsafe { std::env::set_var("DEVTEST_ENV", "") };
+        unsafe { std::env::set_var("LATE_DEVTEST_ENV", "") };
         assert_eq!(resolve_devtest_jump("artboard@test", false), None);
 
-        unsafe { std::env::set_var("DEVTEST_ENV", "true") };
+        unsafe { std::env::set_var("LATE_DEVTEST_ENV", "true") };
         assert_eq!(resolve_devtest_jump("artboard@test", false), None);
 
-        unsafe { std::env::set_var("DEVTEST_ENV", "1") };
+        unsafe { std::env::set_var("LATE_DEVTEST_ENV", "1") };
         assert_eq!(
             resolve_devtest_jump("artboard@test", false),
             Some(DevtestJump::Artboard)
@@ -1438,13 +1438,13 @@ mod tests {
         );
         assert_eq!(resolve_devtest_jump("artboard@test", true), None);
 
-        unsafe { std::env::remove_var("DEVTEST_ENV") };
+        unsafe { std::env::remove_var("LATE_DEVTEST_ENV") };
     }
 
     #[test]
     fn resolve_devtest_jump_only_uses_incoming_ssh_login_name() {
-        let _guard = DEVTEST_ENV_LOCK.lock().expect("lock devtest env");
-        unsafe { std::env::set_var("DEVTEST_ENV", "1") };
+        let _guard = LATE_DEVTEST_ENV_LOCK.lock().expect("lock devtest env");
+        unsafe { std::env::set_var("LATE_DEVTEST_ENV", "1") };
 
         assert_eq!(resolve_devtest_jump("joe@test", false), None);
         assert_eq!(
@@ -1464,6 +1464,6 @@ mod tests {
             Some(DevtestJump::Sudoku)
         );
 
-        unsafe { std::env::remove_var("DEVTEST_ENV") };
+        unsafe { std::env::remove_var("LATE_DEVTEST_ENV") };
     }
 }
