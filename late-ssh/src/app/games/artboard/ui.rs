@@ -867,16 +867,17 @@ const GUIDE_PROSE: &[&str] = &[
     "Move the caret with arrows and type to draw.",
     "",
     "Hold shift with arrows or drag with the mouse to select.",
-    "Type to fill the selection. Use ^X / ^C / ^V to cut / copy",
-    "/ paste into swatches, then reactivate them as brushes.",
+    "Type to fill the selection. Use ^X/^C/^V to cut/copy/",
+    "paste to swatches. Click a swatch to use it as a brush.",
     "",
+    "Ctrl+] to insert emojis or unicode characters.",
     "Enter stamps a floating brush without dismissing it.",
     "^⇧+arrows strokes a floating brush from the keyboard.",
     "",
     "^P toggles this help. Tab or arrows switch tabs; j/k,",
     "arrows, PgUp/PgDn, and Home scroll the current tab.",
     "",
-    "The other tabs list key bindings by category.",
+    "View more key bindings in the other tabs (press tab).",
 ];
 
 fn build_guide_lines(desc: Style) -> Vec<Line<'static>> {
