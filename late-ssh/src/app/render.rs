@@ -21,7 +21,7 @@ use super::{
         theme,
     },
     dashboard, help_modal, icon_picker, profile, profile_modal, settings_modal,
-    state::{App, NotificationMode},
+    state::{App, GAME_SELECTION_ARTBOARD, NotificationMode},
     visualizer::Visualizer,
 };
 use crate::session::ClientAudioState;
@@ -562,7 +562,10 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             .add_modifier(Modifier::BOLD),
     )];
 
-    if screen == Screen::Games && ctx.is_playing_game && ctx.game_selection == 7 {
+    if screen == Screen::Games
+        && ctx.is_playing_game
+        && ctx.game_selection == GAME_SELECTION_ARTBOARD
+    {
         spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
         spans.push(Span::styled(
             "Artboard ",

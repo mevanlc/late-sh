@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use late_core::audio::VizFrame;
 
-use super::state::App;
+use super::state::{App, GAME_SELECTION_TETRIS};
 use crate::app::common::primitives::Screen;
 use crate::session::{BrowserVizFrame, SessionMessage};
 
@@ -63,7 +63,10 @@ impl App {
             }
         }
 
-        if self.screen == Screen::Games && self.is_playing_game && self.game_selection == 1 {
+        if self.screen == Screen::Games
+            && self.is_playing_game
+            && self.game_selection == GAME_SELECTION_TETRIS
+        {
             self.tetris_state.tick();
         }
         self.blackjack_state.tick();

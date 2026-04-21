@@ -125,6 +125,14 @@ async fn devtest_artboard_jump_starts_on_games_without_intro_overlays() {
         "expected artboard to be preselected on devtest jump; frame={frame:?}"
     );
     assert!(
+        frame.contains("─── Featured Game ───"),
+        "expected artboard devtest jump to render the featured section; frame={frame:?}"
+    );
+    assert!(
+        frame.contains("Multi-user real-time shared ASCII artboard!"),
+        "expected artboard devtest jump to show the featured artboard copy; frame={frame:?}"
+    );
+    assert!(
         !frame.contains(" Settings "),
         "expected devtest jump to bypass the settings modal; frame={frame:?}"
     );

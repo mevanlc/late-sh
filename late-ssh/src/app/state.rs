@@ -53,11 +53,21 @@ pub enum DevtestJump {
     Sudoku,
 }
 
+pub(crate) const GAME_SELECTION_ARTBOARD: usize = 0;
+pub(crate) const GAME_SELECTION_2048: usize = 1;
+pub(crate) const GAME_SELECTION_TETRIS: usize = 2;
+pub(crate) const GAME_SELECTION_SUDOKU: usize = 3;
+pub(crate) const GAME_SELECTION_NONOGRAMS: usize = 4;
+pub(crate) const GAME_SELECTION_MINESWEEPER: usize = 5;
+pub(crate) const GAME_SELECTION_SOLITAIRE: usize = 6;
+pub(crate) const GAME_SELECTION_BLACKJACK: usize = 7;
+pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_2048;
+
 impl DevtestJump {
     const fn game_selection(self) -> usize {
         match self {
-            Self::Sudoku => 2,
-            Self::Artboard => 7,
+            Self::Artboard => GAME_SELECTION_ARTBOARD,
+            Self::Sudoku => GAME_SELECTION_SUDOKU,
         }
     }
 }
@@ -443,7 +453,7 @@ impl App {
         settings_modal_state.open_from_profile(&initial_profile, settings_modal::ui::MODAL_WIDTH);
         let (screen, show_settings, show_splash, game_selection) = match config.devtest_jump {
             Some(jump) => (Screen::Games, false, false, jump.game_selection()),
-            None => (Screen::Dashboard, true, true, 0),
+            None => (Screen::Dashboard, true, true, DEFAULT_GAME_SELECTION),
         };
 
         Ok(Self {

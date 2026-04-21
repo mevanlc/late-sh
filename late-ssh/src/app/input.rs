@@ -1084,7 +1084,10 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return true;
     }
 
-    if ctx.screen == Screen::Games && app.is_playing_game && app.game_selection == 7 && byte == 0x03
+    if ctx.screen == Screen::Games
+        && app.is_playing_game
+        && app.game_selection == crate::app::state::GAME_SELECTION_ARTBOARD
+        && byte == 0x03
     {
         return false;
     }
