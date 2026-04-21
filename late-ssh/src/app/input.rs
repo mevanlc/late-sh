@@ -449,6 +449,13 @@ fn overlay_input_action(event: &ParsedInput) -> Option<OverlayInputAction> {
 }
 
 fn handle_parsed_input(app: &mut App, event: ParsedInput) {
+    // Ctrl+O is a plain C0 control byte (0x0F) across terminals/tmux, so
+    // treat it as the global "open settings" chord before any local routing.
+    if matches!(event, ParsedInput::Byte(0x0F)) {
+        open_settings_modal_globally(app);
+        return;
+    }
+
     // Help is the topmost modal: when both are open it owns input.
     if app.show_help {
         help_modal::input::handle_input(app, event);
@@ -748,6 +755,12 @@ fn dispatch_escape(app: &mut App) {
     if handle_modal_input(app, ctx, 0x1B) {
         return;
     }
+    if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard)
+        && app.chat.is_reaction_leader_active()
+    {
+        app.chat.cancel_reaction_leader();
+        return;
+    }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && app.chat.has_overlay() {
         app.chat.close_overlay();
         return;
@@ -884,6 +897,20 @@ fn reset_composers_for_page_change(app: &mut App) {
     app.chat.news.stop_composing();
 }
 
+fn open_settings_modal_globally(app: &mut App) {
+    app.show_help = false;
+    app.show_profile_modal = false;
+    app.show_web_chat_qr = false;
+    app.icon_picker_open = false;
+    app.chat.close_overlay();
+    app.chat.cancel_room_jump();
+    app.settings_modal_state.open_from_profile(
+        app.profile_state.profile(),
+        crate::app::settings_modal::ui::MODAL_WIDTH,
+    );
+    app.show_settings = true;
+}
+
 fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
     // ? opens help unless composing text
     if byte == b'?' && !ctx.chat_composing && !ctx.news_composing {
@@ -891,6 +918,13 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             .open(crate::app::help_modal::data::HelpTopic::Overview);
         app.show_help = true;
         return true;
+    }
+
+    if matches!(byte, b'1' | b'2' | b'3' | b'4' | b'5')
+        && (ctx.screen == Screen::Dashboard || ctx.screen == Screen::Chat)
+        && app.chat.is_reaction_leader_active()
+    {
+        return false;
     }
 
     if ctx.screen == Screen::Games

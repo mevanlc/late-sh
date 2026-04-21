@@ -25,6 +25,8 @@ pub enum Row {
     Username,
     Theme,
     BackgroundColor,
+    RightSidebar,
+    GamesSidebar,
     Country,
     Timezone,
     DirectMessages,
@@ -36,10 +38,12 @@ pub enum Row {
 }
 
 impl Row {
-    pub const ALL: [Row; 11] = [
+    pub const ALL: [Row; 13] = [
         Row::Username,
         Row::Theme,
         Row::BackgroundColor,
+        Row::RightSidebar,
+        Row::GamesSidebar,
         Row::Country,
         Row::Timezone,
         Row::DirectMessages,
@@ -466,6 +470,14 @@ impl SettingsModalState {
                 self.draft.enable_background_color ^= true;
                 true
             }
+            Row::RightSidebar => {
+                self.draft.show_right_sidebar ^= true;
+                true
+            }
+            Row::GamesSidebar => {
+                self.draft.show_games_sidebar ^= true;
+                true
+            }
             Row::DirectMessages => {
                 toggle_kind(&mut self.draft.notify_kinds, "dms");
                 true
@@ -519,6 +531,8 @@ impl SettingsModalState {
                         .unwrap_or_else(|| "late".to_string()),
                 ),
                 enable_background_color: self.draft.enable_background_color,
+                show_right_sidebar: self.draft.show_right_sidebar,
+                show_games_sidebar: self.draft.show_games_sidebar,
             },
         );
     }

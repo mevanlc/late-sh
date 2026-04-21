@@ -170,6 +170,8 @@ impl ProfileState {
                 notify_format: self.profile.notify_format.clone(),
                 theme_id: Some(self.theme_id().to_string()),
                 enable_background_color: self.profile.enable_background_color,
+                show_right_sidebar: self.profile.show_right_sidebar,
+                show_games_sidebar: self.profile.show_games_sidebar,
             },
         );
     }
