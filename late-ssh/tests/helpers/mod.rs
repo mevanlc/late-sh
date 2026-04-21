@@ -39,8 +39,8 @@ pub async fn new_test_db() -> TestDb {
     test_db().await
 }
 
-fn test_dartboard_server() -> dartboard_local::ServerHandle {
-    dartboard_local::ServerHandle::spawn_local(dartboard_local::InMemStore)
+fn test_dartboard_server() -> dartboard_server::ServerHandle {
+    dartboard_server::ServerHandle::spawn_local(dartboard_server::InMemStore)
 }
 
 pub fn test_config(db_config: late_core::db::DbConfig) -> Config {
@@ -112,7 +112,8 @@ pub fn test_app_state(db: Db, config: Config) -> State {
     let minesweeper_service =
         MinesweeperService::new(db.clone(), activity_tx.clone(), chip_service.clone());
     let bonsai_service = BonsaiService::new(db.clone(), activity_tx.clone());
-    let dartboard_server = dartboard_local::ServerHandle::spawn_local(dartboard_local::InMemStore);
+    let dartboard_server =
+        dartboard_server::ServerHandle::spawn_local(dartboard_server::InMemStore);
     let leaderboard_service = LeaderboardService::new(db.clone());
     State {
         conn_limit: Arc::new(Semaphore::new(config.max_conns_global)),

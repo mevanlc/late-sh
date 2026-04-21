@@ -11,6 +11,7 @@ services:
     env_file: .env
     volumes:
       - .:/app
+      - ${DARTBOARD_DIR}:/dartboard
       - cargo-registry-ssh:/usr/local/cargo/registry
       - cargo-git-ssh:/usr/local/cargo/git
       - cargo-target-ssh:/app/target
@@ -33,6 +34,7 @@ services:
     env_file: .env
     volumes:
       - .:/app
+      - ${DARTBOARD_DIR}:/dartboard
       - cargo-registry-web:/usr/local/cargo/registry
       - cargo-git-web:/usr/local/cargo/git
       - cargo-target-web:/app/target

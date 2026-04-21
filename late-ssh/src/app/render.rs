@@ -6,7 +6,8 @@ use late_core::api_types::NowPlaying;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::Style,
+    style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear},
 };
 
@@ -432,7 +433,7 @@ impl App {
         }
 
         let block = Block::default()
-            .title(" late.sh ")
+            .title(app_frame_title(screen, &ctx))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
 
@@ -551,6 +552,33 @@ impl App {
             icon_picker::picker::render(frame, area, ctx.icon_picker_state, catalog);
         }
     }
+}
+
+fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        " late.sh ",
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    if screen == Screen::Games && ctx.is_playing_game && ctx.game_selection == 7 {
+        spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
+        spans.push(Span::styled(
+            "Artboard ",
+            Style::default().fg(theme::TEXT_MUTED()),
+        ));
+        for (key, desc) in [("^P", "Help"), ("^Q", "Quit")] {
+            spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
+            spans.push(Span::styled(key, Style::default().fg(theme::AMBER_DIM())));
+            spans.push(Span::styled(
+                format!(" {desc} "),
+                Style::default().fg(theme::TEXT_DIM()),
+            ));
+        }
+    }
+
+    Line::from(spans)
 }
 
 #[cfg(test)]

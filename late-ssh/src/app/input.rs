@@ -1084,6 +1084,11 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return true;
     }
 
+    if ctx.screen == Screen::Games && app.is_playing_game && app.game_selection == 7 && byte == 0x03
+    {
+        return false;
+    }
+
     if ctx.screen == Screen::Games
         && app.is_playing_game
         && !matches!(byte, 0x03 | b'm' | b'M' | b'+' | b'=' | b'-' | b'_')

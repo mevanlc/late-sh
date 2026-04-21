@@ -3,7 +3,7 @@ use std::{sync::mpsc, thread, time::Duration};
 use dartboard_core::{
     Canvas, CanvasOp, Client, ClientOpId, Peer, RgbColor, Seq, ServerMsg, UserId,
 };
-use dartboard_local::{ConnectOutcome, Hello, LocalClient, ServerHandle};
+use dartboard_server::{ConnectOutcome, Hello, LocalClient, ServerHandle};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
@@ -57,6 +57,7 @@ impl DartboardService {
     pub fn new(server: ServerHandle, user_id: Uuid, username: &str) -> Self {
         let hello = Hello {
             name: username.to_string(),
+            color: preferred_user_color(user_id),
         };
         let (snapshot_tx, snapshot_rx) = watch::channel(DartboardSnapshot::default());
         let (event_tx, _) = broadcast::channel(128);
@@ -103,6 +104,22 @@ impl DartboardService {
     pub fn submit_op(&self, op: CanvasOp) {
         let _ = self.command_tx.send(Command::SubmitOp(op));
     }
+}
+
+fn preferred_user_color(user_id: Uuid) -> RgbColor {
+    const PALETTE: [RgbColor; 8] = [
+        RgbColor::new(255, 110, 64),
+        RgbColor::new(255, 196, 64),
+        RgbColor::new(145, 226, 88),
+        RgbColor::new(72, 220, 170),
+        RgbColor::new(84, 196, 255),
+        RgbColor::new(128, 163, 255),
+        RgbColor::new(192, 132, 255),
+        RgbColor::new(255, 124, 196),
+    ];
+
+    let idx = user_id.as_bytes()[0] as usize % PALETTE.len();
+    PALETTE[idx]
 }
 
 fn run_client_loop(

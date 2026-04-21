@@ -1,6 +1,11 @@
+use dartboard_editor::{
+    AppKey, AppKeyCode, AppModifiers, AppPointerButton, AppPointerEvent, AppPointerKind, HostEffect,
+};
+
 use crate::app::input::{MouseButton, MouseEvent, MouseEventKind, ParsedInput};
 
 use super::state::State;
+use super::ui::{SwatchHit, swatch_hit};
 
 pub enum InputAction {
     Ignored,
@@ -13,61 +18,88 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
     state.set_viewport_for_screen(screen_size);
     match byte {
         0x11 => InputAction::Leave, // Ctrl+Q
-        0x1B => {
-            if !state.dismiss_floating() {
-                state.clear_local_state();
-            }
-            InputAction::Handled
-        }
-        0x03 => InputAction::Handled, // Ctrl+C stays unbound inside artboard
-        0x16 => {
-            let _ = state.commit_floating();
-            InputAction::Handled
-        }
-        0x18 => {
-            let _ = state.lift_selection_to_floating();
-            InputAction::Handled
-        }
+        0x1B => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Esc,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        0x03 => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Char('c'),
+                modifiers: AppModifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            },
+        ),
+        0x16 => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Char('v'),
+                modifiers: AppModifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            },
+        ),
+        0x18 => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Char('x'),
+                modifiers: AppModifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            },
+        ),
         b'\r' | b'\n' => {
             if state.commit_floating() {
                 return InputAction::Handled;
             }
-            state.move_down(screen_size);
-            InputAction::Handled
+            handle_app_key(
+                state,
+                AppKey {
+                    code: AppKeyCode::Enter,
+                    modifiers: AppModifiers::default(),
+                },
+            )
         }
-        0x08 | 0x7f => {
-            state.backspace(screen_size);
-            InputAction::Handled
-        }
-        _ if byte.is_ascii_graphic() || byte == b' ' => {
-            state.type_char(byte as char, screen_size);
-            InputAction::Handled
-        }
+        0x08 | 0x7f => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Backspace,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        _ if byte.is_ascii_graphic() || byte == b' ' => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Char(byte as char),
+                modifiers: AppModifiers::default(),
+            },
+        ),
         _ => InputAction::Ignored,
     }
 }
 
 pub fn handle_arrow(state: &mut State, screen_size: (u16, u16), key: u8) -> bool {
     state.set_viewport_for_screen(screen_size);
-    match key {
-        b'A' => {
-            state.move_up(screen_size);
-            true
-        }
-        b'B' => {
-            state.move_down(screen_size);
-            true
-        }
-        b'C' => {
-            state.move_right(screen_size);
-            true
-        }
-        b'D' => {
-            state.move_left(screen_size);
-            true
-        }
-        _ => false,
-    }
+    let Some(code) = arrow_key_code(key) else {
+        return false;
+    };
+    matches!(
+        handle_app_key(
+            state,
+            AppKey {
+                code,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        InputAction::Handled | InputAction::Copy(_)
+    )
 }
 
 const BIG_STEP: usize = 10;
@@ -79,27 +111,51 @@ pub(crate) fn handle_event(
 ) -> InputAction {
     state.set_viewport_for_screen(screen_size);
     match event {
-        ParsedInput::Home => {
-            state.move_home(screen_size);
-            InputAction::Handled
-        }
-        ParsedInput::End => {
-            state.move_end(screen_size);
-            InputAction::Handled
-        }
-        ParsedInput::PageUp => {
-            state.move_page_up(screen_size);
-            InputAction::Handled
-        }
-        ParsedInput::PageDown => {
-            state.move_page_down(screen_size);
-            InputAction::Handled
-        }
-        ParsedInput::AltC => InputAction::Copy(state.export_system_clipboard_text()),
-        ParsedInput::Delete => {
-            state.clear_at_cursor();
-            InputAction::Handled
-        }
+        ParsedInput::Home => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Home,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        ParsedInput::End => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::End,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        ParsedInput::PageUp => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::PageUp,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        ParsedInput::PageDown => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::PageDown,
+                modifiers: AppModifiers::default(),
+            },
+        ),
+        ParsedInput::AltC => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Char('c'),
+                modifiers: AppModifiers {
+                    alt: true,
+                    ..Default::default()
+                },
+            },
+        ),
+        ParsedInput::Delete => handle_app_key(
+            state,
+            AppKey {
+                code: AppKeyCode::Delete,
+                modifiers: AppModifiers::default(),
+            },
+        ),
         ParsedInput::ShiftArrow(key) => {
             for _ in 0..BIG_STEP {
                 move_arrow(state, screen_size, *key);
@@ -118,6 +174,32 @@ pub(crate) fn handle_event(
         }
         _ => InputAction::Ignored,
     }
+}
+
+fn handle_app_key(state: &mut State, key: AppKey) -> InputAction {
+    let dispatch = state.handle_app_key(key);
+    if !dispatch.handled {
+        return InputAction::Ignored;
+    }
+
+    if let Some(effect) = dispatch.effects.into_iter().next() {
+        match effect {
+            HostEffect::CopyToClipboard(text) => return InputAction::Copy(text),
+            HostEffect::RequestQuit => return InputAction::Leave,
+        }
+    }
+
+    InputAction::Handled
+}
+
+fn arrow_key_code(key: u8) -> Option<AppKeyCode> {
+    Some(match key {
+        b'A' => AppKeyCode::Up,
+        b'B' => AppKeyCode::Down,
+        b'C' => AppKeyCode::Right,
+        b'D' => AppKeyCode::Left,
+        _ => return None,
+    })
 }
 
 fn move_arrow(state: &mut State, screen_size: (u16, u16), key: u8) {
@@ -141,85 +223,207 @@ fn jump_to_edge(state: &mut State, screen_size: (u16, u16), key: u8) {
 }
 
 fn handle_mouse(state: &mut State, screen_size: (u16, u16), mouse: &MouseEvent) -> InputAction {
+    if let Some(hit) = swatch_hit(screen_size, state, mouse.x, mouse.y) {
+        if matches!(mouse.kind, MouseEventKind::Down)
+            && matches!(mouse.button, Some(MouseButton::Left))
+        {
+            match hit {
+                SwatchHit::Body(idx) => state.activate_swatch(idx),
+                SwatchHit::Pin(idx) => state.toggle_swatch_pin(idx),
+            }
+        }
+        return InputAction::Handled;
+    }
+
     if state.has_floating() {
         return handle_floating_mouse(state, screen_size, mouse);
     }
 
-    match mouse.kind {
-        MouseEventKind::Moved => {
-            if state.move_to_screen_point(screen_size, mouse.x, mouse.y) {
-                InputAction::Handled
-            } else {
-                InputAction::Ignored
-            }
-        }
-        MouseEventKind::Down | MouseEventKind::Drag
-            if matches!(mouse.button, Some(MouseButton::Left)) =>
-        {
-            if state.move_to_screen_point(screen_size, mouse.x, mouse.y) {
-                if mouse.modifiers.ctrl {
-                    state.clear_drag_brush();
-                    if matches!(mouse.kind, MouseEventKind::Down) {
-                        state.begin_selection_from_cursor();
-                    } else {
-                        state.update_selection_to_cursor();
-                    }
-                } else {
-                    if matches!(mouse.kind, MouseEventKind::Down) {
-                        state.begin_drag_brush_from_cursor();
-                    }
-                    state.paint_drag_brush();
-                }
-                InputAction::Handled
-            } else {
-                InputAction::Ignored
-            }
-        }
-        MouseEventKind::Up if matches!(mouse.button, Some(MouseButton::Left)) => {
-            if state.move_to_screen_point(screen_size, mouse.x, mouse.y) {
-                if mouse.modifiers.ctrl {
-                    state.update_selection_to_cursor();
-                } else {
-                    state.clear_drag_brush();
-                }
-                InputAction::Handled
-            } else {
-                state.clear_drag_brush();
-                InputAction::Ignored
-            }
-        }
-        _ => InputAction::Ignored,
-    }
+    handle_shared_pointer(state, mouse)
 }
 
 fn handle_floating_mouse(
     state: &mut State,
-    screen_size: (u16, u16),
+    _screen_size: (u16, u16),
     mouse: &MouseEvent,
 ) -> InputAction {
-    match mouse.kind {
-        MouseEventKind::Moved => {
-            if state.move_to_screen_point(screen_size, mouse.x, mouse.y) {
-                InputAction::Handled
-            } else {
-                InputAction::Ignored
-            }
-        }
-        MouseEventKind::Down if matches!(mouse.button, Some(MouseButton::Left)) => {
-            if state.move_to_screen_point(screen_size, mouse.x, mouse.y) && state.commit_floating()
-            {
-                InputAction::Handled
-            } else {
-                InputAction::Ignored
-            }
-        }
-        MouseEventKind::Down if matches!(mouse.button, Some(MouseButton::Right)) => {
-            if state.dismiss_floating() {
-                InputAction::Handled
-            } else {
-                InputAction::Ignored
-            }
-        }
-        _ => InputAction::Ignored,
+    handle_shared_pointer(state, mouse)
+}
+
+fn handle_shared_pointer(state: &mut State, mouse: &MouseEvent) -> InputAction {
+    let Some(pointer) = app_pointer_event_from_mouse(mouse) else {
+        return InputAction::Ignored;
+    };
+    let dispatch = state.handle_pointer_event(pointer);
+    if dispatch.outcome.is_consumed() {
+        InputAction::Handled
+    } else {
+        InputAction::Ignored
+    }
+}
+
+fn app_pointer_event_from_mouse(mouse: &MouseEvent) -> Option<AppPointerEvent> {
+    let column = mouse.x.checked_sub(1)?;
+    let row = mouse.y.checked_sub(1)?;
+    let kind = match mouse.kind {
+        MouseEventKind::Moved => AppPointerKind::Moved,
+        MouseEventKind::Down => AppPointerKind::Down(map_button(mouse.button?)?),
+        MouseEventKind::Up => AppPointerKind::Up(map_button(mouse.button?)?),
+        MouseEventKind::Drag => AppPointerKind::Drag(map_button(mouse.button?)?),
+    };
+    Some(AppPointerEvent {
+        column,
+        row,
+        kind,
+        modifiers: AppModifiers {
+            shift: mouse.modifiers.shift,
+            alt: mouse.modifiers.alt,
+            ctrl: mouse.modifiers.ctrl,
+            meta: false,
+        },
+    })
+}
+
+fn map_button(button: MouseButton) -> Option<AppPointerButton> {
+    Some(match button {
+        MouseButton::Left => AppPointerButton::Left,
+        MouseButton::Middle => AppPointerButton::Middle,
+        MouseButton::Right => AppPointerButton::Right,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::games::dartboard::svc::DartboardService;
+    use dartboard_core::{Canvas, CellValue, RgbColor};
+    use dartboard_editor::Clipboard;
+    use dartboard_server::{InMemStore, ServerHandle};
+    use uuid::Uuid;
+
+    #[test]
+    fn hover_motion_does_not_move_cursor() {
+        let mut state = test_state();
+        state.editor.cursor = dartboard_core::Pos { x: 4, y: 3 };
+
+        let action = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Moved,
+                button: None,
+                x: 18,
+                y: 12,
+                modifiers: Default::default(),
+            },
+        );
+
+        assert!(matches!(action, InputAction::Ignored));
+        assert_eq!(state.cursor(), dartboard_core::Pos { x: 4, y: 3 });
+    }
+
+    #[test]
+    fn floating_hover_motion_tracks_preview_cursor() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(40, 20);
+        state.set_viewport_for_screen((80, 24));
+        state.editor.cursor = dartboard_core::Pos { x: 1, y: 1 };
+        state.editor.floating = Some(dartboard_editor::FloatingSelection {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('A'))]),
+            transparent: false,
+            source_index: Some(0),
+        });
+
+        let action = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Moved,
+                button: None,
+                x: 20,
+                y: 14,
+                modifiers: Default::default(),
+            },
+        );
+
+        assert!(matches!(action, InputAction::Handled));
+        assert_eq!(state.cursor(), dartboard_core::Pos { x: 18, y: 12 });
+    }
+
+    #[test]
+    fn swatch_overlay_pointer_events_do_not_reveal_hidden_preview() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(40, 20);
+        state.set_viewport_for_screen((80, 24));
+        state.editor.cursor = dartboard_core::Pos { x: 12, y: 7 };
+        state.editor.swatches[0] = Some(dartboard_editor::Swatch {
+            clipboard: Clipboard::new(3, 3, vec![Some(CellValue::Narrow('A')); 9]),
+            pinned: false,
+        });
+
+        let down = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Down,
+                button: Some(MouseButton::Left),
+                x: 11,
+                y: 17,
+                modifiers: Default::default(),
+            },
+        );
+        assert!(matches!(down, InputAction::Handled));
+        assert!(state.floating_view().is_none());
+
+        let up = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Up,
+                button: Some(MouseButton::Left),
+                x: 11,
+                y: 17,
+                modifiers: Default::default(),
+            },
+        );
+        assert!(matches!(up, InputAction::Handled));
+        assert!(state.floating_view().is_none());
+
+        let moved_over_swatch = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Moved,
+                button: None,
+                x: 11,
+                y: 17,
+                modifiers: Default::default(),
+            },
+        );
+        assert!(matches!(moved_over_swatch, InputAction::Handled));
+        assert!(state.floating_view().is_none());
+
+        let moved_over_canvas = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Moved,
+                button: None,
+                x: 20,
+                y: 14,
+                modifiers: Default::default(),
+            },
+        );
+        assert!(matches!(moved_over_canvas, InputAction::Handled));
+        let floating = state.floating_view().expect("floating preview shown");
+        assert_eq!(floating.anchor, dartboard_core::Pos { x: 18, y: 12 });
+    }
+
+    fn test_state() -> State {
+        let server = ServerHandle::spawn_local(InMemStore);
+        let svc = DartboardService::new(server, Uuid::now_v7(), "painter");
+        let mut state = State::new(svc);
+        state.snapshot.your_color = Some(RgbColor::new(255, 196, 64));
+        state
     }
 }
