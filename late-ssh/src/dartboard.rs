@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::Context;
 use dartboard_core::Canvas;
-use dartboard_local::{CanvasStore, ServerHandle};
+use dartboard_local::{CanvasStore, ColorSelectionMode, ServerHandle};
 use late_core::{MutexRecover, db::Db, models::artboard::Snapshot};
 
 pub const CANVAS_WIDTH: usize = 384;
@@ -110,7 +110,10 @@ pub async fn flush_server_snapshot(db: &Db, server: &ServerHandle) -> anyhow::Re
 }
 
 pub fn spawn_server() -> ServerHandle {
-    ServerHandle::spawn_local(LateShCanvasStore)
+    ServerHandle::spawn_local_with_color_selection_mode(
+        LateShCanvasStore,
+        ColorSelectionMode::RandomUnique,
+    )
 }
 
 pub fn spawn_persistent_server(db: Db, initial_canvas: Option<Canvas>) -> ServerHandle {
@@ -122,11 +125,10 @@ pub fn spawn_persistent_server_with_interval(
     initial_canvas: Option<Canvas>,
     persist_interval: Duration,
 ) -> ServerHandle {
-    ServerHandle::spawn_local(PostgresCanvasStore::new(
-        db,
-        initial_canvas,
-        persist_interval,
-    ))
+    ServerHandle::spawn_local_with_color_selection_mode(
+        PostgresCanvasStore::new(db, initial_canvas, persist_interval),
+        ColorSelectionMode::RandomUnique,
+    )
 }
 
 fn blank_canvas() -> Canvas {

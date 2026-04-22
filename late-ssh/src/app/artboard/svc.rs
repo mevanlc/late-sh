@@ -57,14 +57,13 @@ enum Command {
 impl DartboardService {
     pub fn new(server: ServerHandle, user_id: Uuid, username: &str) -> Self {
         let username = username.to_string();
-        let preferred_color = preferred_user_color(user_id);
+        let requested_color = requested_user_color_hint(user_id);
         let hello = Hello {
             name: username.clone(),
-            color: preferred_color,
+            color: requested_color,
         };
         let (snapshot_tx, snapshot_rx) = watch::channel(DartboardSnapshot {
             your_name: username.clone(),
-            your_color: Some(preferred_color),
             ..Default::default()
         });
         let (event_tx, _) = broadcast::channel(128);
@@ -91,7 +90,6 @@ impl DartboardService {
             ConnectOutcome::Rejected(reason) => {
                 let rejected_snapshot = DartboardSnapshot {
                     your_name: username,
-                    your_color: Some(preferred_color),
                     connect_rejected: Some(reason),
                     ..Default::default()
                 };
@@ -122,10 +120,10 @@ impl DartboardService {
     }
 }
 
-fn preferred_user_color(user_id: Uuid) -> RgbColor {
+fn requested_user_color_hint(user_id: Uuid) -> RgbColor {
     const PALETTE: [RgbColor; 8] = [
         RgbColor::new(255, 110, 64),
-        RgbColor::new(255, 196, 64),
+        RgbColor::new(255, 236, 96),
         RgbColor::new(145, 226, 88),
         RgbColor::new(72, 220, 170),
         RgbColor::new(84, 196, 255),
