@@ -4,7 +4,7 @@ mod helpers;
 
 use helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_with_chat_service,
-    make_app_with_devtest_jump, new_test_db, render_plain, wait_for_render_contains, wait_until,
+    new_test_db, render_plain, wait_for_render_contains, wait_until,
 };
 use late_core::models::{
     chat_message::{ChatMessage, ChatMessageParams},
@@ -14,7 +14,6 @@ use late_core::models::{
     user::User,
 };
 use late_core::test_utils::create_test_user;
-use late_ssh::app::state::DevtestJump;
 use rstest::rstest;
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -74,6 +73,30 @@ async fn q_opens_quit_confirm_and_escape_dismisses_it() {
 }
 
 #[tokio::test]
+async fn ctrl_c_does_not_quit_the_app() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-c-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-c-flow-it");
+
+    app.handle_input(b"\x03");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    assert!(
+        app.is_running(),
+        "expected Ctrl+C to no longer quit the app"
+    );
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" Dashboard "),
+        "expected app to remain on the dashboard after Ctrl+C; frame={frame:?}"
+    );
+    assert!(
+        !frame.contains(" Quit? "),
+        "expected Ctrl+C to stay inert rather than opening quit confirm; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
 async fn screen_number_keys_switch_between_dashboard_games_chat_and_artboard() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "screen-it").await;
@@ -97,70 +120,6 @@ async fn screen_number_keys_switch_between_dashboard_games_chat_and_artboard() {
 
     app.handle_input(b"1");
     wait_for_render_contains(&mut app, " Dashboard ").await;
-}
-
-#[tokio::test]
-async fn devtest_sudoku_jump_starts_on_games_without_intro_overlays() {
-    let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "devtest-sudoku-it").await;
-    let mut app = make_app_with_devtest_jump(
-        test_db.db.clone(),
-        user.id,
-        "devtest-sudoku-flow-it",
-        DevtestJump::Sudoku,
-    );
-
-    let frame = render_plain(&mut app);
-    assert!(
-        frame.contains(" The Arcade "),
-        "expected devtest jump to land on the games hub; frame={frame:?}"
-    );
-    assert!(
-        frame.contains("> [ Sudoku ]"),
-        "expected sudoku to be preselected on devtest jump; frame={frame:?}"
-    );
-    assert!(
-        !frame.contains(" Settings "),
-        "expected devtest jump to bypass the settings modal; frame={frame:?}"
-    );
-    assert!(
-        !frame.contains("take a break, grab a coffee"),
-        "expected devtest jump to bypass the splash screen; frame={frame:?}"
-    );
-}
-
-#[tokio::test]
-async fn devtest_artboard_jump_starts_on_artboard_without_intro_overlays() {
-    let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "devtest-artboard-it").await;
-    let mut app = make_app_with_devtest_jump(
-        test_db.db.clone(),
-        user.id,
-        "devtest-artboard-flow-it",
-        DevtestJump::Artboard,
-    );
-
-    let frame = render_plain(&mut app);
-    assert!(
-        frame.contains("Artboard "),
-        "expected devtest jump to land on the dedicated artboard screen; frame={frame:?}"
-    );
-    assert!(
-        frame.contains("Mode       view"),
-        "expected artboard devtest jump to open in view mode; frame={frame:?}"
-    );
-    assert!(
-        !frame.contains(" The Arcade "),
-        "expected artboard devtest jump to skip the arcade hub entirely; frame={frame:?}"
-    );
-    assert!(
-        !frame.contains(" Settings "),
-        "expected devtest jump to bypass the settings modal; frame={frame:?}"
-    );
-    assert!(
-        !frame.contains("take a break, grab a coffee"),
-        "expected devtest jump to bypass the splash screen; frame={frame:?}"
-    );
 }
 
 #[tokio::test]
@@ -278,6 +237,28 @@ async fn active_artboard_ctrl_c_copies_without_quitting() {
 }
 
 #[tokio::test]
+async fn artboard_help_modal_tab_switches_help_tabs_instead_of_pages() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "artboard-help-tab-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-help-tab-flow-it");
+
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+
+    app.handle_input(b"\x10");
+    wait_for_render_contains(&mut app, "Two modes").await;
+
+    app.handle_input(b"\t");
+    wait_for_render_contains(&mut app, "Draw / erase").await;
+
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains(" Dashboard "),
+        "expected Artboard help Tab to stay on Artboard instead of switching page; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
 async fn dashboard_chat_compose_treats_screen_hotkeys_as_text() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "dash-chat-compose-it").await;
@@ -363,8 +344,8 @@ async fn split_read_alt_backspace_deletes_word_without_wedging_parser() {
     app.handle_input(b"\x7f");
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains("│one │"),
-        "expected split Alt+Backspace to leave the composer in the explicit intermediate state `one `; frame={frame:?}"
+        frame.contains("│one │") || frame.contains("│one  │"),
+        "expected split Alt+Backspace to leave the composer in the intermediate `one ` state (allowing for the cursor cell to render as an extra blank); frame={frame:?}"
     );
     assert!(
         !frame.contains("two"),
@@ -377,8 +358,12 @@ async fn split_read_alt_backspace_deletes_word_without_wedging_parser() {
     app.handle_input(b"x\x7f!");
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains("one!") && !frame.contains("x"),
-        "expected composer to keep accepting backspace and text after Alt+Backspace split from the intermediate `one ` state; frame={frame:?}"
+        (frame.contains("│one!│")
+            || frame.contains("│one !│")
+            || frame.contains("│one ! │")
+            || frame.contains("│one! │"))
+            && !frame.contains("x"),
+        "expected composer to keep accepting backspace and text after Alt+Backspace split, allowing for cursor-cell spacing in the rendered composer; frame={frame:?}"
     );
     assert!(
         !frame.contains("two"),
@@ -588,6 +573,33 @@ async fn members_command_shows_room_members_without_persisting_message() {
         .await
         .expect("list recent messages");
     assert!(messages.is_empty(), "expected /members to stay client-side");
+}
+
+#[tokio::test]
+async fn exit_command_opens_quit_confirm_and_stays_client_side() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "exit-command-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    ChatRoomMember::join(&client, general.id, user.id)
+        .await
+        .expect("join user to general");
+
+    let mut app = make_app(test_db.db.clone(), user.id, "exit-command-flow-it");
+
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, " Rooms ").await;
+    wait_for_render_contains(&mut app, "> general").await;
+
+    app.handle_input(b"i/exit\r");
+    wait_for_render_contains(&mut app, " Quit? ").await;
+
+    let messages = ChatMessage::list_recent(&client, general.id, 20)
+        .await
+        .expect("list recent messages");
+    assert!(messages.is_empty(), "expected /exit to stay client-side");
 }
 
 #[tokio::test]

@@ -70,6 +70,7 @@ pub struct ChatState {
     overlay: Option<Overlay>,
     pub(crate) unread_counts: HashMap<Uuid, i64>,
     pending_read_rooms: HashSet<Uuid>,
+    visible_room_id: Option<Uuid>,
     room_tx: watch::Sender<Option<Uuid>>,
     pub(crate) selected_room_id: Option<Uuid>,
     pub(crate) room_jump_active: bool,
@@ -104,6 +105,7 @@ pub struct ChatState {
     pub(crate) pending_notifications: Vec<PendingNotification>,
     requested_help_topic: Option<HelpTopic>,
     requested_settings_modal: bool,
+    requested_quit: bool,
 }
 
 pub(crate) struct PendingNotification {
@@ -147,6 +149,7 @@ impl ChatState {
             overlay: None,
             unread_counts: HashMap::new(),
             pending_read_rooms: HashSet::new(),
+            visible_room_id: None,
             room_tx,
             selected_room_id: None,
             room_jump_active: false,
@@ -174,6 +177,7 @@ impl ChatState {
             pending_notifications: Vec::new(),
             requested_help_topic: None,
             requested_settings_modal: false,
+            requested_quit: false,
         }
     }
 
@@ -222,14 +226,26 @@ impl ChatState {
         self.selected_room_id = Some(self.rooms[0].0.id);
     }
 
+    pub fn mark_room_read(&mut self, room_id: Uuid) {
+        self.pending_read_rooms.insert(room_id);
+        self.unread_counts.insert(room_id, 0);
+        self.service.mark_room_read_task(self.user_id, room_id);
+    }
+
     pub fn mark_selected_room_read(&mut self) {
         let Some(room_id) = self.selected_room_id else {
             return;
         };
 
-        self.pending_read_rooms.insert(room_id);
-        self.unread_counts.insert(room_id, 0);
-        self.service.mark_room_read_task(self.user_id, room_id);
+        self.mark_room_read(room_id);
+    }
+
+    pub fn visible_room_id(&self) -> Option<Uuid> {
+        self.visible_room_id
+    }
+
+    pub fn set_visible_room_id(&mut self, room_id: Option<Uuid>) {
+        self.visible_room_id = room_id;
     }
 
     /// Returns visible messages for the given room.
@@ -265,6 +281,10 @@ impl ChatState {
 
     pub fn take_requested_settings_modal(&mut self) -> bool {
         std::mem::take(&mut self.requested_settings_modal)
+    }
+
+    pub fn take_requested_quit(&mut self) -> bool {
+        std::mem::take(&mut self.requested_quit)
     }
 
     fn select_from_ids(&mut self, ids: &[Uuid], delta: isize) {
@@ -638,7 +658,8 @@ impl ChatState {
         self.reply_target = None;
         self.edited_message_id = None;
         self.composer_room_id = Some(next_room_id);
-        self.mark_selected_room_read();
+        self.visible_room_id = Some(next_room_id);
+        self.mark_room_read(next_room_id);
         self.request_list();
         true
     }
@@ -791,6 +812,12 @@ impl ChatState {
         if body.trim() == "/settings" {
             self.clear_composer_after_submit();
             self.requested_settings_modal = true;
+            return None;
+        }
+
+        if body.trim() == "/exit" {
+            self.clear_composer_after_submit();
+            self.requested_quit = true;
             return None;
         }
 
@@ -1466,7 +1493,7 @@ impl ChatState {
             return;
         }
 
-        let is_viewing_room = Some(message.room_id) == self.selected_room_id;
+        let is_viewing_room = Some(message.room_id) == self.visible_room_id;
 
         let Some((_, messages)) = self
             .rooms
@@ -1873,6 +1900,7 @@ fn reply_preview_text(body: &str) -> String {
 
 pub(crate) fn new_chat_textarea() -> TextArea<'static> {
     let mut ta = TextArea::default();
+    ta.set_style(Style::default().fg(theme::TEXT()));
     ta.set_placeholder_text("Type a message...");
     ta.set_placeholder_style(Style::default().fg(theme::TEXT_DIM()));
     ta.set_cursor_line_style(Style::default());
@@ -2136,6 +2164,12 @@ mod tests {
     #[test]
     fn parse_dm_trims_whitespace() {
         assert_eq!(parse_dm_command("/dm  @alice  "), Some("alice"));
+    }
+
+    #[test]
+    fn new_chat_textarea_uses_theme_text_color() {
+        let textarea = new_chat_textarea();
+        assert_eq!(textarea.style().fg, Some(theme::TEXT()));
     }
 
     #[test]

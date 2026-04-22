@@ -19,6 +19,11 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
     if state.is_glyph_picker_open() {
         return handle_picker_byte(state, screen_size, byte);
     }
+    if byte == 0x1C {
+        state.toggle_ownership_overlay();
+        state.clear_pending_canvas_click();
+        return InputAction::Handled;
+    }
     if byte == 0x10 {
         state.toggle_help();
         state.clear_pending_canvas_click();
@@ -254,8 +259,6 @@ fn handle_help_arrow(state: &mut State, key: u8) -> bool {
     match key {
         b'A' => state.scroll_help(-1),
         b'B' => state.scroll_help(1),
-        b'C' => state.select_next_help_tab(),
-        b'D' => state.select_prev_help_tab(),
         _ => return false,
     }
     true
@@ -427,8 +430,11 @@ fn jump_to_edge(state: &mut State, screen_size: (u16, u16), key: u8) {
 }
 
 fn handle_mouse(state: &mut State, screen_size: (u16, u16), mouse: &MouseEvent) -> InputAction {
+    state.set_hover_screen_point(screen_size, mouse.x, mouse.y);
+
     if let Some(hit) = swatch_hit(screen_size, state, mouse.x, mouse.y) {
         state.clear_pending_canvas_click();
+        state.clear_hover();
         if matches!(mouse.kind, MouseEventKind::Down)
             && matches!(mouse.button, Some(MouseButton::Left))
         {
@@ -448,6 +454,7 @@ fn handle_mouse(state: &mut State, screen_size: (u16, u16), mouse: &MouseEvent) 
 
     if info_hit(screen_size, state, mouse.x, mouse.y) {
         state.clear_pending_canvas_click();
+        state.clear_hover();
         return InputAction::Handled;
     }
 
@@ -535,10 +542,10 @@ fn map_button(button: MouseButton) -> Option<AppPointerButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::artboard::svc::DartboardService;
+    use crate::app::artboard::provenance::ArtboardProvenance;
+    use crate::app::artboard::svc::{DartboardService, DartboardSnapshot};
     use dartboard_core::{Canvas, CellValue, RgbColor};
     use dartboard_editor::Clipboard;
-    use uuid::Uuid;
 
     #[test]
     fn hover_motion_does_not_move_cursor() {
@@ -559,6 +566,55 @@ mod tests {
 
         assert!(matches!(action, InputAction::Ignored));
         assert_eq!(state.cursor(), dartboard_core::Pos { x: 4, y: 3 });
+    }
+
+    #[test]
+    fn raw_control_bytes_map_to_expected_app_keys() {
+        assert_eq!(
+            app_key_from_raw_control_byte(0x00),
+            Some(AppKey {
+                code: AppKeyCode::Char(' '),
+                modifiers: AppModifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            })
+        );
+        assert_eq!(
+            app_key_from_raw_control_byte(0x09),
+            Some(AppKey {
+                code: AppKeyCode::Tab,
+                modifiers: AppModifiers {
+                    ctrl: true,
+                    ..Default::default()
+                },
+            })
+        );
+        assert_eq!(app_key_from_raw_control_byte(0x0D), None);
+        assert_eq!(app_key_from_raw_control_byte(0x1B), None);
+    }
+
+    #[test]
+    fn mouse_pointer_translation_converts_sgr_coords_and_modifiers() {
+        let pointer = app_pointer_event_from_mouse(&MouseEvent {
+            kind: MouseEventKind::Drag,
+            button: Some(MouseButton::Right),
+            x: 7,
+            y: 5,
+            modifiers: crate::app::input::MouseModifiers {
+                shift: true,
+                ctrl: true,
+                ..Default::default()
+            },
+        })
+        .expect("pointer event");
+
+        assert_eq!(pointer.column, 6);
+        assert_eq!(pointer.row, 4);
+        assert_eq!(pointer.kind, AppPointerKind::Drag(AppPointerButton::Right));
+        assert!(pointer.modifiers.shift);
+        assert!(pointer.modifiers.ctrl);
+        assert!(!pointer.modifiers.alt);
     }
 
     #[test]
@@ -590,7 +646,7 @@ mod tests {
     }
 
     #[test]
-    fn swatch_overlay_pointer_events_do_not_reveal_hidden_preview() {
+    fn swatch_overlay_pointer_events_keep_preview_active_until_canvas_move() {
         let mut state = test_state();
         state.snapshot.canvas = Canvas::with_size(40, 20);
         state.set_viewport_for_screen((80, 24));
@@ -612,7 +668,7 @@ mod tests {
             },
         );
         assert!(matches!(down, InputAction::Handled));
-        assert!(state.floating_view().is_none());
+        assert!(state.floating_view().is_some());
 
         let up = handle_mouse(
             &mut state,
@@ -626,7 +682,7 @@ mod tests {
             },
         );
         assert!(matches!(up, InputAction::Handled));
-        assert!(state.floating_view().is_none());
+        assert!(state.floating_view().is_some());
 
         let moved_over_swatch = handle_mouse(
             &mut state,
@@ -640,7 +696,7 @@ mod tests {
             },
         );
         assert!(matches!(moved_over_swatch, InputAction::Handled));
-        assert!(state.floating_view().is_none());
+        assert!(state.floating_view().is_some());
 
         let moved_over_canvas = handle_mouse(
             &mut state,
@@ -947,7 +1003,10 @@ mod tests {
             InputAction::Handled
         ));
 
-        assert!(handle_arrow(&mut state, (80, 24), b'C'));
+        assert!(matches!(
+            handle_byte(&mut state, (80, 24), b'\t'),
+            InputAction::Handled
+        ));
         assert_eq!(
             state.help_tab(),
             crate::app::artboard::state::HelpTab::Drawing
@@ -1055,10 +1114,14 @@ mod tests {
     }
 
     fn test_state() -> State {
-        let server = crate::dartboard::spawn_server();
-        let svc = DartboardService::new(server, Uuid::now_v7(), "painter");
-        let mut state = State::new(svc);
-        state.snapshot.your_color = Some(RgbColor::new(255, 196, 64));
-        state
+        let shared_provenance = ArtboardProvenance::default().shared();
+        let snapshot = DartboardSnapshot {
+            provenance: ArtboardProvenance::default(),
+            your_user_id: Some(1),
+            your_color: Some(RgbColor::new(255, 196, 64)),
+            ..Default::default()
+        };
+        let svc = DartboardService::disconnected_for_tests(snapshot);
+        State::new(svc, "painter".to_string(), shared_provenance)
     }
 }

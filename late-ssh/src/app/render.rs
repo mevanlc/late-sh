@@ -625,23 +625,48 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             .add_modifier(Modifier::BOLD),
     )];
 
+    let page_title = match screen {
+        Screen::Dashboard => "Dashboard",
+        Screen::Chat => "Chat",
+        Screen::Games => "The Arcade",
+        Screen::Artboard => "Artboard",
+    };
+    spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
+    spans.push(Span::styled(
+        format!("{page_title} "),
+        Style::default().fg(theme::TEXT_MUTED()),
+    ));
+
     if screen == Screen::Artboard {
-        spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
         spans.push(Span::styled(
-            "Artboard ",
-            Style::default().fg(theme::TEXT_MUTED()),
+            "by @mevanlc ",
+            Style::default().fg(theme::TEXT_DIM()),
         ));
-        for (key, desc) in if ctx.artboard_interacting {
+        let hints: &[(&str, &str)] = if ctx.artboard_interacting {
             &[
-                ("Esc", "View mode"),
-                ("Space", "Drop brush"),
-                ("^P", "Help"),
-            ][..]
+                ("active", "draw"),
+                ("Space", "drop"),
+                ("Esc", "view"),
+                ("Ctrl+\\", "owners"),
+                ("Ctrl+P", "help"),
+            ]
         } else {
-            &[("i", "Interact"), ("Tab/1-4", "Switch")][..]
-        } {
+            &[
+                ("view", "pan"),
+                ("Alt+arrows", "pan"),
+                ("R-drag", "pan"),
+                ("i", "edit"),
+                ("Ctrl+\\", "owners"),
+            ]
+        };
+        for (key, desc) in hints {
             spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
-            spans.push(Span::styled(*key, Style::default().fg(theme::AMBER_DIM())));
+            spans.push(Span::styled(
+                *key,
+                Style::default()
+                    .fg(theme::AMBER_DIM())
+                    .add_modifier(Modifier::BOLD),
+            ));
             spans.push(Span::styled(
                 format!(" {desc} "),
                 Style::default().fg(theme::TEXT_DIM()),

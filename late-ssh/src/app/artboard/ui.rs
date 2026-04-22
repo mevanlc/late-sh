@@ -1,21 +1,18 @@
 use dartboard_core::CellValue;
-use dartboard_editor::{
-    Clipboard, HelpEntry as KeyMapHelpEntry, HelpSection as KeyMapHelpSection, KeyMap,
-    SWATCH_CAPACITY, Swatch,
-};
+use dartboard_editor::{Clipboard, SWATCH_CAPACITY, Swatch};
 use dartboard_tui::{CanvasStyle, CanvasWidget, CanvasWidgetState};
 use ratatui::{
     Frame,
     buffer::Buffer,
     layout::{Constraint, Flex, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::common::theme;
+use crate::app::{common::theme, games::ui::info_label_value};
 
+use super::data::lines_for;
 use super::state::{BrushMode, HelpTab, PRIMARY_SWATCH_IDX, State};
 
 const INFO_WIDTH: u16 = 28;
@@ -23,9 +20,6 @@ const SWATCH_BOX_WIDTH: u16 = 16;
 const SWATCH_BOX_HEIGHT: u16 = 8;
 const SWATCH_BOTTOM_CLEARANCE: u16 = 1;
 const SWATCH_NOTICE_CLEARANCE: u16 = 1;
-const HELP_TAB_COLS: usize = 3;
-const HELP_TAB_ROWS: u16 = 2;
-const HELP_TAB_GAP: u16 = 2;
 const PIN_UNPINNED: char = '📌';
 const PIN_PINNED: char = '📍';
 const PRIMARY_SWATCH_LABEL: [char; 2] = ['C', 'B'];
@@ -36,28 +30,19 @@ pub(crate) enum SwatchHit {
     Pin(usize),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct ArtboardUserRow {
-    name: String,
-    color: Color,
-}
-
 pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, interacting: bool) {
-    let (info_metrics, info_users) = artboard_info_panel(state, interacting);
+    let info = artboard_info_lines(state, interacting);
     let layout = artboard_layout(area);
-    let info_area = info_block_area(
-        layout.info_anchor,
-        info_content_row_count(info_metrics.len(), info_users.len()),
-    );
+    let info_area = info_block_area(layout.info_anchor, info.len());
     draw_canvas(frame, area, layout.canvas, info_area, state);
-    draw_artboard_sidebar(frame, info_area, &info_metrics, &info_users);
+    draw_artboard_sidebar(frame, info_area, &info);
     if state.is_help_open() {
         draw_help(frame, area, state);
     }
     if state.is_glyph_picker_open()
         && let Some(catalog) = state.glyph_catalog()
     {
-        super::glyph_picker::render(frame, area, state.glyph_picker_state(), catalog);
+        crate::app::icon_picker::picker::render(frame, area, state.glyph_picker_state(), catalog);
     }
 }
 
@@ -76,12 +61,7 @@ fn dartboard_canvas_style() -> CanvasStyle {
     }
 }
 
-fn draw_artboard_sidebar(
-    frame: &mut Frame,
-    info_area: Option<Rect>,
-    info_metrics: &[Line<'_>],
-    info_users: &[ArtboardUserRow],
-) {
+fn draw_artboard_sidebar(frame: &mut Frame, info_area: Option<Rect>, info_lines: &[Line<'_>]) {
     if let Some(info_area) = info_area {
         let info_block = Block::default()
             .title(" Info ")
@@ -91,75 +71,51 @@ fn draw_artboard_sidebar(
         frame.render_widget(Clear, info_area);
         frame.render_widget(info_block, info_area);
         if info_inner.width > 0 && info_inner.height > 0 {
-            if !info_metrics.is_empty() {
-                frame.render_widget(
-                    Paragraph::new(info_metrics.to_vec()),
-                    Rect::new(
-                        info_inner.x,
-                        info_inner.y,
-                        info_inner.width,
-                        info_metrics.len() as u16,
-                    ),
-                );
-            }
-            if !info_users.is_empty() {
-                let divider_y = info_inner.y + info_metrics.len() as u16;
-                render_info_section_divider(frame.buffer_mut(), info_area, divider_y, "Users");
-                let user_lines: Vec<Line<'static>> = info_users
-                    .iter()
-                    .map(|user| {
-                        Line::from(Span::styled(
-                            format!("  {}", user.name),
-                            Style::default().fg(user.color).add_modifier(Modifier::BOLD),
-                        ))
-                    })
-                    .collect();
-                frame.render_widget(
-                    Paragraph::new(user_lines),
-                    Rect::new(
-                        info_inner.x,
-                        divider_y + 1,
-                        info_inner.width,
-                        info_users.len() as u16,
-                    ),
-                );
-            }
+            frame.render_widget(Paragraph::new(info_lines.to_vec()), info_inner);
         }
     }
 }
 
-fn artboard_info_panel(
-    state: &State,
-    interacting: bool,
-) -> (Vec<Line<'static>>, Vec<ArtboardUserRow>) {
-    let mut metrics = vec![
-        artboard_info_label_value(
-            "Mode",
-            if interacting {
-                "active".to_string()
-            } else {
-                "view".to_string()
-            },
-            if interacting {
-                theme::AMBER()
-            } else {
-                theme::TEXT_BRIGHT()
-            },
-        ),
-        artboard_info_label_value(
-            "Cursor",
-            format!("{},{}", state.cursor().x, state.cursor().y),
-            theme::AMBER(),
-        ),
-    ];
-    metrics.push(pan_indicator_line(state));
+fn artboard_info_lines(state: &State, interacting: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![info_label_value(
+        "Mode",
+        if interacting {
+            "active".to_string()
+        } else {
+            "view".to_string()
+        },
+        if interacting {
+            theme::AMBER()
+        } else {
+            theme::TEXT_BRIGHT()
+        },
+    )];
+    lines.push(info_label_value(
+        "Cursor",
+        format!("{},{}", state.cursor().x, state.cursor().y),
+        theme::AMBER(),
+    ));
+    let owner_pos = state.owner_subject_pos();
+    let owner_value = state.owner_username().unwrap_or("?").to_string();
+    let owner_color = if state.owner_username().is_some() {
+        theme::TEXT_BRIGHT()
+    } else {
+        theme::TEXT_FAINT()
+    };
+    lines.push(info_label_value("Owner", owner_value, owner_color));
+    lines.push(info_label_value(
+        "Cell",
+        format!("{},{}", owner_pos.x, owner_pos.y),
+        theme::AMBER(),
+    ));
+    lines.push(pan_indicator_line(state));
 
     let (brush, brush_color) = match state.brush_mode() {
         BrushMode::None => ("none".to_string(), theme::TEXT_FAINT()),
         BrushMode::Swatch => ("swatch".to_string(), theme::TEXT_BRIGHT()),
         BrushMode::Glyph(ch) => (ch.to_string(), theme::TEXT_BRIGHT()),
     };
-    metrics.push(artboard_info_label_value("Brush", brush, brush_color));
+    lines.push(info_label_value("Brush", brush, brush_color));
     let (selection_value, selection_color) = if let Some(selection) = state.selection_view() {
         let width = selection.anchor.x.abs_diff(selection.cursor.x) + 1;
         let height = selection.anchor.y.abs_diff(selection.cursor.y) + 1;
@@ -167,21 +123,22 @@ fn artboard_info_panel(
     } else {
         ("none".to_string(), theme::TEXT_FAINT())
     };
-    metrics.push(artboard_info_label_value(
+    lines.push(info_label_value(
         "Selection",
         selection_value,
         selection_color,
     ));
     let mut users = Vec::new();
     if !state.snapshot.your_name.is_empty() {
-        users.push(ArtboardUserRow {
-            name: state.snapshot.your_name.clone(),
-            color: state
+        users.push((
+            state.snapshot.your_name.clone(),
+            state
                 .snapshot
                 .your_color
                 .map(rgb)
                 .unwrap_or_else(theme::TEXT_BRIGHT),
-        });
+            true,
+        ));
     }
     let mut peers: Vec<_> = state
         .snapshot
@@ -191,19 +148,34 @@ fn artboard_info_panel(
         .cloned()
         .collect();
     peers.sort_by_key(|peer| peer.name.to_ascii_lowercase());
-    users.extend(peers.into_iter().map(|peer| ArtboardUserRow {
-        name: peer.name,
-        color: rgb(peer.color),
-    }));
+    users.extend(
+        peers
+            .into_iter()
+            .map(|peer| (peer.name, rgb(peer.color), false)),
+    );
+    if !users.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_label("Users"));
+        for (name, color, is_you) in users {
+            lines.push(Line::from(vec![
+                Span::styled("• ", Style::default().fg(theme::TEXT_DIM())),
+                Span::styled(name, Style::default().fg(color)),
+                Span::styled(
+                    if is_you { " (you)" } else { "" },
+                    Style::default().fg(theme::TEXT_FAINT()),
+                ),
+            ]));
+        }
+    }
 
-    (metrics, users)
+    lines
 }
 
 fn pan_indicator_line(state: &State) -> Line<'static> {
     let [can_left, can_up, can_down, can_right] = pan_indicator_enabled(state);
     Line::from(vec![
         Span::styled(
-            format!("  {:<11}", "Pan"),
+            format!("{:<11}", "Pan"),
             Style::default().fg(theme::TEXT_DIM()),
         ),
         pan_indicator_span('◀', can_left),
@@ -216,19 +188,6 @@ fn pan_indicator_line(state: &State) -> Line<'static> {
     ])
 }
 
-fn artboard_info_label_value(label: &str, value: String, color: Color) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(
-            format!("  {:<11}", label),
-            Style::default().fg(theme::TEXT_DIM()),
-        ),
-        Span::styled(
-            value,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-    ])
-}
-
 fn pan_indicator_span(ch: char, enabled: bool) -> Span<'static> {
     let style = if enabled {
         Style::default()
@@ -238,10 +197,6 @@ fn pan_indicator_span(ch: char, enabled: bool) -> Span<'static> {
         Style::default().fg(theme::BORDER_DIM())
     };
     Span::styled(ch.to_string(), style)
-}
-
-fn info_content_row_count(metric_count: usize, user_count: usize) -> usize {
-    metric_count + usize::from(user_count > 0) + user_count
 }
 
 fn info_block_height(line_count: usize) -> u16 {
@@ -274,33 +229,13 @@ fn pan_indicator_enabled(state: &State) -> [bool; 4] {
     [can_left, can_up, can_down, can_right]
 }
 
-fn render_info_section_divider(buf: &mut Buffer, area: Rect, y: u16, title: &str) {
-    if area.width < 2 || y <= area.y || y >= area.bottom().saturating_sub(1) {
-        return;
-    }
-
-    let left = area.x;
-    let right = area.right() - 1;
-    let border_style = Style::default().fg(theme::BORDER());
-    let title_style = Style::default()
-        .fg(theme::TEXT_BRIGHT())
-        .add_modifier(Modifier::BOLD);
-
-    buf[(left, y)].set_char('┝').set_style(border_style);
-    buf[(right, y)].set_char('┤').set_style(border_style);
-    for x in (left + 1)..right {
-        buf[(x, y)].set_char('─').set_style(border_style);
-    }
-
-    let label = format!(" {} ", title);
-    let mut x = left + 1;
-    for ch in label.chars() {
-        if x >= right {
-            break;
-        }
-        buf[(x, y)].set_char(ch).set_style(title_style);
-        x += 1;
-    }
+fn section_label(text: &str) -> Line<'static> {
+    Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn rgb(color: dartboard_core::RgbColor) -> ratatui::style::Color {
@@ -408,8 +343,8 @@ pub(crate) fn swatch_hit(
 
     for (idx, maybe_rect) in boxes.iter().enumerate() {
         let Some(rect) = maybe_rect else { continue };
-        if idx != PRIMARY_SWATCH_IDX
-            && state.swatches()[idx].is_some()
+        if state.swatches()[idx].is_some()
+            && state.swatch_is_pinnable(idx)
             && rect_contains(swatch_pin_rect(*rect), col, row)
         {
             return Some(SwatchHit::Pin(idx));
@@ -590,15 +525,15 @@ fn render_swatch_box_contents(
         render_swatch_preview(buf, inner, &swatch.clipboard);
         let pin_rect = swatch_pin_rect(rect);
         if idx == PRIMARY_SWATCH_IDX {
-            let clip_style = Style::default()
+            let label_style = Style::default()
                 .bg(theme::BG_CANVAS())
                 .fg(theme::TEXT_FAINT());
             buf[(pin_rect.x, pin_rect.y)]
                 .set_char(PRIMARY_SWATCH_LABEL[0])
-                .set_style(clip_style);
+                .set_style(label_style);
             buf[(pin_rect.x + 1, pin_rect.y)]
                 .set_char(PRIMARY_SWATCH_LABEL[1])
-                .set_style(clip_style);
+                .set_style(label_style);
         } else {
             let pin_char = if swatch.pinned {
                 PIN_PINNED
@@ -782,16 +717,13 @@ fn artboard_game_area_for_screen(screen_size: (u16, u16)) -> Rect {
 }
 
 fn artboard_info_area_for_screen(screen_size: (u16, u16), state: &State) -> Option<Rect> {
-    let (info_metrics, info_users) = artboard_info_panel(state, false);
+    let info_lines = artboard_info_lines(state, false);
     let layout = artboard_layout(artboard_game_area_for_screen(screen_size));
-    info_block_area(
-        layout.info_anchor,
-        info_content_row_count(info_metrics.len(), info_users.len()),
-    )
+    info_block_area(layout.info_anchor, info_lines.len())
 }
 
 fn help_popup_area(area: Rect) -> Rect {
-    centered_rect(76, 28, area)
+    centered_rect(96, 34, area)
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -804,21 +736,35 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     horizontal[0]
 }
 
-fn help_tab_hits(area: Rect, active: HelpTab) -> Vec<(HelpTab, Rect)> {
-    let popup = help_popup_area(area);
+fn help_layout(popup: Rect) -> Option<[Rect; 5]> {
     let inner = Block::default().borders(Borders::ALL).inner(popup);
-    if inner.height < HELP_TAB_ROWS + 4 || inner.width < 10 {
-        return Vec::new();
+    if inner.height < 5 || inner.width < 10 {
+        return None;
     }
     let layout = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(HELP_TAB_ROWS),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Min(8),
         Constraint::Length(1),
     ])
     .split(inner);
-    render_help_tabs_in_buffer(&mut Buffer::empty(popup), layout[1], active)
+    Some([layout[0], layout[1], layout[2], layout[3], layout[4]])
+}
+
+fn tab_rects(area: Rect) -> Vec<(HelpTab, Rect)> {
+    let mut hits = Vec::with_capacity(HelpTab::ALL.len());
+    let mut x = area.x.saturating_add(2);
+    for tab in HelpTab::ALL {
+        let label = tab.label();
+        let width = label.chars().count() as u16 + 2;
+        if x.saturating_add(width) > area.right() {
+            break;
+        }
+        hits.push((tab, Rect::new(x, area.y, width, 1)));
+        x = x.saturating_add(width).saturating_add(1);
+    }
+    hits
 }
 
 pub(crate) fn help_tab_hit(
@@ -833,7 +779,9 @@ pub(crate) fn help_tab_hit(
     let col = sgr_x.checked_sub(1)?;
     let row = sgr_y.checked_sub(1)?;
     let area = artboard_game_area_for_screen(screen_size);
-    help_tab_hits(area, state.help_tab())
+    let popup = help_popup_area(area);
+    let layout = help_layout(popup)?;
+    tab_rects(layout[1])
         .into_iter()
         .find_map(|(tab, rect)| rect_contains(rect, col, row).then_some(tab))
 }
@@ -865,30 +813,30 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &State) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
 
-    let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    if inner.height < HELP_TAB_ROWS + 4 || inner.width < 10 {
+
+    let Some(layout) = help_layout(popup) else {
         return;
-    }
+    };
 
-    let layout = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(HELP_TAB_ROWS),
-        Constraint::Length(1),
-        Constraint::Min(8),
-        Constraint::Length(1),
-    ])
-    .split(inner);
+    draw_tabs(frame, layout[1], state.help_tab());
 
-    render_help_tabs(frame.buffer_mut(), layout[1], state.help_tab());
-
-    let content = layout[3].inner(Margin::new(1, 0));
-    render_help_section(frame, content, state.help_tab(), state.help_scroll());
+    let body = layout[3].inner(Margin::new(2, 0));
+    let lines: Vec<Line> = lines_for(state.help_tab())
+        .into_iter()
+        .map(|line| Line::from(Span::styled(line, Style::default().fg(theme::TEXT()))))
+        .collect();
+    frame.render_widget(
+        Paragraph::new(Text::from(lines))
+            .wrap(Wrap { trim: false })
+            .scroll((state.help_scroll(), 0)),
+        body,
+    );
 
     let footer = Line::from(vec![
-        Span::styled("Tab/←→", Style::default().fg(theme::AMBER_DIM())),
-        Span::styled(" switch  ", Style::default().fg(theme::TEXT_DIM())),
-        Span::styled("j/k ↑↓", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled("  Tab/S+Tab", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" switch tabs  ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("↑↓ j/k", Style::default().fg(theme::AMBER_DIM())),
         Span::styled(" scroll  ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled("Esc/q", Style::default().fg(theme::AMBER_DIM())),
         Span::styled(" close", Style::default().fg(theme::TEXT_DIM())),
@@ -896,36 +844,11 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &State) {
     frame.render_widget(Paragraph::new(footer), layout[4]);
 }
 
-fn render_help_tabs(frame: &mut Buffer, area: Rect, active: HelpTab) {
-    let _ = render_help_tabs_in_buffer(frame, area, active);
-}
-
-fn render_help_tabs_in_buffer(
-    buf: &mut Buffer,
-    area: Rect,
-    active: HelpTab,
-) -> Vec<(HelpTab, Rect)> {
-    let mut hits: Vec<(HelpTab, Rect)> = Vec::with_capacity(HelpTab::ALL.len());
-    let mut col_widths = [0u16; HELP_TAB_COLS];
-    for (i, tab) in HelpTab::ALL.iter().enumerate() {
-        let col = i % HELP_TAB_COLS;
-        let cell = 4 + display_width(tab.label()) as u16;
-        col_widths[col] = col_widths[col].max(cell);
-    }
-
-    for (i, tab) in HelpTab::ALL.iter().enumerate() {
-        let col = i % HELP_TAB_COLS;
-        let row = (i / HELP_TAB_COLS) as u16;
-        if row >= area.height {
-            break;
-        }
-        let mut x = area.x;
-        for width in col_widths.iter().take(col) {
-            x = x.saturating_add(*width).saturating_add(HELP_TAB_GAP);
-        }
-        let y = area.y + row;
-        let is_active = *tab == active;
-        let style = if is_active {
+fn draw_tabs(frame: &mut Frame, area: Rect, selected: HelpTab) {
+    let mut spans = vec![Span::raw("  ")];
+    for tab in HelpTab::ALL {
+        let active = tab == selected;
+        let style = if active {
             Style::default()
                 .fg(theme::AMBER_GLOW())
                 .bg(theme::BG_HIGHLIGHT())
@@ -933,197 +856,22 @@ fn render_help_tabs_in_buffer(
         } else {
             Style::default().fg(theme::TEXT_DIM())
         };
-        let text = format!(" {} ", tab.label());
-        let start_x = x;
-        for ch in text.chars() {
-            if x >= area.right() {
-                break;
-            }
-            buf[(x, y)].set_char(ch).set_style(style);
-            x += 1;
-        }
-        if x > start_x {
-            hits.push((*tab, Rect::new(start_x, y, x - start_x, 1)));
-        }
+        spans.push(Span::styled(format!(" {} ", tab.label()), style));
+        spans.push(Span::raw(" "));
     }
-
-    hits
-}
-
-fn help_styles() -> (Style, Style, Style, Style) {
-    let heading = Style::default()
-        .fg(theme::AMBER())
-        .add_modifier(Modifier::BOLD);
-    let sep = Style::default().fg(theme::BORDER_DIM());
-    let key = Style::default().fg(theme::TEXT_BRIGHT());
-    let desc = Style::default().fg(theme::TEXT_DIM());
-    (heading, sep, key, desc)
-}
-
-fn keymap_help_entries() -> Vec<KeyMapHelpEntry> {
-    KeyMap::default_standalone().help_entries()
-}
-
-fn keymap_help_rows(section: KeyMapHelpSection) -> Vec<(&'static str, &'static str)> {
-    keymap_help_entries()
-        .into_iter()
-        .filter(|entry| entry.section == section)
-        .map(|entry| (entry.keys, entry.description))
-        .collect()
-}
-
-fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
-    match tab {
-        HelpTab::Guide => Vec::new(),
-        HelpTab::Drawing => keymap_help_rows(KeyMapHelpSection::Drawing),
-        HelpTab::Selection => keymap_help_rows(KeyMapHelpSection::Selection),
-        HelpTab::Clipboard => keymap_help_rows(KeyMapHelpSection::Clipboard),
-        HelpTab::Transform => keymap_help_rows(KeyMapHelpSection::Transform),
-        HelpTab::Session => vec![
-            ("i / Enter", "enter active mode"),
-            ("Esc", "return to view mode"),
-            ("Space", "drop active brush"),
-            ("1-4 / Tab", "switch pages in view mode"),
-            ("^P", "help toggle"),
-        ],
-    }
-}
-
-const GUIDE_PROSE: &[&str] = &[
-    "Artboard opens in view mode. Move with arrows,",
-    "Home/End, PgUp/PgDn, or mouse wheel.",
-    "",
-    "Press i or Enter to enter active mode and edit.",
-    "In active mode, type to draw. Use Space to drop",
-    "active brush and Esc to return to view mode.",
-    "",
-    "The leftmost swatch is the clipboard view, so it",
-    "always stays writable and cannot be pinned.",
-    "",
-    "Hold shift with arrows or drag with the mouse to",
-    "select. Use ^X/^C to cut/copy into swatches and",
-    "arm the freshest result as your active brush.",
-    "",
-    "Ctrl+] opens the glyph picker. Enter stamps a",
-    "floating brush. ^⇧+arrows stroke the floating brush.",
-    "",
-    "^P toggles this help. Tab or arrows switch tabs;",
-    "j/k, arrows, PgUp/PgDn, and Home scroll the modal.",
-];
-
-fn build_guide_lines(desc: Style) -> Vec<Line<'static>> {
-    GUIDE_PROSE
-        .iter()
-        .map(|line| Line::from(Span::styled(format!(" {line}"), desc)))
-        .collect()
-}
-
-fn render_help_section(frame: &mut Frame, area: Rect, tab: HelpTab, scroll: u16) {
-    let (_, _, key_style, desc_style) = help_styles();
-    let width = area.width as usize;
-    let lines: Vec<Line<'static>> = if tab == HelpTab::Guide {
-        build_guide_lines(desc_style)
-    } else {
-        let rows = help_rows_for_tab(tab);
-        let widest_key = rows
-            .iter()
-            .map(|(key, _)| display_width(key))
-            .max()
-            .unwrap_or(0);
-        let key_width = widest_key.min(width.saturating_sub(2));
-        rows.iter()
-            .map(|(key, desc)| {
-                help_entry_line_with_key_width(key, desc, width, key_width, key_style, desc_style)
-            })
-            .collect()
-    };
-
-    let visible = area.height as usize;
-    let max_scroll = lines.len().saturating_sub(visible) as u16;
-    let scroll = scroll.min(max_scroll);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false }),
-        area,
-    );
-}
-
-fn help_entry_line_with_key_width(
-    key: &str,
-    desc: &str,
-    width: usize,
-    key_width: usize,
-    key_style: Style,
-    desc_style: Style,
-) -> Line<'static> {
-    if width == 0 {
-        return Line::default();
-    }
-    let key_width = key_width.min(width.saturating_sub(1));
-    let key_label = truncate_display(key, key_width);
-    let key_padded = pad_right_display(&key_label, key_width);
-    let left = format!(" {key_padded} ");
-    let desc_width = width.saturating_sub(display_width(&left));
-    let desc_label = truncate_display(desc, desc_width);
-    let desc_padded = pad_right_display(&desc_label, desc_width);
-    Line::from(vec![
-        Span::styled(left, key_style),
-        Span::styled(desc_padded, desc_style),
-    ])
-}
-
-fn display_width(text: &str) -> usize {
-    UnicodeWidthStr::width(text)
-}
-
-fn truncate_display(text: &str, max_width: usize) -> String {
-    if display_width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    if max_width <= 3 {
-        return ".".repeat(max_width);
-    }
-    let prefix_budget = max_width - 3;
-    let mut out = String::new();
-    let mut width = 0usize;
-    for ch in text.chars() {
-        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + ch_width > prefix_budget {
-            break;
-        }
-        out.push(ch);
-        width += ch_width;
-    }
-    format!("{out}...")
-}
-
-fn pad_right_display(text: &str, width: usize) -> String {
-    let display = display_width(text);
-    if display >= width {
-        return text.to_string();
-    }
-    let mut out = String::with_capacity(text.len() + (width - display));
-    out.push_str(text);
-    for _ in 0..(width - display) {
-        out.push(' ');
-    }
-    out
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::artboard::provenance::ArtboardProvenance;
     use crate::app::artboard::state::State;
     use dartboard_core::{CellValue, RgbColor};
     use dartboard_editor::Clipboard;
     use ratatui::buffer::Buffer;
-    use uuid::Uuid;
 
-    use super::super::svc::DartboardService;
+    use super::super::svc::{DartboardService, DartboardSnapshot};
 
     #[test]
     fn canvas_area_matches_artboard_frame_layout() {
@@ -1135,23 +883,54 @@ mod tests {
         let state = test_state();
         assert_eq!(
             artboard_info_area_for_screen((80, 24), &state),
-            Some(Rect::new(27, 1, 28, 9))
+            Some(Rect::new(27, 1, 28, 12))
         );
     }
 
     #[test]
-    fn help_rows_use_upstream_keymap_metadata() {
-        let drawing = help_rows_for_tab(HelpTab::Drawing);
-        assert!(drawing.contains(&("←↑↓→", "move cursor")));
-        assert!(drawing.contains(&("^⇧+←↑↓→", "pan / stroke floating")));
+    fn help_lines_cover_all_tabs_with_title_headings() {
+        for tab in HelpTab::ALL {
+            let lines = lines_for(tab);
+            assert!(!lines.is_empty(), "{:?} should have content", tab);
+            assert!(!lines[0].is_empty(), "{:?} should lead with a heading", tab);
+        }
+        let drawing = lines_for(HelpTab::Drawing).join("\n");
+        assert!(drawing.contains("move cursor"));
+        assert!(drawing.contains("Shift+arrows"));
+    }
+
+    #[test]
+    fn clipboard_preview_offset_skips_leading_blank_rows_and_columns() {
+        let clipboard = Clipboard::new(
+            4,
+            3,
+            vec![
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow('A')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+                Some(CellValue::Narrow(' ')),
+            ],
+        );
+
+        assert_eq!(clipboard_preview_offset(&clipboard), (2, 1));
     }
 
     #[test]
     fn help_tab_hit_uses_overlay_tab_rects() {
         let mut state = test_state();
         state.toggle_help();
-        let hits = help_tab_hits(artboard_game_area_for_screen((80, 24)), state.help_tab());
-        let drawing = hits
+        let area = artboard_game_area_for_screen((80, 24));
+        let popup = help_popup_area(area);
+        let layout = help_layout(popup).expect("help layout");
+        let drawing = tab_rects(layout[1])
             .into_iter()
             .find(|(tab, _)| *tab == HelpTab::Drawing)
             .expect("drawing tab hit rect");
@@ -1164,6 +943,20 @@ mod tests {
     }
 
     #[test]
+    fn help_scroll_is_preserved_per_tab() {
+        let mut state = test_state();
+        state.toggle_help();
+        state.scroll_help(3);
+        assert_eq!(state.help_scroll(), 3);
+        state.select_next_help_tab();
+        assert_eq!(state.help_scroll(), 0);
+        state.scroll_help(7);
+        assert_eq!(state.help_scroll(), 7);
+        state.select_prev_help_tab();
+        assert_eq!(state.help_scroll(), 3);
+    }
+
+    #[test]
     fn info_block_height_tracks_visible_lines() {
         assert_eq!(info_block_height(0), 3);
         assert_eq!(info_block_height(1), 3);
@@ -1173,20 +966,18 @@ mod tests {
     #[test]
     fn info_lines_include_mode_and_pan_rows_before_brush() {
         let state = test_state();
-        let (lines, users) = artboard_info_panel(&state, false);
+        let lines = artboard_info_lines(&state, false);
 
-        assert_eq!(
-            users,
-            vec![ArtboardUserRow {
-                name: "painter".to_string(),
-                color: Color::Rgb(255, 196, 64),
-            }]
-        );
-        assert_eq!(lines[0].to_string(), "  Mode       view");
-        assert_eq!(lines[1].to_string(), "  Cursor     0,0");
-        assert_eq!(lines[2].to_string(), "  Pan        ◀ ▲ ▼ ▶");
-        assert_eq!(lines[3].to_string(), "  Brush      none");
-        assert_eq!(lines[4].to_string(), "  Selection  none");
+        assert_eq!(lines[0].to_string(), "Mode       view");
+        assert_eq!(lines[1].to_string(), "Cursor     0,0");
+        assert_eq!(lines[2].to_string(), "Owner      ?");
+        assert_eq!(lines[3].to_string(), "Cell       0,0");
+        assert_eq!(lines[4].to_string(), "Pan        ◀ ▲ ▼ ▶");
+        assert_eq!(lines[5].to_string(), "Brush      none");
+        assert_eq!(lines[6].to_string(), "Selection  none");
+        assert_eq!(lines[7].to_string(), "");
+        assert_eq!(lines[8].to_string(), "Users");
+        assert_eq!(lines[9].to_string(), "• painter (you)");
     }
 
     #[test]
@@ -1198,78 +989,9 @@ mod tests {
         state.move_down((80, 24));
         assert!(state.update_selection_to_cursor());
 
-        let (lines, _) = artboard_info_panel(&state, true);
-        assert_eq!(lines[0].to_string(), "  Mode       active");
-        assert_eq!(lines[4].to_string(), "  Selection  3x2");
-    }
-
-    #[test]
-    fn info_panel_users_are_sorted_and_keep_peer_colors() {
-        let mut state = test_state();
-        state.snapshot.your_name = "me".to_string();
-        state.snapshot.your_color = Some(RgbColor::new(4, 5, 6));
-        state.snapshot.your_user_id = Some(2);
-        state.snapshot.peers = vec![
-            dartboard_core::Peer {
-                user_id: 3,
-                name: "zed".to_string(),
-                color: RgbColor::new(1, 2, 3),
-            },
-            dartboard_core::Peer {
-                user_id: 1,
-                name: "amy".to_string(),
-                color: RgbColor::new(7, 8, 9),
-            },
-        ];
-
-        let (_, users) = artboard_info_panel(&state, false);
-
-        assert_eq!(
-            users,
-            vec![
-                ArtboardUserRow {
-                    name: "me".to_string(),
-                    color: Color::Rgb(4, 5, 6),
-                },
-                ArtboardUserRow {
-                    name: "amy".to_string(),
-                    color: Color::Rgb(7, 8, 9),
-                },
-                ArtboardUserRow {
-                    name: "zed".to_string(),
-                    color: Color::Rgb(1, 2, 3),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn info_panel_includes_current_user_when_no_peers_are_connected() {
-        let state = test_state();
-
-        let (_, users) = artboard_info_panel(&state, false);
-
-        assert_eq!(
-            users,
-            vec![ArtboardUserRow {
-                name: "painter".to_string(),
-                color: Color::Rgb(255, 196, 64),
-            }]
-        );
-    }
-
-    #[test]
-    fn users_divider_draws_across_info_panel_borders() {
-        let area = Rect::new(10, 4, 28, 8);
-        let mut buf = Buffer::empty(area);
-
-        render_info_section_divider(&mut buf, area, area.y + 3, "Users");
-
-        let y = area.y + 3;
-        assert_eq!(buf[(area.x, y)].symbol(), "┝");
-        assert_eq!(buf[(area.right() - 1, y)].symbol(), "┤");
-        assert_eq!(buf[(area.x + 2, y)].symbol(), "U");
-        assert_eq!(buf[(area.x + 8, y)].symbol(), "─");
+        let lines = artboard_info_lines(&state, true);
+        assert_eq!(lines[0].to_string(), "Mode       active");
+        assert_eq!(lines[6].to_string(), "Selection  3x2");
     }
 
     #[test]
@@ -1332,6 +1054,7 @@ mod tests {
         });
         let rects = swatch_box_rects((80, 24), &state);
         let second = rects[1].expect("second swatch visible");
+        let second_pin = swatch_pin_rect(second);
 
         assert_eq!(
             swatch_hit((80, 24), &state, 11, 16),
@@ -1342,12 +1065,7 @@ mod tests {
             Some(SwatchHit::Body(0))
         );
         assert_eq!(
-            swatch_hit(
-                (80, 24),
-                &state,
-                second.x + second.width - 2,
-                second.y + second.height - 1
-            ),
+            swatch_hit((80, 24), &state, second_pin.x + 1, second_pin.y + 1),
             Some(SwatchHit::Pin(1))
         );
     }
@@ -1442,10 +1160,15 @@ mod tests {
     }
 
     fn test_state() -> State {
-        let server = crate::dartboard::spawn_server();
-        let svc = DartboardService::new(server, Uuid::now_v7(), "painter");
-        let mut state = State::new(svc);
-        state.snapshot.your_color = Some(RgbColor::new(255, 196, 64));
-        state
+        let shared_provenance = ArtboardProvenance::default().shared();
+        let snapshot = DartboardSnapshot {
+            provenance: ArtboardProvenance::default(),
+            your_name: "painter".to_string(),
+            your_user_id: Some(1),
+            your_color: Some(RgbColor::new(255, 196, 64)),
+            ..Default::default()
+        };
+        let svc = DartboardService::disconnected_for_tests(snapshot);
+        State::new(svc, "painter".to_string(), shared_provenance)
     }
 }

@@ -7,9 +7,14 @@ use dartboard_local::{ConnectOutcome, Hello, LocalClient, ServerHandle};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
+use super::provenance::{
+    ArtboardProvenance, SharedArtboardProvenance, apply_shared_op, clone_shared_provenance,
+};
+
 #[derive(Debug, Clone, Default)]
 pub struct DartboardSnapshot {
     pub canvas: Canvas,
+    pub provenance: ArtboardProvenance,
     pub peers: Vec<Peer>,
     pub your_name: String,
     pub your_user_id: Option<UserId>,
@@ -55,17 +60,23 @@ enum Command {
 }
 
 impl DartboardService {
-    pub fn new(server: ServerHandle, user_id: Uuid, username: &str) -> Self {
+    pub fn new(
+        server: ServerHandle,
+        user_id: Uuid,
+        username: &str,
+        shared_provenance: SharedArtboardProvenance,
+    ) -> Self {
         let username = username.to_string();
-        let requested_color = requested_user_color_hint(user_id);
         let hello = Hello {
             name: username.clone(),
-            color: requested_color,
+            color: requested_user_color_hint(user_id),
         };
-        let (snapshot_tx, snapshot_rx) = watch::channel(DartboardSnapshot {
+        let initial_snapshot = DartboardSnapshot {
             your_name: username.clone(),
+            provenance: clone_shared_provenance(&shared_provenance),
             ..Default::default()
-        });
+        };
+        let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
         let (event_tx, _) = broadcast::channel(128);
         let (command_tx, command_rx) = mpsc::channel();
 
@@ -73,6 +84,7 @@ impl DartboardService {
             ConnectOutcome::Accepted(client) => {
                 let thread_snapshot_tx = snapshot_tx.clone();
                 let thread_event_tx = event_tx.clone();
+                let thread_shared_provenance = shared_provenance.clone();
                 let thread_username = username.clone();
                 thread::Builder::new()
                     .name(format!("dartboard-{}", user_id))
@@ -82,6 +94,7 @@ impl DartboardService {
                             command_rx,
                             thread_snapshot_tx,
                             thread_event_tx,
+                            thread_shared_provenance,
                             thread_username,
                         )
                     })
@@ -90,6 +103,7 @@ impl DartboardService {
             ConnectOutcome::Rejected(reason) => {
                 let rejected_snapshot = DartboardSnapshot {
                     your_name: username,
+                    provenance: clone_shared_provenance(&shared_provenance),
                     connect_rejected: Some(reason),
                     ..Default::default()
                 };
@@ -118,6 +132,20 @@ impl DartboardService {
     pub fn submit_op(&self, op: CanvasOp) {
         let _ = self.command_tx.send(Command::SubmitOp(op));
     }
+
+    #[cfg(test)]
+    pub(crate) fn disconnected_for_tests(initial_snapshot: DartboardSnapshot) -> Self {
+        let (snapshot_tx, snapshot_rx) = watch::channel(initial_snapshot);
+        let (event_tx, _) = broadcast::channel(128);
+        let (command_tx, command_rx) = mpsc::channel();
+        drop(snapshot_tx);
+        drop(command_rx);
+        Self {
+            command_tx,
+            snapshot_rx,
+            event_tx,
+        }
+    }
 }
 
 fn requested_user_color_hint(user_id: Uuid) -> RgbColor {
@@ -141,19 +169,38 @@ fn run_client_loop(
     command_rx: mpsc::Receiver<Command>,
     snapshot_tx: watch::Sender<DartboardSnapshot>,
     event_tx: broadcast::Sender<DartboardEvent>,
+    shared_provenance: SharedArtboardProvenance,
     username: String,
 ) {
     loop {
         match command_rx.recv_timeout(Duration::from_millis(16)) {
             Ok(Command::SubmitOp(op)) => {
                 client.submit_op(op);
-                drain_server_messages(&mut client, &snapshot_tx, &event_tx, &username);
+                drain_server_messages(
+                    &mut client,
+                    &snapshot_tx,
+                    &event_tx,
+                    &shared_provenance,
+                    &username,
+                );
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_server_messages(&mut client, &snapshot_tx, &event_tx, &username);
+                drain_server_messages(
+                    &mut client,
+                    &snapshot_tx,
+                    &event_tx,
+                    &shared_provenance,
+                    &username,
+                );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                drain_server_messages(&mut client, &snapshot_tx, &event_tx, &username);
+                drain_server_messages(
+                    &mut client,
+                    &snapshot_tx,
+                    &event_tx,
+                    &shared_provenance,
+                    &username,
+                );
                 break;
             }
         }
@@ -164,10 +211,11 @@ fn drain_server_messages(
     client: &mut LocalClient,
     snapshot_tx: &watch::Sender<DartboardSnapshot>,
     event_tx: &broadcast::Sender<DartboardEvent>,
+    shared_provenance: &SharedArtboardProvenance,
     username: &str,
 ) {
     while let Some(msg) = client.try_recv() {
-        handle_server_msg(msg, snapshot_tx, event_tx, username);
+        handle_server_msg(msg, snapshot_tx, event_tx, shared_provenance, username);
     }
 }
 
@@ -175,6 +223,7 @@ fn handle_server_msg(
     msg: ServerMsg,
     snapshot_tx: &watch::Sender<DartboardSnapshot>,
     event_tx: &broadcast::Sender<DartboardEvent>,
+    shared_provenance: &SharedArtboardProvenance,
     username: &str,
 ) {
     match msg {
@@ -186,6 +235,7 @@ fn handle_server_msg(
         } => {
             let _ = snapshot_tx.send(DartboardSnapshot {
                 canvas: snapshot,
+                provenance: clone_shared_provenance(shared_provenance),
                 peers,
                 your_name: username.to_string(),
                 your_user_id: Some(your_user_id),
@@ -200,9 +250,14 @@ fn handle_server_msg(
             let _ = snapshot_tx.send(snapshot);
             let _ = event_tx.send(DartboardEvent::Ack { client_op_id, seq });
         }
-        ServerMsg::OpBroadcast { op, seq, .. } => {
+        ServerMsg::OpBroadcast { from, op, seq } => {
             let mut snapshot = snapshot_tx.borrow().clone();
+            let before = snapshot.canvas.clone();
             snapshot.canvas.apply(&op);
+            if let Some(actor) = actor_name(&snapshot, from, username) {
+                snapshot.provenance.apply_op(&before, &op, &actor);
+                apply_shared_op(shared_provenance, &before, &op, &actor);
+            }
             snapshot.last_seq = snapshot.last_seq.max(seq);
             let _ = snapshot_tx.send(snapshot);
         }
@@ -238,4 +293,15 @@ fn handle_server_msg(
             let _ = event_tx.send(DartboardEvent::ConnectRejected { reason });
         }
     }
+}
+
+fn actor_name(snapshot: &DartboardSnapshot, from: UserId, username: &str) -> Option<String> {
+    if snapshot.your_user_id == Some(from) {
+        return Some(username.to_string());
+    }
+    snapshot
+        .peers
+        .iter()
+        .find(|peer| peer.user_id == from)
+        .map(|peer| peer.name.clone())
 }

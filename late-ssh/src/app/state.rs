@@ -47,12 +47,6 @@ pub(crate) enum NotificationMode {
     Osc9,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DevtestJump {
-    Artboard,
-    Sudoku,
-}
-
 pub(crate) const GAME_SELECTION_2048: usize = 0;
 pub(crate) const GAME_SELECTION_TETRIS: usize = 1;
 pub(crate) const GAME_SELECTION_SUDOKU: usize = 2;
@@ -132,6 +126,7 @@ pub struct SessionConfig {
     /// color slot and showing up in `peer_count` — when the user actually
     /// enters the dartboard game from the arcade.
     pub dartboard_server: dartboard_local::ServerHandle,
+    pub dartboard_provenance: crate::app::artboard::provenance::SharedArtboardProvenance,
     pub username: String,
     pub bonsai_service: crate::app::bonsai::svc::BonsaiService,
     pub initial_bonsai_tree: Option<late_core::models::bonsai::Tree>,
@@ -159,7 +154,6 @@ pub struct SessionConfig {
 
     /// UI flags
     pub is_new_user: bool,
-    pub devtest_jump: Option<DevtestJump>,
 
     /// Display config
     pub initial_theme_id: String,
@@ -268,6 +262,7 @@ pub struct App {
     /// screen hotkeys like `1-4` and `Tab`.
     pub(crate) artboard_interacting: bool,
     pub(crate) dartboard_server: dartboard_local::ServerHandle,
+    pub(crate) dartboard_provenance: crate::app::artboard::provenance::SharedArtboardProvenance,
     pub(crate) username: String,
 
     /// Late Chips balance (loaded on login, updated via leaderboard refresh)
@@ -295,6 +290,10 @@ pub struct App {
 }
 
 impl App {
+    pub fn is_running(&self) -> bool {
+        self.running
+    }
+
     pub fn skip_splash_for_tests(&mut self) {
         self.show_splash = false;
         self.show_settings = false;
@@ -318,6 +317,23 @@ impl App {
                 let idx = self.dashboard_favorite_index.min(len - 1);
                 self.resolve_joined_room(pins[idx]).or(general)
             }
+        }
+    }
+
+    fn current_visible_chat_room_id(&self) -> Option<Uuid> {
+        match self.screen {
+            Screen::Dashboard => self.dashboard_active_room_id(),
+            Screen::Chat => self.chat.selected_room_id,
+            _ => None,
+        }
+    }
+
+    pub(crate) fn sync_visible_chat_room(&mut self) {
+        let visible_room_id = self.current_visible_chat_room_id();
+        let changed = self.chat.visible_room_id() != visible_room_id;
+        self.chat.set_visible_room_id(visible_room_id);
+        if changed && let Some(room_id) = visible_room_id {
+            self.chat.mark_room_read(room_id);
         }
     }
 
@@ -524,6 +540,7 @@ impl App {
             config.initial_chip_balance,
         );
         let dartboard_server = config.dartboard_server.clone();
+        let dartboard_provenance = config.dartboard_provenance.clone();
         let username = config.username.clone();
 
         let bonsai_state = if let Some(tree) = config.initial_bonsai_tree {
@@ -565,18 +582,13 @@ impl App {
             Vec::new(),
             settings_modal::ui::MODAL_WIDTH,
         );
-        let (screen, show_settings, show_splash, game_selection) = match config.devtest_jump {
-            Some(DevtestJump::Artboard) => (Screen::Artboard, false, false, DEFAULT_GAME_SELECTION),
-            Some(DevtestJump::Sudoku) => (Screen::Games, false, false, GAME_SELECTION_SUDOKU),
-            None => (Screen::Dashboard, true, true, DEFAULT_GAME_SELECTION),
-        };
         let mut app = Self {
             running: true,
             size: (cols, rows),
-            screen,
+            screen: Screen::Dashboard,
             banner: None,
-            show_settings,
-            show_splash,
+            show_settings: true,
+            show_splash: true,
             splash_ticks: 0,
             splash_hint,
             show_quit_confirm: false,
@@ -631,7 +643,7 @@ impl App {
             leaderboard_rx: config.leaderboard_rx,
             leaderboard: Arc::new(LeaderboardData::default()),
             bonsai_state,
-            game_selection,
+            game_selection: DEFAULT_GAME_SELECTION,
             is_playing_game: false,
             twenty_forty_eight_state,
             tetris_state,
@@ -643,6 +655,7 @@ impl App {
             dartboard_state: None,
             artboard_interacting: false,
             dartboard_server,
+            dartboard_provenance,
             username,
             chip_balance: config.initial_chip_balance,
             pending_clipboard: None,
@@ -657,6 +670,7 @@ impl App {
         if app.screen == Screen::Artboard {
             app.enter_dartboard();
         }
+        app.sync_visible_chat_room();
         Ok(app)
     }
 
@@ -672,8 +686,13 @@ impl App {
             self.dartboard_server.clone(),
             self.user_id,
             &self.username,
+            self.dartboard_provenance.clone(),
         );
-        self.dartboard_state = Some(crate::app::artboard::state::State::new(svc));
+        self.dartboard_state = Some(crate::app::artboard::state::State::new(
+            svc,
+            self.username.clone(),
+            self.dartboard_provenance.clone(),
+        ));
         self.set_cursor_shape(CURSOR_SHAPE_STEADY_UNDERLINE);
     }
 
@@ -706,6 +725,7 @@ impl App {
             if screen == Screen::Artboard {
                 self.enter_dartboard();
             }
+            self.sync_visible_chat_room();
             return;
         }
 
@@ -719,12 +739,12 @@ impl App {
         if self.screen == Screen::Chat {
             self.chat.request_list();
             self.chat.sync_selection();
-            self.chat.mark_selected_room_read();
         }
 
         if self.screen == Screen::Artboard {
             self.enter_dartboard();
         }
+        self.sync_visible_chat_room();
     }
 
     fn set_cursor_shape(&mut self, sequence: &[u8]) {
