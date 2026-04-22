@@ -1,7 +1,9 @@
 use crate::app::{
-    input::{MouseEventKind, ParsedInput},
+    input::{MouseButton, MouseEventKind, ParsedInput},
     state::App,
 };
+
+use super::ui::{info_hit, swatch_hit};
 
 pub(crate) fn handle_key(app: &mut App, byte: u8) -> bool {
     let size = app.size;
@@ -105,6 +107,24 @@ pub(crate) fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
         {
             let action = super::input::handle_event(state, size, event);
             handle_action(app, action)
+        }
+        ParsedInput::Mouse(mouse)
+            if matches!(mouse.kind, MouseEventKind::Down)
+                && matches!(mouse.button, Some(MouseButton::Left))
+                && !mouse.modifiers.shift
+                && !mouse.modifiers.alt
+                && !mouse.modifiers.ctrl =>
+        {
+            if swatch_hit(size, state, mouse.x, mouse.y).is_some()
+                || info_hit(size, state, mouse.x, mouse.y)
+            {
+                return true;
+            }
+            if !state.move_to_screen_point(size, mouse.x, mouse.y) {
+                return false;
+            }
+            app.activate_artboard_interaction();
+            true
         }
         _ => false,
     }

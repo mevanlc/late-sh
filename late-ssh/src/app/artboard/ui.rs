@@ -982,7 +982,7 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
         HelpTab::Session => vec![
             ("i / Enter", "enter active mode"),
             ("Esc", "return to view mode"),
-            ("^E", "drop active brush"),
+            ("Space", "drop active brush"),
             ("1-4 / Tab", "switch pages in view mode"),
             ("^P", "help toggle"),
         ],
@@ -994,7 +994,7 @@ const GUIDE_PROSE: &[&str] = &[
     "Home/End, PgUp/PgDn, or mouse wheel.",
     "",
     "Press i or Enter to enter active mode and edit.",
-    "In active mode, type to draw. Use ^E to drop an",
+    "In active mode, type to draw. Use Space to drop",
     "active brush and Esc to return to view mode.",
     "",
     "The leftmost swatch is the clipboard view, so it",

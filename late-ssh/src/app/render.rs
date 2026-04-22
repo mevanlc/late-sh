@@ -632,7 +632,11 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             Style::default().fg(theme::TEXT_MUTED()),
         ));
         for (key, desc) in if ctx.artboard_interacting {
-            &[("Esc", "View mode"), ("^E", "Drop brush"), ("^P", "Help")][..]
+            &[
+                ("Esc", "View mode"),
+                ("Space", "Drop brush"),
+                ("^P", "Help"),
+            ][..]
         } else {
             &[("i", "Interact"), ("Tab/1-4", "Switch")][..]
         } {

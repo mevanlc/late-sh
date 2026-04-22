@@ -207,6 +207,21 @@ async fn artboard_view_mode_allows_cursor_movement_and_screen_hotkeys() {
 }
 
 #[tokio::test]
+async fn artboard_view_mode_click_enters_active_mode_at_clicked_canvas_cell() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "artboard-click-enter-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-click-enter-flow-it");
+
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    wait_for_render_contains(&mut app, "Cursor     0,0").await;
+
+    app.handle_input(b"\x1b[<0;10;5M");
+    wait_for_render_contains(&mut app, "Mode       active").await;
+    wait_for_render_contains(&mut app, "Cursor     8,3").await;
+}
+
+#[tokio::test]
 async fn active_artboard_blocks_screen_number_hotkeys_until_escape() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "artboard-active-it").await;

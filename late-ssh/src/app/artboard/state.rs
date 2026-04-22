@@ -192,12 +192,8 @@ impl State {
                 effects: Vec::new(),
             };
         }
-        if key.code == dartboard_editor::AppKeyCode::Char('e')
-            && key.modifiers
-                == (AppModifiers {
-                    ctrl: true,
-                    ..Default::default()
-                })
+        if key.code == dartboard_editor::AppKeyCode::Char(' ')
+            && key.modifiers == AppModifiers::default()
             && self.dismiss_active_brush()
         {
             return EditorKeyDispatch {
@@ -532,6 +528,9 @@ impl State {
         let activation = self.editor.activate_swatch(idx);
         self.active_brush = None;
         if activation == SwatchActivation::ActivatedFloating {
+            if let Some(floating) = self.editor.floating.as_mut() {
+                floating.transparent = true;
+            }
             self.suppress_swatch_preview = true;
         }
         self.sync_floating_source_selection();
@@ -741,7 +740,7 @@ impl State {
         self.editor.clear_selection();
         self.editor.floating = Some(EditorFloatingSelection {
             clipboard: capture_bounds(&self.snapshot.canvas, Bounds::single(pos)),
-            transparent: false,
+            transparent: true,
             source_index: None,
         });
         self.floating_source_selection = None;
@@ -847,12 +846,12 @@ impl State {
         self.editor.clear_selection();
         self.editor.floating = Some(EditorFloatingSelection {
             clipboard,
-            transparent: false,
+            transparent: true,
             source_index: Some(idx),
         });
         self.floating_source_selection = None;
         self.active_brush = None;
-        self.suppress_swatch_preview = true;
+        self.suppress_swatch_preview = false;
         true
     }
 
@@ -1258,7 +1257,7 @@ mod tests {
         assert_eq!(state.active_swatch_index(), Some(0));
         assert_eq!(state.brush_mode(), BrushMode::Swatch);
         assert!(state.has_floating());
-        assert!(!state.floating_is_transparent());
+        assert!(state.floating_is_transparent());
     }
 
     #[test]
@@ -1328,7 +1327,7 @@ mod tests {
         assert!(second.handled);
         assert_eq!(state.active_swatch_index(), Some(0));
         assert!(state.has_floating());
-        assert!(!state.floating_is_transparent());
+        assert!(state.floating_is_transparent());
     }
 
     #[test]
@@ -1377,6 +1376,8 @@ mod tests {
                 .and_then(|swatch| swatch.clipboard.get(0, 0)),
             Some(CellValue::Narrow('A'))
         );
+        assert!(state.floating_view().is_some());
+        assert!(state.should_show_canvas_cursor());
     }
 
     #[test]
@@ -1396,17 +1397,14 @@ mod tests {
     }
 
     #[test]
-    fn app_key_ctrl_e_dismisses_temp_brush_back_to_none() {
+    fn app_key_space_dismisses_temp_brush_back_to_none() {
         let mut state = test_state();
         state.type_char('Q', (80, 24));
         assert!(state.activate_temp_glyph_brush_at(Pos { x: 0, y: 0 }));
 
         let dispatch = state.handle_app_key(AppKey {
-            code: dartboard_editor::AppKeyCode::Char('e'),
-            modifiers: dartboard_editor::AppModifiers {
-                ctrl: true,
-                ..Default::default()
-            },
+            code: dartboard_editor::AppKeyCode::Char(' '),
+            modifiers: Default::default(),
         });
 
         assert!(dispatch.handled);
@@ -1425,6 +1423,7 @@ mod tests {
         state.activate_swatch(0);
 
         assert_eq!(state.brush_mode(), BrushMode::Swatch);
+        assert!(state.floating_is_transparent());
     }
 
     #[test]
@@ -1436,6 +1435,7 @@ mod tests {
 
         assert_eq!(state.brush_mode(), BrushMode::Glyph('🔥'));
         assert!(state.has_floating());
+        assert!(state.floating_is_transparent());
     }
 
     #[test]
