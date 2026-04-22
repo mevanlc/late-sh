@@ -721,9 +721,7 @@ impl App {
         if self.screen == Screen::Chat {
             self.chat.request_list();
             self.chat.sync_selection();
-            if let Some(room_id) = self.chat.selected_room_id {
-                self.chat.mark_room_read(room_id);
-            }
+            self.chat.mark_selected_room_read();
         }
 
         if self.screen == Screen::Artboard {

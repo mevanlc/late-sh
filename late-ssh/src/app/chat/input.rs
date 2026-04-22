@@ -138,9 +138,7 @@ pub fn handle_scroll_in_room(app: &mut App, room_id: Uuid, delta: isize) {
 fn switch_room(app: &mut App, delta: isize) {
     if app.chat.move_selection(delta) {
         app.chat.reset_composer();
-        if let Some(room_id) = app.chat.selected_room_id {
-            app.chat.mark_room_read(room_id);
-        }
+        app.chat.mark_selected_room_read();
         app.chat.request_list();
     }
 }
@@ -318,9 +316,7 @@ pub fn handle_byte(app: &mut App, byte: u8) -> bool {
                 let changed = app.chat.handle_room_jump_key(byte);
                 if changed {
                     app.chat.reset_composer();
-                    if let Some(room_id) = app.chat.selected_room_id {
-                        app.chat.mark_room_read(room_id);
-                    }
+                    app.chat.mark_selected_room_read();
                     app.chat.request_list();
                 }
                 return true;
