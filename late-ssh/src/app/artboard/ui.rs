@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::common::theme;
 
-use super::state::{BrushMode, HelpTab, State};
+use super::state::{BrushMode, HelpTab, PRIMARY_SWATCH_IDX, State};
 
 const INFO_WIDTH: u16 = 28;
 const SWATCH_BOX_WIDTH: u16 = 16;
@@ -28,6 +28,7 @@ const HELP_TAB_ROWS: u16 = 2;
 const HELP_TAB_GAP: u16 = 2;
 const PIN_UNPINNED: char = '📌';
 const PIN_PINNED: char = '📍';
+const PRIMARY_SWATCH_LABEL: [char; 2] = ['C', 'B'];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SwatchHit {
@@ -407,7 +408,10 @@ pub(crate) fn swatch_hit(
 
     for (idx, maybe_rect) in boxes.iter().enumerate() {
         let Some(rect) = maybe_rect else { continue };
-        if state.swatches()[idx].is_some() && rect_contains(swatch_pin_rect(*rect), col, row) {
+        if idx != PRIMARY_SWATCH_IDX
+            && state.swatches()[idx].is_some()
+            && rect_contains(swatch_pin_rect(*rect), col, row)
+        {
             return Some(SwatchHit::Pin(idx));
         }
     }
@@ -453,6 +457,7 @@ fn render_swatch_strip(
         render_swatch_box_contents(
             frame.buffer_mut(),
             *rect,
+            idx,
             state.swatches()[idx].as_ref(),
             active_idx == Some(idx),
             active_idx == Some(idx) && is_transparent,
@@ -566,6 +571,7 @@ fn render_swatch_strip_frame(
 fn render_swatch_box_contents(
     buf: &mut Buffer,
     rect: Rect,
+    idx: usize,
     swatch: Option<&Swatch>,
     _is_active: bool,
     is_transparent: bool,
@@ -583,24 +589,36 @@ fn render_swatch_box_contents(
     if let Some(swatch) = swatch {
         render_swatch_preview(buf, inner, &swatch.clipboard);
         let pin_rect = swatch_pin_rect(rect);
-        let pin_char = if swatch.pinned {
-            PIN_PINNED
+        if idx == PRIMARY_SWATCH_IDX {
+            let clip_style = Style::default()
+                .bg(theme::BG_CANVAS())
+                .fg(theme::TEXT_FAINT());
+            buf[(pin_rect.x, pin_rect.y)]
+                .set_char(PRIMARY_SWATCH_LABEL[0])
+                .set_style(clip_style);
+            buf[(pin_rect.x + 1, pin_rect.y)]
+                .set_char(PRIMARY_SWATCH_LABEL[1])
+                .set_style(clip_style);
         } else {
-            PIN_UNPINNED
-        };
-        let pin_style = Style::default()
-            .bg(theme::BG_CANVAS())
-            .fg(if swatch.pinned {
-                theme::BORDER_ACTIVE()
+            let pin_char = if swatch.pinned {
+                PIN_PINNED
             } else {
-                theme::TEXT_FAINT()
-            });
-        buf[(pin_rect.x, pin_rect.y)]
-            .set_char(pin_char)
-            .set_style(pin_style);
-        buf[(pin_rect.x + 1, pin_rect.y)]
-            .set_char(' ')
-            .set_style(pin_style);
+                PIN_UNPINNED
+            };
+            let pin_style = Style::default()
+                .bg(theme::BG_CANVAS())
+                .fg(if swatch.pinned {
+                    theme::BORDER_ACTIVE()
+                } else {
+                    theme::TEXT_FAINT()
+                });
+            buf[(pin_rect.x, pin_rect.y)]
+                .set_char(pin_char)
+                .set_style(pin_style);
+            buf[(pin_rect.x + 1, pin_rect.y)]
+                .set_char(' ')
+                .set_style(pin_style);
+        }
     }
 
     if is_transparent {
@@ -979,9 +997,12 @@ const GUIDE_PROSE: &[&str] = &[
     "In active mode, type to draw. Use ^E to drop an",
     "active brush and Esc to return to view mode.",
     "",
+    "The leftmost swatch is the clipboard view, so it",
+    "always stays writable and cannot be pinned.",
+    "",
     "Hold shift with arrows or drag with the mouse to",
-    "select. Use ^X/^C to cut/copy to swatches, then",
-    "click a swatch to use it as a brush.",
+    "select. Use ^X/^C to cut/copy into swatches and",
+    "arm the freshest result as your active brush.",
     "",
     "Ctrl+] opens the glyph picker. Enter stamps a",
     "floating brush. ^⇧+arrows stroke the floating brush.",
@@ -1305,6 +1326,12 @@ mod tests {
             clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('A'))]),
             pinned: false,
         });
+        state.editor.swatches[1] = Some(dartboard_editor::Swatch {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('B'))]),
+            pinned: false,
+        });
+        let rects = swatch_box_rects((80, 24), &state);
+        let second = rects[1].expect("second swatch visible");
 
         assert_eq!(
             swatch_hit((80, 24), &state, 11, 16),
@@ -1312,7 +1339,16 @@ mod tests {
         );
         assert_eq!(
             swatch_hit((80, 24), &state, 23, 21),
-            Some(SwatchHit::Pin(0))
+            Some(SwatchHit::Body(0))
+        );
+        assert_eq!(
+            swatch_hit(
+                (80, 24),
+                &state,
+                second.x + second.width - 2,
+                second.y + second.height - 1
+            ),
+            Some(SwatchHit::Pin(1))
         );
     }
 

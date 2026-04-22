@@ -24,6 +24,7 @@ use super::glyph_picker;
 use super::svc::{DartboardEvent, DartboardService, DartboardSnapshot};
 
 const DOUBLE_CLICK_WINDOW_MS: u128 = 400;
+pub(crate) const PRIMARY_SWATCH_IDX: usize = 0;
 
 pub struct State {
     pub snapshot: DartboardSnapshot,
@@ -229,6 +230,14 @@ impl State {
     }
 
     pub fn handle_editor_action(&mut self, action: EditorAction) -> EditorKeyDispatch {
+        let copied_to_slot = matches!(
+            action,
+            EditorAction::CopySelection | EditorAction::CutSelection
+        )
+        .then_some(PRIMARY_SWATCH_IDX);
+        if copied_to_slot.is_some() {
+            self.prepare_primary_clipboard_slot();
+        }
         let before = self.snapshot.canvas.clone();
         let color = self.active_user_color();
         let dispatch =
@@ -237,6 +246,12 @@ impl State {
 
         if self.snapshot.canvas != before {
             let _ = self.submit_canvas_diff(before);
+        }
+
+        if dispatch.handled
+            && let Some(idx) = copied_to_slot
+        {
+            self.arm_swatch_brush(idx);
         }
 
         dispatch
@@ -523,6 +538,15 @@ impl State {
     }
 
     pub fn toggle_swatch_pin(&mut self, idx: usize) {
+        if idx >= SWATCH_CAPACITY {
+            return;
+        }
+        if !self.swatch_is_pinnable(idx) {
+            if let Some(swatch) = self.editor.swatches.get_mut(idx).and_then(Option::as_mut) {
+                swatch.pinned = false;
+            }
+            return;
+        }
         self.editor.toggle_pin(idx);
     }
 
@@ -798,6 +822,38 @@ impl State {
             return true;
         }
         false
+    }
+
+    pub fn swatch_is_pinnable(&self, idx: usize) -> bool {
+        idx != PRIMARY_SWATCH_IDX && idx < SWATCH_CAPACITY
+    }
+
+    fn prepare_primary_clipboard_slot(&mut self) {
+        if let Some(swatch) = self.editor.swatches[PRIMARY_SWATCH_IDX].as_mut() {
+            swatch.pinned = false;
+        }
+    }
+
+    fn arm_swatch_brush(&mut self, idx: usize) -> bool {
+        let Some(clipboard) = self
+            .editor
+            .swatches
+            .get(idx)
+            .and_then(|swatch| swatch.as_ref())
+            .map(|swatch| swatch.clipboard.clone())
+        else {
+            return false;
+        };
+        self.editor.clear_selection();
+        self.editor.floating = Some(EditorFloatingSelection {
+            clipboard,
+            transparent: false,
+            source_index: Some(idx),
+        });
+        self.floating_source_selection = None;
+        self.active_brush = None;
+        self.suppress_swatch_preview = true;
+        true
     }
 
     fn apply_floating_override(&mut self, action: Option<EditorAction>) -> FloatingOverride {
@@ -1198,6 +1254,128 @@ mod tests {
                 .as_ref()
                 .and_then(|swatch| swatch.clipboard.get(0, 0)),
             Some(dartboard_core::CellValue::Narrow('A'))
+        );
+        assert_eq!(state.active_swatch_index(), Some(0));
+        assert_eq!(state.brush_mode(), BrushMode::Swatch);
+        assert!(state.has_floating());
+        assert!(!state.floating_is_transparent());
+    }
+
+    #[test]
+    fn app_key_ctrl_x_uses_primary_clipboard_swatch_as_brush() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(3, 1);
+        state.snapshot.canvas.set(Pos { x: 0, y: 0 }, 'P');
+        state.snapshot.canvas.set(Pos { x: 1, y: 0 }, 'Q');
+        state.editor.swatches[0] = Some(Swatch {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('Z'))]),
+            pinned: false,
+        });
+        state.editor.swatches[1] = Some(Swatch {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('Y'))]),
+            pinned: true,
+        });
+
+        let dispatch = state.handle_app_key(AppKey {
+            code: dartboard_editor::AppKeyCode::Char('x'),
+            modifiers: dartboard_editor::AppModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        });
+
+        assert!(dispatch.handled);
+        assert!(dispatch.effects.is_empty());
+        assert_eq!(state.snapshot.canvas.get(Pos { x: 0, y: 0 }), ' ');
+        assert_eq!(state.active_swatch_index(), Some(0));
+        assert_eq!(state.brush_mode(), BrushMode::Swatch);
+        assert_eq!(
+            state.editor.swatches[0]
+                .as_ref()
+                .and_then(|swatch| swatch.clipboard.get(0, 0)),
+            Some(CellValue::Narrow('P'))
+        );
+        assert_eq!(
+            state.editor.swatches[1]
+                .as_ref()
+                .and_then(|swatch| swatch.clipboard.get(0, 0)),
+            Some(CellValue::Narrow('Y'))
+        );
+    }
+
+    #[test]
+    fn app_key_ctrl_c_refreshes_active_swatch_without_toggling_transparency() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(2, 1);
+        state.snapshot.canvas.set(Pos { x: 0, y: 0 }, 'A');
+
+        let first = state.handle_app_key(AppKey {
+            code: dartboard_editor::AppKeyCode::Char('c'),
+            modifiers: dartboard_editor::AppModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        });
+        let second = state.handle_app_key(AppKey {
+            code: dartboard_editor::AppKeyCode::Char('c'),
+            modifiers: dartboard_editor::AppModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        });
+
+        assert!(first.handled);
+        assert!(second.handled);
+        assert_eq!(state.active_swatch_index(), Some(0));
+        assert!(state.has_floating());
+        assert!(!state.floating_is_transparent());
+    }
+
+    #[test]
+    fn primary_swatch_pin_toggle_is_ignored() {
+        let mut state = test_state();
+        state.editor.swatches[0] = Some(Swatch {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('A'))]),
+            pinned: false,
+        });
+
+        state.toggle_swatch_pin(0);
+
+        assert_eq!(
+            state.swatches()[0].as_ref().map(|swatch| swatch.pinned),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn copy_sanitizes_primary_swatch_back_to_writable() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(2, 1);
+        state.snapshot.canvas.set(Pos { x: 0, y: 0 }, 'A');
+        state.editor.swatches[0] = Some(Swatch {
+            clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('Z'))]),
+            pinned: true,
+        });
+
+        let dispatch = state.handle_app_key(AppKey {
+            code: dartboard_editor::AppKeyCode::Char('c'),
+            modifiers: dartboard_editor::AppModifiers {
+                ctrl: true,
+                ..Default::default()
+            },
+        });
+
+        assert!(dispatch.handled);
+        assert_eq!(state.active_swatch_index(), Some(0));
+        assert_eq!(
+            state.swatches()[0].as_ref().map(|swatch| swatch.pinned),
+            Some(false)
+        );
+        assert_eq!(
+            state.editor.swatches[0]
+                .as_ref()
+                .and_then(|swatch| swatch.clipboard.get(0, 0)),
+            Some(CellValue::Narrow('A'))
         );
     }
 
