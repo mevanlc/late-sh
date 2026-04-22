@@ -28,7 +28,6 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
         return handle_help_byte(state, byte);
     }
     match byte {
-        0x11 => InputAction::Leave, // Ctrl+Q
         // Ctrl+] / Ctrl+5 / raw GS — open the glyph picker.
         0x1D => {
             state.open_glyph_picker();
@@ -86,9 +85,6 @@ fn handle_help_byte(state: &mut State, byte: u8) -> InputAction {
 
 fn handle_picker_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> InputAction {
     match byte {
-        // Ctrl+Q always leaves the game, regardless of picker state. Picker
-        // contents are discarded along with the rest of game state.
-        0x11 => return InputAction::Leave,
         0x1B => {
             // Esc closes the picker without inserting.
             state.close_glyph_picker();
@@ -539,7 +535,7 @@ fn map_button(button: MouseButton) -> Option<AppPointerButton> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::games::artboard::svc::DartboardService;
+    use crate::app::artboard::svc::DartboardService;
     use dartboard_core::{Canvas, CellValue, RgbColor};
     use dartboard_editor::Clipboard;
     use uuid::Uuid;
@@ -774,7 +770,7 @@ mod tests {
         assert!(matches!(second_down, InputAction::Handled));
         assert_eq!(
             state.brush_mode(),
-            crate::app::games::artboard::state::BrushMode::Glyph('x')
+            crate::app::artboard::state::BrushMode::Glyph('x')
         );
         let floating = state
             .floating_view()
@@ -954,7 +950,7 @@ mod tests {
         assert!(handle_arrow(&mut state, (80, 24), b'C'));
         assert_eq!(
             state.help_tab(),
-            crate::app::games::artboard::state::HelpTab::Drawing
+            crate::app::artboard::state::HelpTab::Drawing
         );
 
         assert!(matches!(

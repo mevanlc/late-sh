@@ -6,8 +6,8 @@ use std::{
 use dartboard_core::{CanvasOp, Pos, RgbColor};
 use dartboard_local::MAX_PLAYERS;
 use late_core::{models::artboard::Snapshot, test_utils::test_db};
-use late_ssh::app::games::artboard::state::State;
-use late_ssh::app::games::artboard::svc::{DartboardEvent, DartboardService};
+use late_ssh::app::artboard::state::State;
+use late_ssh::app::artboard::svc::{DartboardEvent, DartboardService};
 use late_ssh::dartboard;
 use uuid::Uuid;
 

@@ -14,6 +14,7 @@ use ratatui::{
 use late_core::models::leaderboard::LeaderboardData;
 
 use super::{
+    artboard,
     chat,
     common::{
         primitives::{Banner, BannerKind, Screen, draw_banner},
@@ -21,7 +22,7 @@ use super::{
         theme,
     },
     dashboard, help_modal, icon_picker, profile_modal, quit_confirm, settings_modal,
-    state::{App, GAME_SELECTION_ARTBOARD, NotificationMode},
+    state::{App, NotificationMode},
     visualizer::Visualizer,
 };
 use crate::session::ClientAudioState;
@@ -101,8 +102,8 @@ struct DrawContext<'a> {
     solitaire_state: &'a crate::app::games::solitaire::state::State,
     minesweeper_state: &'a crate::app::games::minesweeper::state::State,
     blackjack_state: &'a crate::app::games::blackjack::state::State,
-    dartboard_state: Option<&'a crate::app::games::artboard::state::State>,
-    dartboard_peer_count: usize,
+    dartboard_state: Option<&'a crate::app::artboard::state::State>,
+    artboard_interacting: bool,
     leaderboard: &'a Arc<LeaderboardData>,
     visualizer: &'a Visualizer,
     now_playing: Option<&'a NowPlaying>,
@@ -317,7 +318,7 @@ impl App {
                         minesweeper_state: &self.minesweeper_state,
                         blackjack_state: &self.blackjack_state,
                         dartboard_state: self.dartboard_state.as_ref(),
-                        dartboard_peer_count: self.dartboard_server.peer_count(),
+                        artboard_interacting: self.artboard_interacting,
                         leaderboard: &self.leaderboard,
                         visualizer,
                         now_playing: now_playing.as_ref(),
@@ -504,6 +505,11 @@ impl App {
                 dashboard::ui::draw_dashboard(frame, content_area, ctx.dashboard_view)
             }
             Screen::Chat => chat::ui::draw_chat(frame, content_area, ctx.chat_view),
+            Screen::Artboard => {
+                if let Some(state) = ctx.dartboard_state {
+                    artboard::ui::draw_game(frame, content_area, state, ctx.artboard_interacting);
+                }
+            }
             Screen::Games => crate::app::games::ui::draw_games_hub(
                 frame,
                 content_area,
@@ -517,8 +523,6 @@ impl App {
                     solitaire_state: ctx.solitaire_state,
                     minesweeper_state: ctx.minesweeper_state,
                     blackjack_state: ctx.blackjack_state,
-                    dartboard_state: ctx.dartboard_state,
-                    dartboard_peer_count: ctx.dartboard_peer_count,
                     is_admin: ctx.is_admin,
                     leaderboard: ctx.leaderboard,
                     show_sidebar: ctx.show_games_sidebar,
@@ -622,16 +626,17 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             .add_modifier(Modifier::BOLD),
     )];
 
-    if screen == Screen::Games
-        && ctx.is_playing_game
-        && ctx.game_selection == GAME_SELECTION_ARTBOARD
-    {
+    if screen == Screen::Artboard {
         spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
         spans.push(Span::styled(
             "Artboard ",
             Style::default().fg(theme::TEXT_MUTED()),
         ));
-        for (key, desc) in [("^P", "Help"), ("^Q", "Quit")] {
+        for (key, desc) in if ctx.artboard_interacting {
+            [("Esc", "View mode"), ("^P", "Help")]
+        } else {
+            [("i", "Interact"), ("Tab/1-4", "Switch")]
+        } {
             spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
             spans.push(Span::styled(key, Style::default().fg(theme::AMBER_DIM())));
             spans.push(Span::styled(

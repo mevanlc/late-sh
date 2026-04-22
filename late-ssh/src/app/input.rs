@@ -590,12 +590,15 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         return;
     }
 
-    // Games that consume richer events (dartboard) get first crack at
+    // Screen-specific rich event handlers get first crack at
     // Mouse/Home/modified-arrow events before the generic dispatch below.
     if ctx.screen == Screen::Games
         && app.is_playing_game
         && crate::app::games::input::handle_event(app, &event)
     {
+        return;
+    }
+    if ctx.screen == Screen::Artboard && crate::app::artboard::page::handle_event(app, &event) {
         return;
     }
 
@@ -654,13 +657,11 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             if ctx.screen == Screen::Games && app.is_playing_game {
                 return;
             }
-            reset_composers_for_page_change(app);
-            app.screen = ctx.screen.prev();
-            if app.screen == Screen::Chat {
-                app.chat.request_list();
-                app.chat.sync_selection();
-                app.chat.mark_selected_room_read();
+            if ctx.screen == Screen::Artboard && app.artboard_interacting {
+                return;
             }
+            reset_composers_for_page_change(app);
+            app.set_screen(ctx.screen.prev());
             app.chat.clear_message_selection();
         }
         // Page keys mirror Ctrl-U / Ctrl-D. Signs follow the existing scheme:
@@ -766,8 +767,8 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         | ParsedInput::AltArrow(_)
         | ParsedInput::CtrlBackspace
         | ParsedInput::CtrlDelete => {}
-        // Modified arrows are only bound in games that opt-in via the early
-        // `handle_event` hook (dartboard). Everywhere else they're inert.
+        // Modified arrows are only bound on screens that opt in via the early
+        // `handle_event` hook. Everywhere else they're inert.
         ParsedInput::ShiftArrow(_) | ParsedInput::CtrlShiftArrow(_) | ParsedInput::Home => {}
         ParsedInput::Arrow(key) => {
             if ctx.screen == Screen::Chat && app.chat.room_jump_active {
@@ -816,10 +817,13 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             app.chat.update_autocomplete();
         }
         // 0x1D (Ctrl+] / Ctrl+5 / raw GS) opens the chat icon picker on
-        // chat-bearing screens, but when Artboard is the active game it owns
-        // this keystroke as the glyph-picker open key — let it fall through
+        // chat-bearing screens, but active Artboard editing owns this
+        // keystroke as the glyph-picker open key — let it fall through
         // to the byte dispatch below.
-        ParsedInput::Byte(0x1D) if !(ctx.screen == Screen::Games && app.is_playing_game) => {
+        ParsedInput::Byte(0x1D)
+            if !((ctx.screen == Screen::Games && app.is_playing_game)
+                || (ctx.screen == Screen::Artboard && app.artboard_interacting)) =>
+        {
             try_open_icon_picker(app)
         }
         ParsedInput::Byte(byte) => handle_byte_event(app, ctx, byte),
@@ -900,6 +904,19 @@ fn dispatch_escape(app: &mut App) {
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && app.chat.has_overlay() {
         app.chat.close_overlay();
         return;
+    }
+    if ctx.screen == Screen::Artboard {
+        let Some(state) = app.dartboard_state.as_mut() else {
+            return;
+        };
+        if state.is_glyph_picker_open() || state.is_help_open() {
+            dispatch_screen_key(app, ctx.screen, 0x1B);
+            return;
+        }
+        if app.artboard_interacting {
+            app.deactivate_artboard_interaction();
+            return;
+        }
     }
     if ctx.screen == Screen::Games && app.is_playing_game {
         dispatch_screen_key(app, ctx.screen, 0x1B);
@@ -985,6 +1002,7 @@ fn handle_scroll_for_screen(app: &mut App, screen: Screen, delta: isize) {
             }
         }
         Screen::Chat => chat::input::handle_scroll(app, delta),
+        Screen::Artboard => {}
         _ => {}
     }
 }
@@ -1014,6 +1032,7 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
         }
         Screen::Dashboard => dashboard::input::handle_arrow(app, key),
         Screen::Games => crate::app::games::input::handle_arrow(app, key),
+        Screen::Artboard => crate::app::artboard::page::handle_arrow(app, key),
     }
 }
 
@@ -1089,16 +1108,12 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
 
     if ctx.screen == Screen::Games
         && app.is_playing_game
-        && app.game_selection == crate::app::state::GAME_SELECTION_ARTBOARD
-        && byte == 0x03
+        && !matches!(byte, 0x03 | b'm' | b'M' | b'+' | b'=' | b'-' | b'_')
     {
         return false;
     }
 
-    if ctx.screen == Screen::Games
-        && app.is_playing_game
-        && !matches!(byte, 0x03 | b'm' | b'M' | b'+' | b'=' | b'-' | b'_')
-    {
+    if ctx.screen == Screen::Artboard && app.artboard_interacting && byte != 0x03 {
         return false;
     }
 
@@ -1218,34 +1233,27 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         }
         b'1' => {
             reset_composers_for_page_change(app);
-            app.screen = Screen::Dashboard;
+            app.set_screen(Screen::Dashboard);
             true
         }
         b'2' => {
             reset_composers_for_page_change(app);
-            app.chat.request_list();
-            app.chat.sync_selection();
-            app.chat.mark_selected_room_read();
-            app.screen = Screen::Chat;
+            app.set_screen(Screen::Chat);
             true
         }
         b'3' => {
             reset_composers_for_page_change(app);
-            app.screen = Screen::Games;
+            app.set_screen(Screen::Games);
+            true
+        }
+        b'4' => {
+            reset_composers_for_page_change(app);
+            app.set_screen(Screen::Artboard);
             true
         }
         b'\t' => {
             reset_composers_for_page_change(app);
-            app.screen = ctx.screen.next();
-            match app.screen {
-                Screen::Dashboard => {}
-                Screen::Chat => {
-                    app.chat.request_list();
-                    app.chat.sync_selection();
-                    app.chat.mark_selected_room_read();
-                }
-                Screen::Games => {}
-            }
+            app.set_screen(ctx.screen.next());
             true
         }
         b'P' => {
@@ -1268,6 +1276,9 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
         }
         Screen::Games => {
             crate::app::games::input::handle_key(app, byte);
+        }
+        Screen::Artboard => {
+            let _ = crate::app::artboard::page::handle_key(app, byte);
         }
     }
 }

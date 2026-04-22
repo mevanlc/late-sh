@@ -30,7 +30,7 @@ impl App {
         }
         if self.chat.pending_chat_screen_switch {
             self.chat.pending_chat_screen_switch = false;
-            self.screen = Screen::Chat;
+            self.set_screen(Screen::Chat);
         }
         if let Some(b) = self.vote.tick() {
             self.banner = Some(b);

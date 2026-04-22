@@ -222,11 +222,7 @@ impl ChatState {
         self.selected_room_id = Some(self.rooms[0].0.id);
     }
 
-    pub fn mark_selected_room_read(&mut self) {
-        let Some(room_id) = self.selected_room_id else {
-            return;
-        };
-
+    pub fn mark_room_read(&mut self, room_id: Uuid) {
         self.pending_read_rooms.insert(room_id);
         self.unread_counts.insert(room_id, 0);
         self.service.mark_room_read_task(self.user_id, room_id);
@@ -638,7 +634,7 @@ impl ChatState {
         self.reply_target = None;
         self.edited_message_id = None;
         self.composer_room_id = Some(next_room_id);
-        self.mark_selected_room_read();
+        self.mark_room_read(next_room_id);
         self.request_list();
         true
     }

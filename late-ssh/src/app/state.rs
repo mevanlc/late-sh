@@ -53,24 +53,14 @@ pub enum DevtestJump {
     Sudoku,
 }
 
-pub(crate) const GAME_SELECTION_ARTBOARD: usize = 0;
-pub(crate) const GAME_SELECTION_2048: usize = 1;
-pub(crate) const GAME_SELECTION_TETRIS: usize = 2;
-pub(crate) const GAME_SELECTION_SUDOKU: usize = 3;
-pub(crate) const GAME_SELECTION_NONOGRAMS: usize = 4;
-pub(crate) const GAME_SELECTION_MINESWEEPER: usize = 5;
-pub(crate) const GAME_SELECTION_SOLITAIRE: usize = 6;
-pub(crate) const GAME_SELECTION_BLACKJACK: usize = 7;
-pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_ARTBOARD;
-
-impl DevtestJump {
-    const fn game_selection(self) -> usize {
-        match self {
-            Self::Artboard => GAME_SELECTION_ARTBOARD,
-            Self::Sudoku => GAME_SELECTION_SUDOKU,
-        }
-    }
-}
+pub(crate) const GAME_SELECTION_2048: usize = 0;
+pub(crate) const GAME_SELECTION_TETRIS: usize = 1;
+pub(crate) const GAME_SELECTION_SUDOKU: usize = 2;
+pub(crate) const GAME_SELECTION_NONOGRAMS: usize = 3;
+pub(crate) const GAME_SELECTION_MINESWEEPER: usize = 4;
+pub(crate) const GAME_SELECTION_SOLITAIRE: usize = 5;
+pub(crate) const GAME_SELECTION_BLACKJACK: usize = 6;
+pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_2048;
 impl NotificationMode {
     /// Map the `notify_format` profile field to a concrete mode. Unknown
     /// or missing values fall back to `Both`, matching the on-read
@@ -272,7 +262,11 @@ pub struct App {
     /// `Drop` impl). A full SSH-session drop cascades through `App` → this
     /// `Option` → the underlying client, so the seat is released on logout
     /// or connection loss.
-    pub(crate) dartboard_state: Option<crate::app::games::artboard::state::State>,
+    pub(crate) dartboard_state: Option<crate::app::artboard::state::State>,
+    /// `true` while the dedicated Artboard screen is in editing mode.
+    /// View mode stays connected to the shared board but reserves global
+    /// screen hotkeys like `1-4` and `Tab`.
+    pub(crate) artboard_interacting: bool,
     pub(crate) dartboard_server: dartboard_local::ServerHandle,
     pub(crate) username: String,
 
@@ -572,11 +566,13 @@ impl App {
             settings_modal::ui::MODAL_WIDTH,
         );
         let (screen, show_settings, show_splash, game_selection) = match config.devtest_jump {
-            Some(jump) => (Screen::Games, false, false, jump.game_selection()),
+            Some(DevtestJump::Artboard) => {
+                (Screen::Artboard, false, false, DEFAULT_GAME_SELECTION)
+            }
+            Some(DevtestJump::Sudoku) => (Screen::Games, false, false, GAME_SELECTION_SUDOKU),
             None => (Screen::Dashboard, true, true, DEFAULT_GAME_SELECTION),
         };
-
-        Ok(Self {
+        let mut app = Self {
             running: true,
             size: (cols, rows),
             screen,
@@ -647,6 +643,7 @@ impl App {
             minesweeper_state,
             blackjack_state,
             dartboard_state: None,
+            artboard_interacting: false,
             dartboard_server,
             username,
             chip_balance: config.initial_chip_balance,
@@ -658,7 +655,11 @@ impl App {
             icon_picker_state: super::icon_picker::IconPickerState::default(),
             icon_catalog: None,
             last_terminal_bg: None,
-        })
+        };
+        if app.screen == Screen::Artboard {
+            app.enter_dartboard();
+        }
+        Ok(app)
     }
 
     /// Connect this session to the shared dartboard and install per-user
@@ -669,12 +670,12 @@ impl App {
         if self.dartboard_state.is_some() {
             return;
         }
-        let svc = crate::app::games::artboard::svc::DartboardService::new(
+        let svc = crate::app::artboard::svc::DartboardService::new(
             self.dartboard_server.clone(),
             self.user_id,
             &self.username,
         );
-        self.dartboard_state = Some(crate::app::games::artboard::state::State::new(svc));
+        self.dartboard_state = Some(crate::app::artboard::state::State::new(svc));
         self.set_cursor_shape(CURSOR_SHAPE_STEADY_UNDERLINE);
     }
 
@@ -686,6 +687,48 @@ impl App {
         }
         self.dartboard_state = None;
         self.set_cursor_shape(CURSOR_SHAPE_STEADY_BLOCK);
+    }
+
+    pub(crate) fn activate_artboard_interaction(&mut self) {
+        self.enter_dartboard();
+        self.artboard_interacting = true;
+    }
+
+    pub(crate) fn deactivate_artboard_interaction(&mut self) {
+        self.artboard_interacting = false;
+        if let Some(state) = self.dartboard_state.as_mut() {
+            state.clear_local_state();
+            state.close_help();
+            state.close_glyph_picker();
+        }
+    }
+
+    pub(crate) fn set_screen(&mut self, screen: Screen) {
+        if self.screen == screen {
+            if screen == Screen::Artboard {
+                self.enter_dartboard();
+            }
+            return;
+        }
+
+        if self.screen == Screen::Artboard {
+            self.deactivate_artboard_interaction();
+            self.leave_dartboard();
+        }
+
+        self.screen = screen;
+
+        if self.screen == Screen::Chat {
+            self.chat.request_list();
+            self.chat.sync_selection();
+            if let Some(room_id) = self.chat.selected_room_id {
+                self.chat.mark_room_read(room_id);
+            }
+        }
+
+        if self.screen == Screen::Artboard {
+            self.enter_dartboard();
+        }
     }
 
     fn set_cursor_shape(&mut self, sequence: &[u8]) {

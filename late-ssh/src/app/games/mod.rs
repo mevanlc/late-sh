@@ -1,4 +1,3 @@
-pub mod artboard;
 pub mod blackjack;
 pub mod cards;
 pub mod chips;

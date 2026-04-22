@@ -11,9 +11,9 @@ use ratatui::{
 use crate::app::{
     common::theme,
     state::{
-        GAME_SELECTION_2048, GAME_SELECTION_ARTBOARD, GAME_SELECTION_BLACKJACK,
-        GAME_SELECTION_MINESWEEPER, GAME_SELECTION_NONOGRAMS, GAME_SELECTION_SOLITAIRE,
-        GAME_SELECTION_SUDOKU, GAME_SELECTION_TETRIS,
+        GAME_SELECTION_2048, GAME_SELECTION_BLACKJACK, GAME_SELECTION_MINESWEEPER,
+        GAME_SELECTION_NONOGRAMS, GAME_SELECTION_SOLITAIRE, GAME_SELECTION_SUDOKU,
+        GAME_SELECTION_TETRIS,
     },
 };
 use late_core::models::leaderboard::{BadgeTier, LeaderboardData};
@@ -173,8 +173,6 @@ pub struct GamesHubView<'a> {
     pub solitaire_state: &'a super::solitaire::state::State,
     pub minesweeper_state: &'a super::minesweeper::state::State,
     pub blackjack_state: &'a super::blackjack::state::State,
-    pub dartboard_state: Option<&'a super::artboard::state::State>,
-    pub dartboard_peer_count: usize,
     pub is_admin: bool,
     pub leaderboard: &'a Arc<LeaderboardData>,
     pub show_sidebar: bool,
@@ -182,12 +180,7 @@ pub struct GamesHubView<'a> {
 
 pub fn draw_games_hub(frame: &mut Frame, area: Rect, view: &GamesHubView<'_>) {
     if view.is_playing_game {
-        if view.game_selection == GAME_SELECTION_ARTBOARD {
-            if let Some(state) = view.dartboard_state {
-                super::artboard::ui::draw_game(frame, area, state);
-            }
-            return;
-        } else if view.game_selection == GAME_SELECTION_2048 {
+        if view.game_selection == GAME_SELECTION_2048 {
             super::twenty_forty_eight::ui::draw_game(
                 frame,
                 area,
@@ -274,18 +267,6 @@ pub fn draw_games_hub(frame: &mut Frame, area: Rect, view: &GamesHubView<'_>) {
 
 fn draw_header(frame: &mut Frame, area: Rect, selection: usize) {
     let (art, subtitle, subtitle_indent) = match selection {
-        GAME_SELECTION_ARTBOARD => (
-            vec![
-                r#"     █████╗ ██████╗ ████████╗██████╗  ██████╗  █████╗ ██████╗ ██████╗ "#,
-                r#"    ██╔══██╗██╔══██╗╚══██╔══╝██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔══██╗"#,
-                r#"    ███████║██████╔╝   ██║   ██████╔╝██║   ██║███████║██████╔╝██║  ██║"#,
-                r#"    ██╔══██║██╔══██╗   ██║   ██╔══██╗██║   ██║██╔══██║██╔══██╗██║  ██║"#,
-                r#"    ██║  ██║██║  ██║   ██║   ██████╔╝╚██████╔╝██║  ██║██║  ██║██████╔╝"#,
-                r#"    ╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   ╚═════╝  ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝╚═════╝ "#,
-            ],
-            "Multi-user real-time shared ASCII artboard.",
-            "     ",
-        ),
         GAME_SELECTION_2048 => (
             vec![
                 r#"     ██████╗  ██████╗ ██╗  ██╗ █████╗ "#,
@@ -407,29 +388,6 @@ fn draw_game_list(frame: &mut Frame, area: Rect, view: &GamesHubView<'_>) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let selection = view.game_selection;
     let mut selected_line: usize = 0;
-
-    push_game_section(&mut lines, "─── Featured Game ───");
-    lines.push(Line::from(""));
-
-    draw_game_entry(
-        &mut lines,
-        &mut selected_line,
-        selection,
-        GameEntry {
-            idx: GAME_SELECTION_ARTBOARD,
-            name: "Artboard",
-            descriptions: &[
-                "Multi-user real-time shared ASCII artboard!",
-                "Make a masterpiece or just doodle with friends.",
-            ],
-            selected_style: Style::default()
-                .fg(theme::TEXT_BRIGHT())
-                .add_modifier(Modifier::BOLD),
-            normal_style: Style::default().fg(theme::TEXT()),
-            description_style: Style::default().fg(theme::TEXT_DIM()),
-            status: None,
-        },
-    );
 
     push_game_section(&mut lines, "─── High Score Games ───");
     lines.push(Line::from(""));

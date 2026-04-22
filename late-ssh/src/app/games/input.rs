@@ -1,35 +1,14 @@
 use crate::app::state::{
-    App, GAME_SELECTION_2048, GAME_SELECTION_ARTBOARD, GAME_SELECTION_BLACKJACK,
-    GAME_SELECTION_MINESWEEPER, GAME_SELECTION_NONOGRAMS, GAME_SELECTION_SOLITAIRE,
-    GAME_SELECTION_SUDOKU, GAME_SELECTION_TETRIS,
+    App, GAME_SELECTION_2048, GAME_SELECTION_BLACKJACK, GAME_SELECTION_MINESWEEPER,
+    GAME_SELECTION_NONOGRAMS, GAME_SELECTION_SOLITAIRE, GAME_SELECTION_SUDOKU,
+    GAME_SELECTION_TETRIS,
 };
 
-const LOBBY_GAME_COUNT: usize = 8;
+const LOBBY_GAME_COUNT: usize = 7;
 
 pub fn handle_key(app: &mut App, byte: u8) -> bool {
     if app.is_playing_game {
-        if app.game_selection == GAME_SELECTION_ARTBOARD {
-            let Some(state) = app.dartboard_state.as_mut() else {
-                // Not connected (shouldn't happen once we've entered the
-                // game, but guard rather than panic). Treat as a leave.
-                app.is_playing_game = false;
-                return true;
-            };
-            let action = super::artboard::input::handle_byte(state, app.size, byte);
-            match action {
-                super::artboard::input::InputAction::Ignored => return false,
-                super::artboard::input::InputAction::Handled => return true,
-                super::artboard::input::InputAction::Copy(text) => {
-                    app.pending_clipboard = Some(text);
-                    return true;
-                }
-                super::artboard::input::InputAction::Leave => {
-                    app.is_playing_game = false;
-                    app.leave_dartboard();
-                    return true;
-                }
-            }
-        } else if app.game_selection == GAME_SELECTION_2048 {
+        if app.game_selection == GAME_SELECTION_2048 {
             if byte == 0x1B || byte == b'q' || byte == b'Q' {
                 // Exit game mode back to lobby
                 app.is_playing_game = false;
@@ -99,8 +78,7 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
             true
         }
         b'\r' | b'\n' => {
-            if app.game_selection == GAME_SELECTION_ARTBOARD
-                || app.game_selection == GAME_SELECTION_2048
+            if app.game_selection == GAME_SELECTION_2048
                 || app.game_selection == GAME_SELECTION_TETRIS
                 || app.game_selection == GAME_SELECTION_SUDOKU
                 || (app.game_selection == GAME_SELECTION_NONOGRAMS
@@ -110,9 +88,6 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
                 || (app.game_selection == GAME_SELECTION_BLACKJACK && app.is_admin)
             {
                 app.is_playing_game = true;
-                if app.game_selection == GAME_SELECTION_ARTBOARD {
-                    app.enter_dartboard();
-                }
             }
             true
         }
@@ -137,11 +112,6 @@ pub fn handle_arrow(app: &mut App, key: u8) -> bool {
             return super::minesweeper::input::handle_arrow(&mut app.minesweeper_state, key);
         } else if app.game_selection == GAME_SELECTION_SOLITAIRE {
             return super::solitaire::input::handle_arrow(&mut app.solitaire_state, key);
-        } else if app.game_selection == GAME_SELECTION_ARTBOARD {
-            let Some(state) = app.dartboard_state.as_mut() else {
-                return false;
-            };
-            return super::artboard::input::handle_arrow(state, app.size, key);
         }
         return false;
     }
@@ -163,26 +133,7 @@ pub fn handle_arrow(app: &mut App, key: u8) -> bool {
     }
 }
 
-pub(crate) fn handle_event(app: &mut App, event: &crate::app::input::ParsedInput) -> bool {
-    if !(app.is_playing_game && app.game_selection == GAME_SELECTION_ARTBOARD) {
-        return false;
-    }
-    let Some(state) = app.dartboard_state.as_mut() else {
-        return false;
-    };
-
-    let action = super::artboard::input::handle_event(state, app.size, event);
-    match action {
-        super::artboard::input::InputAction::Ignored => false,
-        super::artboard::input::InputAction::Handled => true,
-        super::artboard::input::InputAction::Copy(text) => {
-            app.pending_clipboard = Some(text);
-            true
-        }
-        super::artboard::input::InputAction::Leave => {
-            app.is_playing_game = false;
-            app.leave_dartboard();
-            true
-        }
-    }
+pub(crate) fn handle_event(_app: &mut App, event: &crate::app::input::ParsedInput) -> bool {
+    let _ = event;
+    false
 }

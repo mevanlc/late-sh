@@ -74,7 +74,7 @@ async fn q_opens_quit_confirm_and_escape_dismisses_it() {
 }
 
 #[tokio::test]
-async fn screen_number_keys_switch_between_dashboard_games_and_chat() {
+async fn screen_number_keys_switch_between_dashboard_games_chat_and_artboard() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "screen-it").await;
     let client = test_db.db.get().await.expect("db client");
@@ -91,6 +91,9 @@ async fn screen_number_keys_switch_between_dashboard_games_and_chat() {
 
     app.handle_input(b"3");
     wait_for_render_contains(&mut app, " The Arcade ").await;
+
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Mode       view").await;
 
     app.handle_input(b"1");
     wait_for_render_contains(&mut app, " Dashboard ").await;
@@ -127,7 +130,7 @@ async fn devtest_sudoku_jump_starts_on_games_without_intro_overlays() {
 }
 
 #[tokio::test]
-async fn devtest_artboard_jump_starts_on_games_without_intro_overlays() {
+async fn devtest_artboard_jump_starts_on_artboard_without_intro_overlays() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "devtest-artboard-it").await;
     let mut app = make_app_with_devtest_jump(
@@ -139,20 +142,16 @@ async fn devtest_artboard_jump_starts_on_games_without_intro_overlays() {
 
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains(" The Arcade "),
-        "expected devtest jump to land on the games hub; frame={frame:?}"
+        frame.contains("Artboard "),
+        "expected devtest jump to land on the dedicated artboard screen; frame={frame:?}"
     );
     assert!(
-        frame.contains("> [ Artboard ]"),
-        "expected artboard to be preselected on devtest jump; frame={frame:?}"
+        frame.contains("Mode       view"),
+        "expected artboard devtest jump to open in view mode; frame={frame:?}"
     );
     assert!(
-        frame.contains("─── Featured Game ───"),
-        "expected artboard devtest jump to render the featured section; frame={frame:?}"
-    );
-    assert!(
-        frame.contains("Multi-user real-time shared ASCII") && frame.contains("artboard!"),
-        "expected artboard devtest jump to show the featured artboard copy; frame={frame:?}"
+        !frame.contains(" The Arcade "),
+        "expected artboard devtest jump to skip the arcade hub entirely; frame={frame:?}"
     );
     assert!(
         !frame.contains(" Settings "),
@@ -178,6 +177,9 @@ async fn shift_tab_cycles_screens_backwards() {
     let mut app = make_app(test_db.db.clone(), user.id, "screen-backtab-flow-it");
 
     app.handle_input(b"\x1b[Z");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+
+    app.handle_input(b"\x1b[Z");
     wait_for_render_contains(&mut app, " The Arcade ").await;
 
     app.handle_input(b"\x1b[Z");
@@ -188,19 +190,51 @@ async fn shift_tab_cycles_screens_backwards() {
 }
 
 #[tokio::test]
-async fn active_game_blocks_screen_number_hotkeys() {
+async fn artboard_view_mode_allows_cursor_movement_and_screen_hotkeys() {
     let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "games-hotkey-it").await;
-    let mut app = make_app(test_db.db.clone(), user.id, "games-hotkey-flow-it");
+    let user = create_test_user(&test_db.db, "artboard-view-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-view-flow-it");
 
-    app.handle_input(b"3");
-    wait_for_render_contains(&mut app, " The Arcade ").await;
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    wait_for_render_contains(&mut app, "Cursor     0,0").await;
 
-    app.handle_input(b"\n");
-    wait_for_render_contains(&mut app, "Artboard ").await;
+    app.handle_input(b"\x1b[C");
+    wait_for_render_contains(&mut app, "Cursor     1,0").await;
 
     app.handle_input(b"1");
-    wait_for_render_contains(&mut app, "Artboard ").await;
+    wait_for_render_contains(&mut app, " Dashboard ").await;
+}
+
+#[tokio::test]
+async fn active_artboard_blocks_screen_number_hotkeys_until_escape() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "artboard-active-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-active-flow-it");
+
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+
+    app.handle_input(b"i");
+    wait_for_render_contains(&mut app, "Mode       active").await;
+
+    app.handle_input(b"1");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Mode       active"),
+        "expected active artboard mode to keep focus after numeric hotkeys; frame={frame:?}"
+    );
+    assert!(
+        !frame.contains(" Dashboard "),
+        "expected active artboard mode to block screen switching; frame={frame:?}"
+    );
+
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+
+    app.handle_input(b"1");
+    wait_for_render_contains(&mut app, " Dashboard ").await;
 }
 
 #[tokio::test]

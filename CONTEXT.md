@@ -38,7 +38,7 @@ This file is the primary working context for the entire late.sh project.
 The system is a Rust workspace with four crates (`late-cli`, `late-core`, `late-ssh`, `late-web`) backed by PostgreSQL, Icecast audio streaming, and Liquidsoap playlist management.
 
 - **Primary entry points:** SSH server (russh on port 2222), HTTP API (axum on port 4000), Web server (axum on port 3000)
-- **Main responsibilities:** Multi-screen TUI over SSH (Dashboard, Chat, News, The Arcade), genre voting, paired browser/CLI audio control plus visualizer, real-time global chat (regular SSH chat messages support a small Markdown subset: headings, bold, italic, inline code, blockquotes, and simple `- ` list items; messages also carry simple per-user numeric reactions `1..5` rendered as footer chips beneath the message block; `---NEWS---` cards still use their dedicated renderer), link and YouTube sharing with AI summaries/ASCII thumbnails, interactive terminal games (2048, Sudoku, Nonograms, Minesweeper, Solitaire, admin-gated Blackjack), and configurable right-side panels: the global app sidebar (now playing, activity, visualizer, bonsai) plus the arcade lobby leaderboard sidebar, both default-on. Global `q` now opens a quit-confirm modal; pressing `q` again exits and `Esc` dismisses it. `@bot` mention replies now receive compact context about online non-bot members in the active room (username plus optional bio/country/timezone, capped and truncated for prompt size).
+- **Main responsibilities:** Multi-screen TUI over SSH (Dashboard, Chat, News, The Arcade, Artboard), genre voting, paired browser/CLI audio control plus visualizer, real-time global chat (regular SSH chat messages support a small Markdown subset: headings, bold, italic, inline code, blockquotes, and simple `- ` list items; messages also carry simple per-user numeric reactions `1..5` rendered as footer chips beneath the message block; `---NEWS---` cards still use their dedicated renderer), link and YouTube sharing with AI summaries/ASCII thumbnails, interactive terminal games (2048, Sudoku, Nonograms, Minesweeper, Solitaire, admin-gated Blackjack), a dedicated shared multi-user ASCII artboard screen, and configurable right-side panels: the global app sidebar (now playing, activity, visualizer, bonsai) plus the arcade lobby leaderboard sidebar, both default-on. Global `q` now opens a quit-confirm modal; pressing `q` again exits and `Esc` dismisses it. `@bot` mention replies now receive compact context about online non-bot members in the active room (username plus optional bio/country/timezone, capped and truncated for prompt size).
 - **Highest-risk areas:** SSH render loop backpressure, connection limiting, chat sync consistency, paired-client WS routing/state drift
 
 ---
@@ -429,6 +429,164 @@ Current invariants:
 - Browser and CLI share the same paired-client protocol, so the TUI can show target kind plus live mute/volume state in the sidebar.
 - The CLI currently requires a working local audio output device to fully start.
 - Native SSH is now the default launcher path; `--ssh-mode old` remains the compatibility fallback. Native mode requires a server that supports the `late-cli-token-v1` SSH exec handshake.
+
+### 2.10 Artboard (Shared ASCII Canvas) [STABLE]
+
+`Artboard` is the user-facing name. The code and upstream crates still use `dartboard` heavily (`src/dartboard.rs`, `app/artboard/svc.rs`, `dartboard_core`, `dartboard_local`, `dartboard_editor`, `dartboard_tui`). When searching the repo, use both terms.
+
+#### High-level model
+
+- The artboard is a shared, persistent, multiplayer ASCII canvas on its own top-level app screen (`4`, or cycle with `Tab` / `Shift+Tab`).
+- The server owns one in-proc `dartboard_local::ServerHandle` for the whole `late-ssh` process.
+- The canonical canvas size is `384 x 192` (`late-ssh/src/dartboard.rs`).
+- A user does **not** connect to the shared board at SSH login. They only consume a peer/color slot after opening the Artboard screen.
+- Entering the Artboard screen opens in `view` mode; `i` / `Enter` switches into `active` edit mode.
+- Leaving the Artboard screen drops that session's `LocalClient` and frees the slot immediately.
+
+```mermaid
+flowchart LR
+    Nav["Screen 4 / Tab"] --> Page["App::set_screen(Screen::Artboard)"]
+    Page --> Enter["App::enter_dartboard()"]
+    Enter --> Svc["DartboardService::new()"]
+    Svc --> Client["dartboard_local::LocalClient<br/>per session"]
+    Client <-->|CanvasOp / ServerMsg| Server["Shared ServerHandle<br/>process-wide"]
+    Server --> Snap["watch::Receiver<DartboardSnapshot>"]
+    Server --> Events["broadcast::Receiver<DartboardEvent>"]
+    Snap --> State["artboard::state::State"]
+    Events --> State
+    State --> UI["artboard::ui + render loop"]
+    Server --> Persist["Postgres snapshot persistence"]
+```
+
+#### Runtime split: authoritative shared state vs local editor state
+
+Only canvas mutations are shared. Editor affordances stay local to the current SSH session.
+
+**Shared / authoritative**
+- Canvas contents
+- Peer list
+- Assigned user color
+- Sequence number / ack progress
+- Connect rejection state
+
+**Local / session-private**
+- Cursor and viewport origin
+- Active selection anchor
+- Floating brush / floating selection preview
+- Swatch strip contents + pin state
+- Temporary sampled glyph brush
+- Help overlay tab + scroll
+- Glyph picker search state
+- Private notice text
+
+This split is intentional: the multiplayer protocol syncs `CanvasOp`s, not full editor sessions. Two users can have completely different local selections/swatches while painting into the same shared board.
+
+#### Connection and service lifecycle
+
+1. `late-ssh/src/main.rs` loads the last persisted artboard snapshot from Postgres on server boot, then spawns the persistent in-proc dartboard server.
+2. `SessionConfig` carries that shared `dartboard_server` handle into each SSH app instance.
+3. `App::set_screen(Screen::Artboard)` lazily calls `App::enter_dartboard()`, creating a per-user `DartboardService` and `artboard::state::State`, and switching the terminal cursor to steady underline.
+4. `DartboardService` calls `ServerHandle::try_connect_local(...)`. On success it spawns a dedicated OS thread that:
+   - polls a local command channel every ~16ms
+   - submits `CanvasOp`s to the shared server
+   - drains `ServerMsg`s into a `watch` snapshot plus `broadcast` event stream
+5. `App::tick()` calls `dartboard_state.tick()` when present, which refreshes the local snapshot, updates cursor clamping, and surfaces rejection/lag notices.
+6. `App::leave_dartboard()` drops the local state and restores the normal block cursor.
+
+Important operational note:
+- Connection overflow is handled at connect time. The upstream server enforces a hard player cap (`dartboard_local::MAX_PLAYERS`); an overflow session gets `connect_rejected` instead of a live board connection.
+
+#### Persistence model
+
+- Runtime helper: `late-ssh/src/dartboard.rs`
+- Snapshot row model: `late_core::models::artboard::Snapshot`
+- Board key: `Snapshot::MAIN_BOARD_KEY`
+
+Persistence behavior:
+- The shared server boots from the last saved snapshot if one exists; otherwise it starts with a blank `384 x 192` canvas.
+- Canvas saves are coalesced and persisted in the background every 5 minutes while dirty.
+- Shutdown/drain explicitly flushes the latest in-memory artboard snapshot before process exit.
+- Tests cover both periodic persistence and explicit flush-on-demand (`late-ssh/tests/games/artboard.rs`).
+
+#### Interaction model
+
+The artboard is keyboard-first, but it is not "just type into a grid". It layers a local editor model on top of the shared canvas and now has two interaction modes:
+
+- `view` mode: inspect the board, move the cursor/viewport, and keep global page switching (`1-4`, `Tab`, `Shift+Tab`) available.
+- `active` mode: edit the board. Single-key global shortcuts are suppressed so typing goes to the canvas/editor.
+
+```text
+type chars -> draw directly
+select region -> copy/cut -> swatch
+activate swatch -> floating brush
+Enter / ^V -> stamp brush
+^⇧+arrows -> stroke floating brush
+Esc -> dismiss brush/floating first, then clear selection
+```
+
+Key behaviors:
+- Artboard opens in `view` mode.
+- In `view` mode, arrows/Home/End/PageUp/PageDown move around the board without entering draw mode.
+- `i` or `Enter` enters `active` mode.
+- Plain typing draws directly at the cursor.
+- Typing space erases at the cursor.
+- `Shift+arrows` starts/extends a selection.
+- Mouse drag participates in the same editor selection/pointer model.
+- `Ctrl+C` / `Ctrl+X` copy or cut the current selection into the swatch strip.
+- Clicking a swatch body, or using `Ctrl+A / Ctrl+S / Ctrl+D / Ctrl+F / Ctrl+G`, activates swatch slots `1..5` as a floating brush.
+- Activating the currently active swatch again toggles floating-brush transparency.
+- `Enter` or `Ctrl+V` stamps the active floating brush without dismissing it.
+- `Ctrl+Shift+arrows` strokes a floating brush from the keyboard.
+- `Ctrl+]` opens the glyph picker for emoji / Unicode glyph insertion.
+- Double-clicking an existing non-space cell samples it into a temporary one-glyph brush.
+- `Ctrl+P` toggles the help overlay.
+- `Esc` closes transient Artboard overlays first, then returns from `active` mode to `view` mode.
+
+Mouse-specific extras:
+- Click swatch pin icon to pin/unpin a swatch.
+- `Ctrl+click` a swatch body clears that swatch slot.
+- Mouse wheel pans the viewport when the pointer is over the canvas.
+- Mouse wheel over the info overlay is intentionally swallowed so it does not pan the board underneath.
+
+#### Keyboard reference
+
+| Action | Keys / Mouse | Notes |
+| --- | --- | --- |
+| Open Artboard | `4`, `Tab`, `Shift+Tab` | Dedicated top-level screen; entering it also connects a local client |
+| Move around in view mode | `←↑↓→`, `Home`, `End`, `PgUp`, `PgDn`, mouse wheel | Lets users inspect/pan without entering draw mode |
+| Enter active mode | `i`, `Enter` | Switches the screen from inspect to edit |
+| Draw / erase in active mode | `<type>`, `Space`, `Backspace`, `Delete` | Plain typing edits the shared canvas |
+| Select | `Shift+arrows`, mouse drag | Local selection only |
+| Copy / cut to swatch | `Ctrl+C`, `Ctrl+X` | Fills swatch strip; does not sync to peers |
+| Activate swatch brush | click swatch, `Ctrl+A/S/D/F/G` | Slots `1..5` on the home row |
+| Stamp floating brush | `Enter`, `Ctrl+V` | Brush stays active |
+| Stroke floating brush | `Ctrl+Shift+arrows` | Repeated stamps while moving |
+| Toggle brush transparency | activate same swatch again | Floating preview shows transparency state |
+| Glyph picker | `Ctrl+]` | Searchable emoji / Unicode picker |
+| Help | `Ctrl+P` | Overlay with guide + upstream keymap rows |
+| Return to view mode | `Esc` | Also closes help / glyph-picker before exiting edit mode |
+| Leave Artboard page | `1-4`, `Tab`, `Shift+Tab` | Available from `view` mode |
+
+#### UI and integration notes
+
+- Artboard now lives under `late-ssh/src/app/artboard/`, not `app/games/artboard/`.
+- The Artboard screen has its own renderer and does **not** use the generic game frame/sidebar layout used by the arcade games.
+- The screen chrome exposes `view` vs `active` mode explicitly in both the frame title and the Artboard info sidebar.
+- The artboard info sidebar shows cursor position, pan availability, brush status, current selection size, and connected peers.
+- In `view` mode, global page switching stays live; in `active` mode, single-key global shortcuts are intentionally suppressed so the editor owns typing.
+- The global app quit-confirm still exists, but `Esc` is reserved for backing Artboard from overlay -> view mode before any screen change.
+- `LATE_DEVTEST_ENV=1` plus SSH login name `artboard` jumps directly into the Artboard screen in `view` mode (see `resolve_devtest_jump` in `late-ssh/src/ssh.rs`).
+
+#### Key files
+
+- `late-ssh/src/dartboard.rs` — process-wide server + persistence wrapper
+- `late-ssh/src/app/artboard/svc.rs` — per-session client/service bridge
+- `late-ssh/src/app/artboard/state.rs` — local editor/session state
+- `late-ssh/src/app/artboard/input.rs` — keyboard/mouse routing for active mode
+- `late-ssh/src/app/artboard/page.rs` — dedicated-screen routing for view vs active mode
+- `late-ssh/src/app/artboard/ui.rs` — canvas/sidebar/help/swatch rendering
+- `late-ssh/tests/games/artboard.rs` — service + persistence integration tests
+- `late-ssh/src/app/input.rs`, `late-ssh/src/app/tick.rs`, `late-ssh/src/app/render.rs` — SSH app integration points
 
 ---
 
@@ -1070,6 +1228,7 @@ Use narrower crate-specific `cargo test` / `cargo nextest run` commands ad hoc w
 | **Dashboard** | 1 | Active | Now playing + vibe voting + `/music` hint + dashboard chat (The Lounge Hub) |
 | **Chat** | 2 | Active | Full room-list chat screen (`/dm @user`, `/public #room`, `/private #room`, `/invite @user`, `/members`, `/leave`, `/active`, `/list`, `/ignore [@user]`, `/unignore [@user]`, `/music`, `/settings`, `/help`) with grouped room sections and synthetic `news`, `mentions`, and `discover` entries in the room list. `discover` shows public rooms you have not joined yet with member/message counts; Enter joins the selected room. `/public #room` opens or creates an opt-in public room and joins only the caller. |
 | **Games** | 3 | Active | The Arcade Lobby + leaderboard sidebar (champions, streaks, all-time high scores, chip leaders, info): persisted high-score games (`2048`, `Tetris`), daily games (`Sudoku`, `Nonograms`, `Minesweeper`, `Solitaire`), and admin-gated shared-table Blackjack. Game list auto-scrolls (top-third anchor); ASCII header hides on small screens |
+| **Artboard** | 4 | Active | Dedicated shared ASCII canvas screen. Opens in `view` mode for navigation and screen switching; `i` / `Enter` enters `active` edit mode; `Esc` returns to `view` mode. |
 
 ### Layout
 

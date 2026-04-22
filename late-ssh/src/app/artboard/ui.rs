@@ -7,10 +7,10 @@ use dartboard_tui::{CanvasStyle, CanvasWidget, CanvasWidgetState};
 use ratatui::{
     Frame,
     buffer::Buffer,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Flex, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
@@ -35,8 +35,8 @@ pub(crate) enum SwatchHit {
     Pin(usize),
 }
 
-pub fn draw_game(frame: &mut Frame, area: Rect, state: &State) {
-    let info = artboard_info_lines(state);
+pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, interacting: bool) {
+    let info = artboard_info_lines(state, interacting);
     let layout = artboard_layout(area);
     let info_area = info_block_area(layout.info_anchor, info.len());
     draw_canvas(frame, area, layout.canvas, info_area, state);
@@ -81,12 +81,25 @@ fn draw_artboard_sidebar(frame: &mut Frame, info_area: Option<Rect>, info_lines:
     }
 }
 
-fn artboard_info_lines(state: &State) -> Vec<Line<'static>> {
+fn artboard_info_lines(state: &State, interacting: bool) -> Vec<Line<'static>> {
     let mut lines = vec![info_label_value(
+        "Mode",
+        if interacting {
+            "active".to_string()
+        } else {
+            "view".to_string()
+        },
+        if interacting {
+            theme::AMBER()
+        } else {
+            theme::TEXT_BRIGHT()
+        },
+    )];
+    lines.push(info_label_value(
         "Cursor",
         format!("{},{}", state.cursor().x, state.cursor().y),
         theme::AMBER(),
-    )];
+    ));
     lines.push(pan_indicator_line(state));
 
     let (brush, brush_color) = match state.brush_mode() {
@@ -663,31 +676,42 @@ fn artboard_game_area_for_screen(screen_size: (u16, u16)) -> Rect {
 }
 
 fn artboard_info_area_for_screen(screen_size: (u16, u16), state: &State) -> Option<Rect> {
-    let info_lines = artboard_info_lines(state);
+    let info_lines = artboard_info_lines(state, false);
     let layout = artboard_layout(artboard_game_area_for_screen(screen_size));
     info_block_area(layout.info_anchor, info_lines.len())
 }
 
 fn help_popup_area(area: Rect) -> Rect {
-    let width = 64u16.min(area.width.saturating_sub(4));
-    let height = 22u16.min(area.height.saturating_sub(2));
-    let x = (area.width.saturating_sub(width)) / 2 + area.x;
-    let y = (area.height.saturating_sub(height)) / 2 + area.y;
-    Rect::new(x, y, width, height)
+    centered_rect(76, 28, area)
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([Constraint::Length(height.min(area.height))])
+        .flex(Flex::Center)
+        .split(area);
+    let horizontal = Layout::horizontal([Constraint::Length(width.min(area.width))])
+        .flex(Flex::Center)
+        .split(vertical[0]);
+    horizontal[0]
 }
 
 fn help_tab_hits(area: Rect, active: HelpTab) -> Vec<(HelpTab, Rect)> {
     let popup = help_popup_area(area);
-    let inner = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .inner(popup);
-    if inner.height < HELP_TAB_ROWS + 2 || inner.width < 10 {
+    let inner = Block::default().borders(Borders::ALL).inner(popup);
+    if inner.height < HELP_TAB_ROWS + 4 || inner.width < 10 {
         return Vec::new();
     }
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(HELP_TAB_ROWS),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+    ])
+    .split(inner);
     render_help_tabs_in_buffer(
         &mut Buffer::empty(popup),
-        Rect::new(inner.x, inner.y, inner.width, HELP_TAB_ROWS),
+        layout[1],
         active,
     )
 }
@@ -727,49 +751,44 @@ fn draw_help(frame: &mut Frame, area: Rect, state: &State) {
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
+        .title(" Artboard Help ")
+        .title_style(
+            Style::default()
+                .fg(theme::AMBER_GLOW())
+                .add_modifier(Modifier::BOLD),
+        )
         .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(theme::BORDER_ACTIVE()))
-        .title(Span::styled(
-            " help ",
-            Style::default().fg(theme::TEXT_BRIGHT()),
-        ))
-        .title(
-            Line::from(vec![
-                Span::styled("tab", Style::default().fg(theme::AMBER_DIM())),
-                Span::raw(" "),
-                Span::styled("switch ", Style::default().fg(theme::TEXT_DIM())),
-            ])
-            .right_aligned(),
-        );
+        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
 
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    if inner.height < HELP_TAB_ROWS + 2 || inner.width < 10 {
+    if inner.height < HELP_TAB_ROWS + 4 || inner.width < 10 {
         return;
     }
 
-    let tabs_area = Rect::new(inner.x, inner.y, inner.width, HELP_TAB_ROWS);
-    render_help_tabs(frame.buffer_mut(), tabs_area, state.help_tab());
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(HELP_TAB_ROWS),
+        Constraint::Length(1),
+        Constraint::Min(8),
+        Constraint::Length(1),
+    ])
+    .split(inner);
 
-    let (_, sep, _, _) = help_styles();
-    let divider_y = inner.y + HELP_TAB_ROWS;
-    frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(
-            "─".repeat(inner.width as usize),
-            sep,
-        ))),
-        Rect::new(inner.x, divider_y, inner.width, 1),
-    );
+    render_help_tabs(frame.buffer_mut(), layout[1], state.help_tab());
 
-    let content_y = divider_y + 1;
-    let content = Rect::new(
-        inner.x,
-        content_y,
-        inner.width,
-        inner.height.saturating_sub(HELP_TAB_ROWS + 1),
-    );
+    let content = layout[3].inner(Margin::new(1, 0));
     render_help_section(frame, content, state.help_tab(), state.help_scroll());
+
+    let footer = Line::from(vec![
+        Span::styled("Tab/←→", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" switch  ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("j/k ↑↓", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" scroll  ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("Esc/q", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" close", Style::default().fg(theme::TEXT_DIM())),
+    ]);
+    frame.render_widget(Paragraph::new(footer), layout[4]);
 }
 
 fn render_help_tabs(frame: &mut Buffer, area: Rect, active: HelpTab) {
@@ -795,21 +814,21 @@ fn render_help_tabs_in_buffer(
         if row >= area.height {
             break;
         }
-        let mut x = area.x + 1;
+        let mut x = area.x;
         for width in col_widths.iter().take(col) {
             x = x.saturating_add(*width).saturating_add(HELP_TAB_GAP);
         }
         let y = area.y + row;
         let is_active = *tab == active;
-        let indicator = if is_active { "•" } else { " " };
         let style = if is_active {
             Style::default()
-                .fg(theme::TEXT_BRIGHT())
+                .fg(theme::AMBER_GLOW())
+                .bg(theme::BG_HIGHLIGHT())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::TEXT_FAINT())
+            Style::default().fg(theme::TEXT_DIM())
         };
-        let text = format!("[{indicator}] {}", tab.label());
+        let text = format!(" {} ", tab.label());
         let start_x = x;
         for ch in text.chars() {
             if x >= area.right() {
@@ -855,25 +874,32 @@ fn help_rows_for_tab(tab: HelpTab) -> Vec<(&'static str, &'static str)> {
         HelpTab::Selection => keymap_help_rows(KeyMapHelpSection::Selection),
         HelpTab::Clipboard => keymap_help_rows(KeyMapHelpSection::Clipboard),
         HelpTab::Transform => keymap_help_rows(KeyMapHelpSection::Transform),
-        HelpTab::Session => vec![("^P", "help toggle"), ("^Q", "leave artboard")],
+        HelpTab::Session => vec![
+            ("i / Enter", "enter active mode"),
+            ("Esc", "return to view mode"),
+            ("1-4 / Tab", "switch pages in view mode"),
+            ("^P", "help toggle"),
+        ],
     }
 }
 
 const GUIDE_PROSE: &[&str] = &[
-    "Move the caret with arrows and type to draw.",
+    "Artboard opens in view mode. Move with arrows,",
+    "Home/End, PgUp/PgDn, or mouse wheel.",
     "",
-    "Hold shift with arrows or drag with the mouse to select.",
-    "Type to fill the selection. Use ^X/^C/^V to cut/copy/",
-    "paste to swatches. Click a swatch to use it as a brush.",
+    "Press i or Enter to enter active mode and edit.",
+    "In active mode, type to draw and use Esc to return",
+    "to view mode.",
     "",
-    "Ctrl+] to insert emojis or unicode characters.",
-    "Enter stamps a floating brush without dismissing it.",
-    "^⇧+arrows strokes a floating brush from the keyboard.",
+    "Hold shift with arrows or drag with the mouse to",
+    "select. Use ^X/^C to cut/copy to swatches, then",
+    "click a swatch to use it as a brush.",
     "",
-    "^P toggles this help. Tab or arrows switch tabs; j/k,",
-    "arrows, PgUp/PgDn, and Home scroll the current tab.",
+    "Ctrl+] opens the glyph picker. Enter stamps a",
+    "floating brush. ^⇧+arrows stroke the floating brush.",
     "",
-    "View more key bindings in the other tabs (press tab).",
+    "^P toggles this help. Tab or arrows switch tabs;",
+    "j/k, arrows, PgUp/PgDn, and Home scroll the modal.",
 ];
 
 fn build_guide_lines(desc: Style) -> Vec<Line<'static>> {
@@ -982,7 +1008,7 @@ fn pad_right_display(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::games::artboard::state::State;
+    use crate::app::artboard::state::State;
     use dartboard_core::{CellValue, RgbColor};
     use dartboard_editor::Clipboard;
     use ratatui::buffer::Buffer;
@@ -1036,14 +1062,15 @@ mod tests {
     }
 
     #[test]
-    fn info_lines_include_pan_row_before_brush() {
+    fn info_lines_include_mode_and_pan_rows_before_brush() {
         let state = test_state();
-        let lines = artboard_info_lines(&state);
+        let lines = artboard_info_lines(&state, false);
 
-        assert_eq!(lines[0].to_string(), "Cursor     0,0");
-        assert_eq!(lines[1].to_string(), "Pan        ◀ ▲ ▼ ▶");
-        assert_eq!(lines[2].to_string(), "Brush      none");
-        assert_eq!(lines[3].to_string(), "Selection  none");
+        assert_eq!(lines[0].to_string(), "Mode       view");
+        assert_eq!(lines[1].to_string(), "Cursor     0,0");
+        assert_eq!(lines[2].to_string(), "Pan        ◀ ▲ ▼ ▶");
+        assert_eq!(lines[3].to_string(), "Brush      none");
+        assert_eq!(lines[4].to_string(), "Selection  none");
     }
 
     #[test]
@@ -1055,8 +1082,9 @@ mod tests {
         state.move_down((80, 24));
         assert!(state.update_selection_to_cursor());
 
-        let lines = artboard_info_lines(&state);
-        assert_eq!(lines[3].to_string(), "Selection  3x2");
+        let lines = artboard_info_lines(&state, true);
+        assert_eq!(lines[0].to_string(), "Mode       active");
+        assert_eq!(lines[4].to_string(), "Selection  3x2");
     }
 
     #[test]
