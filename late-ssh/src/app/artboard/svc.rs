@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub struct DartboardSnapshot {
     pub canvas: Canvas,
     pub peers: Vec<Peer>,
+    pub your_name: String,
     pub your_user_id: Option<UserId>,
     pub your_color: Option<RgbColor>,
     pub last_seq: Seq,
@@ -55,11 +56,17 @@ enum Command {
 
 impl DartboardService {
     pub fn new(server: ServerHandle, user_id: Uuid, username: &str) -> Self {
+        let username = username.to_string();
+        let preferred_color = preferred_user_color(user_id);
         let hello = Hello {
-            name: username.to_string(),
-            color: preferred_user_color(user_id),
+            name: username.clone(),
+            color: preferred_color,
         };
-        let (snapshot_tx, snapshot_rx) = watch::channel(DartboardSnapshot::default());
+        let (snapshot_tx, snapshot_rx) = watch::channel(DartboardSnapshot {
+            your_name: username.clone(),
+            your_color: Some(preferred_color),
+            ..Default::default()
+        });
         let (event_tx, _) = broadcast::channel(128);
         let (command_tx, command_rx) = mpsc::channel();
 
@@ -67,15 +74,24 @@ impl DartboardService {
             ConnectOutcome::Accepted(client) => {
                 let thread_snapshot_tx = snapshot_tx.clone();
                 let thread_event_tx = event_tx.clone();
+                let thread_username = username.clone();
                 thread::Builder::new()
                     .name(format!("dartboard-{}", user_id))
                     .spawn(move || {
-                        run_client_loop(client, command_rx, thread_snapshot_tx, thread_event_tx)
+                        run_client_loop(
+                            client,
+                            command_rx,
+                            thread_snapshot_tx,
+                            thread_event_tx,
+                            thread_username,
+                        )
                     })
                     .expect("failed to spawn dartboard client loop");
             }
             ConnectOutcome::Rejected(reason) => {
                 let rejected_snapshot = DartboardSnapshot {
+                    your_name: username,
+                    your_color: Some(preferred_color),
                     connect_rejected: Some(reason),
                     ..Default::default()
                 };
@@ -127,18 +143,19 @@ fn run_client_loop(
     command_rx: mpsc::Receiver<Command>,
     snapshot_tx: watch::Sender<DartboardSnapshot>,
     event_tx: broadcast::Sender<DartboardEvent>,
+    username: String,
 ) {
     loop {
         match command_rx.recv_timeout(Duration::from_millis(16)) {
             Ok(Command::SubmitOp(op)) => {
                 client.submit_op(op);
-                drain_server_messages(&mut client, &snapshot_tx, &event_tx);
+                drain_server_messages(&mut client, &snapshot_tx, &event_tx, &username);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                drain_server_messages(&mut client, &snapshot_tx, &event_tx);
+                drain_server_messages(&mut client, &snapshot_tx, &event_tx, &username);
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                drain_server_messages(&mut client, &snapshot_tx, &event_tx);
+                drain_server_messages(&mut client, &snapshot_tx, &event_tx, &username);
                 break;
             }
         }
@@ -149,9 +166,10 @@ fn drain_server_messages(
     client: &mut LocalClient,
     snapshot_tx: &watch::Sender<DartboardSnapshot>,
     event_tx: &broadcast::Sender<DartboardEvent>,
+    username: &str,
 ) {
     while let Some(msg) = client.try_recv() {
-        handle_server_msg(msg, snapshot_tx, event_tx);
+        handle_server_msg(msg, snapshot_tx, event_tx, username);
     }
 }
 
@@ -159,6 +177,7 @@ fn handle_server_msg(
     msg: ServerMsg,
     snapshot_tx: &watch::Sender<DartboardSnapshot>,
     event_tx: &broadcast::Sender<DartboardEvent>,
+    username: &str,
 ) {
     match msg {
         ServerMsg::Welcome {
@@ -170,6 +189,7 @@ fn handle_server_msg(
             let _ = snapshot_tx.send(DartboardSnapshot {
                 canvas: snapshot,
                 peers,
+                your_name: username.to_string(),
                 your_user_id: Some(your_user_id),
                 your_color: Some(your_color),
                 last_seq: 0,

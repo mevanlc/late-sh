@@ -168,20 +168,29 @@ fn artboard_info_panel(state: &State, interacting: bool) -> (Vec<Line<'static>>,
         selection_value,
         selection_color,
     ));
-    let mut peers = state.snapshot.peers.clone();
-    peers.sort_by_key(|peer| {
-        (
-            peer.user_id != state.snapshot.your_user_id.unwrap_or_default(),
-            peer.name.to_ascii_lowercase(),
-        )
-    });
-    let users = peers
-        .into_iter()
-        .map(|peer| ArtboardUserRow {
-            name: peer.name,
-            color: rgb(peer.color),
-        })
+    let mut users = Vec::new();
+    if !state.snapshot.your_name.is_empty() {
+        users.push(ArtboardUserRow {
+            name: state.snapshot.your_name.clone(),
+            color: state
+                .snapshot
+                .your_color
+                .map(rgb)
+                .unwrap_or_else(theme::TEXT_BRIGHT),
+        });
+    }
+    let mut peers: Vec<_> = state
+        .snapshot
+        .peers
+        .iter()
+        .filter(|peer| Some(peer.user_id) != state.snapshot.your_user_id)
+        .cloned()
         .collect();
+    peers.sort_by_key(|peer| peer.name.to_ascii_lowercase());
+    users.extend(peers.into_iter().map(|peer| ArtboardUserRow {
+        name: peer.name,
+        color: rgb(peer.color),
+    }));
 
     (metrics, users)
 }
@@ -1105,7 +1114,7 @@ mod tests {
         let state = test_state();
         assert_eq!(
             artboard_info_area_for_screen((80, 24), &state),
-            Some(Rect::new(27, 1, 28, 7))
+            Some(Rect::new(27, 1, 28, 9))
         );
     }
 
@@ -1145,7 +1154,13 @@ mod tests {
         let state = test_state();
         let (lines, users) = artboard_info_panel(&state, false);
 
-        assert!(users.is_empty());
+        assert_eq!(
+            users,
+            vec![ArtboardUserRow {
+                name: "painter".to_string(),
+                color: Color::Rgb(255, 196, 64),
+            }]
+        );
         assert_eq!(lines[0].to_string(), "  Mode       view");
         assert_eq!(lines[1].to_string(), "  Cursor     0,0");
         assert_eq!(lines[2].to_string(), "  Pan        ◀ ▲ ▼ ▶");
@@ -1170,17 +1185,14 @@ mod tests {
     #[test]
     fn info_panel_users_are_sorted_and_keep_peer_colors() {
         let mut state = test_state();
+        state.snapshot.your_name = "me".to_string();
+        state.snapshot.your_color = Some(RgbColor::new(4, 5, 6));
         state.snapshot.your_user_id = Some(2);
         state.snapshot.peers = vec![
             dartboard_core::Peer {
                 user_id: 3,
                 name: "zed".to_string(),
                 color: RgbColor::new(1, 2, 3),
-            },
-            dartboard_core::Peer {
-                user_id: 2,
-                name: "me".to_string(),
-                color: RgbColor::new(4, 5, 6),
             },
             dartboard_core::Peer {
                 user_id: 1,
@@ -1207,6 +1219,21 @@ mod tests {
                     color: Color::Rgb(1, 2, 3),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn info_panel_includes_current_user_when_no_peers_are_connected() {
+        let state = test_state();
+
+        let (_, users) = artboard_info_panel(&state, false);
+
+        assert_eq!(
+            users,
+            vec![ArtboardUserRow {
+                name: "painter".to_string(),
+                color: Color::Rgb(255, 196, 64),
+            }]
         );
     }
 
