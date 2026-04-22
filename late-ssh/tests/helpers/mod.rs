@@ -234,8 +234,6 @@ pub fn make_app_with_chat_service(
         is_new_user: false,
         devtest_jump: None,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-
-        ai_model: "test-model".to_string(),
         initial_theme_id: "late".to_string(),
     })
     .expect("app");
@@ -324,7 +322,6 @@ pub fn make_app_with_devtest_jump(
         is_new_user: false,
         devtest_jump: Some(devtest_jump),
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        ai_model: "test-model".to_string(),
         initial_theme_id: "late".to_string(),
     })
     .expect("app")
@@ -417,8 +414,6 @@ pub fn make_app_with_paired_client(
         is_new_user: false,
         devtest_jump: None,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-
-        ai_model: "test-model".to_string(),
         initial_theme_id: "late".to_string(),
     })
     .expect("app");

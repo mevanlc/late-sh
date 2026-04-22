@@ -739,7 +739,6 @@ impl russh::server::Handler for ClientHandler {
             devtest_jump: self.devtest_jump,
 
             // Display config
-            ai_model: self.state.config.ai.model.clone(),
             initial_theme_id: late_ssh_theme_id(&user.settings),
 
             // Server state
