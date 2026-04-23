@@ -2,11 +2,13 @@ use late_core::models::{
     chat_message::{ChatMessage, ChatMessageParams},
     chat_room::{ChatRoom, ChatRoomParams},
     chat_room_member::ChatRoomMember,
+    moderation_audit_log::ModerationAuditLog,
     profile::{Profile, ProfileParams},
+    room_ban::RoomBan,
     user::User,
 };
 use late_ssh::app::chat::notifications::svc::NotificationService;
-use late_ssh::app::chat::svc::{ChatEvent, ChatService, StaffViewScope};
+use late_ssh::app::chat::svc::{ChatEvent, ChatService, RoomModerationAction, StaffViewScope};
 use late_ssh::authz::Permissions;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
@@ -654,6 +656,207 @@ async fn join_public_room_task_only_adds_requesting_user() {
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn moderate_room_member_task_bans_target_and_writes_audit_log() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let moderator = create_test_user(&test_db.db, "room_mod_actor").await;
+    let target = create_test_user(&test_db.db, "room_mod_target").await;
+    let room = ChatRoom::get_or_create_public_room(&client, "side")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, room.id, moderator.id)
+        .await
+        .expect("join moderator");
+    ChatRoomMember::join(&client, room.id, target.id)
+        .await
+        .expect("join target");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&moderator.id],
+        )
+        .await
+        .expect("promote moderator");
+
+    service.moderate_room_member_task(
+        moderator.id,
+        room.id,
+        target.username.clone(),
+        RoomModerationAction::Ban,
+        Permissions::new(false, true),
+    );
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::RoomModerated {
+            actor_user_id,
+            target_user_id,
+            room_id,
+            room_slug,
+            target_username,
+            action,
+        } => {
+            assert_eq!(actor_user_id, moderator.id);
+            assert_eq!(target_user_id, target.id);
+            assert_eq!(room_id, room.id);
+            assert_eq!(room_slug, "side");
+            assert_eq!(target_username, target.username);
+            assert_eq!(action, RoomModerationAction::Ban);
+        }
+        other => panic!("expected RoomModerated, got {other:?}"),
+    }
+
+    assert!(
+        RoomBan::is_active_for_room_and_user(&client, room.id, target.id)
+            .await
+            .expect("check active room ban")
+    );
+    assert!(
+        !ChatRoomMember::is_member(&client, room.id, target.id)
+            .await
+            .expect("check membership"),
+    );
+
+    let audit_rows = client
+        .query(
+            "SELECT * FROM moderation_audit_log WHERE actor_user_id = $1 AND action = 'room_ban'",
+            &[&moderator.id],
+        )
+        .await
+        .expect("query moderation audit log");
+    let audit_entries: Vec<_> = audit_rows
+        .into_iter()
+        .map(ModerationAuditLog::from)
+        .collect();
+    assert_eq!(audit_entries.len(), 1);
+    assert_eq!(audit_entries[0].target_id, Some(target.id));
+}
+
+#[tokio::test]
+async fn moderate_room_member_task_rejects_non_staff_permissions() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let viewer = create_test_user(&test_db.db, "room_mod_viewer").await;
+    let target = create_test_user(&test_db.db, "room_mod_plain_target").await;
+    let room = ChatRoom::get_or_create_public_room(&client, "plain-room")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, room.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, room.id, target.id)
+        .await
+        .expect("join target");
+
+    service.moderate_room_member_task(
+        viewer.id,
+        room.id,
+        target.username.clone(),
+        RoomModerationAction::Kick,
+        Permissions::default(),
+    );
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::ModerationFailed { user_id, message } => {
+            assert_eq!(user_id, viewer.id);
+            assert_eq!(message, "Moderator or admin only");
+        }
+        other => panic!("expected ModerationFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn join_public_room_task_rejects_banned_user() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let target = create_test_user(&test_db.db, "discover_banned_target").await;
+    let actor = create_test_user(&test_db.db, "discover_banned_actor").await;
+    let room = ChatRoom::get_or_create_public_room(&client, "discover-banned")
+        .await
+        .expect("create room");
+    RoomBan::activate(&client, room.id, target.id, actor.id, "", None)
+        .await
+        .expect("create room ban");
+
+    service.join_public_room_task(target.id, room.id, "discover-banned".to_string());
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::RoomFailed { user_id, message } => {
+            assert_eq!(user_id, target.id);
+            assert_eq!(message, "You are banned from this room");
+        }
+        other => panic!("expected RoomFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invite_user_to_room_task_rejects_banned_target() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let inviter = create_test_user(&test_db.db, "invite_room_mod").await;
+    let target = create_test_user(&test_db.db, "invite_room_banned").await;
+    let actor = create_test_user(&test_db.db, "invite_room_actor").await;
+    let room = ChatRoom::create_private_room(&client, "invite-only")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, room.id, inviter.id)
+        .await
+        .expect("join inviter");
+    RoomBan::activate(&client, room.id, target.id, actor.id, "", None)
+        .await
+        .expect("create room ban");
+
+    service.invite_user_to_room_task(inviter.id, room.id, target.username.clone());
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::InviteFailed { user_id, message } => {
+            assert_eq!(user_id, inviter.id);
+            assert_eq!(message, "You are banned from this room");
+        }
+        other => panic!("expected InviteFailed, got {other:?}"),
+    }
 }
 
 // --- delete message: regression tests for user_id on MessageDeleted ---

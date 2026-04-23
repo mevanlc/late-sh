@@ -86,9 +86,17 @@ impl ChatRoomMember {
         let count = client
             .execute(
                 "INSERT INTO chat_room_members (room_id, user_id)
-                 SELECT id, $1
-                 FROM chat_rooms
-                 WHERE visibility = 'public' AND auto_join = true
+                 SELECT r.id, $1
+                 FROM chat_rooms r
+                 WHERE r.visibility = 'public'
+                   AND r.auto_join = true
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM room_bans b
+                       WHERE b.room_id = r.id
+                         AND b.target_user_id = $1
+                         AND (b.expires_at IS NULL OR b.expires_at > current_timestamp)
+                   )
                  ON CONFLICT (room_id, user_id) DO NOTHING",
                 &[&user_id],
             )

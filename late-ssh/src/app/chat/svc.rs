@@ -11,10 +11,14 @@ use late_core::{
         chat_message_reaction::{ChatMessageReaction, ChatMessageReactionSummary},
         chat_room::ChatRoom,
         chat_room_member::ChatRoomMember,
+        moderation_audit_log::ModerationAuditLog,
+        room_ban::RoomBan,
         user::User,
     },
 };
+use serde_json::json;
 use tokio::sync::{broadcast, watch};
+use tokio_postgres::Client;
 use tracing::{Instrument, info_span};
 
 use crate::app::bonsai::state::stage_for;
@@ -28,6 +32,48 @@ const DELTA_LIMIT: i64 = 256;
 pub enum StaffViewScope {
     Admin,
     Moderator,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomModerationAction {
+    Kick,
+    Ban,
+    Unban,
+}
+
+impl RoomModerationAction {
+    pub fn verb(self) -> &'static str {
+        match self {
+            Self::Kick => "kick",
+            Self::Ban => "ban",
+            Self::Unban => "unban",
+        }
+    }
+
+    pub fn progress_verb(self) -> &'static str {
+        match self {
+            Self::Kick => "Kicking",
+            Self::Ban => "Banning",
+            Self::Unban => "Unbanning",
+        }
+    }
+
+    pub fn success_verb(self) -> &'static str {
+        match self {
+            Self::Kick => "Kicked",
+            Self::Ban => "Banned",
+            Self::Unban => "Unbanned",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RoomModerationResult {
+    room_id: Uuid,
+    room_slug: String,
+    target_user_id: Uuid,
+    target_username: String,
+    action: RoomModerationAction,
 }
 
 #[derive(Clone)]
@@ -208,6 +254,14 @@ pub enum ChatEvent {
     StaffQueryFailed {
         user_id: Uuid,
         message: String,
+    },
+    RoomModerated {
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        room_id: Uuid,
+        room_slug: String,
+        target_username: String,
+        action: RoomModerationAction,
     },
     InviteFailed {
         user_id: Uuid,
@@ -425,6 +479,18 @@ impl ChatService {
         Ok(joined)
     }
 
+    async fn ensure_user_not_banned_from_room(
+        &self,
+        client: &Client,
+        room_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<()> {
+        if RoomBan::is_active_for_room_and_user(client, room_id, user_id).await? {
+            anyhow::bail!("You are banned from this room");
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(skip(self), fields(user_id = %user_id, room_id = %room_id))]
     async fn mark_room_read(&self, user_id: Uuid, room_id: Uuid) -> Result<()> {
         let client = &self.db.get().await?;
@@ -532,6 +598,8 @@ impl ChatService {
                     Err(e) => {
                         let message = if e.to_string().contains("not a member") {
                             "You are not a member of this room."
+                        } else if e.to_string().contains("banned from this room") {
+                            "You are banned from this room."
                         } else if e.to_string().contains("admin-only") {
                             "Only admins can post in #announcements."
                         } else {
@@ -584,6 +652,8 @@ impl ChatService {
         }
 
         let client = &self.db.get().await?;
+        self.ensure_user_not_banned_from_room(client, room_id, user_id)
+            .await?;
         let is_member = ChatRoomMember::is_member(client, room_id, user_id).await?;
         if !is_member {
             anyhow::bail!("user is not a member of room");
@@ -1307,6 +1377,8 @@ impl ChatService {
         if room.kind != "topic" || room.visibility != "public" {
             anyhow::bail!("Only public rooms can be joined from discover");
         }
+        self.ensure_user_not_banned_from_room(client, room.id, user_id)
+            .await?;
         ChatRoomMember::join(client, room.id, user_id).await?;
         Ok(room.id)
     }
@@ -1314,6 +1386,8 @@ impl ChatService {
     async fn open_public_room(&self, user_id: Uuid, slug: &str) -> Result<Uuid> {
         let client = &self.db.get().await?;
         let room = ChatRoom::get_or_create_public_room(client, slug).await?;
+        self.ensure_user_not_banned_from_room(client, room.id, user_id)
+            .await?;
         ChatRoomMember::join(client, room.id, user_id).await?;
         Ok(room.id)
     }
@@ -1504,9 +1578,146 @@ impl ChatService {
             anyhow::bail!("Cannot invite yourself");
         }
 
+        self.ensure_user_not_banned_from_room(client, room_id, target.id)
+            .await?;
         ChatRoomMember::join(client, room_id, target.id).await?;
         let room_slug = room.slug.clone().unwrap_or_else(|| room.kind.clone());
         Ok((room_slug, target.username))
+    }
+
+    pub fn moderate_room_member_task(
+        &self,
+        actor_user_id: Uuid,
+        room_id: Uuid,
+        target_username: String,
+        action: RoomModerationAction,
+        permissions: Permissions,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.moderate_room_member_task",
+            actor_user_id = %actor_user_id,
+            room_id = %room_id,
+            target = %target_username,
+            action = action.verb()
+        );
+        tokio::spawn(
+            async move {
+                match service
+                    .moderate_room_member(
+                        actor_user_id,
+                        room_id,
+                        &target_username,
+                        action,
+                        permissions,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = service.evt_tx.send(ChatEvent::RoomModerated {
+                            actor_user_id,
+                            target_user_id: result.target_user_id,
+                            room_id: result.room_id,
+                            room_slug: result.room_slug,
+                            target_username: result.target_username,
+                            action: result.action,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
+                            user_id: actor_user_id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn moderate_room_member(
+        &self,
+        actor_user_id: Uuid,
+        room_id: Uuid,
+        target_username: &str,
+        action: RoomModerationAction,
+        permissions: Permissions,
+    ) -> Result<RoomModerationResult> {
+        if !permissions.can_moderate() {
+            anyhow::bail!("Moderator or admin only");
+        }
+
+        let client = &self.db.get().await?;
+        let room = ChatRoom::get(client, room_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let room_slug = room
+            .slug
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Room does not have a slug"))?;
+        if room.kind != "topic" {
+            anyhow::bail!("Room moderation is limited to topic rooms");
+        }
+
+        let actor_is_member = ChatRoomMember::is_member(client, room_id, actor_user_id).await?;
+        if !actor_is_member {
+            anyhow::bail!("You are not a member of this room");
+        }
+
+        let target = User::find_by_username(client, target_username)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("User '{}' not found", target_username))?;
+        if target.id == actor_user_id {
+            anyhow::bail!("Cannot {} yourself", action.verb());
+        }
+        if !permissions.is_admin() && (target.is_admin || target.is_moderator) {
+            anyhow::bail!("Only admins can moderate staff");
+        }
+
+        match action {
+            RoomModerationAction::Kick => {
+                let removed = ChatRoomMember::leave(client, room_id, target.id).await?;
+                if removed == 0 {
+                    anyhow::bail!("@{} is not in #{}", target.username, room_slug);
+                }
+            }
+            RoomModerationAction::Ban => {
+                if RoomBan::is_active_for_room_and_user(client, room_id, target.id).await? {
+                    anyhow::bail!("@{} is already banned from #{}", target.username, room_slug);
+                }
+                RoomBan::activate(client, room_id, target.id, actor_user_id, "", None).await?;
+                let _ = ChatRoomMember::leave(client, room_id, target.id).await?;
+            }
+            RoomModerationAction::Unban => {
+                if !RoomBan::is_active_for_room_and_user(client, room_id, target.id).await? {
+                    anyhow::bail!("@{} is not banned from #{}", target.username, room_slug);
+                }
+                RoomBan::delete_for_room_and_user(client, room_id, target.id).await?;
+            }
+        }
+
+        ModerationAuditLog::record(
+            client,
+            actor_user_id,
+            format!("room_{}", action.verb()),
+            "user",
+            Some(target.id),
+            json!({
+                "room_id": room_id,
+                "room_slug": room_slug.clone(),
+                "target_user_id": target.id,
+                "target_username": target.username.clone(),
+            }),
+        )
+        .await?;
+
+        Ok(RoomModerationResult {
+            room_id,
+            room_slug,
+            target_user_id: target.id,
+            target_username: target.username,
+            action,
+        })
     }
 
     pub fn delete_permanent_room_task(&self, user_id: Uuid, slug: String) {

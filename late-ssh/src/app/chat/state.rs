@@ -22,7 +22,7 @@ use crate::state::{ActiveUser, ActiveUsers};
 use super::{
     discover, news, notifications,
     notifications::svc::NotificationService,
-    svc::{ChatEvent, ChatService, ChatSnapshot, StaffViewScope},
+    svc::{ChatEvent, ChatService, ChatSnapshot, RoomModerationAction, StaffViewScope},
 };
 
 pub(crate) const ROOM_JUMP_KEYS: &[u8] = b"asdfghjklqwertyuiopzxcvbnm1234567890";
@@ -809,6 +809,12 @@ impl ChatState {
                 "open the chat page (press 2) to invite a user",
             ));
         }
+        if from_dashboard && parse_room_moderation_command(&body).is_some() {
+            self.clear_composer_after_submit();
+            return Some(Banner::error(
+                "open the chat page (press 2) to moderate a room",
+            ));
+        }
 
         if body.trim() == "/binds" {
             self.clear_composer_after_submit();
@@ -914,11 +920,53 @@ impl ChatState {
                         StaffViewScope::Moderator,
                     );
                 }
-                None => {
-                    return Some(Banner::error("Usage: /mod users | /mod rooms"));
+                Some(rest) => {
+                    let Some(command) = parse_room_moderation_subcommand(rest) else {
+                        return Some(Banner::error(&format!("Unknown mod command: {rest}")));
+                    };
+                    let Some(room_id) = self.selected_room_id else {
+                        return Some(Banner::error("No room selected"));
+                    };
+                    let Some(room_slug) = room_slug_for(&self.rooms, room_id) else {
+                        return Some(Banner::error(
+                            "Room moderation is only available for topic rooms",
+                        ));
+                    };
+                    match command {
+                        ParsedRoomModerationCommand::Show => {
+                            self.open_overlay("Mod Room", mod_room_lines(&room_slug));
+                        }
+                        ParsedRoomModerationCommand::Action {
+                            action,
+                            target_username: Some(target_username),
+                        } => {
+                            self.service.moderate_room_member_task(
+                                self.user_id,
+                                room_id,
+                                target_username.to_string(),
+                                action,
+                                self.permissions,
+                            );
+                            return Some(Banner::success(&format!(
+                                "{} @{} in #{}...",
+                                action.progress_verb(),
+                                target_username,
+                                room_slug,
+                            )));
+                        }
+                        ParsedRoomModerationCommand::Action {
+                            action,
+                            target_username: None,
+                        } => {
+                            return Some(Banner::error(&format!(
+                                "Usage: /mod room {} @user",
+                                action.verb()
+                            )));
+                        }
+                    }
                 }
-                Some(other) => {
-                    return Some(Banner::error(&format!("Unknown mod command: {other}")));
+                None => {
+                    return Some(Banner::error("Usage: /mod users | /mod rooms | /mod room"));
                 }
             }
             return None;
@@ -1450,6 +1498,44 @@ impl ChatState {
                 ChatEvent::ModerationFailed { user_id, message } if self.user_id == user_id => {
                     banner = Some(Banner::error(&message));
                 }
+                ChatEvent::RoomModerated {
+                    actor_user_id,
+                    target_user_id,
+                    room_id,
+                    room_slug,
+                    target_username,
+                    action,
+                } => {
+                    if self.user_id == actor_user_id {
+                        self.request_list();
+                        banner = Some(Banner::success(&format!(
+                            "{} @{} in #{}",
+                            action.success_verb(),
+                            target_username,
+                            room_slug,
+                        )));
+                    }
+                    if self.user_id == target_user_id {
+                        if matches!(
+                            action,
+                            RoomModerationAction::Kick | RoomModerationAction::Ban
+                        ) && Some(room_id) == self.selected_room_id
+                        {
+                            self.selected_room_id = None;
+                        }
+                        self.request_list();
+                        if matches!(
+                            action,
+                            RoomModerationAction::Kick | RoomModerationAction::Ban
+                        ) {
+                            banner = Some(Banner::error(&format!(
+                                "You were {} from #{}",
+                                action.success_verb().to_ascii_lowercase(),
+                                room_slug,
+                            )));
+                        }
+                    }
+                }
                 ChatEvent::MessageDeleted {
                     user_id,
                     room_id,
@@ -1920,6 +2006,63 @@ fn admin_help_lines() -> Vec<String> {
         "Moderator commands:".to_string(),
         "/mod users".to_string(),
         "/mod rooms".to_string(),
+        "/mod room".to_string(),
+        "/mod room kick @user".to_string(),
+        "/mod room ban @user".to_string(),
+        "/mod room unban @user".to_string(),
+    ]
+}
+
+enum ParsedRoomModerationCommand<'a> {
+    Show,
+    Action {
+        action: RoomModerationAction,
+        target_username: Option<&'a str>,
+    },
+}
+
+fn parse_room_moderation_subcommand(input: &str) -> Option<ParsedRoomModerationCommand<'_>> {
+    let rest = input.strip_prefix("room")?;
+    let rest = match rest.chars().next() {
+        None => return Some(ParsedRoomModerationCommand::Show),
+        Some(c) if c.is_whitespace() => rest.trim(),
+        Some(_) => return None,
+    };
+    if rest.is_empty() {
+        return Some(ParsedRoomModerationCommand::Show);
+    }
+
+    let (verb, trailing) = rest
+        .split_once(char::is_whitespace)
+        .map(|(verb, tail)| (verb, Some(tail.trim())))
+        .unwrap_or((rest, None));
+    let action = match verb {
+        "kick" => RoomModerationAction::Kick,
+        "ban" => RoomModerationAction::Ban,
+        "unban" => RoomModerationAction::Unban,
+        _ => return None,
+    };
+    let target_username = trailing
+        .filter(|tail| !tail.is_empty())
+        .map(|tail| tail.strip_prefix('@').unwrap_or(tail).trim())
+        .filter(|tail| !tail.is_empty());
+    Some(ParsedRoomModerationCommand::Action {
+        action,
+        target_username,
+    })
+}
+
+fn parse_room_moderation_command(input: &str) -> Option<ParsedRoomModerationCommand<'_>> {
+    parse_subcommand(input, "/mod")?.and_then(parse_room_moderation_subcommand)
+}
+
+fn mod_room_lines(room_slug: &str) -> Vec<String> {
+    vec![
+        format!("#{}", room_slug),
+        String::new(),
+        "/mod room kick @user".to_string(),
+        "/mod room ban @user".to_string(),
+        "/mod room unban @user".to_string(),
     ]
 }
 
@@ -2555,6 +2698,41 @@ mod tests {
     fn parse_subcommand_rejects_non_matches() {
         assert_eq!(parse_subcommand("/admins help", "/admin"), None);
         assert_eq!(parse_subcommand("admin help", "/admin"), None);
+    }
+
+    #[test]
+    fn parse_room_moderation_command_reads_show_and_targeted_forms() {
+        assert!(matches!(
+            parse_room_moderation_command("/mod room"),
+            Some(ParsedRoomModerationCommand::Show)
+        ));
+        assert!(matches!(
+            parse_room_moderation_command("/mod room kick @alice"),
+            Some(ParsedRoomModerationCommand::Action {
+                action: RoomModerationAction::Kick,
+                target_username: Some("alice"),
+            })
+        ));
+        assert!(matches!(
+            parse_room_moderation_command("/mod room unban bob"),
+            Some(ParsedRoomModerationCommand::Action {
+                action: RoomModerationAction::Unban,
+                target_username: Some("bob"),
+            })
+        ));
+    }
+
+    #[test]
+    fn parse_room_moderation_command_handles_missing_target_and_rejects_non_matches() {
+        assert!(matches!(
+            parse_room_moderation_command("/mod room ban"),
+            Some(ParsedRoomModerationCommand::Action {
+                action: RoomModerationAction::Ban,
+                target_username: None,
+            })
+        ));
+        assert!(parse_room_moderation_command("/mod rooms").is_none());
+        assert!(parse_room_moderation_command("/admin room kick @alice").is_none());
     }
 
     #[test]

@@ -724,3 +724,64 @@ async fn ignore_command_hides_messages_and_persists_across_refresh() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn mod_room_command_opens_overlay_and_kicks_selected_room_member() {
+    let test_db = new_test_db().await;
+    let moderator = create_test_user(&test_db.db, "mod-room-flow-viewer").await;
+    let target = create_test_user(&test_db.db, "mod-room-flow-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    ChatRoomMember::join(&client, general.id, moderator.id)
+        .await
+        .expect("join moderator to general");
+    let room = ChatRoom::create_private_room(&client, "mod-side")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, room.id, moderator.id)
+        .await
+        .expect("join moderator to side");
+    ChatRoomMember::join(&client, room.id, target.id)
+        .await
+        .expect("join target to side");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&moderator.id],
+        )
+        .await
+        .expect("promote moderator");
+
+    let mut app = make_app(test_db.db.clone(), moderator.id, "mod-room-flow-it");
+
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, " Rooms ").await;
+    wait_for_render_contains(&mut app, "> general").await;
+    wait_for_render_contains(&mut app, " mod-side").await;
+
+    app.handle_input(b" ");
+    wait_for_render_contains(&mut app, "[g] mod-side").await;
+    app.handle_input(b"g");
+    wait_for_render_contains(&mut app, "> mod-side").await;
+
+    app.handle_input(b"i/mod room\r");
+    wait_for_render_contains(&mut app, "Mod Room").await;
+    wait_for_render_contains(&mut app, "/mod room kick @user").await;
+
+    app.handle_input(b"\x1b");
+    app.handle_input(b"i/mod room kick @mod-room-flow-target\r");
+    wait_for_render_contains(&mut app, "Kicking @mod-room-flow-target in #mod-side...").await;
+    wait_for_render_contains(&mut app, "Kicked @mod-room-flow-target in #mod-side").await;
+
+    wait_until(
+        || async {
+            !ChatRoomMember::is_member(&client, room.id, target.id)
+                .await
+                .expect("load target membership")
+        },
+        "target to be removed from selected room",
+    )
+    .await;
+}
