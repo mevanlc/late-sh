@@ -120,6 +120,7 @@ struct DrawContext<'a> {
     control_center_focus: control_center::state::Focus,
     control_center_user_list_lines: &'a [String],
     control_center_user_detail_lines: &'a [String],
+    control_center_user_session_lines: &'a [String],
     control_center_room_list_lines: &'a [String],
     control_center_room_detail_lines: &'a [String],
     control_center_room_prompt_panel_title: Option<&'a str>,
@@ -314,12 +315,25 @@ impl App {
         let control_center_user_ids = self.chat.control_center_user_ids();
         self.control_center.sync_user_ids(&control_center_user_ids);
         let selected_control_center_user_id = self.control_center.selected_user_id();
+        let control_center_user_session_ids = self
+            .chat
+            .control_center_user_session_ids(selected_control_center_user_id);
+        self.control_center
+            .sync_user_session_ids(&control_center_user_session_ids);
+        self.control_center
+            .normalize_focus(!control_center_user_session_ids.is_empty());
+        let selected_control_center_user_session_id =
+            self.control_center.selected_user_session_id();
         let control_center_user_list_lines = self
             .chat
             .control_center_user_list_lines(selected_control_center_user_id);
         let control_center_user_detail_lines = self
             .chat
             .control_center_user_detail_lines(selected_control_center_user_id);
+        let control_center_user_session_lines = self.chat.control_center_user_session_lines(
+            selected_control_center_user_id,
+            selected_control_center_user_session_id,
+        );
         let control_center_room_ids = self.chat.control_center_room_ids();
         self.control_center.sync_room_ids(&control_center_room_ids);
         let selected_control_center_room_id = self.control_center.selected_room_id();
@@ -385,6 +399,7 @@ impl App {
                         control_center_focus: self.control_center.focus(),
                         control_center_user_list_lines: &control_center_user_list_lines,
                         control_center_user_detail_lines: &control_center_user_detail_lines,
+                        control_center_user_session_lines: &control_center_user_session_lines,
                         control_center_room_list_lines: &control_center_room_list_lines,
                         control_center_room_detail_lines: &control_center_room_detail_lines,
                         control_center_room_prompt_panel_title,
@@ -582,11 +597,20 @@ impl App {
                     live_session_count: ctx.live_session_count,
                     user_list_lines: ctx.control_center_user_list_lines,
                     user_detail_lines: ctx.control_center_user_detail_lines,
+                    user_session_lines: ctx.control_center_user_session_lines,
                     room_list_lines: ctx.control_center_room_list_lines,
                     room_detail_lines: ctx.control_center_room_detail_lines,
-                    room_prompt_panel_title: ctx.control_center_room_prompt_panel_title,
-                    room_prompt_title: ctx.control_center_room_prompt_title,
-                    room_prompt_value: ctx.control_center_room_prompt_value,
+                    room_prompt: ctx
+                        .control_center_room_prompt_panel_title
+                        .zip(ctx.control_center_room_prompt_title)
+                        .zip(ctx.control_center_room_prompt_value)
+                        .map(
+                            |((panel_title, title), value)| control_center::ui::RoomPromptView {
+                                panel_title,
+                                title,
+                                value,
+                            },
+                        ),
                 },
             ),
             Screen::Artboard => {

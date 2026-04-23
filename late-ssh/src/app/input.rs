@@ -639,7 +639,8 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         }
         ParsedInput::BackTab => {
             if ctx.screen == Screen::ControlCenter {
-                app.control_center.focus_prev();
+                app.control_center
+                    .focus_prev(control_center_has_user_sessions(app));
                 return;
             }
             if ctx.screen == Screen::Chat && app.chat.room_jump_active {
@@ -1383,7 +1384,8 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         }
         b'\t' if !artboard_blocks_page_switch => {
             if ctx.screen == Screen::ControlCenter {
-                app.control_center.focus_next();
+                app.control_center
+                    .focus_next(control_center_has_user_sessions(app));
                 return true;
             }
             reset_composers_for_page_change(app);
@@ -1424,8 +1426,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             b'k' | b'K' => {
                 let _ = control_center_move_active_selection(app, -1);
             }
-            b'x' | b'X' => match app.control_center.selected_tab() {
-                crate::app::control_center::state::Tab::Users => {
+            b'x' | b'X' => match app.control_center.focus() {
+                crate::app::control_center::state::Focus::UserList => {
                     control_center_request_user_confirmation(
                         app,
                         crate::app::control_center::state::PendingConfirmAction::DisconnectUser {
@@ -1436,55 +1438,121 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                         "disconnect",
                     );
                 }
-                crate::app::control_center::state::Tab::Rooms => {
+                crate::app::control_center::state::Focus::UserSessions => {
+                    control_center_request_user_session_confirmation(
+                        app,
+                        crate::app::control_center::state::PendingConfirmAction::DisconnectUserSession {
+                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
+                            session_id: app
+                                .control_center
+                                .selected_user_session_id()
+                                .unwrap_or_default(),
+                        },
+                        "Disconnect Session",
+                        "This closes only the selected live session.",
+                        "disconnect",
+                    );
+                }
+                crate::app::control_center::state::Focus::RoomList => {
                     control_center_begin_room_action(
                         app,
                         crate::app::control_center::state::RoomAction::Kick,
                     );
                 }
+                crate::app::control_center::state::Focus::Tabs => {}
             },
-            b'b' | b'B' => {
-                control_center_begin_room_action(
-                    app,
-                    crate::app::control_center::state::RoomAction::Ban,
-                );
+            b'b' | b'B' => match app.control_center.focus() {
+                crate::app::control_center::state::Focus::UserList
+                | crate::app::control_center::state::Focus::UserSessions => {
+                    control_center_request_user_confirmation(
+                        app,
+                        crate::app::control_center::state::PendingConfirmAction::BanUser {
+                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
+                        },
+                        "Ban User",
+                        "This blocks future login and disconnects every live session.",
+                        "ban",
+                    );
+                }
+                crate::app::control_center::state::Focus::RoomList => {
+                    control_center_begin_room_action(
+                        app,
+                        crate::app::control_center::state::RoomAction::Ban,
+                    );
+                }
+                crate::app::control_center::state::Focus::Tabs => {}
+            },
+            b'u' | b'U' => match app.control_center.focus() {
+                crate::app::control_center::state::Focus::UserList
+                | crate::app::control_center::state::Focus::UserSessions => {
+                    control_center_request_user_confirmation(
+                        app,
+                        crate::app::control_center::state::PendingConfirmAction::UnbanUser {
+                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
+                        },
+                        "Unban User",
+                        "This removes the active server ban and allows login again.",
+                        "unban",
+                    );
+                }
+                crate::app::control_center::state::Focus::RoomList => {
+                    control_center_begin_room_action(
+                        app,
+                        crate::app::control_center::state::RoomAction::Unban,
+                    );
+                }
+                crate::app::control_center::state::Focus::Tabs => {}
+            },
+            b'r' | b'R'
+                if app.control_center.focus()
+                    == crate::app::control_center::state::Focus::RoomList =>
+            {
+                control_center_begin_admin_rename(app)
             }
-            b'u' | b'U' => {
-                control_center_begin_room_action(
+            b'p' | b'P'
+                if app.control_center.focus()
+                    == crate::app::control_center::state::Focus::RoomList =>
+            {
+                control_center_request_admin_confirmation(
                     app,
-                    crate::app::control_center::state::RoomAction::Unban,
-                );
+                    crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
+                        room_id: app.control_center.selected_room_id().unwrap_or_default(),
+                        visibility: "public".to_string(),
+                    },
+                    "Make Public",
+                    "This will expose the room to the broader member list.",
+                    "make public",
+                )
             }
-            b'r' | b'R' => control_center_begin_admin_rename(app),
-            b'p' | b'P' => control_center_request_admin_confirmation(
-                app,
-                crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
-                    room_id: app.control_center.selected_room_id().unwrap_or_default(),
-                    visibility: "public".to_string(),
-                },
-                "Make Public",
-                "This will expose the room to the broader member list.",
-                "make public",
-            ),
-            b'v' | b'V' => control_center_request_admin_confirmation(
-                app,
-                crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
-                    room_id: app.control_center.selected_room_id().unwrap_or_default(),
-                    visibility: "private".to_string(),
-                },
-                "Make Private",
-                "This will hide the room from public discovery.",
-                "make private",
-            ),
-            b'd' | b'D' => control_center_request_admin_confirmation(
-                app,
-                crate::app::control_center::state::PendingConfirmAction::DeleteRoom {
-                    room_id: app.control_center.selected_room_id().unwrap_or_default(),
-                },
-                "Delete Room",
-                "This removes the room and its membership state.",
-                "delete",
-            ),
+            b'v' | b'V'
+                if app.control_center.focus()
+                    == crate::app::control_center::state::Focus::RoomList =>
+            {
+                control_center_request_admin_confirmation(
+                    app,
+                    crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
+                        room_id: app.control_center.selected_room_id().unwrap_or_default(),
+                        visibility: "private".to_string(),
+                    },
+                    "Make Private",
+                    "This will hide the room from public discovery.",
+                    "make private",
+                )
+            }
+            b'd' | b'D'
+                if app.control_center.focus()
+                    == crate::app::control_center::state::Focus::RoomList =>
+            {
+                control_center_request_admin_confirmation(
+                    app,
+                    crate::app::control_center::state::PendingConfirmAction::DeleteRoom {
+                        room_id: app.control_center.selected_room_id().unwrap_or_default(),
+                    },
+                    "Delete Room",
+                    "This removes the room and its membership state.",
+                    "delete",
+                )
+            }
             _ => {}
         },
         Screen::Chat => {
@@ -1500,11 +1568,15 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
 }
 
 fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
-    match app.control_center.selected_tab() {
-        crate::app::control_center::state::Tab::Users => {
+    match app.control_center.focus() {
+        crate::app::control_center::state::Focus::Tabs => false,
+        crate::app::control_center::state::Focus::UserList => {
             control_center_move_user_selection(app, delta)
         }
-        crate::app::control_center::state::Tab::Rooms => {
+        crate::app::control_center::state::Focus::UserSessions => {
+            control_center_move_user_session_selection(app, delta)
+        }
+        crate::app::control_center::state::Focus::RoomList => {
             control_center_move_room_selection(app, delta)
         }
     }
@@ -1524,6 +1596,17 @@ fn control_center_move_user_selection(app: &mut App, delta: isize) -> bool {
     }
     let user_ids = app.chat.control_center_user_ids();
     app.control_center.move_user_selection(&user_ids, delta)
+}
+
+fn control_center_move_user_session_selection(app: &mut App, delta: isize) -> bool {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return false;
+    }
+    let session_ids = app
+        .chat
+        .control_center_user_session_ids(app.control_center.selected_user_id());
+    app.control_center
+        .move_user_session_selection(&session_ids, delta)
 }
 
 fn control_center_begin_room_action(
@@ -1588,7 +1671,28 @@ fn submit_confirm_dialog(app: &mut App) {
         crate::app::control_center::state::PendingConfirmAction::DisconnectUser { user_id } => {
             app.banner = Some(app.chat.admin_control_center_user_action(
                 user_id,
-                crate::app::chat::svc::AdminUserAction::Disconnect,
+                crate::app::chat::svc::AdminUserAction::DisconnectAllSessions,
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::DisconnectUserSession {
+            user_id,
+            session_id,
+        } => {
+            app.banner = Some(app.chat.admin_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::AdminUserAction::DisconnectSession { session_id },
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::BanUser { user_id } => {
+            app.banner = Some(app.chat.admin_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::AdminUserAction::Ban,
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::UnbanUser { user_id } => {
+            app.banner = Some(app.chat.admin_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::AdminUserAction::Unban,
             ));
         }
         crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
@@ -1699,6 +1803,49 @@ fn control_center_request_user_confirmation(
             "cancel",
         ),
     );
+}
+
+fn control_center_request_user_session_confirmation(
+    app: &mut App,
+    action: crate::app::control_center::state::PendingConfirmAction,
+    title: &str,
+    detail: &str,
+    confirm_label: &str,
+) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(session_id) = app.control_center.selected_user_session_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No live session selected",
+        ));
+        return;
+    };
+    let session_label = app
+        .chat
+        .control_center_user_session_label(session_id)
+        .unwrap_or_else(|| "session".to_string());
+    app.control_center.set_pending_confirm_action(action);
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            title,
+            format!("Type {} to confirm {}", session_label, confirm_label),
+            detail,
+            session_label,
+            confirm_label,
+            "cancel",
+        ),
+    );
+}
+
+fn control_center_has_user_sessions(app: &App) -> bool {
+    !app.chat
+        .control_center_user_session_ids(app.control_center.selected_user_id())
+        .is_empty()
 }
 
 fn try_open_icon_picker(app: &mut App) {

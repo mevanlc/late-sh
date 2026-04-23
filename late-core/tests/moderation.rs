@@ -123,3 +123,39 @@ async fn server_ban_can_be_found_by_user_id_or_fingerprint() {
         .expect("server ban by fingerprint");
     assert_eq!(by_fingerprint.actor_user_id, actor.id);
 }
+
+#[tokio::test]
+async fn server_ban_delete_active_for_user_clears_active_rows() {
+    let test_db = test_db().await;
+    let actor = create_test_user(&test_db.db, "server-unban-actor").await;
+    let target = create_test_user(&test_db.db, "server-unban-target").await;
+    let client = test_db.db.get().await.expect("db client");
+
+    ServerBan::activate(
+        &client,
+        target.id,
+        &target.fingerprint,
+        actor.id,
+        "abuse",
+        None,
+    )
+    .await
+    .expect("create active server ban");
+
+    let removed = ServerBan::delete_active_for_user(&client, target.id, &target.fingerprint)
+        .await
+        .expect("delete active server bans");
+    assert_eq!(removed, 1);
+    assert!(
+        ServerBan::find_active_for_user_id(&client, target.id)
+            .await
+            .expect("lookup by user id")
+            .is_none()
+    );
+    assert!(
+        ServerBan::find_active_for_fingerprint(&client, &target.fingerprint)
+            .await
+            .expect("lookup by fingerprint")
+            .is_none()
+    );
+}

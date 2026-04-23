@@ -13,6 +13,7 @@ use late_core::{
         chat_room_member::ChatRoomMember,
         moderation_audit_log::ModerationAuditLog,
         room_ban::RoomBan,
+        server_ban::ServerBan,
         user::User,
     },
 };
@@ -41,6 +42,7 @@ pub struct StaffUserRecord {
     pub username: String,
     pub is_admin: bool,
     pub is_moderator: bool,
+    pub active_server_ban: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,15 +109,21 @@ impl AdminRoomAction {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminUserAction {
-    Disconnect,
+    DisconnectAllSessions,
+    DisconnectSession { session_id: Uuid },
+    Ban,
+    Unban,
 }
 
 impl AdminUserAction {
-    pub const fn verb(self) -> &'static str {
+    pub const fn verb(&self) -> &'static str {
         match self {
-            Self::Disconnect => "disconnect",
+            Self::DisconnectAllSessions => "disconnect",
+            Self::DisconnectSession { .. } => "disconnect_session",
+            Self::Ban => "ban",
+            Self::Unban => "unban",
         }
     }
 }
@@ -1191,6 +1199,19 @@ impl ChatService {
                 .then_with(|| a.created.cmp(&b.created))
         });
 
+        let active_server_bans = client
+            .query(
+                "SELECT target_user_id
+                 FROM server_bans
+                 WHERE target_user_id IS NOT NULL
+                   AND (expires_at IS NULL OR expires_at > current_timestamp)",
+                &[],
+            )
+            .await?
+            .into_iter()
+            .filter_map(|row| row.get::<_, Option<Uuid>>("target_user_id"))
+            .collect::<HashSet<_>>();
+
         Ok(users
             .into_iter()
             .map(|user| StaffUserRecord {
@@ -1198,6 +1219,7 @@ impl ChatService {
                 username: user.username,
                 is_admin: user.is_admin,
                 is_moderator: user.is_moderator,
+                active_server_ban: active_server_bans.contains(&user.id),
             })
             .collect())
     }
@@ -2128,8 +2150,8 @@ impl ChatService {
         let target = User::get(client, target_user_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("User not found"))?;
-        let disconnected_sessions = match action {
-            AdminUserAction::Disconnect => {
+        let disconnected_sessions = match &action {
+            AdminUserAction::DisconnectAllSessions => {
                 session_registry
                     .disconnect_user_sessions(
                         target_user_id,
@@ -2137,9 +2159,73 @@ impl ChatService {
                     )
                     .await
             }
+            AdminUserAction::DisconnectSession { session_id } => {
+                let session_exists = session_registry
+                    .sessions_for_user(target_user_id)
+                    .into_iter()
+                    .any(|session| session.session_id == *session_id);
+                if !session_exists {
+                    anyhow::bail!(
+                        "session {} is not live for @{}",
+                        session_id,
+                        target.username
+                    );
+                }
+                usize::from(
+                    session_registry
+                        .disconnect_session(
+                            *session_id,
+                            "You were disconnected by an admin".to_string(),
+                        )
+                        .await,
+                )
+            }
+            AdminUserAction::Ban => {
+                if ServerBan::find_active_for_user_id(client, target_user_id)
+                    .await?
+                    .is_some()
+                    || ServerBan::find_active_for_fingerprint(client, &target.fingerprint)
+                        .await?
+                        .is_some()
+                {
+                    anyhow::bail!("@{} is already server banned", target.username);
+                }
+                ServerBan::activate(
+                    client,
+                    target_user_id,
+                    &target.fingerprint,
+                    actor_user_id,
+                    "",
+                    None,
+                )
+                .await?;
+                session_registry
+                    .disconnect_user_sessions(
+                        target_user_id,
+                        "You were banned by an admin".to_string(),
+                    )
+                    .await
+            }
+            AdminUserAction::Unban => {
+                let removed =
+                    ServerBan::delete_active_for_user(client, target_user_id, &target.fingerprint)
+                        .await?;
+                if removed == 0 {
+                    anyhow::bail!("@{} is not server banned", target.username);
+                }
+                0
+            }
         };
         if disconnected_sessions == 0 {
-            anyhow::bail!("@{} has no live sessions", target.username);
+            match action {
+                AdminUserAction::DisconnectAllSessions => {
+                    anyhow::bail!("@{} has no live sessions", target.username);
+                }
+                AdminUserAction::DisconnectSession { session_id } => {
+                    anyhow::bail!("session {} is no longer live", session_id);
+                }
+                AdminUserAction::Ban | AdminUserAction::Unban => {}
+            }
         }
 
         ModerationAuditLog::record(
@@ -2151,6 +2237,11 @@ impl ChatService {
             json!({
                 "target_user_id": target_user_id,
                 "target_username": target.username.clone(),
+                "session_id": match &action {
+                    AdminUserAction::DisconnectAllSessions => None::<Uuid>,
+                    AdminUserAction::DisconnectSession { session_id } => Some(*session_id),
+                    AdminUserAction::Ban | AdminUserAction::Unban => None::<Uuid>,
+                },
                 "disconnected_sessions": disconnected_sessions,
             }),
         )

@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use late_core::MutexRecover;
+use late_core::models::server_ban::ServerBan;
 use late_core::models::user::{User, UserParams, extract_theme_id};
 use russh::keys::PrivateKey;
 use russh::server::{Auth, Msg, Session};
@@ -469,6 +470,24 @@ impl russh::server::Handler for ClientHandler {
             return Ok(reject_publickey_only());
         }
         let fingerprint = key.fingerprint(keys::HashAlg::Sha256).to_string();
+        let client = match self.state.db.get().await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!(error = ?e, "failed to open db client, rejecting auth");
+                return Ok(reject_publickey_only());
+            }
+        };
+        match ServerBan::find_active_for_fingerprint(&client, &fingerprint).await {
+            Ok(Some(_)) => {
+                tracing::info!(fingerprint = %fingerprint, "rejecting banned fingerprint");
+                return Ok(reject_publickey_only());
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!(error = ?e, "failed to check server ban fingerprint, rejecting auth");
+                return Ok(reject_publickey_only());
+            }
+        }
         let (user, is_new_user) =
             match crate::ssh::ensure_user(&self.state, login_username, &fingerprint).await {
                 Ok(pair) => pair,
@@ -477,6 +496,17 @@ impl russh::server::Handler for ClientHandler {
                     return Ok(reject_publickey_only());
                 }
             };
+        match user_has_active_server_ban(&client, &user).await {
+            Ok(true) => {
+                tracing::info!(user_id = %user.id, username = %user.username, "rejecting banned user");
+                return Ok(reject_publickey_only());
+            }
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = ?e, user_id = %user.id, "failed to check server ban for user, rejecting auth");
+                return Ok(reject_publickey_only());
+            }
+        }
         self.is_new_user = is_new_user;
         if !self.active_user_incremented {
             let mut active_users = self.state.active_users.lock_recover();
@@ -565,6 +595,18 @@ impl russh::server::Handler for ClientHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         tracing::debug!(term, col_width, row_height, "pty requested");
+        let user = match self.user.clone() {
+            Some(user) => user,
+            None => {
+                tracing::error!("pty request without authenticated user");
+                return Err(anyhow::anyhow!("unauthenticated pty request"));
+            }
+        };
+        let client = self.state.db.get().await?;
+        if user_has_active_server_ban(&client, &user).await? {
+            anyhow::bail!("You are server banned");
+        }
+
         let session_token = self.ensure_cli_session().await?;
         let session_rx = self
             .session_rx
@@ -580,14 +622,6 @@ impl russh::server::Handler for ClientHandler {
         let nonogram_service = self.state.nonogram_service.clone();
         let solitaire_service = self.state.solitaire_service.clone();
         let nonogram_library = self.state.nonogram_library.clone();
-
-        let user = match self.user.as_ref() {
-            Some(user) => user,
-            None => {
-                tracing::error!("pty request without authenticated user");
-                return Err(anyhow::anyhow!("unauthenticated pty request"));
-            }
-        };
 
         let user_id = user.id;
 
@@ -1180,6 +1214,15 @@ async fn ensure_user(state: &State, username: &str, fingerprint: &str) -> Result
     };
 
     Ok((user, is_new_user))
+}
+
+async fn user_has_active_server_ban(client: &tokio_postgres::Client, user: &User) -> Result<bool> {
+    Ok(ServerBan::find_active_for_user_id(client, user.id)
+        .await?
+        .is_some()
+        || ServerBan::find_active_for_fingerprint(client, &user.fingerprint)
+            .await?
+            .is_some())
 }
 
 fn late_ssh_theme_id(settings: &Value) -> String {

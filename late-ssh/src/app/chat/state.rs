@@ -839,11 +839,43 @@ impl ChatState {
     }
 
     pub fn control_center_user_detail_lines(&self, selected_user_id: Option<Uuid>) -> Vec<String> {
+        let live_session_count = self
+            .user_sessions_for_control_center(selected_user_id)
+            .len();
         format_control_center_user_detail_lines(
             &self.staff_users_snapshot,
             control_center_selected_user(&self.staff_users_snapshot, selected_user_id),
-            self.session_registry.as_ref(),
+            live_session_count,
+            self.permissions.can_access_admin_surface(),
+        )
+    }
+
+    pub fn control_center_user_session_ids(&self, selected_user_id: Option<Uuid>) -> Vec<Uuid> {
+        let Some(user_id) = selected_user_id else {
+            return Vec::new();
+        };
+        self.session_registry
+            .as_ref()
+            .map(|registry| {
+                registry
+                    .sessions_for_user(user_id)
+                    .into_iter()
+                    .map(|session| session.session_id)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn control_center_user_session_lines(
+        &self,
+        selected_user_id: Option<Uuid>,
+        selected_session_id: Option<Uuid>,
+    ) -> Vec<String> {
+        format_control_center_user_session_lines(
+            self.user_sessions_for_control_center(selected_user_id)
+                .as_slice(),
             self.paired_client_registry.as_ref(),
+            selected_session_id,
             self.permissions.can_access_admin_surface(),
         )
     }
@@ -853,6 +885,18 @@ impl ChatState {
             .iter()
             .find(|user| user.user_id == user_id)
             .map(control_center_user_label)
+    }
+
+    pub fn control_center_user_session_label(&self, session_id: Uuid) -> Option<String> {
+        self.session_registry
+            .as_ref()
+            .and_then(|registry| {
+                registry
+                    .snapshot_all()
+                    .into_iter()
+                    .find(|session| session.session_id == session_id)
+            })
+            .map(|session| short_session_id(session.session_id))
     }
 
     pub fn control_center_room_ids(&self) -> Vec<Uuid> {
@@ -946,19 +990,46 @@ impl ChatState {
         let user_label = self
             .control_center_user_label(user_id)
             .unwrap_or_else(|| "user".to_string());
-        let banner = match action {
-            super::svc::AdminUserAction::Disconnect => {
+        let banner = match &action {
+            super::svc::AdminUserAction::DisconnectAllSessions => {
                 Banner::success(&format!("Disconnecting {}...", user_label))
+            }
+            super::svc::AdminUserAction::DisconnectSession { session_id } => {
+                Banner::success(&format!(
+                    "Disconnecting session {} for {}...",
+                    self.control_center_user_session_label(*session_id)
+                        .unwrap_or_else(|| "session".to_string()),
+                    user_label
+                ))
+            }
+            super::svc::AdminUserAction::Ban => {
+                Banner::success(&format!("Banning {}...", user_label))
+            }
+            super::svc::AdminUserAction::Unban => {
+                Banner::success(&format!("Unbanning {}...", user_label))
             }
         };
         self.service.admin_user_task(
             self.user_id,
             user_id,
-            action,
+            action.clone(),
             self.permissions,
             self.session_registry.clone(),
         );
         banner
+    }
+
+    fn user_sessions_for_control_center(
+        &self,
+        selected_user_id: Option<Uuid>,
+    ) -> Vec<LiveSessionSnapshot> {
+        let Some(user_id) = selected_user_id else {
+            return Vec::new();
+        };
+        self.session_registry
+            .as_ref()
+            .map(|registry| registry.sessions_for_user(user_id))
+            .unwrap_or_default()
     }
 
     fn open_staff_users_overlay(&mut self, title: &str, mut lines: Vec<String>) {
@@ -1795,7 +1866,7 @@ impl ChatState {
                 } => {
                     if self.user_id == actor_user_id {
                         match action {
-                            super::svc::AdminUserAction::Disconnect => {
+                            super::svc::AdminUserAction::DisconnectAllSessions => {
                                 banner = Some(Banner::success(&format!(
                                     "Disconnected @{} ({} live {})",
                                     target_username,
@@ -1805,6 +1876,35 @@ impl ChatState {
                                     } else {
                                         "sessions"
                                     }
+                                )));
+                            }
+                            super::svc::AdminUserAction::DisconnectSession { session_id } => {
+                                banner = Some(Banner::success(&format!(
+                                    "Disconnected session {} for @{}",
+                                    short_session_id(session_id),
+                                    target_username
+                                )));
+                            }
+                            super::svc::AdminUserAction::Ban => {
+                                banner = Some(Banner::success(&if disconnected_sessions == 0 {
+                                    format!("Banned @{}", target_username)
+                                } else {
+                                    format!(
+                                        "Banned @{} and disconnected {} live {}",
+                                        target_username,
+                                        disconnected_sessions,
+                                        if disconnected_sessions == 1 {
+                                            "session"
+                                        } else {
+                                            "sessions"
+                                        }
+                                    )
+                                }));
+                            }
+                            super::svc::AdminUserAction::Unban => {
+                                banner = Some(Banner::success(&format!(
+                                    "Unbanned @{}",
+                                    target_username
                                 )));
                             }
                         }
@@ -2443,8 +2543,7 @@ fn control_center_selected_user(
 fn format_control_center_user_detail_lines(
     users: &[StaffUserRecord],
     selected_user: Option<&StaffUserRecord>,
-    session_registry: Option<&SessionRegistry>,
-    paired_client_registry: Option<&PairedClientRegistry>,
+    live_session_count: usize,
     can_admin_disconnect: bool,
 ) -> Vec<String> {
     if users.is_empty() {
@@ -2459,9 +2558,6 @@ fn format_control_center_user_detail_lines(
         return vec!["No user selected".to_string()];
     };
 
-    let sessions = session_registry
-        .map(|registry| registry.sessions_for_user(user.user_id))
-        .unwrap_or_default();
     let mut lines = vec![
         control_center_user_label(user),
         String::new(),
@@ -2475,33 +2571,68 @@ fn format_control_center_user_detail_lines(
                 "member"
             }
         ),
-        format!("live sessions: {}", sessions.len()),
+        format!("live sessions: {}", live_session_count),
+        format!(
+            "server ban: {}",
+            if user.active_server_ban {
+                "active"
+            } else {
+                "clear"
+            }
+        ),
+        format!(
+            "status: {}",
+            if live_session_count == 0 {
+                "offline"
+            } else {
+                "online now"
+            }
+        ),
     ];
-
-    if sessions.is_empty() {
-        lines.push("status: offline".to_string());
-    } else {
-        lines.push("status: online now".to_string());
-    }
-
-    lines.push(String::new());
-    if sessions.is_empty() {
-        lines.push("No live session details.".to_string());
-    } else {
-        lines.push("Live Session Detail".to_string());
-        lines.extend(sessions.iter().map(|session| {
-            format!(
-                "  {}",
-                format_live_session_line(session, paired_client_registry)
-            )
-        }));
-    }
     lines.push(String::new());
     lines.push(if can_admin_disconnect {
-        "Actions next: disconnect live sessions.".to_string()
+        "Actions next: disconnect all sessions, ban or unban from the user list, or target one session from the live-session pane.".to_string()
     } else {
         "Admin actions unavailable in moderator view.".to_string()
     });
+    lines
+}
+
+fn format_control_center_user_session_lines(
+    sessions: &[LiveSessionSnapshot],
+    paired_client_registry: Option<&PairedClientRegistry>,
+    selected_session_id: Option<Uuid>,
+    can_admin_disconnect: bool,
+) -> Vec<String> {
+    if sessions.is_empty() {
+        return vec![
+            "No live sessions".to_string(),
+            String::new(),
+            if can_admin_disconnect {
+                "Select a user with active sessions to target one session.".to_string()
+            } else {
+                "Live sessions will appear here when the selected user is online.".to_string()
+            },
+        ];
+    }
+
+    let mut lines = vec!["Live Session Detail".to_string(), String::new()];
+    lines.extend(sessions.iter().map(|session| {
+        let marker = if Some(session.session_id) == selected_session_id {
+            ">"
+        } else {
+            " "
+        };
+        format!(
+            "{marker} {}",
+            format_live_session_line(session, paired_client_registry)
+        )
+    }));
+    if can_admin_disconnect {
+        lines.push(String::new());
+        lines
+            .push("Actions: x disconnect selected session · b ban user · u unban user".to_string());
+    }
     lines
 }
 
@@ -2520,6 +2651,9 @@ fn control_center_user_flags(user: &StaffUserRecord) -> Vec<String> {
     }
     if user.is_moderator {
         flags.push("mod".to_string());
+    }
+    if user.active_server_ban {
+        flags.push("banned".to_string());
     }
     flags
 }

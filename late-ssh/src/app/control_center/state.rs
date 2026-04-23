@@ -17,9 +17,11 @@ impl Tab {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Focus {
-    #[default]
     Tabs,
-    ActivePane,
+    #[default]
+    UserList,
+    UserSessions,
+    RoomList,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +87,9 @@ impl PromptKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingConfirmAction {
     DisconnectUser { user_id: Uuid },
+    DisconnectUserSession { user_id: Uuid, session_id: Uuid },
+    BanUser { user_id: Uuid },
+    UnbanUser { user_id: Uuid },
     SetRoomVisibility { room_id: Uuid, visibility: String },
     DeleteRoom { room_id: Uuid },
 }
@@ -100,6 +105,7 @@ pub struct State {
     selected_tab: usize,
     focus: Focus,
     selected_user_id: Option<Uuid>,
+    selected_user_session_id: Option<Uuid>,
     selected_room_id: Option<Uuid>,
     prompt: Option<Prompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
@@ -117,25 +123,60 @@ impl State {
         self.focus
     }
 
-    pub fn focus_next(&mut self) {
-        self.focus = match self.focus {
-            Focus::Tabs => Focus::ActivePane,
-            Focus::ActivePane => Focus::Tabs,
+    pub fn focus_next(&mut self, has_user_sessions: bool) {
+        self.focus = match (self.selected_tab(), self.focus, has_user_sessions) {
+            (Tab::Users, Focus::UserList, true) => Focus::UserSessions,
+            (Tab::Users, Focus::UserList, false) => Focus::Tabs,
+            (Tab::Users, Focus::UserSessions, _) => Focus::Tabs,
+            (Tab::Users, Focus::Tabs, _) => Focus::UserList,
+            (Tab::Users, Focus::RoomList, _) => Focus::UserList,
+            (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
+            (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
+            (Tab::Rooms, Focus::UserList | Focus::UserSessions, _) => Focus::RoomList,
         };
     }
 
-    pub fn focus_prev(&mut self) {
-        self.focus_next();
+    pub fn focus_prev(&mut self, has_user_sessions: bool) {
+        self.focus = match (self.selected_tab(), self.focus, has_user_sessions) {
+            (Tab::Users, Focus::UserList, _) => Focus::Tabs,
+            (Tab::Users, Focus::UserSessions, _) => Focus::UserList,
+            (Tab::Users, Focus::Tabs, true) => Focus::UserSessions,
+            (Tab::Users, Focus::Tabs, false) => Focus::UserList,
+            (Tab::Users, Focus::RoomList, _) => Focus::Tabs,
+            (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
+            (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
+            (Tab::Rooms, Focus::UserList | Focus::UserSessions, _) => Focus::Tabs,
+        };
+    }
+
+    pub fn normalize_focus(&mut self, has_user_sessions: bool) {
+        self.focus = match (self.selected_tab(), self.focus, has_user_sessions) {
+            (Tab::Users, Focus::RoomList, _) => Focus::UserList,
+            (Tab::Users, Focus::UserSessions, false) => Focus::UserList,
+            (Tab::Users, focus, _) => focus,
+            (Tab::Rooms, Focus::UserList | Focus::UserSessions, _) => Focus::RoomList,
+            (Tab::Rooms, focus, _) => focus,
+        };
+    }
+
+    pub fn focus_user_list(&mut self) {
+        self.focus = Focus::UserList;
+    }
+
+    pub fn focus_room_list(&mut self) {
+        self.focus = Focus::RoomList;
     }
 
     pub fn next_tab(&mut self) {
         self.selected_tab = (self.selected_tab + 1) % 2;
+        self.normalize_focus(false);
         self.prompt = None;
         self.pending_confirm_action = None;
     }
 
     pub fn prev_tab(&mut self) {
         self.selected_tab = if self.selected_tab == 0 { 1 } else { 0 };
+        self.normalize_focus(false);
         self.prompt = None;
         self.pending_confirm_action = None;
     }
@@ -148,9 +189,14 @@ impl State {
         self.selected_user_id
     }
 
+    pub fn selected_user_session_id(&self) -> Option<Uuid> {
+        self.selected_user_session_id
+    }
+
     pub fn sync_user_ids(&mut self, user_ids: &[Uuid]) {
         if user_ids.is_empty() {
             self.selected_user_id = None;
+            self.selected_user_session_id = None;
             self.prompt = None;
             self.pending_confirm_action = None;
             return;
@@ -162,6 +208,7 @@ impl State {
             return;
         }
         self.selected_user_id = user_ids.first().copied();
+        self.selected_user_session_id = None;
         self.prompt = None;
         self.pending_confirm_action = None;
     }
@@ -169,6 +216,7 @@ impl State {
     pub fn move_user_selection(&mut self, user_ids: &[Uuid], delta: isize) -> bool {
         if user_ids.is_empty() {
             self.selected_user_id = None;
+            self.selected_user_session_id = None;
             self.prompt = None;
             self.pending_confirm_action = None;
             return false;
@@ -183,7 +231,54 @@ impl State {
         let next_user_id = user_ids[next_index];
         let changed = self.selected_user_id != Some(next_user_id);
         self.selected_user_id = Some(next_user_id);
+        self.selected_user_session_id = None;
         self.prompt = None;
+        self.pending_confirm_action = None;
+        changed
+    }
+
+    pub fn sync_user_session_ids(&mut self, session_ids: &[Uuid]) {
+        if session_ids.is_empty() {
+            self.selected_user_session_id = None;
+            if self.focus == Focus::UserSessions {
+                self.focus = Focus::UserList;
+            }
+            self.pending_confirm_action = None;
+            return;
+        }
+        if self
+            .selected_user_session_id
+            .is_some_and(|session_id| session_ids.contains(&session_id))
+        {
+            return;
+        }
+        self.selected_user_session_id = session_ids.first().copied();
+        self.pending_confirm_action = None;
+    }
+
+    pub fn move_user_session_selection(&mut self, session_ids: &[Uuid], delta: isize) -> bool {
+        if session_ids.is_empty() {
+            self.selected_user_session_id = None;
+            if self.focus == Focus::UserSessions {
+                self.focus = Focus::UserList;
+            }
+            self.pending_confirm_action = None;
+            return false;
+        }
+
+        let current_index = self
+            .selected_user_session_id
+            .and_then(|session_id| {
+                session_ids
+                    .iter()
+                    .position(|candidate| *candidate == session_id)
+            })
+            .unwrap_or(0);
+        let next_index =
+            ((current_index as isize + delta).rem_euclid(session_ids.len() as isize)) as usize;
+        let next_session_id = session_ids[next_index];
+        let changed = self.selected_user_session_id != Some(next_session_id);
+        self.selected_user_session_id = Some(next_session_id);
         self.pending_confirm_action = None;
         changed
     }
