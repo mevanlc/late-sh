@@ -1480,6 +1480,7 @@ mod tests {
         assert_eq!(floating.anchor, Pos { x: 0, y: 0 });
         assert_eq!(floating.width, 2);
         assert_eq!(floating.height, 1);
+        assert!(state.floating_is_transparent());
     }
 
     #[test]
