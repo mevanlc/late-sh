@@ -126,6 +126,7 @@ struct DrawContext<'a> {
     control_center_room_prompt_panel_title: Option<&'a str>,
     control_center_room_prompt_title: Option<&'a str>,
     control_center_room_prompt_value: Option<&'a str>,
+    control_center_ban_prompt: Option<control_center::state::BanPrompt>,
     is_admin: bool,
     is_moderator: bool,
     live_session_count: usize,
@@ -355,6 +356,7 @@ impl App {
             .control_center
             .prompt()
             .map(|prompt| prompt.value.as_str());
+        let control_center_ban_prompt = self.control_center.ban_prompt().cloned();
         let live_session_count = self
             .session_registry
             .as_ref()
@@ -405,6 +407,7 @@ impl App {
                         control_center_room_prompt_panel_title,
                         control_center_room_prompt_title,
                         control_center_room_prompt_value,
+                        control_center_ban_prompt,
                         is_admin: self.is_admin,
                         is_moderator: self.permissions.is_moderator(),
                         live_session_count,
@@ -611,6 +614,14 @@ impl App {
                                 value,
                             },
                         ),
+                    ban_prompt: ctx.control_center_ban_prompt.as_ref().map(|prompt| {
+                        control_center::ui::BanPromptView {
+                            username: prompt.username.as_str(),
+                            reason: prompt.reason.as_str(),
+                            duration: prompt.duration.as_str(),
+                            focus: prompt.focus,
+                        }
+                    }),
                 },
             ),
             Screen::Artboard => {

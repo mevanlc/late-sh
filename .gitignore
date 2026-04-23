@@ -15,3 +15,4 @@ server_key.pub
 *.bkp
 *.dtmp
 *.drawio
+*SESSION*HANDOFF*.md

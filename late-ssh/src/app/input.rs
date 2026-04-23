@@ -856,6 +856,13 @@ fn route_char_to_composer(app: &mut App, ctx: InputContext, ch: char) -> bool {
         app.control_center.prompt_push(ch);
         return true;
     }
+    if ctx.screen == Screen::ControlCenter
+        && app.control_center.is_ban_prompt_open()
+        && !ch.is_control()
+    {
+        app.control_center.ban_prompt_push(ch);
+        return true;
+    }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && ctx.chat_composing {
         chat::input::handle_compose_char(app, ch);
         return true;
@@ -1118,6 +1125,32 @@ fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             }
             0x17 | 0x08 => {
                 app.control_center.prompt_delete_word_left();
+                true
+            }
+            _ => false,
+        };
+    }
+
+    if ctx.screen == Screen::ControlCenter && app.control_center.is_ban_prompt_open() {
+        return match byte {
+            0x1B => {
+                app.control_center.cancel_ban_prompt();
+                true
+            }
+            b'\r' | b'\n' => {
+                submit_control_center_ban_prompt(app);
+                true
+            }
+            b'\t' => {
+                app.control_center.ban_prompt_focus_next();
+                true
+            }
+            0x7F => {
+                app.control_center.ban_prompt_backspace();
+                true
+            }
+            0x17 | 0x08 => {
+                app.control_center.ban_prompt_delete_word_left();
                 true
             }
             _ => false,
@@ -1464,15 +1497,7 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             b'b' | b'B' => match app.control_center.focus() {
                 crate::app::control_center::state::Focus::UserList
                 | crate::app::control_center::state::Focus::UserSessions => {
-                    control_center_request_user_confirmation(
-                        app,
-                        crate::app::control_center::state::PendingConfirmAction::BanUser {
-                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
-                        },
-                        "Ban User",
-                        "This blocks future login and disconnects every live session.",
-                        "ban",
-                    );
+                    control_center_begin_ban_prompt(app);
                 }
                 crate::app::control_center::state::Focus::RoomList => {
                     control_center_begin_room_action(
@@ -1683,10 +1708,14 @@ fn submit_confirm_dialog(app: &mut App) {
                 crate::app::chat::svc::AdminUserAction::DisconnectSession { session_id },
             ));
         }
-        crate::app::control_center::state::PendingConfirmAction::BanUser { user_id } => {
+        crate::app::control_center::state::PendingConfirmAction::BanUser {
+            user_id,
+            reason,
+            expires_at,
+        } => {
             app.banner = Some(app.chat.admin_control_center_user_action(
                 user_id,
-                crate::app::chat::svc::AdminUserAction::Ban,
+                crate::app::chat::svc::AdminUserAction::Ban { reason, expires_at },
             ));
         }
         crate::app::control_center::state::PendingConfirmAction::UnbanUser { user_id } => {
@@ -1840,6 +1869,107 @@ fn control_center_request_user_session_confirmation(
             "cancel",
         ),
     );
+}
+
+fn control_center_begin_ban_prompt(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
+        ));
+        return;
+    };
+    let user_label = app
+        .chat
+        .control_center_user_label(user_id)
+        .unwrap_or_else(|| "@user".to_string());
+    app.control_center
+        .begin_ban_prompt(user_id, user_label.trim_start_matches('@').to_string());
+}
+
+fn submit_control_center_ban_prompt(app: &mut App) {
+    let Some(ban_prompt) = app.control_center.ban_prompt().cloned() else {
+        return;
+    };
+    let reason = ban_prompt.reason.trim().to_string();
+    if reason.is_empty() {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Ban reason is required",
+        ));
+        return;
+    }
+    let duration = match crate::app::control_center::state::parse_ban_duration(&ban_prompt.duration)
+    {
+        Ok(duration) => duration,
+        Err(err) => {
+            app.banner = Some(crate::app::common::primitives::Banner::error(&format!(
+                "Invalid duration: {err}"
+            )));
+            return;
+        }
+    };
+    let expires_at = crate::app::control_center::state::ban_expires_at(duration);
+
+    app.control_center.take_ban_prompt();
+
+    let user_label = format!("@{}", ban_prompt.username);
+    let duration_summary = match duration {
+        None => "permanent".to_string(),
+        Some(d) => format!("expires in {}", humanize_chrono_duration(d)),
+    };
+    let detail = format!(
+        "Reason: {} · {} · disconnects every live session.",
+        reason, duration_summary
+    );
+    app.control_center.set_pending_confirm_action(
+        crate::app::control_center::state::PendingConfirmAction::BanUser {
+            user_id: ban_prompt.user_id,
+            reason: reason.clone(),
+            expires_at,
+        },
+    );
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            "Ban User",
+            format!("Type {} to confirm ban", user_label),
+            detail,
+            user_label,
+            "ban",
+            "cancel",
+        ),
+    );
+}
+
+fn humanize_chrono_duration(duration: chrono::Duration) -> String {
+    let total = duration.num_seconds().max(0);
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3_600;
+    let minutes = (total % 3_600) / 60;
+    let seconds = total % 60;
+    let mut parts: Vec<String> = Vec::new();
+    if days > 0 {
+        parts.push(format!("{days}d"));
+    }
+    if hours > 0 {
+        parts.push(format!("{hours}h"));
+    }
+    if minutes > 0 && days == 0 {
+        parts.push(format!("{minutes}m"));
+    }
+    if seconds > 0 && days == 0 && hours == 0 {
+        parts.push(format!("{seconds}s"));
+    }
+    if parts.is_empty() {
+        "<1s".to_string()
+    } else {
+        parts.join(" ")
+    }
 }
 
 fn control_center_has_user_sessions(app: &App) -> bool {

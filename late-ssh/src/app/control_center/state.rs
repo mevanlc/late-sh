@@ -1,3 +1,4 @@
+use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,12 +87,43 @@ impl PromptKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingConfirmAction {
-    DisconnectUser { user_id: Uuid },
-    DisconnectUserSession { user_id: Uuid, session_id: Uuid },
-    BanUser { user_id: Uuid },
-    UnbanUser { user_id: Uuid },
-    SetRoomVisibility { room_id: Uuid, visibility: String },
-    DeleteRoom { room_id: Uuid },
+    DisconnectUser {
+        user_id: Uuid,
+    },
+    DisconnectUserSession {
+        user_id: Uuid,
+        session_id: Uuid,
+    },
+    BanUser {
+        user_id: Uuid,
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+    },
+    UnbanUser {
+        user_id: Uuid,
+    },
+    SetRoomVisibility {
+        room_id: Uuid,
+        visibility: String,
+    },
+    DeleteRoom {
+        room_id: Uuid,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BanPromptField {
+    Reason,
+    Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BanPrompt {
+    pub user_id: Uuid,
+    pub username: String,
+    pub reason: String,
+    pub duration: String,
+    pub focus: BanPromptField,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -108,6 +140,7 @@ pub struct State {
     selected_user_session_id: Option<Uuid>,
     selected_room_id: Option<Uuid>,
     prompt: Option<Prompt>,
+    ban_prompt: Option<BanPrompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
 }
 
@@ -167,18 +200,22 @@ impl State {
         self.focus = Focus::RoomList;
     }
 
+    fn clear_pending_state(&mut self) {
+        self.prompt = None;
+        self.ban_prompt = None;
+        self.pending_confirm_action = None;
+    }
+
     pub fn next_tab(&mut self) {
         self.selected_tab = (self.selected_tab + 1) % 2;
         self.normalize_focus(false);
-        self.prompt = None;
-        self.pending_confirm_action = None;
+        self.clear_pending_state();
     }
 
     pub fn prev_tab(&mut self) {
         self.selected_tab = if self.selected_tab == 0 { 1 } else { 0 };
         self.normalize_focus(false);
-        self.prompt = None;
-        self.pending_confirm_action = None;
+        self.clear_pending_state();
     }
 
     pub fn selected_room_id(&self) -> Option<Uuid> {
@@ -197,8 +234,7 @@ impl State {
         if user_ids.is_empty() {
             self.selected_user_id = None;
             self.selected_user_session_id = None;
-            self.prompt = None;
-            self.pending_confirm_action = None;
+            self.clear_pending_state();
             return;
         }
         if self
@@ -209,16 +245,14 @@ impl State {
         }
         self.selected_user_id = user_ids.first().copied();
         self.selected_user_session_id = None;
-        self.prompt = None;
-        self.pending_confirm_action = None;
+        self.clear_pending_state();
     }
 
     pub fn move_user_selection(&mut self, user_ids: &[Uuid], delta: isize) -> bool {
         if user_ids.is_empty() {
             self.selected_user_id = None;
             self.selected_user_session_id = None;
-            self.prompt = None;
-            self.pending_confirm_action = None;
+            self.clear_pending_state();
             return false;
         }
 
@@ -232,8 +266,7 @@ impl State {
         let changed = self.selected_user_id != Some(next_user_id);
         self.selected_user_id = Some(next_user_id);
         self.selected_user_session_id = None;
-        self.prompt = None;
-        self.pending_confirm_action = None;
+        self.clear_pending_state();
         changed
     }
 
@@ -286,8 +319,7 @@ impl State {
     pub fn sync_room_ids(&mut self, room_ids: &[Uuid]) {
         if room_ids.is_empty() {
             self.selected_room_id = None;
-            self.prompt = None;
-            self.pending_confirm_action = None;
+            self.clear_pending_state();
             return;
         }
         if self
@@ -297,15 +329,13 @@ impl State {
             return;
         }
         self.selected_room_id = room_ids.first().copied();
-        self.prompt = None;
-        self.pending_confirm_action = None;
+        self.clear_pending_state();
     }
 
     pub fn move_room_selection(&mut self, room_ids: &[Uuid], delta: isize) -> bool {
         if room_ids.is_empty() {
             self.selected_room_id = None;
-            self.prompt = None;
-            self.pending_confirm_action = None;
+            self.clear_pending_state();
             return false;
         }
 
@@ -318,8 +348,7 @@ impl State {
         let next_room_id = room_ids[next_index];
         let changed = self.selected_room_id != Some(next_room_id);
         self.selected_room_id = Some(next_room_id);
-        self.prompt = None;
-        self.pending_confirm_action = None;
+        self.clear_pending_state();
         changed
     }
 
@@ -402,5 +431,215 @@ impl State {
         let room_id = self.selected_room_id?;
         let prompt = self.prompt.take()?;
         Some((room_id, prompt.kind, prompt.value.trim().to_string()))
+    }
+
+    pub fn begin_ban_prompt(&mut self, user_id: Uuid, username: String) -> bool {
+        self.prompt = None;
+        self.pending_confirm_action = None;
+        self.ban_prompt = Some(BanPrompt {
+            user_id,
+            username,
+            reason: String::new(),
+            duration: String::new(),
+            focus: BanPromptField::Reason,
+        });
+        true
+    }
+
+    pub fn ban_prompt(&self) -> Option<&BanPrompt> {
+        self.ban_prompt.as_ref()
+    }
+
+    pub fn is_ban_prompt_open(&self) -> bool {
+        self.ban_prompt.is_some()
+    }
+
+    pub fn cancel_ban_prompt(&mut self) -> bool {
+        self.ban_prompt.take().is_some()
+    }
+
+    pub fn ban_prompt_push(&mut self, ch: char) {
+        if let Some(prompt) = &mut self.ban_prompt {
+            ban_prompt_focused_field_mut(prompt).push(ch);
+        }
+    }
+
+    pub fn ban_prompt_backspace(&mut self) {
+        if let Some(prompt) = &mut self.ban_prompt {
+            ban_prompt_focused_field_mut(prompt).pop();
+        }
+    }
+
+    pub fn ban_prompt_delete_word_left(&mut self) {
+        let Some(prompt) = &mut self.ban_prompt else {
+            return;
+        };
+        let field = ban_prompt_focused_field_mut(prompt);
+        while field.ends_with(char::is_whitespace) {
+            field.pop();
+        }
+        while field.chars().last().is_some_and(|ch| !ch.is_whitespace()) {
+            field.pop();
+        }
+    }
+
+    pub fn ban_prompt_focus_next(&mut self) {
+        if let Some(prompt) = &mut self.ban_prompt {
+            prompt.focus = match prompt.focus {
+                BanPromptField::Reason => BanPromptField::Duration,
+                BanPromptField::Duration => BanPromptField::Reason,
+            };
+        }
+    }
+
+    pub fn take_ban_prompt(&mut self) -> Option<BanPrompt> {
+        self.ban_prompt.take()
+    }
+}
+
+fn ban_prompt_focused_field_mut(prompt: &mut BanPrompt) -> &mut String {
+    match prompt.focus {
+        BanPromptField::Reason => &mut prompt.reason,
+        BanPromptField::Duration => &mut prompt.duration,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BanDurationParseError {
+    Empty,
+    MissingUnit,
+    InvalidNumber,
+    InvalidUnit,
+    NonPositive,
+    TooLarge,
+}
+
+impl std::fmt::Display for BanDurationParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let msg = match self {
+            Self::Empty => "duration is empty",
+            Self::MissingUnit => "duration needs a unit (s/m/h/d)",
+            Self::InvalidNumber => "duration number is invalid",
+            Self::InvalidUnit => "duration unit must be s, m, h, or d",
+            Self::NonPositive => "duration must be positive",
+            Self::TooLarge => "duration is too large",
+        };
+        f.write_str(msg)
+    }
+}
+
+/// Parse a ban duration of the form `<N><s|m|h|d>`.
+/// An empty/whitespace-only input returns `Ok(None)` (permanent ban).
+pub fn parse_ban_duration(input: &str) -> Result<Option<Duration>, BanDurationParseError> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let bytes = trimmed.as_bytes();
+    let unit = *bytes.last().ok_or(BanDurationParseError::Empty)?;
+    if unit.is_ascii_digit() {
+        return Err(BanDurationParseError::MissingUnit);
+    }
+    let number_str = &trimmed[..trimmed.len() - 1];
+    if number_str.is_empty() {
+        return Err(BanDurationParseError::InvalidNumber);
+    }
+    let n: i64 = number_str
+        .parse()
+        .map_err(|_| BanDurationParseError::InvalidNumber)?;
+    if n <= 0 {
+        return Err(BanDurationParseError::NonPositive);
+    }
+    let duration = match unit.to_ascii_lowercase() {
+        b's' => Duration::try_seconds(n),
+        b'm' => Duration::try_minutes(n),
+        b'h' => Duration::try_hours(n),
+        b'd' => Duration::try_days(n),
+        _ => return Err(BanDurationParseError::InvalidUnit),
+    }
+    .ok_or(BanDurationParseError::TooLarge)?;
+    Ok(Some(duration))
+}
+
+pub fn ban_expires_at(duration: Option<Duration>) -> Option<DateTime<Utc>> {
+    duration.and_then(|d| Utc::now().checked_add_signed(d))
+}
+
+#[cfg(test)]
+mod ban_duration_tests {
+    use super::*;
+
+    #[test]
+    fn empty_is_permanent() {
+        assert_eq!(parse_ban_duration(""), Ok(None));
+        assert_eq!(parse_ban_duration("   "), Ok(None));
+    }
+
+    #[test]
+    fn parses_each_unit() {
+        assert_eq!(
+            parse_ban_duration("30s"),
+            Ok(Some(Duration::try_seconds(30).unwrap()))
+        );
+        assert_eq!(
+            parse_ban_duration("15m"),
+            Ok(Some(Duration::try_minutes(15).unwrap()))
+        );
+        assert_eq!(
+            parse_ban_duration("24h"),
+            Ok(Some(Duration::try_hours(24).unwrap()))
+        );
+        assert_eq!(
+            parse_ban_duration("7d"),
+            Ok(Some(Duration::try_days(7).unwrap()))
+        );
+    }
+
+    #[test]
+    fn unit_is_case_insensitive() {
+        assert_eq!(
+            parse_ban_duration("12H"),
+            Ok(Some(Duration::try_hours(12).unwrap()))
+        );
+    }
+
+    #[test]
+    fn rejects_missing_unit() {
+        assert_eq!(
+            parse_ban_duration("42"),
+            Err(BanDurationParseError::MissingUnit)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_unit() {
+        assert_eq!(
+            parse_ban_duration("10y"),
+            Err(BanDurationParseError::InvalidUnit)
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_number() {
+        assert_eq!(
+            parse_ban_duration("abch"),
+            Err(BanDurationParseError::InvalidNumber)
+        );
+        assert_eq!(
+            parse_ban_duration("h"),
+            Err(BanDurationParseError::InvalidNumber)
+        );
+    }
+
+    #[test]
+    fn rejects_non_positive() {
+        assert_eq!(
+            parse_ban_duration("0h"),
+            Err(BanDurationParseError::NonPositive)
+        );
+        assert_eq!(
+            parse_ban_duration("-3h"),
+            Err(BanDurationParseError::NonPositive)
+        );
     }
 }

@@ -1002,7 +1002,7 @@ impl ChatState {
                     user_label
                 ))
             }
-            super::svc::AdminUserAction::Ban => {
+            super::svc::AdminUserAction::Ban { .. } => {
                 Banner::success(&format!("Banning {}...", user_label))
             }
             super::svc::AdminUserAction::Unban => {
@@ -1885,7 +1885,7 @@ impl ChatState {
                                     target_username
                                 )));
                             }
-                            super::svc::AdminUserAction::Ban => {
+                            super::svc::AdminUserAction::Ban { .. } => {
                                 banner = Some(Banner::success(&if disconnected_sessions == 0 {
                                     format!("Banned @{}", target_username)
                                 } else {
@@ -2574,21 +2574,44 @@ fn format_control_center_user_detail_lines(
         format!("live sessions: {}", live_session_count),
         format!(
             "server ban: {}",
-            if user.active_server_ban {
+            if user.active_server_ban.is_some() {
                 "active"
             } else {
                 "clear"
             }
         ),
-        format!(
-            "status: {}",
-            if live_session_count == 0 {
-                "offline"
-            } else {
-                "online now"
-            }
-        ),
     ];
+    if let Some(ban) = &user.active_server_ban {
+        let actor = ban
+            .actor_username
+            .as_ref()
+            .map(|u| format!("@{u}"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let reason = if ban.reason.trim().is_empty() {
+            "(no reason recorded)".to_string()
+        } else {
+            ban.reason.clone()
+        };
+        let expires = match ban.expires_at {
+            None => "permanent".to_string(),
+            Some(expires_at) => format_relative_future(expires_at, chrono::Utc::now()),
+        };
+        lines.push(format!("  reason: {reason}"));
+        lines.push(format!("  banned by: {actor}"));
+        lines.push(format!(
+            "  banned at: {}",
+            ban.created.format("%Y-%m-%d %H:%M UTC")
+        ));
+        lines.push(format!("  expires: {expires}"));
+    }
+    lines.push(format!(
+        "status: {}",
+        if live_session_count == 0 {
+            "offline"
+        } else {
+            "online now"
+        }
+    ));
     lines.push(String::new());
     lines.push(if can_admin_disconnect {
         "Actions next: disconnect all sessions, ban or unban from the user list, or target one session from the live-session pane.".to_string()
@@ -2596,6 +2619,37 @@ fn format_control_center_user_detail_lines(
         "Admin actions unavailable in moderator view.".to_string()
     });
     lines
+}
+
+fn format_relative_future(
+    when: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> String {
+    let delta = when.signed_duration_since(now);
+    if delta.num_seconds() <= 0 {
+        return "expired".to_string();
+    }
+    let days = delta.num_days();
+    if days >= 1 {
+        let hours = delta.num_hours() - days * 24;
+        if hours > 0 {
+            return format!("in {days}d {hours}h");
+        }
+        return format!("in {days}d");
+    }
+    let hours = delta.num_hours();
+    if hours >= 1 {
+        let minutes = delta.num_minutes() - hours * 60;
+        if minutes > 0 {
+            return format!("in {hours}h {minutes}m");
+        }
+        return format!("in {hours}h");
+    }
+    let minutes = delta.num_minutes();
+    if minutes >= 1 {
+        return format!("in {minutes}m");
+    }
+    "in <1m".to_string()
 }
 
 fn format_control_center_user_session_lines(
@@ -2652,7 +2706,7 @@ fn control_center_user_flags(user: &StaffUserRecord) -> Vec<String> {
     if user.is_moderator {
         flags.push("mod".to_string());
     }
-    if user.active_server_ban {
+    if user.active_server_ban.is_some() {
         flags.push("banned".to_string());
     }
     flags

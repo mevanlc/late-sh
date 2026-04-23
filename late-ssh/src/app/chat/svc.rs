@@ -42,7 +42,16 @@ pub struct StaffUserRecord {
     pub username: String,
     pub is_admin: bool,
     pub is_moderator: bool,
-    pub active_server_ban: bool,
+    pub active_server_ban: Option<ActiveBanSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActiveBanSummary {
+    pub reason: String,
+    pub actor_user_id: Uuid,
+    pub actor_username: Option<String>,
+    pub created: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -112,8 +121,13 @@ impl AdminRoomAction {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminUserAction {
     DisconnectAllSessions,
-    DisconnectSession { session_id: Uuid },
-    Ban,
+    DisconnectSession {
+        session_id: Uuid,
+    },
+    Ban {
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+    },
     Unban,
 }
 
@@ -122,7 +136,7 @@ impl AdminUserAction {
         match self {
             Self::DisconnectAllSessions => "disconnect",
             Self::DisconnectSession { .. } => "disconnect_session",
-            Self::Ban => "ban",
+            Self::Ban { .. } => "ban",
             Self::Unban => "unban",
         }
     }
@@ -1199,18 +1213,22 @@ impl ChatService {
                 .then_with(|| a.created.cmp(&b.created))
         });
 
-        let active_server_bans = client
-            .query(
-                "SELECT target_user_id
-                 FROM server_bans
-                 WHERE target_user_id IS NOT NULL
-                   AND (expires_at IS NULL OR expires_at > current_timestamp)",
-                &[],
-            )
-            .await?
-            .into_iter()
-            .filter_map(|row| row.get::<_, Option<Uuid>>("target_user_id"))
-            .collect::<HashSet<_>>();
+        let active_bans = ServerBan::active_with_actor_username(client).await?;
+        let mut active_bans_by_user: HashMap<Uuid, ActiveBanSummary> = HashMap::new();
+        for (ban, actor_username) in active_bans {
+            let Some(target_user_id) = ban.target_user_id else {
+                continue;
+            };
+            active_bans_by_user
+                .entry(target_user_id)
+                .or_insert(ActiveBanSummary {
+                    reason: ban.reason,
+                    actor_user_id: ban.actor_user_id,
+                    actor_username,
+                    created: ban.created,
+                    expires_at: ban.expires_at,
+                });
+        }
 
         Ok(users
             .into_iter()
@@ -1219,7 +1237,7 @@ impl ChatService {
                 username: user.username,
                 is_admin: user.is_admin,
                 is_moderator: user.is_moderator,
-                active_server_ban: active_server_bans.contains(&user.id),
+                active_server_ban: active_bans_by_user.remove(&user.id),
             })
             .collect())
     }
@@ -2180,7 +2198,7 @@ impl ChatService {
                         .await,
                 )
             }
-            AdminUserAction::Ban => {
+            AdminUserAction::Ban { reason, expires_at } => {
                 if ServerBan::find_active_for_user_id(client, target_user_id)
                     .await?
                     .is_some()
@@ -2195,15 +2213,17 @@ impl ChatService {
                     target_user_id,
                     &target.fingerprint,
                     actor_user_id,
-                    "",
-                    None,
+                    reason,
+                    *expires_at,
                 )
                 .await?;
+                let kick_msg = if reason.is_empty() {
+                    "You were banned by an admin".to_string()
+                } else {
+                    format!("You were banned: {reason}")
+                };
                 session_registry
-                    .disconnect_user_sessions(
-                        target_user_id,
-                        "You were banned by an admin".to_string(),
-                    )
+                    .disconnect_user_sessions(target_user_id, kick_msg)
                     .await
             }
             AdminUserAction::Unban => {
@@ -2224,10 +2244,18 @@ impl ChatService {
                 AdminUserAction::DisconnectSession { session_id } => {
                     anyhow::bail!("session {} is no longer live", session_id);
                 }
-                AdminUserAction::Ban | AdminUserAction::Unban => {}
+                AdminUserAction::Ban { .. } | AdminUserAction::Unban => {}
             }
         }
 
+        let ban_reason = match &action {
+            AdminUserAction::Ban { reason, .. } => Some(reason.clone()),
+            _ => None,
+        };
+        let ban_expires_at = match &action {
+            AdminUserAction::Ban { expires_at, .. } => *expires_at,
+            _ => None,
+        };
         ModerationAuditLog::record(
             client,
             actor_user_id,
@@ -2240,8 +2268,10 @@ impl ChatService {
                 "session_id": match &action {
                     AdminUserAction::DisconnectAllSessions => None::<Uuid>,
                     AdminUserAction::DisconnectSession { session_id } => Some(*session_id),
-                    AdminUserAction::Ban | AdminUserAction::Unban => None::<Uuid>,
+                    AdminUserAction::Ban { .. } | AdminUserAction::Unban => None::<Uuid>,
                 },
+                "reason": ban_reason,
+                "expires_at": ban_expires_at,
                 "disconnected_sessions": disconnected_sessions,
             }),
         )

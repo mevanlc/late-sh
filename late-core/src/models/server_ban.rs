@@ -56,6 +56,29 @@ impl ServerBan {
         Ok(row.map(Self::from))
     }
 
+    pub async fn active_with_actor_username(
+        client: &Client,
+    ) -> Result<Vec<(Self, Option<String>)>> {
+        let rows = client
+            .query(
+                "SELECT sb.*, u.username AS actor_username
+                 FROM server_bans sb
+                 LEFT JOIN users u ON u.id = sb.actor_user_id
+                 WHERE sb.target_user_id IS NOT NULL
+                   AND (sb.expires_at IS NULL OR sb.expires_at > current_timestamp)
+                 ORDER BY sb.created DESC",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let actor_username: Option<String> = row.get("actor_username");
+                (Self::from(row), actor_username)
+            })
+            .collect())
+    }
+
     pub async fn find_active_for_fingerprint(
         client: &Client,
         fingerprint: &str,

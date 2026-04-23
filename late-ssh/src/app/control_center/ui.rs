@@ -8,12 +8,19 @@ use ratatui::{
 
 use crate::app::common::theme;
 
-use super::state::{Focus, Tab};
+use super::state::{BanPromptField, Focus, Tab};
 
 pub struct RoomPromptView<'a> {
     pub panel_title: &'a str,
     pub title: &'a str,
     pub value: &'a str,
+}
+
+pub struct BanPromptView<'a> {
+    pub username: &'a str,
+    pub reason: &'a str,
+    pub duration: &'a str,
+    pub focus: BanPromptField,
 }
 
 pub struct ControlCenterView<'a> {
@@ -30,6 +37,7 @@ pub struct ControlCenterView<'a> {
     pub room_list_lines: &'a [String],
     pub room_detail_lines: &'a [String],
     pub room_prompt: Option<RoomPromptView<'a>>,
+    pub ban_prompt: Option<BanPromptView<'a>>,
 }
 
 pub fn draw_control_center(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
@@ -81,6 +89,9 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
 
     let help_text = match (view.focus, selected) {
         (_, Tab::Rooms) if view.room_prompt.is_some() => "type @user · Enter confirm · Esc cancel",
+        (_, Tab::Users) if view.ban_prompt.is_some() => {
+            "Tab switch field · Enter confirm · Esc cancel"
+        }
         (Focus::Tabs, Tab::Users) => "Tab focus users · h/l or ←/→ switch tabs",
         (Focus::Tabs, Tab::Rooms) => "Tab focus rooms · h/l or ←/→ switch tabs",
         (Focus::UserList, Tab::Users) if view.is_admin => {
@@ -193,6 +204,7 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
             view.user_list_lines,
             view.user_detail_lines,
             view.user_session_lines,
+            view.ban_prompt.as_ref(),
         ),
         Tab::Rooms => draw_rooms_panel(
             frame,
@@ -212,13 +224,24 @@ fn draw_user_panel(
     user_list_lines: &[String],
     user_detail_lines: &[String],
     user_session_lines: &[String],
+    ban_prompt: Option<&BanPromptView<'_>>,
 ) {
-    let columns = Layout::horizontal([
-        Constraint::Percentage(34),
-        Constraint::Percentage(28),
-        Constraint::Percentage(38),
-    ])
-    .split(area);
+    let columns = if ban_prompt.is_some() {
+        Layout::horizontal([
+            Constraint::Percentage(26),
+            Constraint::Percentage(22),
+            Constraint::Percentage(26),
+            Constraint::Percentage(26),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([
+            Constraint::Percentage(34),
+            Constraint::Percentage(28),
+            Constraint::Percentage(38),
+        ])
+        .split(area)
+    };
     draw_panel_card(
         frame,
         columns[0],
@@ -234,6 +257,78 @@ fn draw_user_panel(
         user_session_lines,
         focus == Focus::UserSessions,
     );
+    if let Some(prompt) = ban_prompt {
+        draw_ban_prompt_card(frame, columns[3], prompt);
+    }
+}
+
+fn draw_ban_prompt_card(frame: &mut Frame, area: Rect, prompt: &BanPromptView<'_>) {
+    let block = Block::default()
+        .title(" Ban User ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let reason_focused = matches!(prompt.focus, BanPromptField::Reason);
+    let duration_focused = matches!(prompt.focus, BanPromptField::Duration);
+
+    let lines = vec![
+        Line::from(Span::styled(
+            format!("target: @{}", prompt.username),
+            Style::default().fg(theme::TEXT_BRIGHT()),
+        )),
+        Line::from(Span::raw("")),
+        ban_field_header("reason (required)", reason_focused),
+        ban_field_line(prompt.reason, reason_focused, "what happened?"),
+        Line::from(Span::raw("")),
+        ban_field_header("duration (blank = permanent)", duration_focused),
+        ban_field_line(prompt.duration, duration_focused, "e.g. 1h, 24h, 7d"),
+        Line::from(Span::raw("")),
+        Line::from(Span::styled(
+            "Tab switch · Enter confirm · Esc cancel",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+fn ban_field_header(label: &str, focused: bool) -> Line<'static> {
+    let style = if focused {
+        Style::default()
+            .fg(theme::AMBER_GLOW())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::TEXT_DIM())
+    };
+    Line::from(Span::styled(label.to_string(), style))
+}
+
+fn ban_field_line(value: &str, focused: bool, placeholder: &str) -> Line<'static> {
+    let caret_style = if focused {
+        Style::default().fg(theme::AMBER_GLOW())
+    } else {
+        Style::default().fg(theme::AMBER_DIM())
+    };
+    let value_style = if focused {
+        Style::default().fg(theme::TEXT_BRIGHT())
+    } else {
+        Style::default().fg(theme::TEXT())
+    };
+    if value.is_empty() {
+        Line::from(vec![
+            Span::styled("> ".to_string(), caret_style),
+            Span::styled(
+                placeholder.to_string(),
+                Style::default().fg(theme::TEXT_FAINT()),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("> ".to_string(), caret_style),
+            Span::styled(value.to_string(), value_style),
+        ])
+    }
 }
 
 fn draw_rooms_panel(
