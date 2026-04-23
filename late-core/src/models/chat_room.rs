@@ -272,6 +272,81 @@ impl ChatRoom {
         Ok(count)
     }
 
+    pub async fn rename_topic_room(client: &Client, room_id: Uuid, new_slug: &str) -> Result<Self> {
+        let new_slug = normalize_topic_slug(new_slug)?;
+        let current = Self::get(client, room_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let current_slug = current
+            .slug
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Room does not have a slug"))?;
+        if current_slug == new_slug {
+            bail!("room is already named #{new_slug}");
+        }
+        if let Some(existing) =
+            Self::find_topic_room(client, &current.visibility, &new_slug).await?
+            && existing.id != room_id
+        {
+            bail!("{} room #{new_slug} already exists", current.visibility);
+        }
+
+        let row = client
+            .query_one(
+                "UPDATE chat_rooms
+                 SET slug = $1, updated = current_timestamp
+                 WHERE id = $2
+                 RETURNING *",
+                &[&new_slug, &room_id],
+            )
+            .await?;
+        Ok(Self::from(row))
+    }
+
+    pub async fn set_topic_room_visibility(
+        client: &Client,
+        room_id: Uuid,
+        visibility: &str,
+    ) -> Result<Self> {
+        if visibility != "public" && visibility != "private" {
+            bail!("invalid room visibility");
+        }
+
+        let current = Self::get(client, room_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        if current.visibility == visibility {
+            bail!("room is already {visibility}");
+        }
+        let current_slug = current
+            .slug
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Room does not have a slug"))?;
+        if let Some(existing) = Self::find_topic_room(client, visibility, &current_slug).await?
+            && existing.id != room_id
+        {
+            bail!("{visibility} room #{current_slug} already exists");
+        }
+
+        let row = client
+            .query_one(
+                "UPDATE chat_rooms
+                 SET visibility = $1, updated = current_timestamp
+                 WHERE id = $2
+                 RETURNING *",
+                &[&visibility, &room_id],
+            )
+            .await?;
+        Ok(Self::from(row))
+    }
+
+    pub async fn delete_topic_room(client: &Client, room_id: Uuid) -> Result<u64> {
+        let count = client
+            .execute("DELETE FROM chat_rooms WHERE id = $1", &[&room_id])
+            .await?;
+        Ok(count)
+    }
+
     /// Bulk-add all existing users to a room (idempotent).
     pub async fn add_all_users(client: &Client, room_id: Uuid) -> Result<u64> {
         let count = client
@@ -370,5 +445,44 @@ mod tests {
     #[test]
     fn normalize_room_slug_allows_general_for_non_creation_paths() {
         assert_eq!(normalize_room_slug(" General ").unwrap(), "general");
+    }
+
+    #[tokio::test]
+    async fn topic_room_can_be_renamed_and_rebucketed() {
+        let test_db = crate::test_utils::test_db().await;
+        let client = test_db.db.get().await.expect("db client");
+
+        let room = ChatRoom::get_or_create_public_room(&client, "rust-nerds")
+            .await
+            .expect("create room");
+        let renamed = ChatRoom::rename_topic_room(&client, room.id, "vps / d9d0")
+            .await
+            .expect("rename room");
+        assert_eq!(renamed.slug.as_deref(), Some("vps-d9d0"));
+
+        let hidden = ChatRoom::set_topic_room_visibility(&client, room.id, "private")
+            .await
+            .expect("make room private");
+        assert_eq!(hidden.visibility, "private");
+    }
+
+    #[tokio::test]
+    async fn topic_room_delete_removes_row() {
+        let test_db = crate::test_utils::test_db().await;
+        let client = test_db.db.get().await.expect("db client");
+
+        let room = ChatRoom::create_private_room(&client, "throwaway")
+            .await
+            .expect("create room");
+        let deleted = ChatRoom::delete_topic_room(&client, room.id)
+            .await
+            .expect("delete room");
+        assert_eq!(deleted, 1);
+        assert!(
+            ChatRoom::get(&client, room.id)
+                .await
+                .expect("reload room")
+                .is_none()
+        );
     }
 }

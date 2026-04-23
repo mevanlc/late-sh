@@ -785,3 +785,63 @@ async fn mod_room_command_opens_overlay_and_kicks_selected_room_member() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn admin_room_command_opens_overlay_and_renames_selected_room() {
+    let test_db = new_test_db().await;
+    let admin = create_test_user(&test_db.db, "admin-room-flow-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    ChatRoomMember::join(&client, general.id, admin.id)
+        .await
+        .expect("join admin to general");
+    let room = ChatRoom::create_private_room(&client, "admin-side")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, room.id, admin.id)
+        .await
+        .expect("join admin to side");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    let mut app = make_app(test_db.db.clone(), admin.id, "admin-room-flow-it");
+
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, " Rooms ").await;
+    wait_for_render_contains(&mut app, "> general").await;
+    wait_for_render_contains(&mut app, " admin-side").await;
+
+    app.handle_input(b" ");
+    wait_for_render_contains(&mut app, "[g] admin-side").await;
+    app.handle_input(b"g");
+    wait_for_render_contains(&mut app, "> admin-side").await;
+
+    app.handle_input(b"i/admin room\r");
+    wait_for_render_contains(&mut app, "Admin Room").await;
+    wait_for_render_contains(&mut app, "/admin room rename #new").await;
+
+    app.handle_input(b"\x1b");
+    app.handle_input(b"i/admin room rename #admin-suite\r");
+    wait_for_render_contains(&mut app, "Renaming #admin-side to #admin-suite...").await;
+    wait_for_render_contains(&mut app, "Renamed #admin-side to #admin-suite").await;
+
+    wait_until(
+        || async {
+            ChatRoom::get(&client, room.id)
+                .await
+                .expect("reload room")
+                .and_then(|room| room.slug)
+                .as_deref()
+                == Some("admin-suite")
+        },
+        "selected room to be renamed",
+    )
+    .await;
+}

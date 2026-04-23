@@ -22,7 +22,9 @@ use crate::state::{ActiveUser, ActiveUsers};
 use super::{
     discover, news, notifications,
     notifications::svc::NotificationService,
-    svc::{ChatEvent, ChatService, ChatSnapshot, RoomModerationAction, StaffViewScope},
+    svc::{
+        AdminRoomAction, ChatEvent, ChatService, ChatSnapshot, RoomModerationAction, StaffViewScope,
+    },
 };
 
 pub(crate) const ROOM_JUMP_KEYS: &[u8] = b"asdfghjklqwertyuiopzxcvbnm1234567890";
@@ -815,6 +817,12 @@ impl ChatState {
                 "open the chat page (press 2) to moderate a room",
             ));
         }
+        if from_dashboard && parse_admin_room_command(&body).is_some() {
+            self.clear_composer_after_submit();
+            return Some(Banner::error(
+                "open the chat page (press 2) to manage a room",
+            ));
+        }
 
         if body.trim() == "/binds" {
             self.clear_composer_after_submit();
@@ -893,8 +901,78 @@ impl ChatState {
                     self.service
                         .list_moderators_task(self.user_id, self.permissions);
                 }
-                Some(other) => {
-                    return Some(Banner::error(&format!("Unknown admin command: {other}")));
+                Some(rest) => {
+                    let Some(command) = parse_admin_room_subcommand(rest) else {
+                        return Some(Banner::error(&format!("Unknown admin command: {rest}")));
+                    };
+                    let Some(room_id) = self.selected_room_id else {
+                        return Some(Banner::error("No room selected"));
+                    };
+                    let Some(room) = self.rooms.iter().find(|(room, _)| room.id == room_id) else {
+                        return Some(Banner::error("No room selected"));
+                    };
+                    if room.0.kind != "topic" {
+                        return Some(Banner::error(
+                            "Admin room actions are only available for topic rooms",
+                        ));
+                    }
+                    if room.0.permanent {
+                        return Some(Banner::error(
+                            "Permanent rooms must use the dedicated admin room commands",
+                        ));
+                    }
+                    let Some(room_slug) = room.0.slug.clone() else {
+                        return Some(Banner::error(
+                            "Admin room actions are only available for topic rooms",
+                        ));
+                    };
+                    match command {
+                        ParsedAdminRoomCommand::Show => {
+                            self.open_overlay("Admin Room", admin_room_lines(&room_slug));
+                        }
+                        ParsedAdminRoomCommand::Rename {
+                            new_slug: Some(new_slug),
+                        } => {
+                            self.service.admin_room_task(
+                                self.user_id,
+                                room_id,
+                                AdminRoomAction::Rename {
+                                    new_slug: new_slug.to_string(),
+                                },
+                                self.permissions,
+                            );
+                            return Some(Banner::success(&format!(
+                                "Renaming #{} to #{}...",
+                                room_slug, new_slug
+                            )));
+                        }
+                        ParsedAdminRoomCommand::Rename { new_slug: None } => {
+                            return Some(Banner::error("Usage: /admin room rename #new"));
+                        }
+                        ParsedAdminRoomCommand::SetVisibility { visibility } => {
+                            self.service.admin_room_task(
+                                self.user_id,
+                                room_id,
+                                AdminRoomAction::SetVisibility {
+                                    visibility: visibility.to_string(),
+                                },
+                                self.permissions,
+                            );
+                            return Some(Banner::success(&format!(
+                                "Making #{} {}...",
+                                room_slug, visibility
+                            )));
+                        }
+                        ParsedAdminRoomCommand::Delete => {
+                            self.service.admin_room_task(
+                                self.user_id,
+                                room_id,
+                                AdminRoomAction::Delete,
+                                self.permissions,
+                            );
+                            return Some(Banner::success(&format!("Deleting #{}...", room_slug)));
+                        }
+                    }
                 }
             }
             return None;
@@ -1495,6 +1573,30 @@ impl ChatState {
                     self.request_list();
                     banner = Some(Banner::success(&format!("Deleted permanent #{slug}")));
                 }
+                ChatEvent::AdminRoomUpdated {
+                    actor_user_id,
+                    room_id,
+                    old_slug,
+                    new_slug,
+                    visibility,
+                    deleted,
+                } => {
+                    let was_selected = Some(room_id) == self.selected_room_id;
+                    if deleted && Some(room_id) == self.selected_room_id {
+                        self.selected_room_id = None;
+                    }
+                    self.request_list();
+                    if self.user_id == actor_user_id {
+                        banner = Some(Banner::success(&admin_room_success_message(
+                            &old_slug,
+                            new_slug.as_deref(),
+                            visibility.as_deref(),
+                            deleted,
+                        )));
+                    } else if deleted && was_selected {
+                        banner = Some(Banner::error(&format!("Room #{} was deleted", old_slug)));
+                    }
+                }
                 ChatEvent::ModerationFailed { user_id, message } if self.user_id == user_id => {
                     banner = Some(Banner::error(&message));
                 }
@@ -2002,6 +2104,11 @@ fn admin_help_lines() -> Vec<String> {
         "/admin users".to_string(),
         "/admin rooms".to_string(),
         "/admin mods".to_string(),
+        "/admin room".to_string(),
+        "/admin room rename #new".to_string(),
+        "/admin room public".to_string(),
+        "/admin room private".to_string(),
+        "/admin room delete".to_string(),
         String::new(),
         "Moderator commands:".to_string(),
         "/mod users".to_string(),
@@ -2011,6 +2118,48 @@ fn admin_help_lines() -> Vec<String> {
         "/mod room ban @user".to_string(),
         "/mod room unban @user".to_string(),
     ]
+}
+
+enum ParsedAdminRoomCommand<'a> {
+    Show,
+    Rename { new_slug: Option<&'a str> },
+    SetVisibility { visibility: &'static str },
+    Delete,
+}
+
+fn parse_admin_room_subcommand(input: &str) -> Option<ParsedAdminRoomCommand<'_>> {
+    let rest = input.strip_prefix("room")?;
+    let rest = match rest.chars().next() {
+        None => return Some(ParsedAdminRoomCommand::Show),
+        Some(c) if c.is_whitespace() => rest.trim(),
+        Some(_) => return None,
+    };
+    if rest.is_empty() {
+        return Some(ParsedAdminRoomCommand::Show);
+    }
+
+    if let Some(slug) = rest.strip_prefix("rename") {
+        let slug = slug.trim();
+        let slug = (!slug.is_empty())
+            .then(|| slug.strip_prefix('#').unwrap_or(slug).trim())
+            .filter(|slug| !slug.is_empty());
+        return Some(ParsedAdminRoomCommand::Rename { new_slug: slug });
+    }
+
+    match rest {
+        "public" => Some(ParsedAdminRoomCommand::SetVisibility {
+            visibility: "public",
+        }),
+        "private" => Some(ParsedAdminRoomCommand::SetVisibility {
+            visibility: "private",
+        }),
+        "delete" => Some(ParsedAdminRoomCommand::Delete),
+        _ => None,
+    }
+}
+
+fn parse_admin_room_command(input: &str) -> Option<ParsedAdminRoomCommand<'_>> {
+    parse_subcommand(input, "/admin")?.and_then(parse_admin_room_subcommand)
 }
 
 enum ParsedRoomModerationCommand<'a> {
@@ -2064,6 +2213,35 @@ fn mod_room_lines(room_slug: &str) -> Vec<String> {
         "/mod room ban @user".to_string(),
         "/mod room unban @user".to_string(),
     ]
+}
+
+fn admin_room_lines(room_slug: &str) -> Vec<String> {
+    vec![
+        format!("#{}", room_slug),
+        String::new(),
+        "/admin room rename #new".to_string(),
+        "/admin room public".to_string(),
+        "/admin room private".to_string(),
+        "/admin room delete".to_string(),
+    ]
+}
+
+fn admin_room_success_message(
+    old_slug: &str,
+    new_slug: Option<&str>,
+    visibility: Option<&str>,
+    deleted: bool,
+) -> String {
+    if deleted {
+        return format!("Deleted #{}", old_slug);
+    }
+    if let Some(new_slug) = new_slug {
+        return format!("Renamed #{} to #{}", old_slug, new_slug);
+    }
+    if let Some(visibility) = visibility {
+        return format!("Made #{} {}", old_slug, visibility);
+    }
+    format!("Updated #{}", old_slug)
 }
 
 fn wrapped_index(current: isize, delta: isize, len: usize) -> usize {
@@ -2698,6 +2876,40 @@ mod tests {
     fn parse_subcommand_rejects_non_matches() {
         assert_eq!(parse_subcommand("/admins help", "/admin"), None);
         assert_eq!(parse_subcommand("admin help", "/admin"), None);
+    }
+
+    #[test]
+    fn parse_admin_room_command_reads_show_and_action_forms() {
+        assert!(matches!(
+            parse_admin_room_command("/admin room"),
+            Some(ParsedAdminRoomCommand::Show)
+        ));
+        assert!(matches!(
+            parse_admin_room_command("/admin room rename #suite"),
+            Some(ParsedAdminRoomCommand::Rename {
+                new_slug: Some("suite"),
+            })
+        ));
+        assert!(matches!(
+            parse_admin_room_command("/admin room public"),
+            Some(ParsedAdminRoomCommand::SetVisibility {
+                visibility: "public",
+            })
+        ));
+        assert!(matches!(
+            parse_admin_room_command("/admin room delete"),
+            Some(ParsedAdminRoomCommand::Delete)
+        ));
+    }
+
+    #[test]
+    fn parse_admin_room_command_handles_missing_target_and_rejects_non_matches() {
+        assert!(matches!(
+            parse_admin_room_command("/admin room rename"),
+            Some(ParsedAdminRoomCommand::Rename { new_slug: None })
+        ));
+        assert!(parse_admin_room_command("/admin rooms").is_none());
+        assert!(parse_admin_room_command("/mod room delete").is_none());
     }
 
     #[test]

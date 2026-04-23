@@ -68,12 +68,39 @@ impl RoomModerationAction {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminRoomAction {
+    Rename { new_slug: String },
+    SetVisibility { visibility: String },
+    Delete,
+}
+
+impl AdminRoomAction {
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Self::Rename { .. } => "rename",
+            Self::SetVisibility { visibility } if visibility == "public" => "make public",
+            Self::SetVisibility { .. } => "make private",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct RoomModerationResult {
     room_id: Uuid,
     room_slug: String,
     target_user_id: Uuid,
     target_username: String,
     action: RoomModerationAction,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdminRoomResult {
+    room_id: Uuid,
+    old_slug: String,
+    new_slug: Option<String>,
+    visibility: Option<String>,
+    deleted: bool,
 }
 
 #[derive(Clone)]
@@ -189,6 +216,14 @@ pub enum ChatEvent {
     PermanentRoomDeleted {
         user_id: Uuid,
         slug: String,
+    },
+    AdminRoomUpdated {
+        actor_user_id: Uuid,
+        room_id: Uuid,
+        old_slug: String,
+        new_slug: Option<String>,
+        visibility: Option<String>,
+        deleted: bool,
     },
     ModerationFailed {
         user_id: Uuid,
@@ -1718,6 +1753,149 @@ impl ChatService {
             target_username: target.username,
             action,
         })
+    }
+
+    pub fn admin_room_task(
+        &self,
+        actor_user_id: Uuid,
+        room_id: Uuid,
+        action: AdminRoomAction,
+        permissions: Permissions,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.admin_room_task",
+            actor_user_id = %actor_user_id,
+            room_id = %room_id,
+            action = action.verb()
+        );
+        tokio::spawn(
+            async move {
+                match service
+                    .admin_room_action(actor_user_id, room_id, action, permissions)
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = service.evt_tx.send(ChatEvent::AdminRoomUpdated {
+                            actor_user_id,
+                            room_id: result.room_id,
+                            old_slug: result.old_slug,
+                            new_slug: result.new_slug,
+                            visibility: result.visibility,
+                            deleted: result.deleted,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
+                            user_id: actor_user_id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn admin_room_action(
+        &self,
+        actor_user_id: Uuid,
+        room_id: Uuid,
+        action: AdminRoomAction,
+        permissions: Permissions,
+    ) -> Result<AdminRoomResult> {
+        if !permissions.can_access_admin_surface() {
+            anyhow::bail!("Admin only");
+        }
+
+        let client = &self.db.get().await?;
+        let room = ChatRoom::get(client, room_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        let old_slug = room
+            .slug
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Room does not have a slug"))?;
+        if room.kind != "topic" {
+            anyhow::bail!("Admin room actions are limited to topic rooms");
+        }
+        if room.permanent {
+            anyhow::bail!("Permanent rooms must use the dedicated admin room commands");
+        }
+
+        let result = match action {
+            AdminRoomAction::Rename { new_slug } => {
+                let updated = ChatRoom::rename_topic_room(client, room_id, &new_slug).await?;
+                ModerationAuditLog::record(
+                    client,
+                    actor_user_id,
+                    "room_rename",
+                    "room",
+                    Some(room_id),
+                    json!({
+                        "old_slug": old_slug.clone(),
+                        "new_slug": updated.slug.clone(),
+                    }),
+                )
+                .await?;
+                AdminRoomResult {
+                    room_id,
+                    old_slug,
+                    new_slug: updated.slug,
+                    visibility: None,
+                    deleted: false,
+                }
+            }
+            AdminRoomAction::SetVisibility { visibility } => {
+                let updated =
+                    ChatRoom::set_topic_room_visibility(client, room_id, &visibility).await?;
+                ModerationAuditLog::record(
+                    client,
+                    actor_user_id,
+                    "room_visibility_change",
+                    "room",
+                    Some(room_id),
+                    json!({
+                        "room_slug": old_slug.clone(),
+                        "visibility": updated.visibility.clone(),
+                    }),
+                )
+                .await?;
+                AdminRoomResult {
+                    room_id,
+                    old_slug,
+                    new_slug: None,
+                    visibility: Some(updated.visibility),
+                    deleted: false,
+                }
+            }
+            AdminRoomAction::Delete => {
+                let deleted = ChatRoom::delete_topic_room(client, room_id).await?;
+                if deleted == 0 {
+                    anyhow::bail!("Room not found");
+                }
+                ModerationAuditLog::record(
+                    client,
+                    actor_user_id,
+                    "room_delete",
+                    "room",
+                    Some(room_id),
+                    json!({
+                        "room_slug": old_slug.clone(),
+                    }),
+                )
+                .await?;
+                AdminRoomResult {
+                    room_id,
+                    old_slug,
+                    new_slug: None,
+                    visibility: None,
+                    deleted: true,
+                }
+            }
+        };
+
+        Ok(result)
     }
 
     pub fn delete_permanent_room_task(&self, user_id: Uuid, slug: String) {

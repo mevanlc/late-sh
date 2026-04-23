@@ -8,7 +8,9 @@ use late_core::models::{
     user::User,
 };
 use late_ssh::app::chat::notifications::svc::NotificationService;
-use late_ssh::app::chat::svc::{ChatEvent, ChatService, RoomModerationAction, StaffViewScope};
+use late_ssh::app::chat::svc::{
+    AdminRoomAction, ChatEvent, ChatService, RoomModerationAction, StaffViewScope,
+};
 use late_ssh::authz::Permissions;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
@@ -857,6 +859,141 @@ async fn invite_user_to_room_task_rejects_banned_target() {
         }
         other => panic!("expected InviteFailed, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn admin_room_task_renames_selected_topic_room_and_writes_audit_log() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let admin = create_test_user(&test_db.db, "admin_room_actor").await;
+    let room = ChatRoom::create_private_room(&client, "old-suite")
+        .await
+        .expect("create room");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    service.admin_room_task(
+        admin.id,
+        room.id,
+        AdminRoomAction::Rename {
+            new_slug: "new-suite".to_string(),
+        },
+        Permissions::new(true, false),
+    );
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::AdminRoomUpdated {
+            actor_user_id,
+            room_id,
+            old_slug,
+            new_slug,
+            visibility,
+            deleted,
+        } => {
+            assert_eq!(actor_user_id, admin.id);
+            assert_eq!(room_id, room.id);
+            assert_eq!(old_slug, "old-suite");
+            assert_eq!(new_slug.as_deref(), Some("new-suite"));
+            assert!(visibility.is_none());
+            assert!(!deleted);
+        }
+        other => panic!("expected AdminRoomUpdated, got {other:?}"),
+    }
+
+    let renamed = ChatRoom::get(&client, room.id)
+        .await
+        .expect("reload room")
+        .expect("room exists");
+    assert_eq!(renamed.slug.as_deref(), Some("new-suite"));
+
+    let audit_rows = client
+        .query(
+            "SELECT * FROM moderation_audit_log WHERE actor_user_id = $1 AND action = 'room_rename'",
+            &[&admin.id],
+        )
+        .await
+        .expect("query moderation audit log");
+    let audit_entries: Vec<_> = audit_rows
+        .into_iter()
+        .map(ModerationAuditLog::from)
+        .collect();
+    assert_eq!(audit_entries.len(), 1);
+    assert_eq!(audit_entries[0].target_id, Some(room.id));
+}
+
+#[tokio::test]
+async fn admin_room_task_deletes_non_permanent_topic_room() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let admin = create_test_user(&test_db.db, "admin_room_delete").await;
+    let room = ChatRoom::create_private_room(&client, "trash-room")
+        .await
+        .expect("create room");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    service.admin_room_task(
+        admin.id,
+        room.id,
+        AdminRoomAction::Delete,
+        Permissions::new(true, false),
+    );
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::AdminRoomUpdated {
+            actor_user_id,
+            room_id,
+            old_slug,
+            new_slug,
+            visibility,
+            deleted,
+        } => {
+            assert_eq!(actor_user_id, admin.id);
+            assert_eq!(room_id, room.id);
+            assert_eq!(old_slug, "trash-room");
+            assert!(new_slug.is_none());
+            assert!(visibility.is_none());
+            assert!(deleted);
+        }
+        other => panic!("expected AdminRoomUpdated, got {other:?}"),
+    }
+
+    assert!(
+        ChatRoom::get(&client, room.id)
+            .await
+            .expect("reload room")
+            .is_none()
+    );
 }
 
 // --- delete message: regression tests for user_id on MessageDeleted ---
