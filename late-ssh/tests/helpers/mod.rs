@@ -25,6 +25,7 @@ use late_ssh::app::games::twenty_forty_eight::svc::TwentyFortyEightService;
 use late_ssh::app::profile::svc::ProfileService;
 use late_ssh::app::state::{App, SessionConfig};
 use late_ssh::app::vote::svc::VoteService;
+use late_ssh::authz::Permissions;
 use late_ssh::config::{AiConfig, Config};
 use late_ssh::session::{PairControlMessage, PairedClientRegistry, SessionRegistry};
 use late_ssh::state::ActivityEvent;
@@ -234,7 +235,7 @@ pub fn make_app_with_chat_service(
         session_rx: None,
         now_playing_rx: None,
         user_id,
-        is_admin: false,
+        permissions: Permissions::default(),
         my_vote: None,
         active_users: None,
         activity_feed_rx: None,
@@ -328,7 +329,7 @@ pub fn make_app_with_paired_client(
         session_rx: None,
         now_playing_rx: None,
         user_id,
-        is_admin: false,
+        permissions: Permissions::default(),
         my_vote: None,
         active_users: None,
         activity_feed_rx: None,

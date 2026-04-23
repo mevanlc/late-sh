@@ -1,4 +1,7 @@
-use crate::app::{ai::svc::AiService, chat::svc::ChatService};
+use crate::{
+    app::{ai::svc::AiService, chat::svc::ChatService},
+    authz::Permissions,
+};
 use anyhow::{Context, Result};
 use late_core::models::article::{ArticleEvent, ArticleFeedItem, ArticleSnapshot, NEWS_MARKER};
 use late_core::{
@@ -179,7 +182,7 @@ impl ArticleService {
         Ok(())
     }
 
-    pub fn delete_article(&self, user_id: Uuid, article_id: Uuid, is_admin: bool) {
+    pub fn delete_article(&self, user_id: Uuid, article_id: Uuid, permissions: Permissions) {
         let service = self.clone();
         tokio::spawn(
             async move {
@@ -191,7 +194,7 @@ impl ArticleService {
                     let Some(article) = Article::get(&client, article_id).await? else {
                         anyhow::bail!("Article not found");
                     };
-                    if !is_admin && article.user_id != user_id {
+                    if !permissions.can_delete_article(article.user_id == user_id) {
                         anyhow::bail!("Article not owned by you");
                     }
 
@@ -387,7 +390,7 @@ impl ArticleService {
                 Some("general".to_string()),
                 announcement,
                 Uuid::now_v7(),
-                false,
+                Permissions::default(),
             );
         }
 

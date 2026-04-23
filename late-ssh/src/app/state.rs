@@ -14,6 +14,7 @@ use std::{
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
+use crate::authz::Permissions;
 use late_core::models::leaderboard::LeaderboardData;
 use late_core::models::profile::Profile;
 
@@ -144,7 +145,7 @@ pub struct SessionConfig {
     pub active_users: Option<ActiveUsers>,
     pub activity_feed_rx: Option<broadcast::Receiver<ActivityEvent>>,
     pub user_id: Uuid,
-    pub is_admin: bool,
+    pub permissions: Permissions,
 
     /// Voting
     pub my_vote: Option<Genre>,
@@ -616,13 +617,13 @@ impl App {
             activity_feed_rx: config.activity_feed_rx,
             activity: VecDeque::new(),
             user_id: config.user_id,
-            is_admin: config.is_admin,
+            is_admin: config.permissions.is_admin(),
             vote: vote::state::VoteState::new(config.vote_service, config.user_id, config.my_vote),
             chat: chat::state::ChatState::new(
                 config.chat_service,
                 config.notification_service,
                 config.user_id,
-                config.is_admin,
+                config.permissions,
                 active_users.clone(),
                 config.article_service.clone(),
             ),

@@ -7,6 +7,7 @@ use late_core::models::{
 };
 use late_ssh::app::chat::notifications::svc::NotificationService;
 use late_ssh::app::chat::svc::{ChatEvent, ChatService};
+use late_ssh::authz::Permissions;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
 
@@ -31,7 +32,7 @@ async fn emits_send_failed_event_when_sender_is_not_room_member() {
         None,
         "hello".to_string(),
         request_id,
-        false,
+        Permissions::default(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -76,7 +77,7 @@ async fn emits_message_created_and_send_succeeded_when_sender_is_member() {
         room.slug.clone(),
         "hello world".to_string(),
         request_id,
-        false,
+        Permissions::default(),
     );
 
     let first = timeout(Duration::from_secs(2), events.recv())
@@ -193,7 +194,7 @@ async fn emits_send_failed_event_when_non_admin_posts_to_announcements() {
         room.slug.clone(),
         "not allowed".to_string(),
         request_id,
-        false,
+        Permissions::default(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -686,7 +687,7 @@ async fn message_deleted_event_carries_deleter_user_id() {
     .await
     .expect("create message");
 
-    service.delete_message_task(author.id, msg.id, false);
+    service.delete_message_task(author.id, msg.id, Permissions::default());
 
     let event = timeout(Duration::from_secs(2), events.recv())
         .await
@@ -737,7 +738,7 @@ async fn admin_delete_event_carries_admin_user_id_not_author() {
     .expect("create message");
 
     // Admin deletes another user's message
-    service.delete_message_task(admin.id, msg.id, true);
+    service.delete_message_task(admin.id, msg.id, Permissions::new(true, false));
 
     let event = timeout(Duration::from_secs(2), events.recv())
         .await

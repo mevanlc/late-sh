@@ -13,6 +13,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::app::common::overlay::Overlay;
+use crate::authz::Permissions;
 
 use crate::app::common::{primitives::Banner, theme};
 use crate::app::help_modal::data::HelpTopic;
@@ -58,7 +59,7 @@ pub(crate) enum RoomSlot {
 pub struct ChatState {
     pub(crate) service: ChatService,
     user_id: Uuid,
-    is_admin: bool,
+    permissions: Permissions,
     active_users: Option<ActiveUsers>,
     snapshot_rx: watch::Receiver<ChatSnapshot>,
     event_rx: tokio::sync::broadcast::Receiver<ChatEvent>,
@@ -125,7 +126,7 @@ impl ChatState {
         service: ChatService,
         notification_service: NotificationService,
         user_id: Uuid,
-        is_admin: bool,
+        permissions: Permissions,
         active_users: Option<ActiveUsers>,
         article_service: news::svc::ArticleService,
     ) -> Self {
@@ -137,7 +138,7 @@ impl ChatState {
         Self {
             service,
             user_id,
-            is_admin,
+            permissions,
             active_users,
             snapshot_rx,
             event_rx,
@@ -169,7 +170,7 @@ impl ChatState {
             reply_target: None,
             bg_task,
             news_selected: false,
-            news: news::state::State::new(article_service, user_id, is_admin),
+            news: news::state::State::new(article_service, user_id, permissions),
             notifications_selected: false,
             notifications: notifications::state::State::new(notification_service, user_id),
             discover_selected: false,
@@ -384,7 +385,7 @@ impl ChatState {
         body: &str,
     ) -> Option<Banner> {
         let is_own = message_user_id == self.user_id;
-        if !is_own && !self.is_admin {
+        if !self.permissions.can_edit_message(is_own) {
             return Some(Banner::error("Can only edit your own messages"));
         }
         self.edited_message_id = Some(selected_id);
@@ -411,11 +412,11 @@ impl ChatState {
             .find_message_in_room(room_id, selected_id)
             .map(|m| m.user_id)?;
         let is_own = msg_user_id == self.user_id;
-        if !is_own && !self.is_admin {
+        if !self.permissions.can_delete_message(is_own) {
             return Some(Banner::error("Can only delete your own messages"));
         }
         self.service
-            .delete_message_task(self.user_id, selected_id, self.is_admin);
+            .delete_message_task(self.user_id, selected_id, self.permissions);
         self.selected_message_id = self
             .rooms
             .iter()
@@ -915,7 +916,7 @@ impl ChatState {
 
         if let Some(slug) = parse_create_room_command(&body) {
             self.clear_composer_after_submit();
-            if !self.is_admin {
+            if !self.permissions.can_manage_permanent_rooms() {
                 return Some(Banner::error("Admin only: /create-room"));
             }
             self.service
@@ -925,7 +926,7 @@ impl ChatState {
 
         if let Some(slug) = parse_delete_room_command(&body) {
             self.clear_composer_after_submit();
-            if !self.is_admin {
+            if !self.permissions.can_manage_permanent_rooms() {
                 return Some(Banner::error("Admin only: /delete-room"));
             }
             self.service
@@ -953,7 +954,7 @@ impl ChatState {
                     message_id,
                     body,
                     request_id,
-                    self.is_admin,
+                    self.permissions,
                 );
             } else {
                 self.service.send_message_task(
@@ -962,7 +963,7 @@ impl ChatState {
                     self.room_slug(room_id),
                     body,
                     request_id,
-                    self.is_admin,
+                    self.permissions,
                 );
             }
             self.pending_send_notices.push_back(request_id);
@@ -1370,7 +1371,7 @@ impl ChatState {
                     self.request_list();
                     banner = Some(Banner::success(&format!("Deleted permanent #{slug}")));
                 }
-                ChatEvent::AdminFailed { user_id, message } if self.user_id == user_id => {
+                ChatEvent::ModerationFailed { user_id, message } if self.user_id == user_id => {
                     banner = Some(Banner::error(&message));
                 }
                 ChatEvent::MessageDeleted {

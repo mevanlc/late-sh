@@ -14,6 +14,7 @@ use late_core::models::{
     user::User,
 };
 use late_core::test_utils::create_test_user;
+use late_ssh::authz::Permissions;
 use rstest::rstest;
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -696,7 +697,7 @@ async fn ignore_command_hides_messages_and_persists_across_refresh() {
         Some("general".to_string()),
         post_ignore_body.to_string(),
         Uuid::now_v7(),
-        false,
+        Permissions::default(),
     );
     wait_until(
         || async {

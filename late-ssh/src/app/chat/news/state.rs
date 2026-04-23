@@ -4,6 +4,7 @@ use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 use crate::app::common::primitives::Banner;
+use crate::authz::Permissions;
 use late_core::models::article::{ArticleEvent, ArticleFeedItem, ArticleSnapshot};
 
 use super::svc::ArticleService;
@@ -11,7 +12,7 @@ use super::svc::ArticleService;
 pub struct State {
     article_service: ArticleService,
     user_id: Uuid,
-    is_admin: bool,
+    permissions: Permissions,
     articles: Vec<ArticleFeedItem>,
     selected: usize,
     snapshot_rx: watch::Receiver<ArticleSnapshot>,
@@ -24,14 +25,14 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(article_service: ArticleService, user_id: Uuid, is_admin: bool) -> Self {
+    pub fn new(article_service: ArticleService, user_id: Uuid, permissions: Permissions) -> Self {
         let snapshot_rx = article_service.subscribe_snapshot();
         let event_rx = article_service.subscribe_events();
         article_service.refresh_unread_count_task(user_id);
         Self {
             article_service,
             user_id,
-            is_admin,
+            permissions,
             articles: Vec::new(),
             selected: 0,
             snapshot_rx,
@@ -182,11 +183,11 @@ impl State {
     pub fn delete_selected(&mut self) {
         if let Some(item) = self.articles.get(self.selected_index()) {
             let is_owner = item.article.user_id == self.user_id;
-            if !is_owner && !self.is_admin {
+            if !self.permissions.can_delete_article(is_owner) {
                 return;
             }
             self.article_service
-                .delete_article(self.user_id, item.article.id, self.is_admin);
+                .delete_article(self.user_id, item.article.id, self.permissions);
         }
     }
 

@@ -20,6 +20,7 @@ use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, timeout};
 
 use crate::app::state::{App, SessionConfig};
+use crate::authz::Permissions as AuthzPermissions;
 use crate::metrics;
 use crate::state::{ActivityEvent, State};
 
@@ -722,7 +723,10 @@ impl russh::server::Handler for ClientHandler {
             active_users: Some(self.state.active_users.clone()),
             activity_feed_rx: self.activity_feed_rx.take(),
             user_id,
-            is_admin: user.is_admin || self.state.config.force_admin,
+            permissions: AuthzPermissions::new(
+                user.is_admin || self.state.config.force_admin,
+                user.is_moderator,
+            ),
 
             // Voting
             my_vote,

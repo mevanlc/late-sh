@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, watch};
 use tracing::{Instrument, info_span};
 
 use crate::app::bonsai::state::stage_for;
+use crate::authz::Permissions;
 use crate::metrics;
 
 const HISTORY_LIMIT: i64 = 1000;
@@ -137,7 +138,7 @@ pub enum ChatEvent {
         user_id: Uuid,
         slug: String,
     },
-    AdminFailed {
+    ModerationFailed {
         user_id: Uuid,
         message: String,
     },
@@ -494,13 +495,13 @@ impl ChatService {
         room_slug: Option<String>,
         body: String,
         request_id: Uuid,
-        is_admin: bool,
+        permissions: Permissions,
     ) {
         let service = self.clone();
         tokio::spawn(
             async move {
                 match service
-                    .send_message(user_id, room_id, room_slug, body, is_admin)
+                    .send_message(user_id, room_id, room_slug, body, permissions)
                     .await
                 {
                     Err(e) => {
@@ -546,14 +547,14 @@ impl ChatService {
         room_id: Uuid,
         room_slug: Option<String>,
         body: String,
-        is_admin: bool,
+        permissions: Permissions,
     ) -> Result<()> {
         let body = body.trim_start_matches('\n').trim_end();
         if body.is_empty() {
             return Ok(());
         }
 
-        if room_slug.as_deref() == Some("announcements") && !is_admin {
+        if room_slug.as_deref() == Some("announcements") && !permissions.can_post_announcements() {
             anyhow::bail!("announcements is admin-only");
         }
 
@@ -589,13 +590,13 @@ impl ChatService {
         message_id: Uuid,
         new_body: String,
         request_id: Uuid,
-        is_admin: bool,
+        permissions: Permissions,
     ) {
         let service = self.clone();
         tokio::spawn(
             async move {
                 match service
-                    .edit_message(user_id, message_id, new_body, is_admin)
+                    .edit_message(user_id, message_id, new_body, permissions)
                     .await
                 {
                     Err(e) => {
@@ -635,7 +636,7 @@ impl ChatService {
         user_id: Uuid,
         message_id: Uuid,
         new_body: String,
-        is_admin: bool,
+        permissions: Permissions,
     ) -> Result<()> {
         let new_body = new_body.trim_start_matches('\n').trim_end();
         if new_body.is_empty() {
@@ -646,7 +647,7 @@ impl ChatService {
         let existing = ChatMessage::get(client, message_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("message not found"))?;
-        if existing.user_id != user_id && !is_admin {
+        if !permissions.can_edit_message(existing.user_id == user_id) {
             anyhow::bail!("cannot edit this message");
         }
 
@@ -1157,7 +1158,7 @@ impl ChatService {
                             .send(ChatEvent::PermanentRoomCreated { user_id, slug });
                     }
                     Err(e) => {
-                        let _ = service.evt_tx.send(ChatEvent::AdminFailed {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
                             user_id,
                             message: e.to_string(),
                         });
@@ -1249,7 +1250,7 @@ impl ChatService {
                             .send(ChatEvent::PermanentRoomDeleted { user_id, slug });
                     }
                     Err(e) => {
-                        let _ = service.evt_tx.send(ChatEvent::AdminFailed {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
                             user_id,
                             message: e.to_string(),
                         });
@@ -1270,12 +1271,15 @@ impl ChatService {
         Ok(())
     }
 
-    pub fn delete_message_task(&self, user_id: Uuid, message_id: Uuid, is_admin: bool) {
+    pub fn delete_message_task(&self, user_id: Uuid, message_id: Uuid, permissions: Permissions) {
         let service = self.clone();
         let span = info_span!("chat.delete_message", user_id = %user_id, message_id = %message_id);
         tokio::spawn(
             async move {
-                match service.delete_message(user_id, message_id, is_admin).await {
+                match service
+                    .delete_message(user_id, message_id, permissions)
+                    .await
+                {
                     Ok(room_id) => {
                         let _ = service.evt_tx.send(ChatEvent::MessageDeleted {
                             user_id,
@@ -1299,14 +1303,14 @@ impl ChatService {
         &self,
         user_id: Uuid,
         message_id: Uuid,
-        is_admin: bool,
+        permissions: Permissions,
     ) -> Result<Uuid> {
         let client = &self.db.get().await?;
         // Look up the message to get room_id
         let msg = ChatMessage::get(client, message_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Message not found"))?;
-        let count = if is_admin {
+        let count = if permissions.can_delete_message(false) {
             ChatMessage::delete_by_admin(client, message_id).await?
         } else {
             ChatMessage::delete_by_author(client, message_id, user_id).await?

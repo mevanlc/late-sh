@@ -21,6 +21,7 @@ use crate::{
     app::ai::svc::AiService,
     app::chat::svc::{ChatEvent, ChatService},
     app::help_modal::data::bot_app_context,
+    authz::Permissions,
     state::{ActiveUser, ActiveUsers, ActivityEvent},
 };
 
@@ -347,7 +348,7 @@ impl GhostService {
             None,
             body,
             Uuid::now_v7(),
-            false,
+            Permissions::default(),
         );
 
         Ok(())
@@ -452,7 +453,7 @@ impl GhostService {
             Some("general".to_string()),
             safe_reply,
             Uuid::now_v7(),
-            false,
+            Permissions::default(),
         );
 
         Ok(())
@@ -608,7 +609,7 @@ impl GhostService {
             Some("general".to_string()),
             safe_reply,
             Uuid::now_v7(),
-            false,
+            Permissions::default(),
         );
 
         Ok(())
@@ -680,7 +681,7 @@ impl GhostService {
             None,
             safe_reply,
             Uuid::now_v7(),
-            false,
+            Permissions::default(),
         );
 
         Ok(())
