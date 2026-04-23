@@ -119,6 +119,8 @@ struct DrawContext<'a> {
     control_center_user_lines: &'a [String],
     control_center_room_list_lines: &'a [String],
     control_center_room_detail_lines: &'a [String],
+    control_center_room_prompt_title: Option<&'a str>,
+    control_center_room_prompt_value: Option<&'a str>,
     is_admin: bool,
     is_moderator: bool,
     live_session_count: usize,
@@ -305,9 +307,24 @@ impl App {
             .as_ref()
             .map(|active_users| active_users.lock_recover().len())
             .unwrap_or(0);
+        let control_center_room_ids = self.chat.control_center_room_ids();
+        self.control_center.sync_room_ids(&control_center_room_ids);
+        let selected_control_center_room_id = self.control_center.selected_room_id();
         let control_center_user_lines = self.chat.control_center_user_lines();
-        let control_center_room_list_lines = self.chat.control_center_room_list_lines();
-        let control_center_room_detail_lines = self.chat.control_center_room_detail_lines();
+        let control_center_room_list_lines = self
+            .chat
+            .control_center_room_list_lines(selected_control_center_room_id);
+        let control_center_room_detail_lines = self
+            .chat
+            .control_center_room_detail_lines(selected_control_center_room_id);
+        let control_center_room_prompt_title = self
+            .control_center
+            .room_action_prompt()
+            .map(|prompt| prompt.action.label());
+        let control_center_room_prompt_value = self
+            .control_center
+            .room_action_prompt()
+            .map(|prompt| prompt.target_username.as_str());
         let live_session_count = self
             .session_registry
             .as_ref()
@@ -351,6 +368,8 @@ impl App {
                         control_center_user_lines: &control_center_user_lines,
                         control_center_room_list_lines: &control_center_room_list_lines,
                         control_center_room_detail_lines: &control_center_room_detail_lines,
+                        control_center_room_prompt_title,
+                        control_center_room_prompt_value,
                         is_admin: self.is_admin,
                         is_moderator: self.permissions.is_moderator(),
                         live_session_count,
@@ -543,6 +562,8 @@ impl App {
                     user_lines: ctx.control_center_user_lines,
                     room_list_lines: ctx.control_center_room_list_lines,
                     room_detail_lines: ctx.control_center_room_detail_lines,
+                    room_prompt_title: ctx.control_center_room_prompt_title,
+                    room_prompt_value: ctx.control_center_room_prompt_value,
                 },
             ),
             Screen::Artboard => {

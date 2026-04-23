@@ -225,6 +225,70 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
 }
 
 #[tokio::test]
+async fn moderator_can_kick_user_from_control_center_room() {
+    let test_db = new_test_db().await;
+    let moderator = create_test_user(&test_db.db, "cc-room-mod").await;
+    let target = create_test_user(&test_db.db, "cc-room-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    let room = ChatRoom::create_private_room(&client, "cc-side")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, general.id, moderator.id)
+        .await
+        .expect("join moderator to general");
+    ChatRoomMember::join(&client, room.id, moderator.id)
+        .await
+        .expect("join moderator to room");
+    ChatRoomMember::join(&client, room.id, target.id)
+        .await
+        .expect("join target to room");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&moderator.id],
+        )
+        .await
+        .expect("promote moderator");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        moderator.id,
+        "cc-room-mod-flow",
+        Permissions::new(false, true),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Room Directory ").await;
+    wait_for_render_contains(&mut app, "> #general").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> #cc-side").await;
+
+    app.handle_input(b"x");
+    wait_for_render_contains(&mut app, " Moderate User ").await;
+    wait_for_render_contains(&mut app, "Kick target").await;
+
+    app.handle_input(b"@cc-room-target\r");
+    wait_for_render_contains(&mut app, "Kicking @cc-room-target in #cc-side...").await;
+    wait_for_render_contains(&mut app, "Kicked @cc-room-target in #cc-side").await;
+
+    wait_until(
+        || async {
+            !ChatRoomMember::is_member(&client, room.id, target.id)
+                .await
+                .expect("load target membership")
+        },
+        "target to be removed from control center selected room",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn artboard_view_mode_allows_cursor_movement_and_screen_hotkeys() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "artboard-view-it").await;

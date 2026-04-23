@@ -831,19 +831,57 @@ impl ChatState {
         )
     }
 
-    pub fn control_center_room_list_lines(&self) -> Vec<String> {
+    pub fn control_center_room_ids(&self) -> Vec<Uuid> {
+        self.staff_rooms_snapshot
+            .iter()
+            .map(|room| room.room_id)
+            .collect()
+    }
+
+    pub fn control_center_room_list_lines(&self, selected_room_id: Option<Uuid>) -> Vec<String> {
         format_control_center_room_list_lines(
             &self.staff_rooms_snapshot,
-            control_center_selected_room(&self.staff_rooms_snapshot, self.selected_room_id)
+            control_center_selected_room(&self.staff_rooms_snapshot, selected_room_id)
                 .map(|room| room.room_id),
         )
     }
 
-    pub fn control_center_room_detail_lines(&self) -> Vec<String> {
+    pub fn control_center_room_detail_lines(&self, selected_room_id: Option<Uuid>) -> Vec<String> {
         format_control_center_room_detail_lines(
             &self.staff_rooms_snapshot,
-            control_center_selected_room(&self.staff_rooms_snapshot, self.selected_room_id),
+            control_center_selected_room(&self.staff_rooms_snapshot, selected_room_id),
         )
+    }
+
+    pub fn moderate_control_center_room_member(
+        &self,
+        room_id: Uuid,
+        target_username: &str,
+        action: RoomModerationAction,
+    ) -> Banner {
+        let target_username = target_username.trim().trim_start_matches('@');
+        if target_username.is_empty() {
+            return Banner::error("Enter a username");
+        }
+        self.service.moderate_room_member_task(
+            self.user_id,
+            room_id,
+            target_username.to_string(),
+            action,
+            self.permissions,
+        );
+        let room_label = self
+            .staff_rooms_snapshot
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .map(control_center_room_label)
+            .unwrap_or_else(|| "room".to_string());
+        Banner::success(&format!(
+            "{} @{} in {}...",
+            action.progress_verb(),
+            target_username,
+            room_label
+        ))
     }
 
     fn open_staff_users_overlay(&mut self, title: &str, mut lines: Vec<String>) {
@@ -1667,6 +1705,9 @@ impl ChatState {
                     } else if deleted && was_selected {
                         banner = Some(Banner::error(&format!("Room #{} was deleted", old_slug)));
                     }
+                    if self.permissions.can_access_mod_surface() {
+                        self.refresh_staff_rooms_snapshot();
+                    }
                 }
                 ChatEvent::ModerationFailed { user_id, message } if self.user_id == user_id => {
                     banner = Some(Banner::error(&message));
@@ -1707,6 +1748,9 @@ impl ChatState {
                                 room_slug,
                             )));
                         }
+                    }
+                    if self.permissions.can_access_mod_surface() {
+                        self.refresh_staff_rooms_snapshot();
                     }
                 }
                 ChatEvent::MessageDeleted {

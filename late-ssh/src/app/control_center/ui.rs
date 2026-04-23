@@ -20,6 +20,8 @@ pub struct ControlCenterView<'a> {
     pub user_lines: &'a [String],
     pub room_list_lines: &'a [String],
     pub room_detail_lines: &'a [String],
+    pub room_prompt_title: Option<&'a str>,
+    pub room_prompt_value: Option<&'a str>,
 }
 
 pub fn draw_control_center(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
@@ -30,12 +32,13 @@ pub fn draw_control_center(frame: &mut Frame, area: Rect, view: &ControlCenterVi
     ])
     .split(area);
 
-    draw_tab_row(frame, layout[0], view.selected_tab);
+    draw_tab_row(frame, layout[0], view);
     draw_summary(frame, layout[1], view);
     draw_active_panel(frame, layout[2], view);
 }
 
-fn draw_tab_row(frame: &mut Frame, area: Rect, selected: Tab) {
+fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
+    let selected = view.selected_tab;
     let tabs = [Tab::Users, Tab::Rooms];
     let mut spans = vec![Span::styled(
         " Staff Control Center ",
@@ -63,8 +66,13 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, selected: Tab) {
         spans.push(Span::raw(" "));
     }
 
+    let help_text = match selected {
+        Tab::Users => "←/→ switch tabs · Tab return",
+        Tab::Rooms if view.room_prompt_title.is_some() => "type @user · Enter confirm · Esc cancel",
+        Tab::Rooms => "←/→ switch tabs · j/k move · x kick · b ban · u unban · Tab return",
+    };
     spans.push(Span::styled(
-        "←/→ switch tabs · Tab return",
+        help_text,
         Style::default().fg(theme::TEXT_FAINT()),
     ));
 
@@ -150,7 +158,14 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
 
     match view.selected_tab {
         Tab::Users => draw_user_panel(frame, inner, view.user_lines),
-        Tab::Rooms => draw_rooms_panel(frame, inner, view.room_list_lines, view.room_detail_lines),
+        Tab::Rooms => draw_rooms_panel(
+            frame,
+            inner,
+            view.room_list_lines,
+            view.room_detail_lines,
+            view.room_prompt_title,
+            view.room_prompt_value,
+        ),
     }
 }
 
@@ -184,11 +199,32 @@ fn draw_rooms_panel(
     area: Rect,
     room_list_lines: &[String],
     room_detail_lines: &[String],
+    room_prompt_title: Option<&str>,
+    room_prompt_value: Option<&str>,
 ) {
-    let columns =
-        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area);
+    let columns = if room_prompt_title.is_some() {
+        Layout::horizontal([
+            Constraint::Percentage(36),
+            Constraint::Percentage(42),
+            Constraint::Percentage(22),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).split(area)
+    };
     draw_panel_card(frame, columns[0], "Room Directory", room_list_lines);
     draw_panel_card(frame, columns[1], "Selected Room", room_detail_lines);
+    if let Some(title) = room_prompt_title {
+        let prompt_lines = vec![
+            format!("{} target", title),
+            String::new(),
+            format!("@{}", room_prompt_value.unwrap_or("")),
+            String::new(),
+            "Enter confirms".to_string(),
+            "Esc cancels".to_string(),
+        ];
+        draw_panel_card(frame, columns[2], "Moderate User", &prompt_lines);
+    }
 }
 
 fn draw_panel_card(frame: &mut Frame, area: Rect, title: &str, lines: &[String]) {

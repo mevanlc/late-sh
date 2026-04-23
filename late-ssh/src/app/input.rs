@@ -833,6 +833,13 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
 }
 
 fn route_char_to_composer(app: &mut App, ctx: InputContext, ch: char) -> bool {
+    if ctx.screen == Screen::ControlCenter
+        && app.control_center.is_prompt_open()
+        && !ch.is_control()
+    {
+        app.control_center.prompt_push(ch);
+        return true;
+    }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && ctx.chat_composing {
         chat::input::handle_compose_char(app, ch);
         return true;
@@ -1036,6 +1043,8 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
                 app.control_center.prev_tab();
                 true
             }
+            b'A' => control_center_move_room_selection(app, -1),
+            b'B' => control_center_move_room_selection(app, 1),
             _ => false,
         },
         Screen::Dashboard => dashboard::input::handle_arrow(app, key),
@@ -1045,6 +1054,28 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
 }
 
 fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
+    if ctx.screen == Screen::ControlCenter && app.control_center.is_prompt_open() {
+        return match byte {
+            0x1B => {
+                app.control_center.cancel_prompt();
+                true
+            }
+            b'\r' | b'\n' => {
+                submit_control_center_room_prompt(app);
+                true
+            }
+            0x7F => {
+                app.control_center.prompt_backspace();
+                true
+            }
+            0x17 | 0x08 => {
+                app.control_center.prompt_delete_word_left();
+                true
+            }
+            _ => false,
+        };
+    }
+
     if (ctx.screen == Screen::Dashboard || ctx.screen == Screen::Chat) && ctx.chat_composing {
         chat::input::handle_compose_input(
             app,
@@ -1304,8 +1335,48 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             dashboard::input::handle_key(app, byte);
         }
         Screen::ControlCenter => match byte {
-            b'h' | b'H' => app.control_center.prev_tab(),
-            b'l' | b'L' => app.control_center.next_tab(),
+            b'h' | b'H' => {
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Rooms
+                {
+                    let _ = control_center_move_room_selection(app, -1);
+                } else {
+                    app.control_center.prev_tab();
+                }
+            }
+            b'l' | b'L' => {
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Rooms
+                {
+                    let _ = control_center_move_room_selection(app, 1);
+                } else {
+                    app.control_center.next_tab();
+                }
+            }
+            b'j' | b'J' => {
+                let _ = control_center_move_room_selection(app, 1);
+            }
+            b'k' | b'K' => {
+                let _ = control_center_move_room_selection(app, -1);
+            }
+            b'x' | b'X' => {
+                control_center_begin_room_action(
+                    app,
+                    crate::app::control_center::state::RoomAction::Kick,
+                );
+            }
+            b'b' | b'B' => {
+                control_center_begin_room_action(
+                    app,
+                    crate::app::control_center::state::RoomAction::Ban,
+                );
+            }
+            b'u' | b'U' => {
+                control_center_begin_room_action(
+                    app,
+                    crate::app::control_center::state::RoomAction::Unban,
+                );
+            }
             _ => {}
         },
         Screen::Chat => {
@@ -1318,6 +1389,50 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             let _ = crate::app::artboard::page::handle_key(app, byte);
         }
     }
+}
+
+fn control_center_move_room_selection(app: &mut App, delta: isize) -> bool {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Rooms {
+        return false;
+    }
+    let room_ids = app.chat.control_center_room_ids();
+    app.control_center.move_room_selection(&room_ids, delta)
+}
+
+fn control_center_begin_room_action(
+    app: &mut App,
+    action: crate::app::control_center::state::RoomAction,
+) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Rooms {
+        return;
+    }
+    if !app.control_center.begin_room_action(action) {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No room selected",
+        ));
+    }
+}
+
+fn submit_control_center_room_prompt(app: &mut App) {
+    let Some((room_id, action, target_username)) = app.control_center.submit_prompt() else {
+        return;
+    };
+    let action = match action {
+        crate::app::control_center::state::RoomAction::Kick => {
+            crate::app::chat::svc::RoomModerationAction::Kick
+        }
+        crate::app::control_center::state::RoomAction::Ban => {
+            crate::app::chat::svc::RoomModerationAction::Ban
+        }
+        crate::app::control_center::state::RoomAction::Unban => {
+            crate::app::chat::svc::RoomModerationAction::Unban
+        }
+    };
+    app.banner = Some(app.chat.moderate_control_center_room_member(
+        room_id,
+        &target_username,
+        action,
+    ));
 }
 
 fn try_open_icon_picker(app: &mut App) {
