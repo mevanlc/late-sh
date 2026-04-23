@@ -2,13 +2,14 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use late_core::MutexRecover;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
+    time::Instant,
 };
-use tokio::sync::{RwLock, mpsc::Sender, mpsc::UnboundedSender};
+use tokio::sync::{mpsc::Sender, mpsc::UnboundedSender};
 use uuid::Uuid;
 
 use crate::metrics;
@@ -33,6 +34,7 @@ pub struct BrowserVizFrame {
 pub enum SessionMessage {
     Heartbeat,
     Viz(BrowserVizFrame),
+    Disconnect { reason: String },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -139,7 +141,7 @@ pub enum PairControlMessage {
 
 #[derive(Clone, Default)]
 pub struct SessionRegistry {
-    sessions: Arc<RwLock<HashMap<String, Sender<SessionMessage>>>>,
+    directory: Arc<Mutex<SessionDirectory>>,
 }
 
 #[derive(Clone, Default)]
@@ -156,6 +158,36 @@ struct PairControlEntry {
     usage_total_recorded: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionRegistration {
+    pub session_id: Uuid,
+    pub token: String,
+    pub user_id: Uuid,
+    pub username: String,
+    pub tx: Sender<SessionMessage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LiveSessionSnapshot {
+    pub session_id: Uuid,
+    pub token: String,
+    pub user_id: Uuid,
+    pub username: String,
+    pub connected_at: Instant,
+}
+
+#[derive(Default)]
+struct SessionDirectory {
+    sessions_by_token: HashMap<String, SessionEntry>,
+    tokens_by_user_id: HashMap<Uuid, HashSet<String>>,
+}
+
+#[derive(Clone)]
+struct SessionEntry {
+    snapshot: LiveSessionSnapshot,
+    tx: Sender<SessionMessage>,
+}
+
 pub fn new_session_token() -> String {
     compact_uuid(Uuid::now_v7())
 }
@@ -169,29 +201,153 @@ impl SessionRegistry {
         Self::default()
     }
 
-    pub async fn register(&self, token: String, tx: Sender<SessionMessage>) {
-        tracing::info!(token_hint = %token_hint(&token), "registered cli session token");
-        let mut sessions = self.sessions.write().await;
-        sessions.insert(token, tx);
+    pub fn register(&self, registration: SessionRegistration) {
+        tracing::info!(
+            token_hint = %token_hint(&registration.token),
+            session_id = %registration.session_id,
+            user_id = %registration.user_id,
+            "registered cli session token"
+        );
+        let mut directory = self.directory.lock_recover();
+        remove_session_locked(&mut directory, &registration.token);
+        let snapshot = LiveSessionSnapshot {
+            session_id: registration.session_id,
+            token: registration.token.clone(),
+            user_id: registration.user_id,
+            username: registration.username,
+            connected_at: Instant::now(),
+        };
+        directory
+            .tokens_by_user_id
+            .entry(snapshot.user_id)
+            .or_default()
+            .insert(registration.token.clone());
+        directory.sessions_by_token.insert(
+            registration.token,
+            SessionEntry {
+                snapshot,
+                tx: registration.tx,
+            },
+        );
     }
 
-    pub async fn unregister(&self, token: &str) {
+    pub fn unregister(&self, token: &str) {
         tracing::info!(token_hint = %token_hint(token), "unregistered cli session token");
-        let mut sessions = self.sessions.write().await;
-        sessions.remove(token);
+        let mut directory = self.directory.lock_recover();
+        remove_session_locked(&mut directory, token);
     }
 
-    pub async fn has_session(&self, token: &str) -> bool {
-        let sessions = self.sessions.read().await;
-        sessions.contains_key(token)
+    pub fn has_session(&self, token: &str) -> bool {
+        let directory = self.directory.lock_recover();
+        directory.sessions_by_token.contains_key(token)
+    }
+
+    pub fn snapshot_all(&self) -> Vec<LiveSessionSnapshot> {
+        let directory = self.directory.lock_recover();
+        directory
+            .sessions_by_token
+            .values()
+            .map(|entry| entry.snapshot.clone())
+            .collect()
+    }
+
+    pub fn snapshot_by_user_id(&self) -> HashMap<Uuid, Vec<LiveSessionSnapshot>> {
+        let directory = self.directory.lock_recover();
+        directory
+            .tokens_by_user_id
+            .iter()
+            .map(|(user_id, tokens)| {
+                let mut sessions: Vec<LiveSessionSnapshot> = tokens
+                    .iter()
+                    .filter_map(|token| directory.sessions_by_token.get(token))
+                    .map(|entry| entry.snapshot.clone())
+                    .collect();
+                sessions.sort_by_key(|session| session.connected_at);
+                (*user_id, sessions)
+            })
+            .collect()
+    }
+
+    pub fn sessions_for_user(&self, user_id: Uuid) -> Vec<LiveSessionSnapshot> {
+        let mut sessions = self
+            .snapshot_by_user_id()
+            .remove(&user_id)
+            .unwrap_or_default();
+        sessions.sort_by_key(|session| session.connected_at);
+        sessions
+    }
+
+    pub async fn disconnect_session(&self, session_id: Uuid, reason: String) -> bool {
+        let target = {
+            let directory = self.directory.lock_recover();
+            directory
+                .sessions_by_token
+                .values()
+                .find(|entry| entry.snapshot.session_id == session_id)
+                .map(|entry| (entry.snapshot.token.clone(), entry.tx.clone()))
+        };
+
+        let Some((token, tx)) = target else {
+            tracing::warn!(%session_id, "no live session found for disconnect");
+            return false;
+        };
+
+        match tx.send(SessionMessage::Disconnect { reason }).await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%session_id, ?error, "failed to send session disconnect");
+                self.unregister(&token);
+                false
+            }
+        }
+    }
+
+    pub async fn disconnect_user_sessions(&self, user_id: Uuid, reason: String) -> usize {
+        let targets: Vec<(Uuid, String, Sender<SessionMessage>)> = {
+            let directory = self.directory.lock_recover();
+            let Some(tokens) = directory.tokens_by_user_id.get(&user_id) else {
+                return 0;
+            };
+            tokens
+                .iter()
+                .filter_map(|token| directory.sessions_by_token.get(token))
+                .map(|entry| {
+                    (
+                        entry.snapshot.session_id,
+                        entry.snapshot.token.clone(),
+                        entry.tx.clone(),
+                    )
+                })
+                .collect()
+        };
+
+        let mut disconnected = 0;
+        for (session_id, token, tx) in targets {
+            match tx
+                .send(SessionMessage::Disconnect {
+                    reason: reason.clone(),
+                })
+                .await
+            {
+                Ok(_) => disconnected += 1,
+                Err(error) => {
+                    tracing::warn!(%session_id, ?error, "failed to send session disconnect");
+                    self.unregister(&token);
+                }
+            }
+        }
+        disconnected
     }
 
     pub async fn send_message(&self, token: &str, msg: SessionMessage) -> bool {
         // 1. Get the Sender (holding read lock)
         let tx = {
-            let sessions = self.sessions.read().await;
-            sessions.get(token).cloned()
-        }; // Lock dropped here
+            let directory = self.directory.lock_recover();
+            directory
+                .sessions_by_token
+                .get(token)
+                .map(|entry| entry.tx.clone())
+        };
 
         // 2. Send (async, no lock held)
         if let Some(tx) = tx {
@@ -199,6 +355,7 @@ impl SessionRegistry {
                 Ok(_) => true,
                 Err(e) => {
                     tracing::error!(error = ?e, "failed to send session message");
+                    self.unregister(token);
                     false
                 }
             }
@@ -210,6 +367,22 @@ impl SessionRegistry {
             false
         }
     }
+}
+
+fn remove_session_locked(directory: &mut SessionDirectory, token: &str) -> Option<SessionEntry> {
+    let removed = directory.sessions_by_token.remove(token)?;
+    if let Some(tokens) = directory
+        .tokens_by_user_id
+        .get_mut(&removed.snapshot.user_id)
+    {
+        tokens.remove(token);
+        if tokens.is_empty() {
+            directory
+                .tokens_by_user_id
+                .remove(&removed.snapshot.user_id);
+        }
+    }
+    Some(removed)
 }
 
 impl PairedClientRegistry {
@@ -342,11 +515,22 @@ fn token_hint(token: &str) -> String {
 mod tests {
     use super::*;
 
+    fn registration(token: &str, tx: Sender<SessionMessage>, user_id: Uuid) -> SessionRegistration {
+        SessionRegistration {
+            session_id: Uuid::now_v7(),
+            token: token.to_string(),
+            user_id,
+            username: format!("user-{}", &token[..token.len().min(4)]),
+            tx,
+        }
+    }
+
     #[tokio::test]
     async fn register_and_send() {
         let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-        registry.register("tok1".to_string(), tx).await;
+        registry.register(registration("tok1", tx, user_id));
 
         let sent = registry
             .send_message("tok1", SessionMessage::Heartbeat)
@@ -369,22 +553,24 @@ mod tests {
     #[tokio::test]
     async fn has_session_reflects_registration() {
         let registry = SessionRegistry::new();
-        assert!(!registry.has_session("tok1").await);
+        let user_id = Uuid::now_v7();
+        assert!(!registry.has_session("tok1"));
 
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
-        registry.register("tok1".to_string(), tx).await;
-        assert!(registry.has_session("tok1").await);
+        registry.register(registration("tok1", tx, user_id));
+        assert!(registry.has_session("tok1"));
 
-        registry.unregister("tok1").await;
-        assert!(!registry.has_session("tok1").await);
+        registry.unregister("tok1");
+        assert!(!registry.has_session("tok1"));
     }
 
     #[tokio::test]
     async fn unregister_removes_session() {
         let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
         let (tx, _rx) = tokio::sync::mpsc::channel(10);
-        registry.register("tok1".to_string(), tx).await;
-        registry.unregister("tok1").await;
+        registry.register(registration("tok1", tx, user_id));
+        registry.unregister("tok1");
 
         let sent = registry
             .send_message("tok1", SessionMessage::Heartbeat)
@@ -395,10 +581,11 @@ mod tests {
     #[tokio::test]
     async fn register_overwrites_existing() {
         let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
         let (tx1, _rx1) = tokio::sync::mpsc::channel(10);
         let (tx2, mut rx2) = tokio::sync::mpsc::channel(10);
-        registry.register("tok1".to_string(), tx1).await;
-        registry.register("tok1".to_string(), tx2).await;
+        registry.register(registration("tok1", tx1, user_id));
+        registry.register(registration("tok1", tx2, user_id));
 
         let sent = registry
             .send_message("tok1", SessionMessage::Heartbeat)
@@ -411,8 +598,9 @@ mod tests {
     #[tokio::test]
     async fn send_viz_frame() {
         let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
         let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-        registry.register("tok1".to_string(), tx).await;
+        registry.register(registration("tok1", tx, user_id));
 
         let frame = BrowserVizFrame {
             bands: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
@@ -436,14 +624,84 @@ mod tests {
     #[tokio::test]
     async fn send_fails_when_receiver_dropped() {
         let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
         let (tx, rx) = tokio::sync::mpsc::channel(10);
-        registry.register("tok1".to_string(), tx).await;
+        registry.register(registration("tok1", tx, user_id));
         drop(rx);
 
         let sent = registry
             .send_message("tok1", SessionMessage::Heartbeat)
             .await;
         assert!(!sent);
+    }
+
+    #[test]
+    fn snapshot_by_user_id_groups_live_sessions() {
+        let registry = SessionRegistry::new();
+        let user_a = Uuid::now_v7();
+        let user_b = Uuid::now_v7();
+        let (tx_a1, _rx_a1) = tokio::sync::mpsc::channel(10);
+        let (tx_a2, _rx_a2) = tokio::sync::mpsc::channel(10);
+        let (tx_b1, _rx_b1) = tokio::sync::mpsc::channel(10);
+        registry.register(registration("tok-a1", tx_a1, user_a));
+        registry.register(registration("tok-a2", tx_a2, user_a));
+        registry.register(registration("tok-b1", tx_b1, user_b));
+
+        let grouped = registry.snapshot_by_user_id();
+        assert_eq!(grouped.get(&user_a).map(Vec::len), Some(2));
+        assert_eq!(grouped.get(&user_b).map(Vec::len), Some(1));
+        assert_eq!(registry.sessions_for_user(user_a).len(), 2);
+    }
+
+    #[tokio::test]
+    async fn disconnect_user_sessions_sends_disconnect_to_each_live_session() {
+        let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(10);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(10);
+        registry.register(registration("tok-1", tx1, user_id));
+        registry.register(registration("tok-2", tx2, user_id));
+
+        let disconnected = registry
+            .disconnect_user_sessions(user_id, "admin kick".to_string())
+            .await;
+        assert_eq!(disconnected, 2);
+        assert!(matches!(
+            rx1.recv().await,
+            Some(SessionMessage::Disconnect { reason }) if reason == "admin kick"
+        ));
+        assert!(matches!(
+            rx2.recv().await,
+            Some(SessionMessage::Disconnect { reason }) if reason == "admin kick"
+        ));
+    }
+
+    #[tokio::test]
+    async fn disconnect_session_targets_only_matching_session_id() {
+        let registry = SessionRegistry::new();
+        let user_id = Uuid::now_v7();
+        let session_id = Uuid::now_v7();
+        let (tx1, mut rx1) = tokio::sync::mpsc::channel(10);
+        let (tx2, mut rx2) = tokio::sync::mpsc::channel(10);
+        registry.register(SessionRegistration {
+            session_id,
+            token: "tok-target".to_string(),
+            user_id,
+            username: "target".to_string(),
+            tx: tx1,
+        });
+        registry.register(registration("tok-other", tx2, user_id));
+
+        assert!(
+            registry
+                .disconnect_session(session_id, "disconnect one".to_string())
+                .await
+        );
+        assert!(matches!(
+            rx1.recv().await,
+            Some(SessionMessage::Disconnect { reason }) if reason == "disconnect one"
+        ));
+        assert!(rx2.try_recv().is_err());
     }
 
     #[test]

@@ -569,6 +569,8 @@ impl App {
         };
 
         let active_users = config.active_users.clone();
+        let session_registry = config.session_registry.clone();
+        let paired_client_registry = config.paired_client_registry.clone();
         let splash_hint = super::common::splash_tips::choose_splash_hint(config.is_new_user);
         let initial_profile = Profile {
             theme_id: Some(config.initial_theme_id.clone()),
@@ -605,8 +607,8 @@ impl App {
             browser_viz_buffer: VecDeque::new(),
             last_browser_viz_at: None,
             connect_url: format!("{}/{}", config.web_url, config.session_token),
-            session_registry: config.session_registry,
-            paired_client_registry: config.paired_client_registry,
+            session_registry: session_registry.clone(),
+            paired_client_registry: paired_client_registry.clone(),
             web_chat_registry: config.web_chat_registry,
             show_web_chat_qr: false,
             web_chat_qr_url: None,
@@ -624,7 +626,11 @@ impl App {
                 config.notification_service,
                 config.user_id,
                 config.permissions,
-                active_users.clone(),
+                chat::state::ChatRuntimeState {
+                    active_users: active_users.clone(),
+                    session_registry,
+                    paired_client_registry,
+                },
                 config.article_service.clone(),
             ),
             dashboard_chat_rows_cache: chat::ui::ChatRowsCache::default(),
@@ -839,9 +845,7 @@ impl Drop for App {
             return;
         }
         let token = self.session_token.clone();
-        tokio::spawn(async move {
-            registry.unregister(&token).await;
-        });
+        registry.unregister(&token);
     }
 }
 

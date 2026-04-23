@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::app::common::overlay::Overlay;
 use crate::authz::Permissions;
+use crate::session::{LiveSessionSnapshot, PairedClientRegistry, SessionRegistry};
 
 use crate::app::common::{primitives::Banner, theme};
 use crate::app::help_modal::data::HelpTopic;
@@ -28,6 +29,13 @@ use super::{
 };
 
 pub(crate) const ROOM_JUMP_KEYS: &[u8] = b"asdfghjklqwertyuiopzxcvbnm1234567890";
+
+#[derive(Clone, Default)]
+pub struct ChatRuntimeState {
+    pub active_users: Option<ActiveUsers>,
+    pub session_registry: Option<SessionRegistry>,
+    pub paired_client_registry: Option<PairedClientRegistry>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MentionMatch {
@@ -63,6 +71,8 @@ pub struct ChatState {
     user_id: Uuid,
     permissions: Permissions,
     active_users: Option<ActiveUsers>,
+    session_registry: Option<SessionRegistry>,
+    paired_client_registry: Option<PairedClientRegistry>,
     snapshot_rx: watch::Receiver<ChatSnapshot>,
     event_rx: tokio::sync::broadcast::Receiver<ChatEvent>,
     pub(crate) rooms: Vec<(ChatRoom, Vec<ChatMessage>)>,
@@ -129,7 +139,7 @@ impl ChatState {
         notification_service: NotificationService,
         user_id: Uuid,
         permissions: Permissions,
-        active_users: Option<ActiveUsers>,
+        runtime: ChatRuntimeState,
         article_service: news::svc::ArticleService,
     ) -> Self {
         let snapshot_rx = service.subscribe_state();
@@ -141,7 +151,9 @@ impl ChatState {
             service,
             user_id,
             permissions,
-            active_users,
+            active_users: runtime.active_users,
+            session_registry: runtime.session_registry,
+            paired_client_registry: runtime.paired_client_registry,
             snapshot_rx,
             event_rx,
             rooms: Vec::new(),
@@ -789,6 +801,11 @@ impl ChatState {
             prefixed.append(&mut lines);
             lines = prefixed;
         }
+        lines = annotate_staff_user_lines(
+            lines,
+            self.session_registry.as_ref(),
+            self.paired_client_registry.as_ref(),
+        );
         self.open_overlay(title, lines);
     }
 
@@ -2098,6 +2115,170 @@ fn format_active_user_lines(active_users: Option<&ActiveUsers>) -> Vec<String> {
         .collect()
 }
 
+fn annotate_staff_user_lines(
+    lines: Vec<String>,
+    session_registry: Option<&SessionRegistry>,
+    paired_client_registry: Option<&PairedClientRegistry>,
+) -> Vec<String> {
+    let Some(session_registry) = session_registry else {
+        return lines;
+    };
+
+    let sessions_by_username = live_sessions_by_username(session_registry);
+    if sessions_by_username.is_empty() {
+        return lines;
+    }
+
+    let mut annotated = Vec::with_capacity(lines.len());
+    let mut in_staff_list = false;
+    for line in lines {
+        if line.starts_with("All Users (") {
+            in_staff_list = true;
+            annotated.push(line);
+            continue;
+        }
+        if !in_staff_list {
+            annotated.push(line);
+            continue;
+        }
+        let Some(username) = staff_overlay_username(&line) else {
+            annotated.push(line);
+            continue;
+        };
+
+        let Some(sessions) = sessions_by_username.get(&username) else {
+            annotated.push(line);
+            continue;
+        };
+
+        let mut header = line;
+        let session_count = sessions.len();
+        header.push_str(&format!(
+            " · online now · {} live {}",
+            session_count,
+            if session_count == 1 {
+                "session"
+            } else {
+                "sessions"
+            }
+        ));
+        annotated.push(header);
+        annotated.extend(sessions.iter().map(|session| {
+            format!(
+                "  {}",
+                format_live_session_line(session, paired_client_registry)
+            )
+        }));
+    }
+    annotated
+}
+
+fn live_sessions_by_username(
+    session_registry: &SessionRegistry,
+) -> HashMap<String, Vec<LiveSessionSnapshot>> {
+    let mut by_username: HashMap<String, Vec<LiveSessionSnapshot>> = HashMap::new();
+    for snapshot in session_registry.snapshot_all() {
+        by_username
+            .entry(snapshot.username.to_ascii_lowercase())
+            .or_default()
+            .push(snapshot);
+    }
+    for sessions in by_username.values_mut() {
+        sessions.sort_by_key(|session| session.connected_at);
+    }
+    by_username
+}
+
+fn staff_overlay_username(line: &str) -> Option<String> {
+    let first = line.split_whitespace().next()?;
+    first
+        .strip_prefix('@')
+        .map(|username| username.to_ascii_lowercase())
+}
+
+fn format_live_session_line(
+    session: &LiveSessionSnapshot,
+    paired_client_registry: Option<&PairedClientRegistry>,
+) -> String {
+    let mut details = vec![
+        format!("session {}", short_session_id(session.session_id)),
+        format!(
+            "{} connected",
+            format_elapsed_compact(session.connected_at.elapsed())
+        ),
+    ];
+    if let Some(state) =
+        paired_client_registry.and_then(|registry| registry.snapshot(&session.token))
+    {
+        details.push(format_paired_client_state(&state));
+    }
+    details.join(" · ")
+}
+
+fn short_session_id(session_id: Uuid) -> String {
+    session_id.to_string().chars().take(8).collect()
+}
+
+fn format_elapsed_compact(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 60 * 60 {
+        format!("{}m", secs / 60)
+    } else if secs < 60 * 60 * 24 {
+        format!("{}h", secs / (60 * 60))
+    } else {
+        format!("{}d", secs / (60 * 60 * 24))
+    }
+}
+
+fn format_paired_client_state(state: &crate::session::ClientAudioState) -> String {
+    let mut details = Vec::new();
+    details.push(match state.client_kind {
+        crate::session::ClientKind::Browser => "paired browser".to_string(),
+        crate::session::ClientKind::Cli => "paired cli".to_string(),
+        crate::session::ClientKind::Unknown => "paired client".to_string(),
+    });
+    if state.client_kind == crate::session::ClientKind::Cli {
+        let transport = match (state.ssh_mode, state.platform) {
+            (crate::session::ClientSshMode::Native, crate::session::ClientPlatform::Macos) => {
+                Some("native/macos")
+            }
+            (crate::session::ClientSshMode::Native, crate::session::ClientPlatform::Linux) => {
+                Some("native/linux")
+            }
+            (crate::session::ClientSshMode::Native, crate::session::ClientPlatform::Android) => {
+                Some("native/android")
+            }
+            (crate::session::ClientSshMode::Native, crate::session::ClientPlatform::Windows) => {
+                Some("native/windows")
+            }
+            (crate::session::ClientSshMode::Old, crate::session::ClientPlatform::Macos) => {
+                Some("old/macos")
+            }
+            (crate::session::ClientSshMode::Old, crate::session::ClientPlatform::Linux) => {
+                Some("old/linux")
+            }
+            (crate::session::ClientSshMode::Old, crate::session::ClientPlatform::Android) => {
+                Some("old/android")
+            }
+            (crate::session::ClientSshMode::Old, crate::session::ClientPlatform::Windows) => {
+                Some("old/windows")
+            }
+            _ => None,
+        };
+        if let Some(transport) = transport {
+            details.push(transport.to_string());
+        }
+    }
+    if state.muted {
+        details.push("muted".to_string());
+    } else {
+        details.push(format!("vol {}%", state.volume_percent));
+    }
+    details.join(" · ")
+}
+
 fn admin_help_lines() -> Vec<String> {
     vec![
         "/admin help".to_string(),
@@ -2992,6 +3173,47 @@ mod tests {
         assert_eq!(
             format_active_user_lines(None),
             vec!["Active user list unavailable".to_string()]
+        );
+    }
+
+    #[test]
+    fn annotate_staff_user_lines_adds_live_session_details_after_staff_header() {
+        let registry = crate::session::SessionRegistry::new();
+        let user_id = Uuid::now_v7();
+        let session_id = Uuid::now_v7();
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        registry.register(crate::session::SessionRegistration {
+            session_id,
+            token: "tok-admin".to_string(),
+            user_id,
+            username: "admin_staff".to_string(),
+            tx,
+        });
+
+        let lines = annotate_staff_user_lines(
+            vec![
+                "Online Now".to_string(),
+                "  @admin_staff".to_string(),
+                String::new(),
+                "All Users (2)".to_string(),
+                "@admin_staff [admin]".to_string(),
+                "@plain_staff".to_string(),
+            ],
+            Some(&registry),
+            None,
+        );
+
+        assert_eq!(lines[1], "  @admin_staff");
+        assert_eq!(lines[3], "All Users (2)");
+        assert!(
+            lines[4].starts_with("@admin_staff [admin] · online now · 1 live session"),
+            "expected live session annotation, got {:?}",
+            lines[4]
+        );
+        assert!(
+            lines[5].contains(&short_session_id(session_id)),
+            "expected session id detail, got {:?}",
+            lines[5]
         );
     }
 

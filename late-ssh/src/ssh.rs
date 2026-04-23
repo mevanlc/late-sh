@@ -18,6 +18,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as TokioMutex, Notify, OwnedSemaphorePermit};
 use tokio::task::JoinSet;
 use tokio::time::{MissedTickBehavior, timeout};
+use uuid::Uuid;
 
 use crate::app::state::{App, SessionConfig};
 use crate::authz::Permissions as AuthzPermissions;
@@ -386,10 +387,7 @@ impl Drop for ClientHandler {
         if self.app.is_none()
             && let Some(token) = self.session_token.clone()
         {
-            let registry = self.state.session_registry.clone();
-            tokio::spawn(async move {
-                registry.unregister(&token).await;
-            });
+            self.state.session_registry.unregister(&token);
         }
 
         if self.active_user_incremented
@@ -431,11 +429,20 @@ impl ClientHandler {
         }
 
         let session_token = crate::session::new_session_token();
+        let session_id = Uuid::now_v7();
         let (session_tx, session_rx) = tokio::sync::mpsc::channel(64);
+        let user = self.user.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("cannot register cli session without authenticated user")
+        })?;
         self.state
             .session_registry
-            .register(session_token.clone(), session_tx)
-            .await;
+            .register(crate::session::SessionRegistration {
+                session_id,
+                token: session_token.clone(),
+                user_id: user.id,
+                username: user.username.clone(),
+                tx: session_tx,
+            });
         self.session_token = Some(session_token.clone());
         self.session_rx = Some(session_rx);
         Ok(session_token)

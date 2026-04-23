@@ -201,7 +201,7 @@ async fn ws_handler(
         );
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    if !state.session_registry.has_session(&params.token).await {
+    if !state.session_registry.has_session(&params.token) {
         tracing::warn!(
             ip = %client_ip,
             peer_ip = %peer_addr.ip(),

@@ -2,11 +2,13 @@ mod helpers;
 
 use helpers::{new_test_db, test_app_state, test_config};
 use late_ssh::api::run_api_server_with_listener;
+use late_ssh::session::SessionRegistration;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::sleep;
+use uuid::Uuid;
 
 #[tokio::test]
 async fn ws_pair_endpoint_rate_limits_repeated_attempts_from_same_ip() {
@@ -16,15 +18,21 @@ async fn ws_pair_endpoint_rate_limits_repeated_attempts_from_same_ip() {
     let state = test_app_state(test_db.db.clone(), config);
 
     let (session_tx_one, _rx_one) = tokio::sync::mpsc::channel(1);
-    state
-        .session_registry
-        .register("tok-one".to_string(), session_tx_one)
-        .await;
+    state.session_registry.register(SessionRegistration {
+        session_id: Uuid::now_v7(),
+        token: "tok-one".to_string(),
+        user_id: Uuid::now_v7(),
+        username: "tok-one".to_string(),
+        tx: session_tx_one,
+    });
     let (session_tx_two, _rx_two) = tokio::sync::mpsc::channel(1);
-    state
-        .session_registry
-        .register("tok-two".to_string(), session_tx_two)
-        .await;
+    state.session_registry.register(SessionRegistration {
+        session_id: Uuid::now_v7(),
+        token: "tok-two".to_string(),
+        user_id: Uuid::now_v7(),
+        username: "tok-two".to_string(),
+        tx: session_tx_two,
+    });
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await

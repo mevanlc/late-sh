@@ -3,7 +3,7 @@ use std::time::Instant;
 use late_core::audio::VizFrame;
 
 use super::state::{App, GAME_SELECTION_TETRIS};
-use crate::app::common::primitives::Screen;
+use crate::app::common::primitives::{Banner, Screen};
 use crate::session::{BrowserVizFrame, SessionMessage};
 
 impl App {
@@ -63,6 +63,10 @@ impl App {
                 SessionMessage::Viz(viz) => {
                     self.push_browser_frame(viz);
                     updated = true;
+                }
+                SessionMessage::Disconnect { reason } => {
+                    self.banner = Some(Banner::error(&reason));
+                    self.running = false;
                 }
             }
         }
