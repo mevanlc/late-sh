@@ -3,6 +3,7 @@ pub mod artboard;
 pub mod bonsai;
 pub mod chat;
 pub mod common;
+pub(crate) mod confirm_dialog;
 pub mod control_center;
 pub mod dashboard;
 pub mod games;

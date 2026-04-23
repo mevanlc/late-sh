@@ -289,6 +289,144 @@ async fn moderator_can_kick_user_from_control_center_room() {
 }
 
 #[tokio::test]
+async fn admin_can_rename_room_from_control_center() {
+    let test_db = new_test_db().await;
+    let admin = create_test_user(&test_db.db, "cc-room-admin").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    let room = ChatRoom::create_private_room(&client, "cc-admin-side")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, general.id, admin.id)
+        .await
+        .expect("join admin to general");
+    ChatRoomMember::join(&client, room.id, admin.id)
+        .await
+        .expect("join admin to room");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        admin.id,
+        "cc-room-admin-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Room Directory ").await;
+    wait_for_render_contains(&mut app, "> #general").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> #cc-admin-side").await;
+
+    app.handle_input(b"r");
+    wait_for_render_contains(&mut app, " Admin Action ").await;
+    wait_for_render_contains(&mut app, "Rename room").await;
+
+    app.handle_input(b"#cc-renamed\r");
+    wait_for_render_contains(&mut app, "Renaming #cc-admin-side to #cc-renamed...").await;
+    wait_for_render_contains(&mut app, "Renamed #cc-admin-side to #cc-renamed").await;
+
+    wait_until(
+        || async {
+            ChatRoom::get(&client, room.id)
+                .await
+                .expect("reload room")
+                .and_then(|room| room.slug)
+                .as_deref()
+                == Some("cc-renamed")
+        },
+        "control center selected room to be renamed",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admin_must_type_room_name_before_deleting_from_control_center() {
+    let test_db = new_test_db().await;
+    let admin = create_test_user(&test_db.db, "cc-room-delete-admin").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    let room = ChatRoom::create_private_room(&client, "cc-delete-side")
+        .await
+        .expect("create room");
+    ChatRoomMember::join(&client, general.id, admin.id)
+        .await
+        .expect("join admin to general");
+    ChatRoomMember::join(&client, room.id, admin.id)
+        .await
+        .expect("join admin to room");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        admin.id,
+        "cc-room-delete-admin-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Room Directory ").await;
+    wait_for_render_contains(&mut app, "> #general").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> #cc-delete-side").await;
+
+    app.handle_input(b"d");
+    wait_for_render_contains(&mut app, " Delete Room ").await;
+    wait_for_render_contains(&mut app, "Type #cc-delete-side to confirm delete").await;
+
+    app.handle_input(b"#wrong\r");
+    assert_render_not_contains_for(
+        &mut app,
+        "Deleting #cc-delete-side...",
+        Duration::from_millis(200),
+    )
+    .await;
+    wait_for_render_contains(&mut app, "Type #cc-delete-side to confirm delete").await;
+
+    app.handle_input(b"\x1b");
+    assert_render_not_contains_for(&mut app, " Delete Room ", Duration::from_millis(200)).await;
+
+    app.handle_input(b"d");
+    wait_for_render_contains(&mut app, "Type #cc-delete-side to confirm delete").await;
+    app.handle_input(b"#cc-delete-side\r");
+    wait_for_render_contains(&mut app, "Deleting #cc-delete-side...").await;
+    wait_for_render_contains(&mut app, "Deleted #cc-delete-side").await;
+
+    wait_until(
+        || async {
+            ChatRoom::get(&client, room.id)
+                .await
+                .expect("reload room")
+                .is_none()
+        },
+        "control center selected room to be deleted",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn artboard_view_mode_allows_cursor_movement_and_screen_hotkeys() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "artboard-view-it").await;

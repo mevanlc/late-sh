@@ -1,6 +1,6 @@
 use super::{
-    chat, dashboard, help_modal, icon_picker, profile_modal, quit_confirm, settings_modal,
-    state::App,
+    chat, confirm_dialog, dashboard, help_modal, icon_picker, profile_modal, quit_confirm,
+    settings_modal, state::App,
 };
 use crate::app::common::primitives::Screen;
 use crate::app::common::readline::ctrl_byte_to_input;
@@ -549,6 +549,11 @@ fn overlay_input_action(event: &ParsedInput) -> Option<OverlayInputAction> {
 }
 
 fn handle_parsed_input(app: &mut App, event: ParsedInput) {
+    if app.confirm_dialog.is_some() {
+        handle_confirm_dialog_input(app, event);
+        return;
+    }
+
     if app.show_quit_confirm {
         quit_confirm::input::handle_input(app, event);
         return;
@@ -833,6 +838,12 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
 }
 
 fn route_char_to_composer(app: &mut App, ctx: InputContext, ch: char) -> bool {
+    if app.confirm_dialog.is_some() && !ch.is_control() {
+        if let Some(dialog) = &mut app.confirm_dialog {
+            dialog.push(ch);
+        }
+        return true;
+    }
     if ctx.screen == Screen::ControlCenter
         && app.control_center.is_prompt_open()
         && !ch.is_control()
@@ -866,6 +877,11 @@ fn handle_byte_event(app: &mut App, ctx: InputContext, byte: u8) {
 }
 
 fn dispatch_escape(app: &mut App) {
+    if app.confirm_dialog.is_some() {
+        app.confirm_dialog = None;
+        app.control_center.clear_pending_confirm_action();
+        return;
+    }
     if app.show_quit_confirm {
         quit_confirm::input::handle_escape(app);
         return;
@@ -1054,6 +1070,33 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
 }
 
 fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
+    if app.confirm_dialog.is_some() {
+        return match byte {
+            0x1B => {
+                app.confirm_dialog = None;
+                app.control_center.clear_pending_confirm_action();
+                true
+            }
+            b'\r' | b'\n' => {
+                submit_confirm_dialog(app);
+                true
+            }
+            0x7F => {
+                if let Some(dialog) = &mut app.confirm_dialog {
+                    dialog.backspace();
+                }
+                true
+            }
+            0x17 | 0x08 => {
+                if let Some(dialog) = &mut app.confirm_dialog {
+                    dialog.delete_word_left();
+                }
+                true
+            }
+            _ => false,
+        };
+    }
+
     if ctx.screen == Screen::ControlCenter && app.control_center.is_prompt_open() {
         return match byte {
             0x1B => {
@@ -1106,6 +1149,7 @@ fn reset_composers_for_page_change(app: &mut App) {
 fn open_settings_modal_globally(app: &mut App) {
     app.show_help = false;
     app.show_profile_modal = false;
+    app.confirm_dialog = None;
     app.show_web_chat_qr = false;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
@@ -1117,6 +1161,39 @@ fn open_settings_modal_globally(app: &mut App) {
         crate::app::settings_modal::ui::MODAL_WIDTH,
     );
     app.show_settings = true;
+}
+
+fn handle_confirm_dialog_input(app: &mut App, event: ParsedInput) {
+    match confirm_dialog::input::action_for(&event) {
+        Some(confirm_dialog::input::ConfirmDialogAction::Confirm) => submit_confirm_dialog(app),
+        Some(confirm_dialog::input::ConfirmDialogAction::Cancel) => {
+            app.confirm_dialog = None;
+            app.control_center.clear_pending_confirm_action();
+        }
+        None => match event {
+            ParsedInput::Char(ch) if !ch.is_control() => {
+                if let Some(dialog) = &mut app.confirm_dialog {
+                    dialog.push(ch);
+                }
+            }
+            ParsedInput::Byte(byte) if byte.is_ascii_graphic() || byte == b' ' => {
+                if let Some(dialog) = &mut app.confirm_dialog {
+                    dialog.push(byte as char);
+                }
+            }
+            ParsedInput::CtrlBackspace | ParsedInput::Byte(0x08) | ParsedInput::Byte(0x17) => {
+                if let Some(dialog) = &mut app.confirm_dialog {
+                    dialog.delete_word_left();
+                }
+            }
+            ParsedInput::Delete | ParsedInput::Byte(0x7F) => {
+                if let Some(dialog) = &mut app.confirm_dialog {
+                    dialog.backspace();
+                }
+            }
+            _ => {}
+        },
+    }
 }
 
 pub(crate) fn trigger_global_quit(app: &mut App) {
@@ -1377,6 +1454,36 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                     crate::app::control_center::state::RoomAction::Unban,
                 );
             }
+            b'r' | b'R' => control_center_begin_admin_rename(app),
+            b'p' | b'P' => control_center_request_admin_confirmation(
+                app,
+                crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
+                    room_id: app.control_center.selected_room_id().unwrap_or_default(),
+                    visibility: "public".to_string(),
+                },
+                "Make Public",
+                "This will expose the room to the broader member list.",
+                "make public",
+            ),
+            b'v' | b'V' => control_center_request_admin_confirmation(
+                app,
+                crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
+                    room_id: app.control_center.selected_room_id().unwrap_or_default(),
+                    visibility: "private".to_string(),
+                },
+                "Make Private",
+                "This will hide the room from public discovery.",
+                "make private",
+            ),
+            b'd' | b'D' => control_center_request_admin_confirmation(
+                app,
+                crate::app::control_center::state::PendingConfirmAction::DeleteRoom {
+                    room_id: app.control_center.selected_room_id().unwrap_or_default(),
+                },
+                "Delete Room",
+                "This removes the room and its membership state.",
+                "delete",
+            ),
             _ => {}
         },
         Screen::Chat => {
@@ -1414,25 +1521,121 @@ fn control_center_begin_room_action(
 }
 
 fn submit_control_center_room_prompt(app: &mut App) {
-    let Some((room_id, action, target_username)) = app.control_center.submit_prompt() else {
+    let Some((room_id, prompt_kind, value)) = app.control_center.submit_prompt() else {
         return;
     };
-    let action = match action {
-        crate::app::control_center::state::RoomAction::Kick => {
-            crate::app::chat::svc::RoomModerationAction::Kick
+    match prompt_kind {
+        crate::app::control_center::state::PromptKind::RoomAction(action) => {
+            let action = match action {
+                crate::app::control_center::state::RoomAction::Kick => {
+                    crate::app::chat::svc::RoomModerationAction::Kick
+                }
+                crate::app::control_center::state::RoomAction::Ban => {
+                    crate::app::chat::svc::RoomModerationAction::Ban
+                }
+                crate::app::control_center::state::RoomAction::Unban => {
+                    crate::app::chat::svc::RoomModerationAction::Unban
+                }
+            };
+            app.banner = Some(
+                app.chat
+                    .moderate_control_center_room_member(room_id, &value, action),
+            );
         }
-        crate::app::control_center::state::RoomAction::Ban => {
-            crate::app::chat::svc::RoomModerationAction::Ban
+        crate::app::control_center::state::PromptKind::AdminAction(
+            crate::app::control_center::state::AdminAction::Rename,
+        ) => {
+            app.banner = Some(app.chat.admin_control_center_room_action(
+                room_id,
+                crate::app::chat::svc::AdminRoomAction::Rename { new_slug: value },
+            ));
         }
-        crate::app::control_center::state::RoomAction::Unban => {
-            crate::app::chat::svc::RoomModerationAction::Unban
-        }
+    }
+}
+
+fn submit_confirm_dialog(app: &mut App) {
+    let Some(dialog) = app.confirm_dialog.as_ref() else {
+        return;
     };
-    app.banner = Some(app.chat.moderate_control_center_room_member(
-        room_id,
-        &target_username,
-        action,
-    ));
+    if !dialog.is_confirm_enabled() {
+        return;
+    }
+    app.confirm_dialog = None;
+    let Some(action) = app.control_center.take_pending_confirm_action() else {
+        return;
+    };
+    match action {
+        crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
+            room_id,
+            visibility,
+        } => {
+            app.banner = Some(app.chat.admin_control_center_room_action(
+                room_id,
+                crate::app::chat::svc::AdminRoomAction::SetVisibility { visibility },
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::DeleteRoom { room_id } => {
+            app.banner = Some(app.chat.admin_control_center_room_action(
+                room_id,
+                crate::app::chat::svc::AdminRoomAction::Delete,
+            ));
+        }
+    }
+}
+
+fn control_center_begin_admin_rename(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Rooms {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    if !app
+        .control_center
+        .begin_admin_action(crate::app::control_center::state::AdminAction::Rename)
+    {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No room selected",
+        ));
+    }
+}
+
+fn control_center_request_admin_confirmation(
+    app: &mut App,
+    action: crate::app::control_center::state::PendingConfirmAction,
+    title: &str,
+    detail: &str,
+    confirm_label: &str,
+) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Rooms {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(room_id) = app.control_center.selected_room_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No room selected",
+        ));
+        return;
+    };
+    let room_label = app
+        .chat
+        .control_center_room_label(room_id)
+        .unwrap_or_else(|| "#room".to_string());
+    app.control_center.set_pending_confirm_action(action);
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            title,
+            format!("Type {} to confirm {}", room_label, confirm_label),
+            detail,
+            room_label,
+            confirm_label,
+            "cancel",
+        ),
+    );
 }
 
 fn try_open_icon_picker(app: &mut App) {

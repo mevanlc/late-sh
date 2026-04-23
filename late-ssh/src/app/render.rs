@@ -20,8 +20,8 @@ use super::{
         sidebar::{SidebarProps, draw_sidebar, sidebar_clock_text},
         theme,
     },
-    control_center, dashboard, help_modal, icon_picker, profile_modal, quit_confirm,
-    settings_modal,
+    confirm_dialog, control_center, dashboard, help_modal, icon_picker, profile_modal,
+    quit_confirm, settings_modal,
     state::{App, NotificationMode},
     visualizer::Visualizer,
 };
@@ -114,11 +114,13 @@ struct DrawContext<'a> {
     activity: &'a std::collections::VecDeque<crate::state::ActivityEvent>,
     banner: Option<&'a Banner>,
     show_control_center: bool,
+    confirm_dialog: Option<&'a confirm_dialog::state::ConfirmDialogState>,
     username: &'a str,
     control_center_tab: control_center::state::Tab,
     control_center_user_lines: &'a [String],
     control_center_room_list_lines: &'a [String],
     control_center_room_detail_lines: &'a [String],
+    control_center_room_prompt_panel_title: Option<&'a str>,
     control_center_room_prompt_title: Option<&'a str>,
     control_center_room_prompt_value: Option<&'a str>,
     is_admin: bool,
@@ -319,12 +321,16 @@ impl App {
             .control_center_room_detail_lines(selected_control_center_room_id);
         let control_center_room_prompt_title = self
             .control_center
-            .room_action_prompt()
-            .map(|prompt| prompt.action.label());
+            .prompt()
+            .map(|prompt| prompt.kind.label());
+        let control_center_room_prompt_panel_title = self
+            .control_center
+            .prompt()
+            .map(|prompt| prompt.kind.panel_title());
         let control_center_room_prompt_value = self
             .control_center
-            .room_action_prompt()
-            .map(|prompt| prompt.target_username.as_str());
+            .prompt()
+            .map(|prompt| prompt.value.as_str());
         let live_session_count = self
             .session_registry
             .as_ref()
@@ -363,11 +369,13 @@ impl App {
                         activity: &self.activity,
                         banner: banner.as_ref(),
                         show_control_center: self.permissions.can_access_mod_surface(),
+                        confirm_dialog: self.confirm_dialog.as_ref(),
                         username: &self.username,
                         control_center_tab: self.control_center.selected_tab(),
                         control_center_user_lines: &control_center_user_lines,
                         control_center_room_list_lines: &control_center_room_list_lines,
                         control_center_room_detail_lines: &control_center_room_detail_lines,
+                        control_center_room_prompt_panel_title,
                         control_center_room_prompt_title,
                         control_center_room_prompt_value,
                         is_admin: self.is_admin,
@@ -562,6 +570,7 @@ impl App {
                     user_lines: ctx.control_center_user_lines,
                     room_list_lines: ctx.control_center_room_list_lines,
                     room_detail_lines: ctx.control_center_room_detail_lines,
+                    room_prompt_panel_title: ctx.control_center_room_prompt_panel_title,
                     room_prompt_title: ctx.control_center_room_prompt_title,
                     room_prompt_value: ctx.control_center_room_prompt_value,
                 },
@@ -659,6 +668,10 @@ impl App {
 
         if ctx.show_quit_confirm {
             quit_confirm::ui::draw(frame, inner);
+        }
+
+        if let Some(state) = ctx.confirm_dialog {
+            confirm_dialog::ui::draw(frame, inner, state);
         }
 
         if ctx.show_web_chat_qr

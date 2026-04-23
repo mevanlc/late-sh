@@ -20,6 +20,7 @@ pub struct ControlCenterView<'a> {
     pub user_lines: &'a [String],
     pub room_list_lines: &'a [String],
     pub room_detail_lines: &'a [String],
+    pub room_prompt_panel_title: Option<&'a str>,
     pub room_prompt_title: Option<&'a str>,
     pub room_prompt_value: Option<&'a str>,
 }
@@ -69,7 +70,9 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
     let help_text = match selected {
         Tab::Users => "←/→ switch tabs · Tab return",
         Tab::Rooms if view.room_prompt_title.is_some() => "type @user · Enter confirm · Esc cancel",
-        Tab::Rooms => "←/→ switch tabs · j/k move · x kick · b ban · u unban · Tab return",
+        Tab::Rooms => {
+            "←/→ switch tabs · j/k move · x kick · b ban · u unban · r rename · p public · v private · d delete · Tab return"
+        }
     };
     spans.push(Span::styled(
         help_text,
@@ -163,6 +166,7 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
             inner,
             view.room_list_lines,
             view.room_detail_lines,
+            view.room_prompt_panel_title,
             view.room_prompt_title,
             view.room_prompt_value,
         ),
@@ -199,10 +203,11 @@ fn draw_rooms_panel(
     area: Rect,
     room_list_lines: &[String],
     room_detail_lines: &[String],
+    room_prompt_panel_title: Option<&str>,
     room_prompt_title: Option<&str>,
     room_prompt_value: Option<&str>,
 ) {
-    let columns = if room_prompt_title.is_some() {
+    let columns = if room_prompt_panel_title.is_some() {
         Layout::horizontal([
             Constraint::Percentage(36),
             Constraint::Percentage(42),
@@ -214,16 +219,26 @@ fn draw_rooms_panel(
     };
     draw_panel_card(frame, columns[0], "Room Directory", room_list_lines);
     draw_panel_card(frame, columns[1], "Selected Room", room_detail_lines);
-    if let Some(title) = room_prompt_title {
+    if let (Some(panel_title), Some(title)) = (room_prompt_panel_title, room_prompt_title) {
+        let value_prefix = if panel_title == "Admin Action" {
+            "#"
+        } else {
+            "@"
+        };
+        let value_label = if panel_title == "Admin Action" {
+            format!("{} room", title)
+        } else {
+            format!("{} target", title)
+        };
         let prompt_lines = vec![
-            format!("{} target", title),
+            value_label,
             String::new(),
-            format!("@{}", room_prompt_value.unwrap_or("")),
+            format!("{}{}", value_prefix, room_prompt_value.unwrap_or("")),
             String::new(),
             "Enter confirms".to_string(),
             "Esc cancels".to_string(),
         ];
-        draw_panel_card(frame, columns[2], "Moderate User", &prompt_lines);
+        draw_panel_card(frame, columns[2], panel_title, &prompt_lines);
     }
 }
 

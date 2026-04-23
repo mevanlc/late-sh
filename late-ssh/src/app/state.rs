@@ -176,6 +176,7 @@ pub struct App {
     pub(crate) show_splash: bool,
     pub(crate) splash_ticks: usize,
     pub(crate) splash_hint: String,
+    pub(crate) confirm_dialog: Option<super::confirm_dialog::state::ConfirmDialogState>,
     pub(crate) show_quit_confirm: bool,
     pub(crate) show_help: bool,
     pub(crate) show_profile_modal: bool,
@@ -300,6 +301,7 @@ impl App {
     pub fn skip_splash_for_tests(&mut self) {
         self.show_splash = false;
         self.show_settings = false;
+        self.confirm_dialog = None;
         self.show_quit_confirm = false;
     }
 
@@ -445,6 +447,7 @@ impl App {
     pub fn show_splash_for_tests(&mut self, hint: impl Into<String>) {
         self.show_splash = true;
         self.show_settings = false;
+        self.confirm_dialog = None;
         self.show_quit_confirm = false;
         self.splash_ticks = 1;
         self.splash_hint = hint.into();
@@ -597,6 +600,7 @@ impl App {
             show_splash: true,
             splash_ticks: 0,
             splash_hint,
+            confirm_dialog: None,
             show_quit_confirm: false,
             show_help: false,
             show_profile_modal: false,

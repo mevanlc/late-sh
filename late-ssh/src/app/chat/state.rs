@@ -853,6 +853,13 @@ impl ChatState {
         )
     }
 
+    pub fn control_center_room_label(&self, room_id: Uuid) -> Option<String> {
+        self.staff_rooms_snapshot
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .map(control_center_room_label)
+    }
+
     pub fn moderate_control_center_room_member(
         &self,
         room_id: Uuid,
@@ -871,10 +878,7 @@ impl ChatState {
             self.permissions,
         );
         let room_label = self
-            .staff_rooms_snapshot
-            .iter()
-            .find(|room| room.room_id == room_id)
-            .map(control_center_room_label)
+            .control_center_room_label(room_id)
             .unwrap_or_else(|| "room".to_string());
         Banner::success(&format!(
             "{} @{} in {}...",
@@ -882,6 +886,32 @@ impl ChatState {
             target_username,
             room_label
         ))
+    }
+
+    pub fn admin_control_center_room_action(
+        &self,
+        room_id: Uuid,
+        action: AdminRoomAction,
+    ) -> Banner {
+        let room_label = self
+            .control_center_room_label(room_id)
+            .unwrap_or_else(|| "room".to_string());
+        let banner = match &action {
+            AdminRoomAction::Rename { new_slug } => {
+                let new_slug = new_slug.trim().trim_start_matches('#');
+                if new_slug.is_empty() {
+                    return Banner::error("Enter a room name");
+                }
+                Banner::success(&format!("Renaming {} to #{}...", room_label, new_slug))
+            }
+            AdminRoomAction::SetVisibility { visibility } => {
+                Banner::success(&format!("Making {} {}...", room_label, visibility))
+            }
+            AdminRoomAction::Delete => Banner::success(&format!("Deleting {}...", room_label)),
+        };
+        self.service
+            .admin_room_task(self.user_id, room_id, action, self.permissions);
+        banner
     }
 
     fn open_staff_users_overlay(&mut self, title: &str, mut lines: Vec<String>) {
