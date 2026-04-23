@@ -6,7 +6,7 @@ use late_core::models::{
     user::User,
 };
 use late_ssh::app::chat::notifications::svc::NotificationService;
-use late_ssh::app::chat::svc::{ChatEvent, ChatService};
+use late_ssh::app::chat::svc::{ChatEvent, ChatService, StaffViewScope};
 use late_ssh::authz::Permissions;
 use tokio::time::{Duration, timeout};
 use uuid::Uuid;
@@ -963,5 +963,136 @@ async fn unignore_user_task_emits_error_for_missing_user_or_entry() {
             assert_eq!(message, "@unignore_missing_target is not ignored");
         }
         other => panic!("expected IgnoreFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_staff_users_task_emits_overlay_lines_for_admin_scope() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let admin = create_test_user(&test_db.db, "admin_staff").await;
+    let moderator = create_test_user(&test_db.db, "mod_staff").await;
+    create_test_user(&test_db.db, "plain_staff").await;
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&moderator.id],
+        )
+        .await
+        .expect("promote moderator");
+
+    service.list_staff_users_task(
+        admin.id,
+        Permissions::new(true, false),
+        StaffViewScope::Admin,
+    );
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::StaffUsersListed {
+            user_id,
+            title,
+            lines,
+        } => {
+            assert_eq!(user_id, admin.id);
+            assert_eq!(title, "Admin Users");
+            assert_eq!(lines.first().map(String::as_str), Some("All Users (3)"));
+            assert!(lines.iter().any(|line| line == "@admin_staff [admin]"));
+            assert!(lines.iter().any(|line| line == "@mod_staff [mod]"));
+            assert!(lines.iter().any(|line| line == "@plain_staff"));
+        }
+        other => panic!("expected StaffUsersListed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_staff_rooms_task_rejects_non_staff_permissions() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let viewer = create_test_user(&test_db.db, "staff_rooms_viewer").await;
+
+    service.list_staff_rooms_task(viewer.id, Permissions::default(), StaffViewScope::Moderator);
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::StaffQueryFailed { user_id, message } => {
+            assert_eq!(user_id, viewer.id);
+            assert_eq!(message, "Moderator or admin only");
+        }
+        other => panic!("expected StaffQueryFailed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn list_moderators_task_lists_admins_and_moderators() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let admin = create_test_user(&test_db.db, "admin_mods").await;
+    let moderator = create_test_user(&test_db.db, "mod_mods").await;
+    let regular = create_test_user(&test_db.db, "plain_mods").await;
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&moderator.id],
+        )
+        .await
+        .expect("promote moderator");
+
+    service.list_moderators_task(admin.id, Permissions::new(true, false));
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::ModeratorsListed {
+            user_id,
+            title,
+            lines,
+        } => {
+            assert_eq!(user_id, admin.id);
+            assert_eq!(title, "Admin Mods");
+            assert_eq!(lines.first().map(String::as_str), Some("Staff (2)"));
+            assert!(lines.iter().any(|line| line == "@admin_mods [admin]"));
+            assert!(lines.iter().any(|line| line == "@mod_mods [mod]"));
+            assert!(!lines.iter().any(|line| line.contains(&regular.username)));
+        }
+        other => panic!("expected ModeratorsListed, got {other:?}"),
     }
 }

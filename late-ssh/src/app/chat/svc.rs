@@ -24,6 +24,12 @@ use crate::metrics;
 const HISTORY_LIMIT: i64 = 1000;
 const DELTA_LIMIT: i64 = 256;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaffViewScope {
+    Admin,
+    Moderator,
+}
+
 #[derive(Clone)]
 pub struct ChatService {
     db: Db,
@@ -166,6 +172,21 @@ pub enum ChatEvent {
         title: String,
         rooms: Vec<String>,
     },
+    StaffUsersListed {
+        user_id: Uuid,
+        title: String,
+        lines: Vec<String>,
+    },
+    StaffRoomsListed {
+        user_id: Uuid,
+        title: String,
+        lines: Vec<String>,
+    },
+    ModeratorsListed {
+        user_id: Uuid,
+        title: String,
+        lines: Vec<String>,
+    },
     InviteSucceeded {
         user_id: Uuid,
         room_id: Uuid,
@@ -181,6 +202,10 @@ pub enum ChatEvent {
         message: String,
     },
     PublicRoomsListFailed {
+        user_id: Uuid,
+        message: String,
+    },
+    StaffQueryFailed {
         user_id: Uuid,
         message: String,
     },
@@ -894,6 +919,252 @@ impl ChatService {
         Ok(("Public Rooms".to_string(), rooms))
     }
 
+    pub fn list_staff_users_task(
+        &self,
+        user_id: Uuid,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.list_staff_users_task",
+            user_id = %user_id,
+            scope = ?scope
+        );
+        tokio::spawn(
+            async move {
+                let event = match service.list_staff_users(permissions, scope).await {
+                    Ok((title, lines)) => ChatEvent::StaffUsersListed {
+                        user_id,
+                        title,
+                        lines,
+                    },
+                    Err(e) => ChatEvent::StaffQueryFailed {
+                        user_id,
+                        message: e.to_string(),
+                    },
+                };
+                let _ = service.evt_tx.send(event);
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn list_staff_users(
+        &self,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) -> Result<(String, Vec<String>)> {
+        ensure_staff_scope(permissions, scope)?;
+
+        let client = &self.db.get().await?;
+        let mut users = User::all(client).await?;
+        users.sort_by(|a, b| {
+            a.username
+                .to_ascii_lowercase()
+                .cmp(&b.username.to_ascii_lowercase())
+                .then_with(|| a.created.cmp(&b.created))
+        });
+
+        let mut lines = vec![format!("All Users ({})", users.len())];
+        if users.is_empty() {
+            lines.push("No users".to_string());
+        } else {
+            lines.extend(users.into_iter().map(|user| {
+                let username = if user.username.trim().is_empty() {
+                    "<unnamed>".to_string()
+                } else {
+                    format!("@{}", user.username)
+                };
+                let mut flags = Vec::new();
+                if user.is_admin {
+                    flags.push("admin");
+                }
+                if user.is_moderator {
+                    flags.push("mod");
+                }
+                if flags.is_empty() {
+                    username
+                } else {
+                    format!("{username} [{}]", flags.join(", "))
+                }
+            }));
+        }
+
+        Ok((staff_users_title(scope), lines))
+    }
+
+    pub fn list_staff_rooms_task(
+        &self,
+        user_id: Uuid,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.list_staff_rooms_task",
+            user_id = %user_id,
+            scope = ?scope
+        );
+        tokio::spawn(
+            async move {
+                let event = match service.list_staff_rooms(permissions, scope).await {
+                    Ok((title, lines)) => ChatEvent::StaffRoomsListed {
+                        user_id,
+                        title,
+                        lines,
+                    },
+                    Err(e) => ChatEvent::StaffQueryFailed {
+                        user_id,
+                        message: e.to_string(),
+                    },
+                };
+                let _ = service.evt_tx.send(event);
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn list_staff_rooms(
+        &self,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) -> Result<(String, Vec<String>)> {
+        ensure_staff_scope(permissions, scope)?;
+
+        let client = &self.db.get().await?;
+        let rows = client
+            .query(
+                "SELECT r.kind,
+                        r.visibility,
+                        r.auto_join,
+                        r.permanent,
+                        r.slug,
+                        r.language_code,
+                        COUNT(DISTINCT m.user_id)::bigint AS member_count
+                 FROM chat_rooms r
+                 LEFT JOIN chat_room_members m ON m.room_id = r.id
+                 GROUP BY r.id, r.kind, r.visibility, r.auto_join, r.permanent, r.slug, r.language_code, r.created
+                 ORDER BY
+                     CASE
+                         WHEN r.kind = 'general' AND r.slug = 'general' THEN 0
+                         WHEN r.permanent THEN 1
+                         WHEN r.visibility = 'public' THEN 2
+                         WHEN r.kind = 'dm' THEN 4
+                         ELSE 3
+                     END ASC,
+                     COALESCE(r.slug, COALESCE(r.language_code, '')) ASC,
+                     r.created ASC,
+                     r.id ASC",
+                &[],
+            )
+            .await?;
+
+        let mut lines = vec![format!("All Rooms ({})", rows.len())];
+        if rows.is_empty() {
+            lines.push("No rooms".to_string());
+        } else {
+            lines.extend(rows.into_iter().map(|row| {
+                let kind: String = row.get("kind");
+                let visibility: String = row.get("visibility");
+                let auto_join: bool = row.get("auto_join");
+                let permanent: bool = row.get("permanent");
+                let slug: Option<String> = row.get("slug");
+                let language_code: Option<String> = row.get("language_code");
+                let member_count: i64 = row.get("member_count");
+
+                let label = slug
+                    .map(|slug| format!("#{slug}"))
+                    .or_else(|| language_code.map(|code| format!("#lang-{code}")))
+                    .unwrap_or_else(|| kind.clone());
+
+                let mut details = vec![
+                    kind,
+                    visibility,
+                    format!(
+                        "{} {}",
+                        member_count,
+                        if member_count == 1 {
+                            "member"
+                        } else {
+                            "members"
+                        }
+                    ),
+                ];
+                if permanent {
+                    details.push("permanent".to_string());
+                }
+                if auto_join {
+                    details.push("auto-join".to_string());
+                }
+
+                format!("{label} · {}", details.join(" · "))
+            }));
+        }
+
+        Ok((staff_rooms_title(scope), lines))
+    }
+
+    pub fn list_moderators_task(&self, user_id: Uuid, permissions: Permissions) {
+        let service = self.clone();
+        let span = info_span!("chat.list_moderators_task", user_id = %user_id);
+        tokio::spawn(
+            async move {
+                let event = match service.list_moderators(permissions).await {
+                    Ok((title, lines)) => ChatEvent::ModeratorsListed {
+                        user_id,
+                        title,
+                        lines,
+                    },
+                    Err(e) => ChatEvent::StaffQueryFailed {
+                        user_id,
+                        message: e.to_string(),
+                    },
+                };
+                let _ = service.evt_tx.send(event);
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn list_moderators(&self, permissions: Permissions) -> Result<(String, Vec<String>)> {
+        if !permissions.can_access_admin_surface() {
+            anyhow::bail!("Admin only");
+        }
+
+        let client = &self.db.get().await?;
+        let mut users = User::all(client).await?;
+        users.retain(|user| user.is_admin || user.is_moderator);
+        users.sort_by(|a, b| {
+            a.username
+                .to_ascii_lowercase()
+                .cmp(&b.username.to_ascii_lowercase())
+        });
+
+        let mut lines = vec![format!("Staff ({})", users.len())];
+        if users.is_empty() {
+            lines.push("No moderators".to_string());
+        } else {
+            lines.extend(users.into_iter().map(|user| {
+                let username = if user.username.trim().is_empty() {
+                    "<unnamed>".to_string()
+                } else {
+                    format!("@{}", user.username)
+                };
+                let mut flags = Vec::new();
+                if user.is_admin {
+                    flags.push("admin");
+                }
+                if user.is_moderator {
+                    flags.push("mod");
+                }
+                format!("{username} [{}]", flags.join(", "))
+            }));
+        }
+
+        Ok(("Admin Mods".to_string(), lines))
+    }
+
     pub fn ignore_user_task(&self, user_id: Uuid, target_username: String) {
         let service = self.clone();
         let span =
@@ -1320,6 +1591,33 @@ impl ChatService {
         }
         tracing::info!(message_id = %message_id, "message deleted");
         Ok(msg.room_id)
+    }
+}
+
+fn ensure_staff_scope(permissions: Permissions, scope: StaffViewScope) -> Result<()> {
+    match scope {
+        StaffViewScope::Admin if !permissions.can_access_admin_surface() => {
+            anyhow::bail!("Admin only");
+        }
+        StaffViewScope::Moderator if !permissions.can_access_mod_surface() => {
+            anyhow::bail!("Moderator or admin only");
+        }
+        StaffViewScope::Admin | StaffViewScope::Moderator => {}
+    }
+    Ok(())
+}
+
+fn staff_users_title(scope: StaffViewScope) -> String {
+    match scope {
+        StaffViewScope::Admin => "Admin Users".to_string(),
+        StaffViewScope::Moderator => "Mod Users".to_string(),
+    }
+}
+
+fn staff_rooms_title(scope: StaffViewScope) -> String {
+    match scope {
+        StaffViewScope::Admin => "Admin Rooms".to_string(),
+        StaffViewScope::Moderator => "Mod Rooms".to_string(),
     }
 }
 

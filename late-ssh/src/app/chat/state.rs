@@ -22,7 +22,7 @@ use crate::state::{ActiveUser, ActiveUsers};
 use super::{
     discover, news, notifications,
     notifications::svc::NotificationService,
-    svc::{ChatEvent, ChatService, ChatSnapshot},
+    svc::{ChatEvent, ChatService, ChatSnapshot, StaffViewScope},
 };
 
 pub(crate) const ROOM_JUMP_KEYS: &[u8] = b"asdfghjklqwertyuiopzxcvbnm1234567890";
@@ -778,6 +778,18 @@ impl ChatState {
         format_active_user_lines(self.active_users.as_ref())
     }
 
+    fn open_staff_users_overlay(&mut self, title: &str, mut lines: Vec<String>) {
+        if self.active_users.is_some() {
+            let active_lines = self.active_user_lines();
+            let mut prefixed = vec!["Online Now".to_string()];
+            prefixed.extend(active_lines.into_iter().map(|line| format!("  {line}")));
+            prefixed.push(String::new());
+            prefixed.append(&mut lines);
+            lines = prefixed;
+        }
+        self.open_overlay(title, lines);
+    }
+
     pub fn submit_composer(&mut self, keep_open: bool, from_dashboard: bool) -> Option<Banner> {
         let body = self.composer.lines().join("\n").trim_end().to_string();
 
@@ -845,6 +857,70 @@ impl ChatState {
         if body.trim() == "/list" {
             self.clear_composer_after_submit();
             self.service.list_public_rooms_task(self.user_id);
+            return None;
+        }
+
+        if let Some(subcommand) = parse_subcommand(&body, "/admin") {
+            self.clear_composer_after_submit();
+            if !self.permissions.can_access_admin_surface() {
+                return Some(Banner::error("Admin only: /admin"));
+            }
+            match subcommand {
+                Some("help") | None => {
+                    self.open_overlay("Admin Help", admin_help_lines());
+                }
+                Some("users") => {
+                    self.service.list_staff_users_task(
+                        self.user_id,
+                        self.permissions,
+                        StaffViewScope::Admin,
+                    );
+                }
+                Some("rooms") => {
+                    self.service.list_staff_rooms_task(
+                        self.user_id,
+                        self.permissions,
+                        StaffViewScope::Admin,
+                    );
+                }
+                Some("mods") => {
+                    self.service
+                        .list_moderators_task(self.user_id, self.permissions);
+                }
+                Some(other) => {
+                    return Some(Banner::error(&format!("Unknown admin command: {other}")));
+                }
+            }
+            return None;
+        }
+
+        if let Some(subcommand) = parse_subcommand(&body, "/mod") {
+            self.clear_composer_after_submit();
+            if !self.permissions.can_access_mod_surface() {
+                return Some(Banner::error("Moderator or admin only: /mod"));
+            }
+            match subcommand {
+                Some("users") => {
+                    self.service.list_staff_users_task(
+                        self.user_id,
+                        self.permissions,
+                        StaffViewScope::Moderator,
+                    );
+                }
+                Some("rooms") => {
+                    self.service.list_staff_rooms_task(
+                        self.user_id,
+                        self.permissions,
+                        StaffViewScope::Moderator,
+                    );
+                }
+                None => {
+                    return Some(Banner::error("Usage: /mod users | /mod rooms"));
+                }
+                Some(other) => {
+                    return Some(Banner::error(&format!("Unknown mod command: {other}")));
+                }
+            }
             return None;
         }
 
@@ -1452,6 +1528,27 @@ impl ChatState {
                 } if self.user_id == user_id => {
                     self.open_overlay(&title, rooms);
                 }
+                ChatEvent::StaffUsersListed {
+                    user_id,
+                    title,
+                    lines,
+                } if self.user_id == user_id => {
+                    self.open_staff_users_overlay(&title, lines);
+                }
+                ChatEvent::StaffRoomsListed {
+                    user_id,
+                    title,
+                    lines,
+                } if self.user_id == user_id => {
+                    self.open_overlay(&title, lines);
+                }
+                ChatEvent::ModeratorsListed {
+                    user_id,
+                    title,
+                    lines,
+                } if self.user_id == user_id => {
+                    self.open_overlay(&title, lines);
+                }
                 ChatEvent::InviteSucceeded {
                     user_id,
                     room_id,
@@ -1473,6 +1570,9 @@ impl ChatState {
                 ChatEvent::PublicRoomsListFailed { user_id, message }
                     if self.user_id == user_id =>
                 {
+                    banner = Some(Banner::error(&message));
+                }
+                ChatEvent::StaffQueryFailed { user_id, message } if self.user_id == user_id => {
                     banner = Some(Banner::error(&message));
                 }
                 ChatEvent::InviteFailed { user_id, message } if self.user_id == user_id => {
@@ -1699,6 +1799,20 @@ fn parse_delete_room_command(input: &str) -> Option<&str> {
     Some(slug)
 }
 
+fn parse_subcommand<'a>(input: &'a str, command: &str) -> Option<Option<&'a str>> {
+    let rest = input.strip_prefix(command)?;
+    let rest = match rest.chars().next() {
+        None => return Some(None),
+        Some(c) if c.is_whitespace() => rest.trim(),
+        Some(_) => return None,
+    };
+    if rest.is_empty() {
+        Some(None)
+    } else {
+        Some(Some(rest))
+    }
+}
+
 fn room_slug_for(rooms: &[(ChatRoom, Vec<ChatMessage>)], room_id: Uuid) -> Option<String> {
     rooms
         .iter()
@@ -1794,6 +1908,19 @@ fn format_active_user_lines(active_users: Option<&ActiveUsers>) -> Vec<String> {
             }
         })
         .collect()
+}
+
+fn admin_help_lines() -> Vec<String> {
+    vec![
+        "/admin help".to_string(),
+        "/admin users".to_string(),
+        "/admin rooms".to_string(),
+        "/admin mods".to_string(),
+        String::new(),
+        "Moderator commands:".to_string(),
+        "/mod users".to_string(),
+        "/mod rooms".to_string(),
+    ]
 }
 
 fn wrapped_index(current: isize, delta: isize, len: usize) -> usize {
@@ -2412,6 +2539,22 @@ mod tests {
     #[test]
     fn parse_delete_room_not_command() {
         assert_eq!(parse_delete_room_command("hello"), None);
+    }
+
+    #[test]
+    fn parse_subcommand_reads_bare_and_named_forms() {
+        assert_eq!(parse_subcommand("/admin", "/admin"), Some(None));
+        assert_eq!(
+            parse_subcommand("/admin help", "/admin"),
+            Some(Some("help"))
+        );
+        assert_eq!(parse_subcommand("/mod rooms", "/mod"), Some(Some("rooms")));
+    }
+
+    #[test]
+    fn parse_subcommand_rejects_non_matches() {
+        assert_eq!(parse_subcommand("/admins help", "/admin"), None);
+        assert_eq!(parse_subcommand("admin help", "/admin"), None);
     }
 
     #[test]

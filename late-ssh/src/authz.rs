@@ -24,6 +24,14 @@ impl Permissions {
         self.is_admin || self.is_moderator
     }
 
+    pub const fn can_access_admin_surface(self) -> bool {
+        self.is_admin
+    }
+
+    pub const fn can_access_mod_surface(self) -> bool {
+        self.can_moderate()
+    }
+
     pub const fn can_manage_permanent_rooms(self) -> bool {
         self.is_admin
     }
@@ -53,6 +61,8 @@ mod tests {
     fn moderator_can_moderate_without_admin_privileges() {
         let permissions = Permissions::new(false, true);
         assert!(permissions.can_moderate());
+        assert!(!permissions.can_access_admin_surface());
+        assert!(permissions.can_access_mod_surface());
         assert!(!permissions.can_manage_permanent_rooms());
         assert!(!permissions.can_post_announcements());
     }
@@ -61,6 +71,8 @@ mod tests {
     fn admin_can_moderate_and_manage_admin_surfaces() {
         let permissions = Permissions::new(true, false);
         assert!(permissions.can_moderate());
+        assert!(permissions.can_access_admin_surface());
+        assert!(permissions.can_access_mod_surface());
         assert!(permissions.can_manage_permanent_rooms());
         assert!(permissions.can_post_announcements());
     }
