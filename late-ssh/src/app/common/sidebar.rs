@@ -19,6 +19,7 @@ use crate::state::ActivityEvent;
 
 pub struct SidebarProps<'a> {
     pub screen: Screen,
+    pub show_control_center: bool,
     pub game_selection: usize,
     pub is_playing_game: bool,
     pub visualizer: &'a Visualizer,
@@ -47,7 +48,7 @@ pub fn draw_sidebar(frame: &mut Frame, area: Rect, props: &SidebarProps<'_>) {
     ])
     .split(area);
 
-    draw_screen_card(frame, layout[0], screen);
+    draw_screen_card(frame, layout[0], screen, props.show_control_center);
     visualizer.render(frame, layout[1]);
     draw_now_playing(frame, layout[2], now_playing, paired_client);
     draw_status(
@@ -60,13 +61,8 @@ pub fn draw_sidebar(frame: &mut Frame, area: Rect, props: &SidebarProps<'_>) {
     crate::app::bonsai::ui::draw_bonsai(frame, layout[4], props.bonsai, props.audio_beat);
 }
 
-fn draw_screen_card(frame: &mut Frame, area: Rect, screen: Screen) {
-    let tabs = [
-        (Screen::Dashboard, "1"),
-        (Screen::Chat, "2"),
-        (Screen::Games, "3"),
-        (Screen::Artboard, "4"),
-    ];
+fn draw_screen_card(frame: &mut Frame, area: Rect, screen: Screen, show_control_center: bool) {
+    let tabs = screen_card_tabs(show_control_center);
 
     let mut spans = Vec::new();
     for (s, key) in tabs {
@@ -87,6 +83,7 @@ fn draw_screen_card(frame: &mut Frame, area: Rect, screen: Screen) {
     }
 
     let label = match screen {
+        Screen::ControlCenter => "Control Center",
         Screen::Dashboard => "Dashboard",
         Screen::Chat => "Chat",
         Screen::Games => "Games",
@@ -100,6 +97,20 @@ fn draw_screen_card(frame: &mut Frame, area: Rect, screen: Screen) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
     frame.render_widget(Paragraph::new(Line::from(spans)), inner);
+}
+
+fn screen_card_tabs(show_control_center: bool) -> Vec<(Screen, &'static str)> {
+    let mut tabs = Vec::with_capacity(if show_control_center { 5 } else { 4 });
+    if show_control_center {
+        tabs.push((Screen::ControlCenter, "0"));
+    }
+    tabs.extend([
+        (Screen::Dashboard, "1"),
+        (Screen::Chat, "2"),
+        (Screen::Games, "3"),
+        (Screen::Artboard, "4"),
+    ]);
+    tabs
 }
 
 fn draw_now_playing(
@@ -337,5 +348,32 @@ mod tests {
     fn sidebar_clock_text_falls_back_to_utc_when_timezone_missing() {
         let clock = sidebar_clock_text(None);
         assert!(clock.starts_with("UTC "));
+    }
+
+    #[test]
+    fn screen_card_tabs_hide_control_center_for_non_staff() {
+        assert_eq!(
+            screen_card_tabs(false),
+            vec![
+                (Screen::Dashboard, "1"),
+                (Screen::Chat, "2"),
+                (Screen::Games, "3"),
+                (Screen::Artboard, "4"),
+            ]
+        );
+    }
+
+    #[test]
+    fn screen_card_tabs_prepend_control_center_for_staff() {
+        assert_eq!(
+            screen_card_tabs(true),
+            vec![
+                (Screen::ControlCenter, "0"),
+                (Screen::Dashboard, "1"),
+                (Screen::Chat, "2"),
+                (Screen::Games, "3"),
+                (Screen::Artboard, "4"),
+            ]
+        );
     }
 }

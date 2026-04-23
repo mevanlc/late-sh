@@ -48,6 +48,7 @@ impl Banner {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
+    ControlCenter,
     Dashboard,
     Chat,
     Games,
@@ -57,6 +58,7 @@ pub enum Screen {
 impl Screen {
     pub fn next(self) -> Self {
         match self {
+            Screen::ControlCenter => Screen::Dashboard,
             Screen::Dashboard => Screen::Chat,
             Screen::Chat => Screen::Games,
             Screen::Games => Screen::Artboard,
@@ -66,6 +68,7 @@ impl Screen {
 
     pub fn prev(self) -> Self {
         match self {
+            Screen::ControlCenter => Screen::Artboard,
             Screen::Dashboard => Screen::Artboard,
             Screen::Chat => Screen::Dashboard,
             Screen::Games => Screen::Chat,
@@ -92,6 +95,7 @@ pub fn format_duration_mmss(duration: Duration) -> String {
 
 pub fn draw_tabs(frame: &mut Frame, area: Rect, current: Screen) {
     let label = match current {
+        Screen::ControlCenter => "Control Center",
         Screen::Dashboard => "Dashboard",
         Screen::Chat => "Chat",
         Screen::Games => "Games",
@@ -150,6 +154,7 @@ mod tests {
 
     #[test]
     fn screen_next_cycles_all_screens() {
+        assert_eq!(Screen::ControlCenter.next(), Screen::Dashboard);
         assert_eq!(Screen::Dashboard.next(), Screen::Chat);
         assert_eq!(Screen::Chat.next(), Screen::Games);
         assert_eq!(Screen::Games.next(), Screen::Artboard);
@@ -158,6 +163,7 @@ mod tests {
 
     #[test]
     fn screen_prev_cycles_all_screens() {
+        assert_eq!(Screen::ControlCenter.prev(), Screen::Artboard);
         assert_eq!(Screen::Dashboard.prev(), Screen::Artboard);
         assert_eq!(Screen::Chat.prev(), Screen::Dashboard);
         assert_eq!(Screen::Games.prev(), Screen::Chat);

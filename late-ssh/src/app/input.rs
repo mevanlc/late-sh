@@ -650,7 +650,11 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
                 return;
             }
             reset_composers_for_page_change(app);
-            app.set_screen(ctx.screen.prev());
+            if ctx.screen == Screen::ControlCenter {
+                app.set_screen(Screen::Dashboard);
+            } else {
+                app.set_screen(ctx.screen.prev());
+            }
             app.chat.clear_message_selection();
         }
         // Page keys mirror Ctrl-U / Ctrl-D. Signs follow the existing scheme:
@@ -994,6 +998,7 @@ fn handle_scroll_for_screen(app: &mut App, screen: Screen, delta: isize) {
             }
         }
         Screen::Chat => chat::input::handle_scroll(app, delta),
+        Screen::ControlCenter => {}
         Screen::Artboard => {}
         _ => {}
     }
@@ -1022,6 +1027,17 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
             let _ = chat::input::handle_arrow(app, key);
             true
         }
+        Screen::ControlCenter => match key {
+            b'C' => {
+                app.control_center.next_tab();
+                true
+            }
+            b'D' => {
+                app.control_center.prev_tab();
+                true
+            }
+            _ => false,
+        },
         Screen::Dashboard => dashboard::input::handle_arrow(app, key),
         Screen::Games => crate::app::games::input::handle_arrow(app, key),
         Screen::Artboard => crate::app::artboard::page::handle_arrow(app, key),
@@ -1231,6 +1247,13 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             app.set_screen(Screen::Dashboard);
             true
         }
+        b'0' if !artboard_blocks_page_switch => {
+            if app.permissions.can_access_mod_surface() {
+                reset_composers_for_page_change(app);
+                app.set_screen(Screen::ControlCenter);
+            }
+            true
+        }
         b'2' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);
             app.set_screen(Screen::Chat);
@@ -1248,7 +1271,11 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         }
         b'\t' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);
-            app.set_screen(ctx.screen.next());
+            if ctx.screen == Screen::ControlCenter {
+                app.set_screen(Screen::Dashboard);
+            } else {
+                app.set_screen(ctx.screen.next());
+            }
             true
         }
         b'P' => {
@@ -1276,6 +1303,11 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
         Screen::Dashboard => {
             dashboard::input::handle_key(app, byte);
         }
+        Screen::ControlCenter => match byte {
+            b'h' | b'H' => app.control_center.prev_tab(),
+            b'l' | b'L' => app.control_center.next_tab(),
+            _ => {}
+        },
         Screen::Chat => {
             chat::input::handle_byte(app, byte);
         }

@@ -4,7 +4,7 @@ mod helpers;
 
 use helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_with_chat_service,
-    new_test_db, render_plain, wait_for_render_contains, wait_until,
+    make_app_with_permissions, new_test_db, render_plain, wait_for_render_contains, wait_until,
 };
 use late_core::models::{
     chat_message::{ChatMessage, ChatMessageParams},
@@ -146,6 +146,81 @@ async fn shift_tab_cycles_screens_backwards() {
     wait_for_render_contains(&mut app, " Rooms ").await;
 
     app.handle_input(b"\x1b[Z");
+    wait_for_render_contains(&mut app, " Dashboard ").await;
+}
+
+#[tokio::test]
+async fn zero_does_not_open_control_center_for_regular_users() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "screen-zero-regular").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "screen-zero-regular-flow");
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" 1  2  3  4 "),
+        "expected standard switcher entries for regular user; frame={frame:?}"
+    );
+    assert!(
+        !frame.contains(" 0  1  2  3  4 "),
+        "expected screen 0 switcher entry to stay hidden from regular user; frame={frame:?}"
+    );
+
+    app.handle_input(b"0");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" Dashboard "),
+        "expected regular user to remain on dashboard; frame={frame:?}"
+    );
+    assert!(
+        !frame.contains("Staff Control Center"),
+        "expected control center to stay hidden from regular users; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn staff_user_can_open_control_center_and_switch_tabs() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "screen-zero-staff").await;
+    let client = test_db.db.get().await.expect("db client");
+    ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    ChatRoom::get_or_create_public_room(&client, "ops")
+        .await
+        .expect("create ops room");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("promote moderator");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        user.id,
+        "screen-zero-staff-flow",
+        Permissions::new(false, true),
+    );
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" 0  1  2  3  4 "),
+        "expected staff switcher to include screen 0 entry; frame={frame:?}"
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "@screen-zero-staff [mod] · online now").await;
+
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Room Directory ").await;
+    wait_for_render_contains(&mut app, "#general").await;
+    wait_for_render_contains(&mut app, "#ops").await;
+    wait_for_render_contains(&mut app, " Selected Room ").await;
+
+    app.handle_input(b"\t");
     wait_for_render_contains(&mut app, " Dashboard ").await;
 }
 

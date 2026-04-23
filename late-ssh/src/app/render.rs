@@ -20,7 +20,8 @@ use super::{
         sidebar::{SidebarProps, draw_sidebar, sidebar_clock_text},
         theme,
     },
-    dashboard, help_modal, icon_picker, profile_modal, quit_confirm, settings_modal,
+    control_center, dashboard, help_modal, icon_picker, profile_modal, quit_confirm,
+    settings_modal,
     state::{App, NotificationMode},
     visualizer::Visualizer,
 };
@@ -112,7 +113,15 @@ struct DrawContext<'a> {
     bonsai: &'a crate::app::bonsai::state::BonsaiState,
     activity: &'a std::collections::VecDeque<crate::state::ActivityEvent>,
     banner: Option<&'a Banner>,
+    show_control_center: bool,
+    username: &'a str,
+    control_center_tab: control_center::state::Tab,
+    control_center_user_lines: &'a [String],
+    control_center_room_list_lines: &'a [String],
+    control_center_room_detail_lines: &'a [String],
     is_admin: bool,
+    is_moderator: bool,
+    live_session_count: usize,
     show_right_sidebar: bool,
     show_games_sidebar: bool,
     show_settings: bool,
@@ -187,6 +196,7 @@ impl App {
             self.profile_state.profile().show_games_sidebar,
         );
         let screen = self.screen;
+        let show_right_sidebar = show_right_sidebar && screen != Screen::ControlCenter;
         let now_playing: Option<NowPlaying> = self
             .now_playing_rx
             .as_mut()
@@ -295,6 +305,14 @@ impl App {
             .as_ref()
             .map(|active_users| active_users.lock_recover().len())
             .unwrap_or(0);
+        let control_center_user_lines = self.chat.control_center_user_lines();
+        let control_center_room_list_lines = self.chat.control_center_room_list_lines();
+        let control_center_room_detail_lines = self.chat.control_center_room_detail_lines();
+        let live_session_count = self
+            .session_registry
+            .as_ref()
+            .map(|registry| registry.snapshot_all().len())
+            .unwrap_or(0);
         let terminal = &mut self.terminal;
 
         terminal
@@ -327,7 +345,15 @@ impl App {
                         bonsai: &self.bonsai_state,
                         activity: &self.activity,
                         banner: banner.as_ref(),
+                        show_control_center: self.permissions.can_access_mod_surface(),
+                        username: &self.username,
+                        control_center_tab: self.control_center.selected_tab(),
+                        control_center_user_lines: &control_center_user_lines,
+                        control_center_room_list_lines: &control_center_room_list_lines,
+                        control_center_room_detail_lines: &control_center_room_detail_lines,
                         is_admin: self.is_admin,
+                        is_moderator: self.permissions.is_moderator(),
+                        live_session_count,
                         show_right_sidebar,
                         show_games_sidebar,
                         show_settings: self.show_settings,
@@ -504,6 +530,21 @@ impl App {
                 dashboard::ui::draw_dashboard(frame, content_area, ctx.dashboard_view)
             }
             Screen::Chat => chat::ui::draw_chat(frame, content_area, ctx.chat_view),
+            Screen::ControlCenter => control_center::ui::draw_control_center(
+                frame,
+                content_area,
+                &control_center::ui::ControlCenterView {
+                    selected_tab: ctx.control_center_tab,
+                    username: ctx.username,
+                    is_admin: ctx.is_admin,
+                    is_moderator: ctx.is_moderator,
+                    online_count: ctx.online_count,
+                    live_session_count: ctx.live_session_count,
+                    user_lines: ctx.control_center_user_lines,
+                    room_list_lines: ctx.control_center_room_list_lines,
+                    room_detail_lines: ctx.control_center_room_detail_lines,
+                },
+            ),
             Screen::Artboard => {
                 if let Some(state) = ctx.dartboard_state {
                     artboard::ui::draw_game(frame, content_area, state, ctx.artboard_interacting);
@@ -535,6 +576,7 @@ impl App {
                 sidebar_area,
                 &SidebarProps {
                     screen,
+                    show_control_center: ctx.show_control_center,
                     game_selection: ctx.game_selection,
                     is_playing_game: ctx.is_playing_game,
                     visualizer: ctx.visualizer,
@@ -626,6 +668,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     )];
 
     let page_title = match screen {
+        Screen::ControlCenter => "Control Center",
         Screen::Dashboard => "Dashboard",
         Screen::Chat => "Chat",
         Screen::Games => "The Arcade",
@@ -636,6 +679,23 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         format!("{page_title} "),
         Style::default().fg(theme::TEXT_MUTED()),
     ));
+
+    if screen == Screen::ControlCenter {
+        let hints = [("0", "staff"), ("←/→", "tabs"), ("Tab", "exit")];
+        for (key, desc) in hints {
+            spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
+            spans.push(Span::styled(
+                key.to_string(),
+                Style::default()
+                    .fg(theme::AMBER_DIM())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" {desc} "),
+                Style::default().fg(theme::TEXT_DIM()),
+            ));
+        }
+    }
 
     if screen == Screen::Artboard {
         spans.push(Span::styled(

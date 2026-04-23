@@ -24,7 +24,8 @@ use super::{
     discover, news, notifications,
     notifications::svc::NotificationService,
     svc::{
-        AdminRoomAction, ChatEvent, ChatService, ChatSnapshot, RoomModerationAction, StaffViewScope,
+        AdminRoomAction, ChatEvent, ChatService, ChatSnapshot, RoomModerationAction,
+        StaffRoomRecord, StaffUserRecord, StaffViewScope,
     },
 };
 
@@ -119,6 +120,8 @@ pub struct ChatState {
     requested_help_topic: Option<HelpTopic>,
     requested_settings_modal: bool,
     requested_quit: bool,
+    staff_users_snapshot: Vec<StaffUserRecord>,
+    staff_rooms_snapshot: Vec<StaffRoomRecord>,
 }
 
 pub(crate) struct PendingNotification {
@@ -193,6 +196,8 @@ impl ChatState {
             requested_help_topic: None,
             requested_settings_modal: false,
             requested_quit: false,
+            staff_users_snapshot: Vec::new(),
+            staff_rooms_snapshot: Vec::new(),
         }
     }
 
@@ -790,6 +795,55 @@ impl ChatState {
 
     fn active_user_lines(&self) -> Vec<String> {
         format_active_user_lines(self.active_users.as_ref())
+    }
+
+    pub fn refresh_staff_users_snapshot(&self) {
+        if !self.permissions.can_access_mod_surface() {
+            return;
+        }
+        let scope = if self.permissions.can_access_admin_surface() {
+            StaffViewScope::Admin
+        } else {
+            StaffViewScope::Moderator
+        };
+        self.service
+            .refresh_staff_users_snapshot_task(self.user_id, self.permissions, scope);
+    }
+
+    pub fn refresh_staff_rooms_snapshot(&self) {
+        if !self.permissions.can_access_mod_surface() {
+            return;
+        }
+        let scope = if self.permissions.can_access_admin_surface() {
+            StaffViewScope::Admin
+        } else {
+            StaffViewScope::Moderator
+        };
+        self.service
+            .refresh_staff_rooms_snapshot_task(self.user_id, self.permissions, scope);
+    }
+
+    pub fn control_center_user_lines(&self) -> Vec<String> {
+        format_control_center_user_lines(
+            &self.staff_users_snapshot,
+            self.session_registry.as_ref(),
+            self.paired_client_registry.as_ref(),
+        )
+    }
+
+    pub fn control_center_room_list_lines(&self) -> Vec<String> {
+        format_control_center_room_list_lines(
+            &self.staff_rooms_snapshot,
+            control_center_selected_room(&self.staff_rooms_snapshot, self.selected_room_id)
+                .map(|room| room.room_id),
+        )
+    }
+
+    pub fn control_center_room_detail_lines(&self) -> Vec<String> {
+        format_control_center_room_detail_lines(
+            &self.staff_rooms_snapshot,
+            control_center_selected_room(&self.staff_rooms_snapshot, self.selected_room_id),
+        )
     }
 
     fn open_staff_users_overlay(&mut self, title: &str, mut lines: Vec<String>) {
@@ -1740,6 +1794,16 @@ impl ChatState {
                 } if self.user_id == user_id => {
                     self.open_staff_users_overlay(&title, lines);
                 }
+                ChatEvent::StaffUsersSnapshotUpdated { user_id, users }
+                    if self.user_id == user_id =>
+                {
+                    self.staff_users_snapshot = users;
+                }
+                ChatEvent::StaffRoomsSnapshotUpdated { user_id, rooms }
+                    if self.user_id == user_id =>
+                {
+                    self.staff_rooms_snapshot = rooms;
+                }
                 ChatEvent::StaffRoomsListed {
                     user_id,
                     title,
@@ -2171,6 +2235,180 @@ fn annotate_staff_user_lines(
         }));
     }
     annotated
+}
+
+fn format_control_center_user_lines(
+    users: &[StaffUserRecord],
+    session_registry: Option<&SessionRegistry>,
+    paired_client_registry: Option<&PairedClientRegistry>,
+) -> Vec<String> {
+    if users.is_empty() {
+        return vec!["Loading users...".to_string()];
+    }
+
+    let mut lines = Vec::new();
+    for user in users {
+        let username = if user.username.trim().is_empty() {
+            "<unnamed>".to_string()
+        } else {
+            format!("@{}", user.username)
+        };
+        let mut flags = Vec::new();
+        if user.is_admin {
+            flags.push("admin");
+        }
+        if user.is_moderator {
+            flags.push("mod");
+        }
+        let sessions = session_registry
+            .map(|registry| registry.sessions_for_user(user.user_id))
+            .unwrap_or_default();
+        let session_count = sessions.len();
+        let mut header = if flags.is_empty() {
+            username
+        } else {
+            format!("{username} [{}]", flags.join(", "))
+        };
+        if session_count > 0 {
+            header.push_str(&format!(
+                " · online now · {} live {}",
+                session_count,
+                if session_count == 1 {
+                    "session"
+                } else {
+                    "sessions"
+                }
+            ));
+        }
+        lines.push(header);
+        lines.extend(sessions.iter().map(|session| {
+            format!(
+                "  {}",
+                format_live_session_line(session, paired_client_registry)
+            )
+        }));
+    }
+    lines
+}
+
+fn control_center_selected_room(
+    rooms: &[StaffRoomRecord],
+    selected_room_id: Option<Uuid>,
+) -> Option<&StaffRoomRecord> {
+    selected_room_id
+        .and_then(|room_id| rooms.iter().find(|room| room.room_id == room_id))
+        .or_else(|| rooms.first())
+}
+
+fn format_control_center_room_list_lines(
+    rooms: &[StaffRoomRecord],
+    selected_room_id: Option<Uuid>,
+) -> Vec<String> {
+    if rooms.is_empty() {
+        return vec!["Loading rooms...".to_string()];
+    }
+
+    rooms
+        .iter()
+        .map(|room| {
+            let marker = if Some(room.room_id) == selected_room_id {
+                ">"
+            } else {
+                " "
+            };
+            let mut summary = vec![room.kind.clone(), room.visibility.clone()];
+            summary.push(format!(
+                "{} {}",
+                room.member_count,
+                if room.member_count == 1 {
+                    "member"
+                } else {
+                    "members"
+                }
+            ));
+            if room.permanent {
+                summary.push("permanent".to_string());
+            }
+            if room.auto_join {
+                summary.push("auto".to_string());
+            }
+            if room.active_ban_count > 0 {
+                summary.push(format!("{} banned", room.active_ban_count));
+            }
+            format!(
+                "{marker} {} · {}",
+                control_center_room_label(room),
+                summary.join(" · ")
+            )
+        })
+        .collect()
+}
+
+fn format_control_center_room_detail_lines(
+    rooms: &[StaffRoomRecord],
+    selected_room: Option<&StaffRoomRecord>,
+) -> Vec<String> {
+    if rooms.is_empty() {
+        return vec![
+            "Loading room directory...".to_string(),
+            String::new(),
+            "Staff room inspection will populate here once the snapshot arrives.".to_string(),
+        ];
+    }
+
+    let Some(room) = selected_room else {
+        return vec!["No room selected".to_string()];
+    };
+
+    let mut lines = vec![
+        control_center_room_label(room),
+        String::new(),
+        format!("kind: {}", room.kind),
+        format!("visibility: {}", room.visibility),
+        format!(
+            "members: {} {}",
+            room.member_count,
+            if room.member_count == 1 {
+                "user"
+            } else {
+                "users"
+            }
+        ),
+        format!(
+            "active room bans: {}",
+            if room.active_ban_count == 0 {
+                "none".to_string()
+            } else {
+                room.active_ban_count.to_string()
+            }
+        ),
+        format!("permanent: {}", yes_no(room.permanent)),
+        format!("auto-join: {}", yes_no(room.auto_join)),
+    ];
+
+    if let Some(language_code) = &room.language_code {
+        lines.push(format!("language: {}", language_code));
+    }
+
+    lines.push(String::new());
+    lines.push("Actions next: kick, ban, unban, rename, visibility, delete.".to_string());
+    lines
+}
+
+fn control_center_room_label(room: &StaffRoomRecord) -> String {
+    room.slug
+        .as_ref()
+        .map(|slug| format!("#{slug}"))
+        .or_else(|| {
+            room.language_code
+                .as_ref()
+                .map(|code| format!("#lang-{code}"))
+        })
+        .unwrap_or_else(|| room.kind.clone())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
 }
 
 fn live_sessions_by_username(

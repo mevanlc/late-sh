@@ -25,7 +25,7 @@ use crate::{
         chat::notifications::svc::NotificationService,
         chat::svc::ChatService,
         common::primitives::{Banner, Screen},
-        help_modal, profile,
+        control_center, help_modal, profile,
         profile::svc::ProfileService,
         profile_modal, settings_modal,
         visualizer::Visualizer,
@@ -205,6 +205,7 @@ pub struct App {
     pub(super) activity_feed_rx: Option<broadcast::Receiver<ActivityEvent>>,
     pub(super) activity: VecDeque<ActivityEvent>,
     pub(crate) user_id: Uuid,
+    pub(crate) permissions: Permissions,
     pub(crate) is_admin: bool,
 
     /// Voting
@@ -212,6 +213,7 @@ pub struct App {
 
     /// Chat
     pub(crate) chat: chat::state::ChatState,
+    pub(crate) control_center: control_center::state::State,
     pub(crate) dashboard_chat_rows_cache: chat::ui::ChatRowsCache,
     pub(crate) active_room_rows_cache: chat::ui::ChatRowsCache,
 
@@ -325,6 +327,7 @@ impl App {
         match self.screen {
             Screen::Dashboard => self.dashboard_active_room_id(),
             Screen::Chat => self.chat.selected_room_id,
+            Screen::ControlCenter => None,
             _ => None,
         }
     }
@@ -619,6 +622,7 @@ impl App {
             activity_feed_rx: config.activity_feed_rx,
             activity: VecDeque::new(),
             user_id: config.user_id,
+            permissions: config.permissions,
             is_admin: config.permissions.is_admin(),
             vote: vote::state::VoteState::new(config.vote_service, config.user_id, config.my_vote),
             chat: chat::state::ChatState::new(
@@ -633,6 +637,7 @@ impl App {
                 },
                 config.article_service.clone(),
             ),
+            control_center: control_center::state::State::default(),
             dashboard_chat_rows_cache: chat::ui::ChatRowsCache::default(),
             active_room_rows_cache: chat::ui::ChatRowsCache::default(),
             dashboard_favorite_index: 0,
@@ -728,6 +733,9 @@ impl App {
     }
 
     pub(crate) fn set_screen(&mut self, screen: Screen) {
+        if screen == Screen::ControlCenter && !self.permissions.can_access_mod_surface() {
+            return;
+        }
         if self.screen == screen {
             if screen == Screen::Artboard {
                 self.enter_dartboard();
@@ -746,6 +754,11 @@ impl App {
         if self.screen == Screen::Chat {
             self.chat.request_list();
             self.chat.sync_selection();
+        }
+
+        if self.screen == Screen::ControlCenter {
+            self.chat.refresh_staff_users_snapshot();
+            self.chat.refresh_staff_rooms_snapshot();
         }
 
         if self.screen == Screen::Artboard {

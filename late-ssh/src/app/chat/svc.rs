@@ -34,6 +34,27 @@ pub enum StaffViewScope {
     Moderator,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaffUserRecord {
+    pub user_id: Uuid,
+    pub username: String,
+    pub is_admin: bool,
+    pub is_moderator: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaffRoomRecord {
+    pub room_id: Uuid,
+    pub kind: String,
+    pub visibility: String,
+    pub auto_join: bool,
+    pub permanent: bool,
+    pub slug: Option<String>,
+    pub language_code: Option<String>,
+    pub member_count: i64,
+    pub active_ban_count: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomModerationAction {
     Kick,
@@ -257,6 +278,14 @@ pub enum ChatEvent {
         user_id: Uuid,
         title: String,
         lines: Vec<String>,
+    },
+    StaffUsersSnapshotUpdated {
+        user_id: Uuid,
+        users: Vec<StaffUserRecord>,
+    },
+    StaffRoomsSnapshotUpdated {
+        user_id: Uuid,
+        rooms: Vec<StaffRoomRecord>,
     },
     StaffRoomsListed {
         user_id: Uuid,
@@ -1055,21 +1084,39 @@ impl ChatService {
         );
     }
 
+    pub fn refresh_staff_users_snapshot_task(
+        &self,
+        user_id: Uuid,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.refresh_staff_users_snapshot_task",
+            user_id = %user_id,
+            scope = ?scope
+        );
+        tokio::spawn(
+            async move {
+                let event = match service.list_staff_users_data(permissions, scope).await {
+                    Ok(users) => ChatEvent::StaffUsersSnapshotUpdated { user_id, users },
+                    Err(e) => ChatEvent::StaffQueryFailed {
+                        user_id,
+                        message: e.to_string(),
+                    },
+                };
+                let _ = service.evt_tx.send(event);
+            }
+            .instrument(span),
+        );
+    }
+
     async fn list_staff_users(
         &self,
         permissions: Permissions,
         scope: StaffViewScope,
     ) -> Result<(String, Vec<String>)> {
-        ensure_staff_scope(permissions, scope)?;
-
-        let client = &self.db.get().await?;
-        let mut users = User::all(client).await?;
-        users.sort_by(|a, b| {
-            a.username
-                .to_ascii_lowercase()
-                .cmp(&b.username.to_ascii_lowercase())
-                .then_with(|| a.created.cmp(&b.created))
-        });
+        let users = self.list_staff_users_data(permissions, scope).await?;
 
         let mut lines = vec![format!("All Users ({})", users.len())];
         if users.is_empty() {
@@ -1097,6 +1144,33 @@ impl ChatService {
         }
 
         Ok((staff_users_title(scope), lines))
+    }
+
+    async fn list_staff_users_data(
+        &self,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) -> Result<Vec<StaffUserRecord>> {
+        ensure_staff_scope(permissions, scope)?;
+
+        let client = &self.db.get().await?;
+        let mut users = User::all(client).await?;
+        users.sort_by(|a, b| {
+            a.username
+                .to_ascii_lowercase()
+                .cmp(&b.username.to_ascii_lowercase())
+                .then_with(|| a.created.cmp(&b.created))
+        });
+
+        Ok(users
+            .into_iter()
+            .map(|user| StaffUserRecord {
+                user_id: user.id,
+                username: user.username,
+                is_admin: user.is_admin,
+                is_moderator: user.is_moderator,
+            })
+            .collect())
     }
 
     pub fn list_staff_rooms_task(
@@ -1130,26 +1204,113 @@ impl ChatService {
         );
     }
 
+    pub fn refresh_staff_rooms_snapshot_task(
+        &self,
+        user_id: Uuid,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.refresh_staff_rooms_snapshot_task",
+            user_id = %user_id,
+            scope = ?scope
+        );
+        tokio::spawn(
+            async move {
+                let event = match service.list_staff_rooms_data(permissions, scope).await {
+                    Ok(rooms) => ChatEvent::StaffRoomsSnapshotUpdated { user_id, rooms },
+                    Err(e) => ChatEvent::StaffQueryFailed {
+                        user_id,
+                        message: e.to_string(),
+                    },
+                };
+                let _ = service.evt_tx.send(event);
+            }
+            .instrument(span),
+        );
+    }
+
     async fn list_staff_rooms(
         &self,
         permissions: Permissions,
         scope: StaffViewScope,
     ) -> Result<(String, Vec<String>)> {
+        let rooms = self.list_staff_rooms_data(permissions, scope).await?;
+
+        let mut lines = vec![format!("All Rooms ({})", rooms.len())];
+        if rooms.is_empty() {
+            lines.push("No rooms".to_string());
+        } else {
+            lines.extend(rooms.into_iter().map(|room| {
+                let label = staff_room_label(&room);
+                let mut details = vec![
+                    room.kind,
+                    room.visibility,
+                    format!(
+                        "{} {}",
+                        room.member_count,
+                        if room.member_count == 1 {
+                            "member"
+                        } else {
+                            "members"
+                        }
+                    ),
+                ];
+                if room.permanent {
+                    details.push("permanent".to_string());
+                }
+                if room.auto_join {
+                    details.push("auto-join".to_string());
+                }
+                if room.active_ban_count > 0 {
+                    details.push(format!("{} banned", room.active_ban_count));
+                }
+
+                format!("{label} · {}", details.join(" · "))
+            }));
+        }
+
+        Ok((staff_rooms_title(scope), lines))
+    }
+
+    async fn list_staff_rooms_data(
+        &self,
+        permissions: Permissions,
+        scope: StaffViewScope,
+    ) -> Result<Vec<StaffRoomRecord>> {
         ensure_staff_scope(permissions, scope)?;
 
         let client = &self.db.get().await?;
         let rows = client
             .query(
-                "SELECT r.kind,
+                "SELECT r.id,
+                        r.kind,
                         r.visibility,
                         r.auto_join,
                         r.permanent,
                         r.slug,
                         r.language_code,
-                        COUNT(DISTINCT m.user_id)::bigint AS member_count
+                        COUNT(DISTINCT m.user_id)::bigint AS member_count,
+                        COALESCE(rb.active_ban_count, 0)::bigint AS active_ban_count
                  FROM chat_rooms r
                  LEFT JOIN chat_room_members m ON m.room_id = r.id
-                 GROUP BY r.id, r.kind, r.visibility, r.auto_join, r.permanent, r.slug, r.language_code, r.created
+                 LEFT JOIN (
+                     SELECT room_id, COUNT(*)::bigint AS active_ban_count
+                     FROM room_bans
+                     WHERE expires_at IS NULL OR expires_at > current_timestamp
+                     GROUP BY room_id
+                 ) rb ON rb.room_id = r.id
+                 GROUP BY
+                     r.id,
+                     r.kind,
+                     r.visibility,
+                     r.auto_join,
+                     r.permanent,
+                     r.slug,
+                     r.language_code,
+                     r.created,
+                     rb.active_ban_count
                  ORDER BY
                      CASE
                          WHEN r.kind = 'general' AND r.slug = 'general' THEN 0
@@ -1165,49 +1326,20 @@ impl ChatService {
             )
             .await?;
 
-        let mut lines = vec![format!("All Rooms ({})", rows.len())];
-        if rows.is_empty() {
-            lines.push("No rooms".to_string());
-        } else {
-            lines.extend(rows.into_iter().map(|row| {
-                let kind: String = row.get("kind");
-                let visibility: String = row.get("visibility");
-                let auto_join: bool = row.get("auto_join");
-                let permanent: bool = row.get("permanent");
-                let slug: Option<String> = row.get("slug");
-                let language_code: Option<String> = row.get("language_code");
-                let member_count: i64 = row.get("member_count");
-
-                let label = slug
-                    .map(|slug| format!("#{slug}"))
-                    .or_else(|| language_code.map(|code| format!("#lang-{code}")))
-                    .unwrap_or_else(|| kind.clone());
-
-                let mut details = vec![
-                    kind,
-                    visibility,
-                    format!(
-                        "{} {}",
-                        member_count,
-                        if member_count == 1 {
-                            "member"
-                        } else {
-                            "members"
-                        }
-                    ),
-                ];
-                if permanent {
-                    details.push("permanent".to_string());
-                }
-                if auto_join {
-                    details.push("auto-join".to_string());
-                }
-
-                format!("{label} · {}", details.join(" · "))
-            }));
-        }
-
-        Ok((staff_rooms_title(scope), lines))
+        Ok(rows
+            .into_iter()
+            .map(|row| StaffRoomRecord {
+                room_id: row.get("id"),
+                kind: row.get("kind"),
+                visibility: row.get("visibility"),
+                auto_join: row.get("auto_join"),
+                permanent: row.get("permanent"),
+                slug: row.get("slug"),
+                language_code: row.get("language_code"),
+                member_count: row.get("member_count"),
+                active_ban_count: row.get("active_ban_count"),
+            })
+            .collect())
     }
 
     pub fn list_moderators_task(&self, user_id: Uuid, permissions: Permissions) {
@@ -2008,6 +2140,18 @@ fn staff_rooms_title(scope: StaffViewScope) -> String {
         StaffViewScope::Admin => "Admin Rooms".to_string(),
         StaffViewScope::Moderator => "Mod Rooms".to_string(),
     }
+}
+
+fn staff_room_label(room: &StaffRoomRecord) -> String {
+    room.slug
+        .as_ref()
+        .map(|slug| format!("#{slug}"))
+        .or_else(|| {
+            room.language_code
+                .as_ref()
+                .map(|code| format!("#lang-{code}"))
+        })
+        .unwrap_or_else(|| room.kind.clone())
 }
 
 fn short_user_id(user_id: Uuid) -> String {
