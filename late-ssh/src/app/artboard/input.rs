@@ -715,9 +715,10 @@ mod tests {
     }
 
     #[test]
-    fn plain_click_on_wide_continuation_snaps_cursor_to_origin() {
+    fn plain_click_on_wide_continuation_keeps_logical_cursor_on_cell_two() {
         let mut state = test_state();
         state.snapshot.canvas = Canvas::with_size(10, 4);
+        state.set_viewport_for_screen((80, 24));
         let _ = state
             .snapshot
             .canvas
@@ -739,7 +740,7 @@ mod tests {
             action,
             InputAction::Handled | InputAction::Ignored
         ));
-        assert_eq!(state.cursor(), dartboard_core::Pos { x: 0, y: 0 });
+        assert_eq!(state.cursor(), dartboard_core::Pos { x: 1, y: 0 });
     }
 
     #[test]

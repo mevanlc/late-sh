@@ -1,11 +1,11 @@
 use dartboard_core::{Canvas, Pos, RgbColor};
 use dartboard_editor::{
-    AppKey, AppModifiers, AppPointerButton, AppPointerEvent, AppPointerKind, Bounds, EditorAction,
-    EditorContext, EditorKeyDispatch, EditorPointerDispatch, EditorSession,
-    FloatingSelection as EditorFloatingSelection, KeyMap, Mode as EditorMode, MoveDir,
-    SWATCH_CAPACITY, Selection as EditorSelection, SelectionShape as EditorSelectionShape, Swatch,
-    SwatchActivation, Viewport, backspace as editor_backspace, capture_bounds, capture_selection,
-    delete_at_cursor, diff_canvas_op, dismiss_floating as editor_dismiss_floating,
+    AppKey, AppModifiers, AppPointerEvent, Bounds, EditorAction, EditorContext, EditorKeyDispatch,
+    EditorPointerDispatch, EditorSession, FloatingSelection as EditorFloatingSelection, KeyMap,
+    Mode as EditorMode, MoveDir, SWATCH_CAPACITY, Selection as EditorSelection,
+    SelectionShape as EditorSelectionShape, Swatch, SwatchActivation, Viewport,
+    backspace as editor_backspace, capture_bounds, capture_selection, delete_at_cursor,
+    diff_canvas_op, dismiss_floating as editor_dismiss_floating,
     export_system_clipboard_text as editor_export_system_clipboard_text,
     handle_editor_action as editor_handle_action, handle_editor_pointer as editor_handle_pointer,
     insert_char as editor_insert_char, paste_text_block, stamp_floating as editor_stamp_floating,
@@ -315,19 +315,6 @@ impl State {
         let color = self.active_user_color();
         let dispatch =
             editor_handle_pointer(&mut self.editor, &mut self.snapshot.canvas, pointer, color);
-        if matches!(pointer.kind, AppPointerKind::Down(AppPointerButton::Left))
-            && !pointer.modifiers.shift
-            && !pointer.modifiers.alt
-            && !pointer.modifiers.ctrl
-            && !pointer.modifiers.meta
-            && self.editor.floating.is_none()
-        {
-            let normalized = self.normalize_click_cursor(self.editor.cursor);
-            self.editor.cursor = normalized;
-            if let Some(origin) = self.editor.drag_origin {
-                self.editor.drag_origin = Some(self.normalize_click_cursor(origin));
-            }
-        }
         self.sync_floating_source_selection();
         if had_floating && had_local_floating && self.editor.floating.is_none() {
             self.restore_floating_source_selection();
@@ -373,7 +360,7 @@ impl State {
         if next.x >= self.snapshot.canvas.width || next.y >= self.snapshot.canvas.height {
             return false;
         }
-        self.editor.cursor = self.normalize_click_cursor(next);
+        self.editor.cursor = next;
         true
     }
 
@@ -855,10 +842,6 @@ impl State {
             .unwrap_or_else(|| RgbColor::new(255, 196, 64))
     }
 
-    fn normalize_click_cursor(&self, pos: Pos) -> Pos {
-        self.snapshot.canvas.glyph_origin(pos).unwrap_or(pos)
-    }
-
     fn swatch_preview_suppressed(&self) -> bool {
         self.suppress_swatch_preview
             && self
@@ -1251,16 +1234,6 @@ mod tests {
             canvas_pos_for_screen_point(viewport, Pos { x: 0, y: 0 }, 4, 4, 10, 10),
             None
         );
-    }
-
-    #[test]
-    fn move_to_screen_point_snaps_wide_continuation_to_origin() {
-        let mut state = test_state();
-        state.snapshot.canvas = Canvas::with_size(10, 4);
-        let _ = state.snapshot.canvas.put_glyph(Pos { x: 0, y: 0 }, '👍');
-
-        assert!(state.move_to_screen_point((80, 24), 3, 2));
-        assert_eq!(state.cursor(), Pos { x: 0, y: 0 });
     }
 
     #[test]
