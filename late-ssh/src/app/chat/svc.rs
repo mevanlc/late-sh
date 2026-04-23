@@ -24,6 +24,7 @@ use tracing::{Instrument, info_span};
 use crate::app::bonsai::state::stage_for;
 use crate::authz::Permissions;
 use crate::metrics;
+use crate::session::SessionRegistry;
 
 const HISTORY_LIMIT: i64 = 1000;
 const DELTA_LIMIT: i64 = 256;
@@ -106,6 +107,19 @@ impl AdminRoomAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminUserAction {
+    Disconnect,
+}
+
+impl AdminUserAction {
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Disconnect => "disconnect",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RoomModerationResult {
     room_id: Uuid,
@@ -122,6 +136,14 @@ struct AdminRoomResult {
     new_slug: Option<String>,
     visibility: Option<String>,
     deleted: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AdminUserResult {
+    target_user_id: Uuid,
+    target_username: String,
+    action: AdminUserAction,
+    disconnected_sessions: usize,
 }
 
 #[derive(Clone)]
@@ -245,6 +267,13 @@ pub enum ChatEvent {
         new_slug: Option<String>,
         visibility: Option<String>,
         deleted: bool,
+    },
+    AdminUserModerated {
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        target_username: String,
+        action: AdminUserAction,
+        disconnected_sessions: usize,
     },
     ModerationFailed {
         user_id: Uuid,
@@ -2028,6 +2057,111 @@ impl ChatService {
         };
 
         Ok(result)
+    }
+
+    pub fn admin_user_task(
+        &self,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        action: AdminUserAction,
+        permissions: Permissions,
+        session_registry: Option<SessionRegistry>,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.admin_user_task",
+            actor_user_id = %actor_user_id,
+            target_user_id = %target_user_id,
+            action = action.verb()
+        );
+        tokio::spawn(
+            async move {
+                match service
+                    .admin_user_action(
+                        actor_user_id,
+                        target_user_id,
+                        action,
+                        permissions,
+                        session_registry,
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = service.evt_tx.send(ChatEvent::AdminUserModerated {
+                            actor_user_id,
+                            target_user_id: result.target_user_id,
+                            target_username: result.target_username,
+                            action: result.action,
+                            disconnected_sessions: result.disconnected_sessions,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
+                            user_id: actor_user_id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn admin_user_action(
+        &self,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        action: AdminUserAction,
+        permissions: Permissions,
+        session_registry: Option<SessionRegistry>,
+    ) -> Result<AdminUserResult> {
+        if !permissions.can_access_admin_surface() {
+            anyhow::bail!("Admin only");
+        }
+        if actor_user_id == target_user_id {
+            anyhow::bail!("Cannot {} yourself", action.verb());
+        }
+
+        let session_registry =
+            session_registry.ok_or_else(|| anyhow::anyhow!("Live session registry unavailable"))?;
+        let client = &self.db.get().await?;
+        let target = User::get(client, target_user_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        let disconnected_sessions = match action {
+            AdminUserAction::Disconnect => {
+                session_registry
+                    .disconnect_user_sessions(
+                        target_user_id,
+                        "You were disconnected by an admin".to_string(),
+                    )
+                    .await
+            }
+        };
+        if disconnected_sessions == 0 {
+            anyhow::bail!("@{} has no live sessions", target.username);
+        }
+
+        ModerationAuditLog::record(
+            client,
+            actor_user_id,
+            format!("server_{}", action.verb()),
+            "user",
+            Some(target_user_id),
+            json!({
+                "target_user_id": target_user_id,
+                "target_username": target.username.clone(),
+                "disconnected_sessions": disconnected_sessions,
+            }),
+        )
+        .await?;
+
+        Ok(AdminUserResult {
+            target_user_id,
+            target_username: target.username,
+            action,
+            disconnected_sessions,
+        })
     }
 
     pub fn delete_permanent_room_task(&self, user_id: Uuid, slug: String) {

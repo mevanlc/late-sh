@@ -117,7 +117,9 @@ struct DrawContext<'a> {
     confirm_dialog: Option<&'a confirm_dialog::state::ConfirmDialogState>,
     username: &'a str,
     control_center_tab: control_center::state::Tab,
-    control_center_user_lines: &'a [String],
+    control_center_focus: control_center::state::Focus,
+    control_center_user_list_lines: &'a [String],
+    control_center_user_detail_lines: &'a [String],
     control_center_room_list_lines: &'a [String],
     control_center_room_detail_lines: &'a [String],
     control_center_room_prompt_panel_title: Option<&'a str>,
@@ -309,10 +311,18 @@ impl App {
             .as_ref()
             .map(|active_users| active_users.lock_recover().len())
             .unwrap_or(0);
+        let control_center_user_ids = self.chat.control_center_user_ids();
+        self.control_center.sync_user_ids(&control_center_user_ids);
+        let selected_control_center_user_id = self.control_center.selected_user_id();
+        let control_center_user_list_lines = self
+            .chat
+            .control_center_user_list_lines(selected_control_center_user_id);
+        let control_center_user_detail_lines = self
+            .chat
+            .control_center_user_detail_lines(selected_control_center_user_id);
         let control_center_room_ids = self.chat.control_center_room_ids();
         self.control_center.sync_room_ids(&control_center_room_ids);
         let selected_control_center_room_id = self.control_center.selected_room_id();
-        let control_center_user_lines = self.chat.control_center_user_lines();
         let control_center_room_list_lines = self
             .chat
             .control_center_room_list_lines(selected_control_center_room_id);
@@ -372,7 +382,9 @@ impl App {
                         confirm_dialog: self.confirm_dialog.as_ref(),
                         username: &self.username,
                         control_center_tab: self.control_center.selected_tab(),
-                        control_center_user_lines: &control_center_user_lines,
+                        control_center_focus: self.control_center.focus(),
+                        control_center_user_list_lines: &control_center_user_list_lines,
+                        control_center_user_detail_lines: &control_center_user_detail_lines,
                         control_center_room_list_lines: &control_center_room_list_lines,
                         control_center_room_detail_lines: &control_center_room_detail_lines,
                         control_center_room_prompt_panel_title,
@@ -562,12 +574,14 @@ impl App {
                 content_area,
                 &control_center::ui::ControlCenterView {
                     selected_tab: ctx.control_center_tab,
+                    focus: ctx.control_center_focus,
                     username: ctx.username,
                     is_admin: ctx.is_admin,
                     is_moderator: ctx.is_moderator,
                     online_count: ctx.online_count,
                     live_session_count: ctx.live_session_count,
-                    user_lines: ctx.control_center_user_lines,
+                    user_list_lines: ctx.control_center_user_list_lines,
+                    user_detail_lines: ctx.control_center_user_detail_lines,
                     room_list_lines: ctx.control_center_room_list_lines,
                     room_detail_lines: ctx.control_center_room_detail_lines,
                     room_prompt_panel_title: ctx.control_center_room_prompt_panel_title,

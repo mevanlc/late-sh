@@ -4,7 +4,8 @@ mod helpers;
 
 use helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_with_chat_service,
-    make_app_with_permissions, new_test_db, render_plain, wait_for_render_contains, wait_until,
+    make_app_with_permissions, make_app_with_runtime_permissions, new_test_db, render_plain,
+    wait_for_render_contains, wait_until,
 };
 use late_core::models::{
     chat_message::{ChatMessage, ChatMessageParams},
@@ -15,6 +16,7 @@ use late_core::models::{
 };
 use late_core::test_utils::create_test_user;
 use late_ssh::authz::Permissions;
+use late_ssh::session::{SessionMessage, SessionRegistration, SessionRegistry};
 use rstest::rstest;
 use tokio::time::Duration;
 use uuid::Uuid;
@@ -212,7 +214,8 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
 
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, "Staff Control Center").await;
-    wait_for_render_contains(&mut app, "@screen-zero-staff [mod] · online now").await;
+    wait_for_render_contains(&mut app, "Tab focus pane").await;
+    wait_for_render_contains(&mut app, "> @screen-zero-staff [mod]").await;
 
     app.handle_input(b"l");
     wait_for_render_contains(&mut app, " Room Directory ").await;
@@ -221,7 +224,18 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
     wait_for_render_contains(&mut app, " Selected Room ").await;
 
     app.handle_input(b"\t");
-    wait_for_render_contains(&mut app, " Dashboard ").await;
+    wait_for_render_contains(&mut app, "Tab focus tabs · j/k or ↑/↓ move").await;
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+
+    app.handle_input(b"\x1b[B");
+    wait_for_render_contains(&mut app, "> #ops").await;
+
+    app.handle_input(b"\x1b[D");
+    wait_for_render_contains(&mut app, " User Directory ").await;
+    wait_for_render_contains(&mut app, "Selected User").await;
+
+    app.handle_input(b"\t");
+    wait_for_render_contains(&mut app, "Tab focus pane").await;
 }
 
 #[tokio::test]
@@ -424,6 +438,83 @@ async fn admin_must_type_room_name_before_deleting_from_control_center() {
         "control center selected room to be deleted",
     )
     .await;
+}
+
+#[tokio::test]
+async fn admin_can_disconnect_selected_user_from_control_center() {
+    let test_db = new_test_db().await;
+    let admin = create_test_user(&test_db.db, "cc-user-admin").await;
+    let target = create_test_user(&test_db.db, "cc-user-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    let session_registry = SessionRegistry::new();
+    let (target_tx, mut target_rx) = tokio::sync::mpsc::channel(4);
+    session_registry.register(SessionRegistration {
+        session_id: Uuid::now_v7(),
+        token: "cc-user-target-token".to_string(),
+        user_id: target.id,
+        username: target.username.clone(),
+        tx: target_tx,
+    });
+
+    let mut app = make_app_with_runtime_permissions(
+        test_db.db.clone(),
+        admin.id,
+        "cc-user-admin-flow",
+        Permissions::new(true, false),
+        Some(session_registry.clone()),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, " User Directory ").await;
+    wait_for_render_contains(&mut app, "> @cc-user-admin [admin]").await;
+    wait_for_render_contains(&mut app, "@cc-user-target · online now · 1 live session").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> @cc-user-target · online now · 1 live session").await;
+    wait_for_render_contains(&mut app, " Selected User ").await;
+    wait_for_render_contains(&mut app, "Live Session Detail").await;
+
+    app.handle_input(b"x");
+    wait_for_render_contains(&mut app, " Disconnect User ").await;
+    wait_for_render_contains(&mut app, "Type @cc-user-target to confirm disconnect").await;
+
+    app.handle_input(b"@wrong\r");
+    assert_render_not_contains_for(
+        &mut app,
+        "Disconnecting @cc-user-target...",
+        Duration::from_millis(200),
+    )
+    .await;
+    wait_for_render_contains(&mut app, "Type @cc-user-target to confirm disconnect").await;
+
+    app.handle_input(b"\x1b");
+    assert_render_not_contains_for(&mut app, " Disconnect User ", Duration::from_millis(200)).await;
+
+    app.handle_input(b"x");
+    wait_for_render_contains(&mut app, "Type @cc-user-target to confirm disconnect").await;
+    app.handle_input(b"@cc-user-target\r");
+    wait_for_render_contains(&mut app, "Disconnecting @cc-user-target...").await;
+    wait_for_render_contains(&mut app, "Disconnected @cc-user-target (1 live session)").await;
+
+    let disconnect = tokio::time::timeout(Duration::from_secs(1), target_rx.recv())
+        .await
+        .expect("disconnect message to arrive")
+        .expect("disconnect message");
+    match disconnect {
+        SessionMessage::Disconnect { reason } => {
+            assert_eq!(reason, "You were disconnected by an admin");
+        }
+        other => panic!("expected disconnect message, got {other:?}"),
+    }
 }
 
 #[tokio::test]

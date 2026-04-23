@@ -8,16 +8,18 @@ use ratatui::{
 
 use crate::app::common::theme;
 
-use super::state::Tab;
+use super::state::{Focus, Tab};
 
 pub struct ControlCenterView<'a> {
     pub selected_tab: Tab,
+    pub focus: Focus,
     pub username: &'a str,
     pub is_admin: bool,
     pub is_moderator: bool,
     pub online_count: usize,
     pub live_session_count: usize,
-    pub user_lines: &'a [String],
+    pub user_list_lines: &'a [String],
+    pub user_detail_lines: &'a [String],
     pub room_list_lines: &'a [String],
     pub room_detail_lines: &'a [String],
     pub room_prompt_panel_title: Option<&'a str>,
@@ -55,9 +57,14 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
     spans.push(Span::raw("   "));
 
     for tab in tabs {
-        let style = if tab == selected {
+        let style = if tab == selected && view.focus == Focus::Tabs {
             Style::default()
                 .fg(theme::AMBER_GLOW())
+                .bg(theme::BG_HIGHLIGHT())
+                .add_modifier(Modifier::BOLD)
+        } else if tab == selected {
+            Style::default()
+                .fg(theme::AMBER())
                 .bg(theme::BG_HIGHLIGHT())
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -67,11 +74,17 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
         spans.push(Span::raw(" "));
     }
 
-    let help_text = match selected {
-        Tab::Users => "←/→ switch tabs · Tab return",
-        Tab::Rooms if view.room_prompt_title.is_some() => "type @user · Enter confirm · Esc cancel",
-        Tab::Rooms => {
-            "←/→ switch tabs · j/k move · x kick · b ban · u unban · r rename · p public · v private · d delete · Tab return"
+    let help_text = match (view.focus, selected) {
+        (_, Tab::Rooms) if view.room_prompt_title.is_some() => {
+            "type @user · Enter confirm · Esc cancel"
+        }
+        (Focus::Tabs, _) => "Tab focus pane · h/l or ←/→ switch tabs",
+        (Focus::ActivePane, Tab::Users) if view.is_admin => {
+            "Tab focus tabs · j/k or ↑/↓ move · x disconnect"
+        }
+        (Focus::ActivePane, Tab::Users) => "Tab focus tabs · j/k or ↑/↓ move",
+        (Focus::ActivePane, Tab::Rooms) => {
+            "Tab focus tabs · j/k or ↑/↓ move · x kick · b ban · u unban · r rename · p public · v private · d delete"
         }
     };
     spans.push(Span::styled(
@@ -155,12 +168,16 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
     let block = Block::default()
         .title(title)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+        .border_style(Style::default().fg(if view.focus == Focus::ActivePane {
+            theme::BORDER_ACTIVE()
+        } else {
+            theme::BORDER()
+        }));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     match view.selected_tab {
-        Tab::Users => draw_user_panel(frame, inner, view.user_lines),
+        Tab::Users => draw_user_panel(frame, inner, view.user_list_lines, view.user_detail_lines),
         Tab::Rooms => draw_rooms_panel(
             frame,
             inner,
@@ -173,29 +190,16 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
     }
 }
 
-fn draw_user_panel(frame: &mut Frame, area: Rect, user_lines: &[String]) {
-    if user_lines.is_empty() {
-        frame.render_widget(
-            Paragraph::new(vec![Line::from(Span::styled(
-                "Loading users...",
-                Style::default().fg(theme::TEXT_BRIGHT()),
-            ))])
-            .wrap(Wrap { trim: true }),
-            area,
-        );
-        return;
-    }
-
-    let lines: Vec<Line<'_>> = user_lines
-        .iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                line.as_str(),
-                Style::default().fg(theme::TEXT()),
-            ))
-        })
-        .collect();
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
+fn draw_user_panel(
+    frame: &mut Frame,
+    area: Rect,
+    user_list_lines: &[String],
+    user_detail_lines: &[String],
+) {
+    let columns =
+        Layout::horizontal([Constraint::Percentage(42), Constraint::Percentage(58)]).split(area);
+    draw_panel_card(frame, columns[0], "User Directory", user_list_lines);
+    draw_panel_card(frame, columns[1], "Selected User", user_detail_lines);
 }
 
 fn draw_rooms_panel(

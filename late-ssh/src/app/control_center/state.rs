@@ -15,6 +15,13 @@ impl Tab {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    Tabs,
+    ActivePane,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RoomAction {
     Kick,
@@ -77,6 +84,7 @@ impl PromptKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PendingConfirmAction {
+    DisconnectUser { user_id: Uuid },
     SetRoomVisibility { room_id: Uuid, visibility: String },
     DeleteRoom { room_id: Uuid },
 }
@@ -90,6 +98,8 @@ pub struct Prompt {
 #[derive(Debug, Default)]
 pub struct State {
     selected_tab: usize,
+    focus: Focus,
+    selected_user_id: Option<Uuid>,
     selected_room_id: Option<Uuid>,
     prompt: Option<Prompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
@@ -101,6 +111,21 @@ impl State {
             1 => Tab::Rooms,
             _ => Tab::Users,
         }
+    }
+
+    pub fn focus(&self) -> Focus {
+        self.focus
+    }
+
+    pub fn focus_next(&mut self) {
+        self.focus = match self.focus {
+            Focus::Tabs => Focus::ActivePane,
+            Focus::ActivePane => Focus::Tabs,
+        };
+    }
+
+    pub fn focus_prev(&mut self) {
+        self.focus_next();
     }
 
     pub fn next_tab(&mut self) {
@@ -117,6 +142,50 @@ impl State {
 
     pub fn selected_room_id(&self) -> Option<Uuid> {
         self.selected_room_id
+    }
+
+    pub fn selected_user_id(&self) -> Option<Uuid> {
+        self.selected_user_id
+    }
+
+    pub fn sync_user_ids(&mut self, user_ids: &[Uuid]) {
+        if user_ids.is_empty() {
+            self.selected_user_id = None;
+            self.prompt = None;
+            self.pending_confirm_action = None;
+            return;
+        }
+        if self
+            .selected_user_id
+            .is_some_and(|user_id| user_ids.contains(&user_id))
+        {
+            return;
+        }
+        self.selected_user_id = user_ids.first().copied();
+        self.prompt = None;
+        self.pending_confirm_action = None;
+    }
+
+    pub fn move_user_selection(&mut self, user_ids: &[Uuid], delta: isize) -> bool {
+        if user_ids.is_empty() {
+            self.selected_user_id = None;
+            self.prompt = None;
+            self.pending_confirm_action = None;
+            return false;
+        }
+
+        let current_index = self
+            .selected_user_id
+            .and_then(|user_id| user_ids.iter().position(|candidate| *candidate == user_id))
+            .unwrap_or(0);
+        let next_index =
+            ((current_index as isize + delta).rem_euclid(user_ids.len() as isize)) as usize;
+        let next_user_id = user_ids[next_index];
+        let changed = self.selected_user_id != Some(next_user_id);
+        self.selected_user_id = Some(next_user_id);
+        self.prompt = None;
+        self.pending_confirm_action = None;
+        changed
     }
 
     pub fn sync_room_ids(&mut self, room_ids: &[Uuid]) {

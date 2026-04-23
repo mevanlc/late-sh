@@ -638,6 +638,10 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             }
         }
         ParsedInput::BackTab => {
+            if ctx.screen == Screen::ControlCenter {
+                app.control_center.focus_prev();
+                return;
+            }
             if ctx.screen == Screen::Chat && app.chat.room_jump_active {
                 return;
             }
@@ -1059,8 +1063,8 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
                 app.control_center.prev_tab();
                 true
             }
-            b'A' => control_center_move_room_selection(app, -1),
-            b'B' => control_center_move_room_selection(app, 1),
+            b'A' => control_center_move_active_selection(app, -1),
+            b'B' => control_center_move_active_selection(app, 1),
             _ => false,
         },
         Screen::Dashboard => dashboard::input::handle_arrow(app, key),
@@ -1378,12 +1382,12 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             true
         }
         b'\t' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
             if ctx.screen == Screen::ControlCenter {
-                app.set_screen(Screen::Dashboard);
-            } else {
-                app.set_screen(ctx.screen.next());
+                app.control_center.focus_next();
+                return true;
             }
+            reset_composers_for_page_change(app);
+            app.set_screen(ctx.screen.next());
             true
         }
         b'P' => {
@@ -1412,36 +1416,33 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             dashboard::input::handle_key(app, byte);
         }
         Screen::ControlCenter => match byte {
-            b'h' | b'H' => {
-                if app.control_center.selected_tab()
-                    == crate::app::control_center::state::Tab::Rooms
-                {
-                    let _ = control_center_move_room_selection(app, -1);
-                } else {
-                    app.control_center.prev_tab();
-                }
-            }
-            b'l' | b'L' => {
-                if app.control_center.selected_tab()
-                    == crate::app::control_center::state::Tab::Rooms
-                {
-                    let _ = control_center_move_room_selection(app, 1);
-                } else {
-                    app.control_center.next_tab();
-                }
-            }
+            b'h' | b'H' => app.control_center.prev_tab(),
+            b'l' | b'L' => app.control_center.next_tab(),
             b'j' | b'J' => {
-                let _ = control_center_move_room_selection(app, 1);
+                let _ = control_center_move_active_selection(app, 1);
             }
             b'k' | b'K' => {
-                let _ = control_center_move_room_selection(app, -1);
+                let _ = control_center_move_active_selection(app, -1);
             }
-            b'x' | b'X' => {
-                control_center_begin_room_action(
-                    app,
-                    crate::app::control_center::state::RoomAction::Kick,
-                );
-            }
+            b'x' | b'X' => match app.control_center.selected_tab() {
+                crate::app::control_center::state::Tab::Users => {
+                    control_center_request_user_confirmation(
+                        app,
+                        crate::app::control_center::state::PendingConfirmAction::DisconnectUser {
+                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
+                        },
+                        "Disconnect User",
+                        "This closes every live session for the selected user right now.",
+                        "disconnect",
+                    );
+                }
+                crate::app::control_center::state::Tab::Rooms => {
+                    control_center_begin_room_action(
+                        app,
+                        crate::app::control_center::state::RoomAction::Kick,
+                    );
+                }
+            },
             b'b' | b'B' => {
                 control_center_begin_room_action(
                     app,
@@ -1498,12 +1499,31 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
     }
 }
 
+fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
+    match app.control_center.selected_tab() {
+        crate::app::control_center::state::Tab::Users => {
+            control_center_move_user_selection(app, delta)
+        }
+        crate::app::control_center::state::Tab::Rooms => {
+            control_center_move_room_selection(app, delta)
+        }
+    }
+}
+
 fn control_center_move_room_selection(app: &mut App, delta: isize) -> bool {
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Rooms {
         return false;
     }
     let room_ids = app.chat.control_center_room_ids();
     app.control_center.move_room_selection(&room_ids, delta)
+}
+
+fn control_center_move_user_selection(app: &mut App, delta: isize) -> bool {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return false;
+    }
+    let user_ids = app.chat.control_center_user_ids();
+    app.control_center.move_user_selection(&user_ids, delta)
 }
 
 fn control_center_begin_room_action(
@@ -1565,6 +1585,12 @@ fn submit_confirm_dialog(app: &mut App) {
         return;
     };
     match action {
+        crate::app::control_center::state::PendingConfirmAction::DisconnectUser { user_id } => {
+            app.banner = Some(app.chat.admin_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::AdminUserAction::Disconnect,
+            ));
+        }
         crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
             room_id,
             visibility,
@@ -1632,6 +1658,43 @@ fn control_center_request_admin_confirmation(
             format!("Type {} to confirm {}", room_label, confirm_label),
             detail,
             room_label,
+            confirm_label,
+            "cancel",
+        ),
+    );
+}
+
+fn control_center_request_user_confirmation(
+    app: &mut App,
+    action: crate::app::control_center::state::PendingConfirmAction,
+    title: &str,
+    detail: &str,
+    confirm_label: &str,
+) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
+        ));
+        return;
+    };
+    let user_label = app
+        .chat
+        .control_center_user_label(user_id)
+        .unwrap_or_else(|| "@user".to_string());
+    app.control_center.set_pending_confirm_action(action);
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            title,
+            format!("Type {} to confirm {}", user_label, confirm_label),
+            detail,
+            user_label,
             confirm_label,
             "cancel",
         ),
