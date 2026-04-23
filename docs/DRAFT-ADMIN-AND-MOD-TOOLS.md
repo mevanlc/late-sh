@@ -1,4 +1,5 @@
 # sketch
+```
 /admin mods                                     open a moderator management dialog
     list
     add
@@ -32,8 +33,9 @@ operations prefixed with * are availble to mods via:
 /mod rooms                                      shows variant of rooms admin panel with admin-only features not rendered
 /mod users                                      shows variant of users admin panel with admin-only features not rendered
 
-
+```
 # deferred
+```
 /admin roles                                    open a role management dialog
     create/edit role
         role optionally colorizes username
@@ -42,5 +44,5 @@ operations prefixed with * are availble to mods via:
     assign role to user
     remove role from user
     view a user's roles
-
+```
 
