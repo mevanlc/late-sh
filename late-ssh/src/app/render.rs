@@ -696,7 +696,7 @@ fn mentions_hud_title(unread: i64) -> Option<Line<'static>> {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                format!(" {noun} "),
+                format!(" unread {noun} "),
                 Style::default().fg(theme::TEXT_MUTED()),
             ),
         ])
@@ -802,10 +802,10 @@ mod tests {
         let one = mentions_hud_title(1).expect("one mention should render");
         assert_eq!(one.alignment, Some(Alignment::Right));
         let text: String = one.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " 1 mention ");
+        assert_eq!(text, " 1 unread mention ");
 
         let many = mentions_hud_title(14).expect("many mentions should render");
         let text: String = many.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " 14 mentions ");
+        assert_eq!(text, " 14 unread mentions ");
     }
 }

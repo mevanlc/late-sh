@@ -628,6 +628,18 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         // events as a fallback for screens that scroll outside those richer
         // handlers.
         ParsedInput::Mouse(mouse) => {
+            if matches!(mouse.kind, MouseEventKind::Down) && !app.show_splash {
+                let unread = app.chat.notifications.unread_count();
+                if unread > 0 && mouse.y == 0 {
+                    let noun = if unread == 1 { "mention" } else { "mentions" };
+                    let hud_width = format!(" {unread} unread {noun} ").len() as u16;
+                    if mouse.x >= app.size.0.saturating_sub(hud_width) {
+                        app.set_screen(Screen::Chat);
+                        app.chat.select_notifications();
+                        return;
+                    }
+                }
+            }
             if let Some(delta) = mouse_scroll_delta(mouse) {
                 handle_scroll_for_screen(app, ctx.screen, delta);
             }
