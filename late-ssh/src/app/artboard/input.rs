@@ -715,6 +715,34 @@ mod tests {
     }
 
     #[test]
+    fn plain_click_on_wide_continuation_snaps_cursor_to_origin() {
+        let mut state = test_state();
+        state.snapshot.canvas = Canvas::with_size(10, 4);
+        let _ = state
+            .snapshot
+            .canvas
+            .put_glyph(dartboard_core::Pos { x: 0, y: 0 }, '👍');
+
+        let action = handle_mouse(
+            &mut state,
+            (80, 24),
+            &MouseEvent {
+                kind: MouseEventKind::Down,
+                button: Some(MouseButton::Left),
+                x: 3,
+                y: 2,
+                modifiers: Default::default(),
+            },
+        );
+
+        assert!(matches!(
+            action,
+            InputAction::Handled | InputAction::Ignored
+        ));
+        assert_eq!(state.cursor(), dartboard_core::Pos { x: 0, y: 0 });
+    }
+
+    #[test]
     fn ctrl_click_swatch_body_clears_slot() {
         let mut state = test_state();
         state.editor.swatches[0] = Some(dartboard_editor::Swatch {
