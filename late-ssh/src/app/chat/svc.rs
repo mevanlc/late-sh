@@ -91,6 +91,14 @@ impl RoomModerationAction {
         }
     }
 
+    fn authz_action(self) -> Action {
+        match self {
+            Self::Kick => Action::KickFromRoom,
+            Self::Ban => Action::BanFromRoom,
+            Self::Unban => Action::UnbanFromRoom,
+        }
+    }
+
     pub fn success_verb(self) -> &'static str {
         match self {
             Self::Kick => "Kicked",
@@ -1890,10 +1898,6 @@ impl ChatService {
         action: RoomModerationAction,
         permissions: Permissions,
     ) -> Result<RoomModerationResult> {
-        if !permissions.can_moderate() {
-            anyhow::bail!("Moderator or admin only");
-        }
-
         let client = &self.db.get().await?;
         let room = ChatRoom::get(client, room_id)
             .await?
@@ -1917,8 +1921,12 @@ impl ChatService {
         if target.id == actor_user_id {
             anyhow::bail!("Cannot {} yourself", action.verb());
         }
-        if !permissions.is_admin() && (target.is_admin || target.is_moderator) {
-            anyhow::bail!("Only admins can moderate staff");
+        let target_tier = TargetTier::from_user_flags(target.is_admin, target.is_moderator);
+        if !permissions
+            .decide(action.authz_action(), target_tier)
+            .is_allowed()
+        {
+            anyhow::bail!("Moderator or admin only");
         }
 
         match action {
