@@ -23,7 +23,7 @@ use tokio_postgres::Client;
 use tracing::{Instrument, info_span};
 
 use crate::app::bonsai::state::stage_for;
-use crate::authz::Permissions;
+use crate::authz::{Action, Permissions, TargetTier};
 use crate::metrics;
 use crate::session::SessionRegistry;
 
@@ -857,7 +857,18 @@ impl ChatService {
         let existing = ChatMessage::get(client, message_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("message not found"))?;
-        if !permissions.can_edit_message(existing.user_id == user_id) {
+        let target_tier = if existing.user_id == user_id {
+            TargetTier::Own
+        } else {
+            let target = User::get(client, existing.user_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("target user not found"))?;
+            TargetTier::from_user_flags(target.is_admin, target.is_moderator)
+        };
+        if !permissions
+            .decide(Action::EditMessage, target_tier)
+            .is_allowed()
+        {
             anyhow::bail!("cannot edit this message");
         }
 

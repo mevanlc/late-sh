@@ -95,6 +95,21 @@ pub enum TargetTier {
     System,
 }
 
+impl TargetTier {
+    /// Maps a target user's role flags to a `TargetTier`. Use `Own` directly
+    /// when the target is the actor themself — this helper never returns
+    /// `Own`.
+    pub const fn from_user_flags(is_admin: bool, is_moderator: bool) -> Self {
+        if is_admin {
+            TargetTier::Admin
+        } else if is_moderator {
+            TargetTier::Moderator
+        } else {
+            TargetTier::Regular
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Allow,
@@ -102,6 +117,14 @@ pub enum Decision {
     /// The capability is intentionally deferred / not implemented. Treat as
     /// `Deny` at call sites unless you have a specific reason to handle it.
     NotImplemented,
+}
+
+impl Decision {
+    /// Only `Allow` permits the action. `Deny` and `NotImplemented` both
+    /// reject.
+    pub const fn is_allowed(self) -> bool {
+        matches!(self, Decision::Allow)
+    }
 }
 
 /// Every action the permissions matrix enumerates. Multiple CSV rows can map
