@@ -1,6 +1,6 @@
 use crate::{
     app::{ai::svc::AiService, chat::svc::ChatService},
-    authz::Permissions,
+    authz::{Action, Permissions, TargetTier},
 };
 use anyhow::{Context, Result};
 use late_core::models::article::{ArticleEvent, ArticleFeedItem, ArticleSnapshot, NEWS_MARKER};
@@ -194,7 +194,18 @@ impl ArticleService {
                     let Some(article) = Article::get(&client, article_id).await? else {
                         anyhow::bail!("Article not found");
                     };
-                    if !permissions.can_delete_article(article.user_id == user_id) {
+                    let target_tier = if article.user_id == user_id {
+                        TargetTier::Own
+                    } else {
+                        let target = User::get(&client, article.user_id)
+                            .await?
+                            .ok_or_else(|| anyhow::anyhow!("target user not found"))?;
+                        TargetTier::from_user_flags(target.is_admin, target.is_moderator)
+                    };
+                    if !permissions
+                        .decide(Action::DeleteArticle, target_tier)
+                        .is_allowed()
+                    {
                         anyhow::bail!("Article not owned by you");
                     }
 
