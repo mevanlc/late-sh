@@ -148,6 +148,21 @@ impl AdminUserAction {
             Self::Unban => "unban",
         }
     }
+
+    fn authz_action(&self) -> Action {
+        match self {
+            Self::DisconnectAllSessions => Action::DisconnectAllSessions,
+            Self::DisconnectSession { .. } => Action::DisconnectOneSession,
+            Self::Ban {
+                expires_at: Some(_),
+                ..
+            } => Action::TempBanUser,
+            Self::Ban {
+                expires_at: None, ..
+            } => Action::PermaBanUser,
+            Self::Unban => Action::UnbanUser,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2174,9 +2189,6 @@ impl ChatService {
         permissions: Permissions,
         session_registry: Option<SessionRegistry>,
     ) -> Result<AdminUserResult> {
-        if !permissions.can_access_admin_surface() {
-            anyhow::bail!("Admin only");
-        }
         if actor_user_id == target_user_id {
             anyhow::bail!("Cannot {} yourself", action.verb());
         }
@@ -2187,6 +2199,13 @@ impl ChatService {
         let target = User::get(client, target_user_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        let target_tier = TargetTier::from_user_flags(target.is_admin, target.is_moderator);
+        if !permissions
+            .decide(action.authz_action(), target_tier)
+            .is_allowed()
+        {
+            anyhow::bail!("Not permitted");
+        }
         let disconnected_sessions = match &action {
             AdminUserAction::DisconnectAllSessions => {
                 session_registry
