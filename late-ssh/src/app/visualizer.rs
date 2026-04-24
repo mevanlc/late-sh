@@ -8,6 +8,12 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
+/// Per-tick release coefficient for band bars. Attack is instant (snap up on
+/// peaks); release is a first-order low-pass with this pole. At the 66ms tick,
+/// ≈ 285ms half-life — bars fly up on transients, then fall visibly between
+/// frames.
+const BAND_RELEASE: f32 = 0.85;
+
 pub struct Visualizer {
     bands: [f32; 8],
     rms: f32,
@@ -38,7 +44,12 @@ impl Visualizer {
         self.has_viz = true;
         self.rms = frame.rms;
         for (i, band) in frame.bands.iter().enumerate() {
-            self.bands[i] = band.clamp(0.0, 1.0);
+            let target = band.clamp(0.0, 1.0);
+            self.bands[i] = if target > self.bands[i] {
+                target
+            } else {
+                self.bands[i] * BAND_RELEASE + target * (1.0 - BAND_RELEASE)
+            };
         }
 
         // Beat detection: a relative spike above the running average triggers
@@ -65,6 +76,9 @@ impl Visualizer {
         }
         self.rms = (self.rms * 0.96).max(0.0);
         self.beat = (self.beat * 0.9).max(0.0);
+        for band in self.bands.iter_mut() {
+            *band = (*band * BAND_RELEASE).max(0.0);
+        }
     }
 
     pub fn render(&self, frame: &mut Frame, area: Rect) {
@@ -289,6 +303,48 @@ mod tests {
         viz.tick_idle();
         assert!(viz.rms < 1.0);
         assert!(viz.rms > 0.0);
+    }
+
+    #[test]
+    fn update_snaps_up_on_rising_band() {
+        let mut viz = Visualizer::new();
+        let frame = VizFrame {
+            bands: [0.8; 8],
+            rms: 0.0,
+            track_pos_ms: 0,
+        };
+        viz.update(&frame);
+        for band in viz.bands {
+            assert_eq!(band, 0.8);
+        }
+    }
+
+    #[test]
+    fn update_decays_on_falling_band() {
+        let mut viz = Visualizer::new();
+        viz.bands = [1.0; 8];
+        let frame = VizFrame {
+            bands: [0.0; 8],
+            rms: 0.0,
+            track_pos_ms: 0,
+        };
+        viz.update(&frame);
+        for band in viz.bands {
+            assert!(band < 1.0);
+            assert!(band > 0.0);
+        }
+    }
+
+    #[test]
+    fn tick_idle_decays_bands() {
+        let mut viz = Visualizer::new();
+        viz.has_viz = true;
+        viz.bands = [1.0; 8];
+        viz.tick_idle();
+        for band in viz.bands {
+            assert!(band < 1.0);
+            assert!(band > 0.0);
+        }
     }
 
     #[test]
