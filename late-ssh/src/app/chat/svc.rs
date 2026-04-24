@@ -137,6 +137,11 @@ pub enum ChatEvent {
         user_id: Uuid,
         slug: String,
     },
+    RoomFilled {
+        user_id: Uuid,
+        slug: String,
+        users_added: u64,
+    },
     AdminFailed {
         user_id: Uuid,
         message: String,
@@ -561,6 +566,19 @@ impl ChatService {
         let is_member = ChatRoomMember::is_member(client, room_id, user_id).await?;
         if !is_member {
             anyhow::bail!("user is not a member of room");
+        }
+        let room = ChatRoom::get(client, room_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("room not found"))?;
+        if room.kind == "dm" {
+            let user_a = room
+                .dm_user_a
+                .ok_or_else(|| anyhow::anyhow!("dm room is missing first participant"))?;
+            let user_b = room
+                .dm_user_b
+                .ok_or_else(|| anyhow::anyhow!("dm room is missing second participant"))?;
+            ChatRoomMember::join(client, room_id, user_a).await?;
+            ChatRoomMember::join(client, room_id, user_b).await?;
         }
 
         let message = ChatMessageParams {
@@ -1174,6 +1192,48 @@ impl ChatService {
         let added = ChatRoom::add_all_users(client, room.id).await?;
         tracing::info!(slug = %slug, room_id = %room.id, users_added = added, "permanent room created");
         Ok(())
+    }
+
+    pub fn fill_room_task(&self, user_id: Uuid, slug: String) {
+        let service = self.clone();
+        let span = info_span!("chat.fill_room", user_id = %user_id, slug = %slug);
+        tokio::spawn(
+            async move {
+                match service.fill_room(&slug).await {
+                    Ok(users_added) => {
+                        let _ = service.evt_tx.send(ChatEvent::RoomFilled {
+                            user_id,
+                            slug,
+                            users_added,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = service.evt_tx.send(ChatEvent::AdminFailed {
+                            user_id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn fill_room(&self, slug: &str) -> Result<u64> {
+        let client = &self.db.get().await?;
+        if let Some(room) = ChatRoom::find_topic_room(client, "public", slug).await? {
+            ChatRoom::set_auto_join(client, room.id, true).await?;
+            let users_added = ChatRoom::add_all_users(client, room.id).await?;
+            tracing::info!(slug = %slug, room_id = %room.id, users_added, "room filled and auto-join enabled");
+            return Ok(users_added);
+        }
+        if ChatRoom::find_topic_room(client, "private", slug)
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("Only public rooms can be filled");
+        }
+        anyhow::bail!("Public room #{slug} not found")
     }
 
     pub fn invite_user_to_room_task(&self, user_id: Uuid, room_id: Uuid, target_username: String) {

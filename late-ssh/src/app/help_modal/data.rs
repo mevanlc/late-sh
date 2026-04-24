@@ -101,6 +101,9 @@ pub fn chat_help_lines() -> Vec<String> {
         "  /private #room     create a private room",
         "  /invite @user      add a user to the current room",
         "  /leave             leave the current room",
+        "  /create-room #room admin: create a permanent public room",
+        "  /delete-room #room admin: delete a permanent room",
+        "  /fill-room #room   admin: add all users and enable auto-join",
         "  /dm @user          open a direct message",
         "  /active            list active users",
         "  /members           list users in this room",
@@ -218,7 +221,7 @@ fn overview_lines() -> Vec<String> {
         "This modal",
         "  Tab / Shift+Tab   next / previous tab",
         "  j / k / ↑ / ↓     scroll current tab",
-        "  ? / q / Esc       close",
+        "  Esc / q / ?       close",
         "",
         "Use /help and /music in chat if you want to jump directly to those slides from the composer.",
     ]

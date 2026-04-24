@@ -127,6 +127,7 @@ pub struct SessionConfig {
     /// enters the dartboard game from the arcade.
     pub dartboard_server: dartboard_local::ServerHandle,
     pub dartboard_provenance: crate::app::artboard::provenance::SharedArtboardProvenance,
+    pub artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService,
     pub username: String,
     pub bonsai_service: crate::app::bonsai::svc::BonsaiService,
     pub initial_bonsai_tree: Option<late_core::models::bonsai::Tree>,
@@ -263,6 +264,7 @@ pub struct App {
     pub(crate) artboard_interacting: bool,
     pub(crate) dartboard_server: dartboard_local::ServerHandle,
     pub(crate) dartboard_provenance: crate::app::artboard::provenance::SharedArtboardProvenance,
+    pub(crate) artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService,
     pub(crate) username: String,
 
     /// Late Chips balance (loaded on login, updated via leaderboard refresh)
@@ -554,6 +556,7 @@ impl App {
         );
         let dartboard_server = config.dartboard_server.clone();
         let dartboard_provenance = config.dartboard_provenance.clone();
+        let artboard_snapshot_service = config.artboard_snapshot_service.clone();
         let username = config.username.clone();
 
         let bonsai_state = if let Some(tree) = config.initial_bonsai_tree {
@@ -669,6 +672,7 @@ impl App {
             artboard_interacting: false,
             dartboard_server,
             dartboard_provenance,
+            artboard_snapshot_service,
             username,
             chip_balance: config.initial_chip_balance,
             pending_clipboard: None,
@@ -703,6 +707,7 @@ impl App {
         );
         self.dartboard_state = Some(crate::app::artboard::state::State::new(
             svc,
+            self.artboard_snapshot_service.clone(),
             self.username.clone(),
             self.dartboard_provenance.clone(),
         ));
@@ -730,6 +735,7 @@ impl App {
             state.clear_local_state();
             state.close_help();
             state.close_glyph_picker();
+            state.close_snapshot_browser();
         }
     }
 
@@ -802,8 +808,7 @@ impl App {
     }
 
     /// Reset the terminal diff state so the next `render()` emits a full frame.
-    /// Used by integration test helpers.
-    #[allow(dead_code)]
+    /// Used after dropped SSH frames and by integration test helpers.
     pub fn reset_render(&mut self) {
         let _ = self.terminal.clear();
         self.shared.take();
