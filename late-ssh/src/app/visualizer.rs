@@ -139,13 +139,29 @@ impl Visualizer {
 
             for (i, &band) in bands.iter().enumerate().take(band_count) {
                 let band = band.clamp(0.0, 1.0);
-                let bar_height = (band * height as f32).floor() as usize;
-                let bar_height = bar_height.min(height);
-                let filled = level <= bar_height;
+                // Total height in eighths
+                let total_eighths = (band * height as f32 * 8.0).round() as usize;
+                let bar_full_rows = total_eighths / 8;
+                let partial_eighths = total_eighths % 8;
 
-                let (ch, style) = if filled {
+                let (ch, style) = if level <= bar_full_rows {
+                    // This row is fully filled
                     ('█', Style::default().fg(theme::AMBER()))
+                } else if level == bar_full_rows + 1 && partial_eighths > 0 {
+                    // This row is the partial top of the bar
+                    let partial_ch = match partial_eighths {
+                        1 => '\u{2581}',
+                        2 => '▂',
+                        3 => '▃',
+                        4 => '▄',
+                        5 => '▅',
+                        6 => '▆',
+                        7 => '▇',
+                        _ => '█',
+                    };
+                    (partial_ch, Style::default().fg(theme::AMBER()))
                 } else {
+                    // This row is empty
                     (' ', Style::default())
                 };
 
