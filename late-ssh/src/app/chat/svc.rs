@@ -124,6 +124,14 @@ impl AdminRoomAction {
             Self::Delete => "delete",
         }
     }
+
+    fn authz_action(&self) -> Action {
+        match self {
+            Self::Rename { .. } => Action::RenameRoom,
+            Self::SetVisibility { .. } => Action::SetRoomVisibility,
+            Self::Delete => Action::DeleteRoom,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -785,7 +793,11 @@ impl ChatService {
             return Ok(());
         }
 
-        if room_slug.as_deref() == Some("announcements") && !permissions.can_post_announcements() {
+        if room_slug.as_deref() == Some("announcements")
+            && !permissions
+                .decide(Action::PostMessageAnnouncements, TargetTier::System)
+                .is_allowed()
+        {
             anyhow::bail!("announcements is admin-only");
         }
 
@@ -1468,8 +1480,11 @@ impl ChatService {
     }
 
     async fn list_moderators(&self, permissions: Permissions) -> Result<(String, Vec<String>)> {
-        if !permissions.can_access_admin_surface() {
-            anyhow::bail!("Admin only");
+        if !permissions
+            .decide(Action::ViewStaffUserDirectory, TargetTier::NotApplicable)
+            .is_allowed()
+        {
+            anyhow::bail!("Moderator or admin only");
         }
 
         let client = &self.db.get().await?;
@@ -2039,8 +2054,11 @@ impl ChatService {
         action: AdminRoomAction,
         permissions: Permissions,
     ) -> Result<AdminRoomResult> {
-        if !permissions.can_access_admin_surface() {
-            anyhow::bail!("Admin only");
+        if !permissions
+            .decide(action.authz_action(), TargetTier::NotApplicable)
+            .is_allowed()
+        {
+            anyhow::bail!("Not permitted");
         }
 
         let client = &self.db.get().await?;
