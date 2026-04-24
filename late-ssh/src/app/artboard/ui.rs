@@ -368,7 +368,12 @@ fn render_canvas_widget(
     let selection = state.selection;
 
     for dy in 0..area.height {
+        let mut skip_next = false;
         for dx in 0..area.width {
+            if skip_next {
+                skip_next = false;
+                continue;
+            }
             let screen_x = area.x + dx;
             let screen_y = area.y + dy;
             let x = ox + dx as usize;
@@ -397,8 +402,14 @@ fn render_canvas_widget(
             };
 
             match cell_value {
-                Some(CellValue::Narrow(ch) | CellValue::Wide(ch)) => {
+                Some(CellValue::Narrow(ch)) => {
                     buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
+                }
+                Some(CellValue::Wide(ch)) => {
+                    buf.set_string(screen_x, screen_y, ch.to_string(), cell_style);
+                    // set_string wrote the wide glyph at dx and an empty
+                    // continuation at dx+1; skip dx+1 so we don't clobber it.
+                    skip_next = true;
                 }
                 Some(CellValue::WideCont) | None => {
                     cell.set_char(' ').set_style(cell_style);
