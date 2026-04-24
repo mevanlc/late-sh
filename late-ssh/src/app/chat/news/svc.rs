@@ -11,6 +11,7 @@ use late_core::{
         article_feed_read::ArticleFeedRead,
         chat_message::ChatMessage,
         chat_room::ChatRoom,
+        moderation_audit_log::ModerationAuditLog,
         user::User,
     },
     telemetry::TracedExt,
@@ -212,6 +213,20 @@ impl ArticleService {
                     let count = Article::delete(&client, article_id).await?;
                     if count == 0 {
                         anyhow::bail!("Article already deleted");
+                    }
+                    if permissions.should_audit(Action::DeleteArticle, target_tier) {
+                        ModerationAuditLog::record(
+                            &client,
+                            user_id,
+                            "article_delete",
+                            "article",
+                            Some(article_id),
+                            serde_json::json!({
+                                "target_user_id": article.user_id,
+                                "url": article.url.clone(),
+                            }),
+                        )
+                        .await?;
                     }
 
                     // Delete the news announcement from general chat

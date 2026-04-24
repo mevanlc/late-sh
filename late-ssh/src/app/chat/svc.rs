@@ -913,6 +913,20 @@ impl ChatService {
             body: new_body.to_string(),
         };
         let updated = ChatMessage::update(client, message_id, params).await?;
+        if permissions.should_audit(Action::EditMessage, target_tier) {
+            ModerationAuditLog::record(
+                client,
+                user_id,
+                "message_edit",
+                "chat_message",
+                Some(message_id),
+                json!({
+                    "room_id": existing.room_id,
+                    "target_user_id": existing.user_id,
+                }),
+            )
+            .await?;
+        }
         let target_user_ids = ChatRoom::get_target_user_ids(client, existing.room_id).await?;
         let _ = self.evt_tx.send(ChatEvent::MessageEdited {
             message: updated,
@@ -2434,6 +2448,20 @@ impl ChatService {
         };
         if count == 0 {
             anyhow::bail!("Cannot delete this message");
+        }
+        if permissions.should_audit(Action::DeleteMessage, target_tier) {
+            ModerationAuditLog::record(
+                client,
+                user_id,
+                "message_delete",
+                "chat_message",
+                Some(message_id),
+                json!({
+                    "room_id": msg.room_id,
+                    "target_user_id": msg.user_id,
+                }),
+            )
+            .await?;
         }
         tracing::info!(message_id = %message_id, "message deleted");
         Ok(msg.room_id)
