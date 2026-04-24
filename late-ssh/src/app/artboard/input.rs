@@ -213,6 +213,12 @@ fn handle_picker_mouse(
 }
 
 fn app_key_from_raw_control_byte(byte: u8) -> Option<AppKey> {
+    // These legacy C0 chords used to drive shape push/pull ops; leave them
+    // unmapped so the artboard no longer claims them as editor shortcuts.
+    if matches!(byte, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0F | 0x15 | 0x19) {
+        return None;
+    }
+
     let ctrl = AppModifiers {
         ctrl: true,
         ..Default::default()
@@ -580,16 +586,9 @@ mod tests {
                 },
             })
         );
-        assert_eq!(
-            app_key_from_raw_control_byte(0x09),
-            Some(AppKey {
-                code: AppKeyCode::Tab,
-                modifiers: AppModifiers {
-                    ctrl: true,
-                    ..Default::default()
-                },
-            })
-        );
+        for byte in [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0F, 0x15, 0x19] {
+            assert_eq!(app_key_from_raw_control_byte(byte), None);
+        }
         assert_eq!(app_key_from_raw_control_byte(0x0D), None);
         assert_eq!(app_key_from_raw_control_byte(0x1B), None);
     }
@@ -982,7 +981,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_lf_maps_to_ctrl_j_instead_of_enter() {
+    fn raw_lf_is_ignored_after_push_pull_removal() {
         let mut state = test_state();
         state.snapshot.canvas = Canvas::with_size(3, 3);
         state
@@ -992,19 +991,19 @@ mod tests {
 
         let action = handle_byte(&mut state, (80, 24), b'\n');
 
-        assert!(matches!(action, InputAction::Handled));
+        assert!(matches!(action, InputAction::Ignored));
         assert_eq!(
             state
                 .snapshot
                 .canvas
-                .get(dartboard_core::Pos { x: 0, y: 1 }),
+                .get(dartboard_core::Pos { x: 0, y: 0 }),
             'A'
         );
         assert_eq!(
             state
                 .snapshot
                 .canvas
-                .get(dartboard_core::Pos { x: 0, y: 0 }),
+                .get(dartboard_core::Pos { x: 0, y: 1 }),
             ' '
         );
     }

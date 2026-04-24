@@ -627,12 +627,13 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             }
         }
         ParsedInput::AltC => {}
-        // Mouse events only matter to a few specific consumers (icon picker,
-        // dartboard). The general dispatch path only uses vertical wheel
-        // events as a fallback for screens that scroll outside those richer
-        // handlers.
+        // Mouse events feed global hit tests first, then vertical wheel
+        // fallback for screens that scroll outside richer local handlers.
         ParsedInput::Mouse(mouse) => {
             if handle_mouse_click(app, ctx.screen, mouse) {
+                return;
+            }
+            if handle_notifications_hud_click(app, mouse) {
                 return;
             }
             if let Some(delta) = mouse_scroll_delta(mouse) {
@@ -1108,6 +1109,31 @@ fn handle_mouse_click(app: &mut App, screen: Screen, mouse: MouseEvent) -> bool 
         }
         _ => false,
     }
+}
+
+fn handle_notifications_hud_click(app: &mut App, mouse: MouseEvent) -> bool {
+    if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
+        return false;
+    }
+    if app.show_splash {
+        return false;
+    }
+
+    let unread = app.chat.notifications.unread_count();
+    // SGR mouse coords are 1-indexed; the top border row is y=1.
+    if unread == 0 || mouse.y != 1 {
+        return false;
+    }
+
+    let noun = if unread == 1 { "mention" } else { "mentions" };
+    let hud_width = format!(" {unread} unread {noun} ").len() as u16;
+    if mouse.x < app.size.0.saturating_sub(hud_width) {
+        return false;
+    }
+
+    app.set_screen(Screen::Chat);
+    app.chat.select_notifications();
+    true
 }
 
 fn app_content_area(app: &App) -> Rect {
