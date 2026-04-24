@@ -70,6 +70,19 @@ impl Permissions {
     pub fn decide(self, action: Action, target: TargetTier) -> Decision {
         decide_matrix(self.tier(), action, target)
     }
+
+    /// The audit-log rule that applies when this actor's allowed action
+    /// landed on the given (action, target) cell of the matrix. Pair with
+    /// [`LogRule::applies`] at call sites.
+    pub fn log_rule(self, action: Action, target: TargetTier) -> LogRule {
+        log_rule_matrix(action, target)
+    }
+
+    /// Convenience: returns `true` when this actor's allowed action at
+    /// `(action, target)` should be recorded in the moderation audit log.
+    pub fn should_audit(self, action: Action, target: TargetTier) -> bool {
+        self.log_rule(action, target).applies(self.tier())
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,6 +137,30 @@ impl Decision {
     /// reject.
     pub const fn is_allowed(self) -> bool {
         matches!(self, Decision::Allow)
+    }
+}
+
+/// Whether an allowed action should be recorded in the moderation audit
+/// log. Derived from the `log_when_allowed` column of the permissions
+/// matrix for the matched (action, target_tier) row. Owner-rule rows
+/// (e.g. editing your own message) are always `Never` — the matrix only
+/// audits privileged overrides, not self-service.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogRule {
+    Never,
+    OnModOrAdmin,
+    OnAdmin,
+}
+
+impl LogRule {
+    /// Whether an actor of `actor_tier` should be audit-logged when their
+    /// action is allowed under this rule.
+    pub const fn applies(self, actor_tier: Tier) -> bool {
+        match self {
+            LogRule::Never => false,
+            LogRule::OnAdmin => matches!(actor_tier, Tier::Admin),
+            LogRule::OnModOrAdmin => matches!(actor_tier, Tier::Moderator | Tier::Admin),
+        }
     }
 }
 
@@ -298,6 +335,112 @@ fn decide_matrix(actor: Tier, action: Action, target: TargetTier) -> Decision {
     }
 }
 
+fn log_rule_matrix(action: Action, target: TargetTier) -> LogRule {
+    use Action::*;
+    use LogRule::*;
+    use TargetTier::*;
+
+    match (action, target) {
+        // Chat messages
+        (PostMessagePublicRoom, _) => Never,
+        (PostMessagePrivateRoomMember, _) => Never,
+        (PostMessageAnnouncements, _) => Never,
+        (EditMessage, Own) => Never,
+        (EditMessage, _) => OnAdmin,
+        (ReactToMessage, _) => Never,
+        (RemoveOwnReaction, _) => Never,
+        (DeleteMessage, Own) => Never,
+        (DeleteMessage, Regular) => OnModOrAdmin,
+        (DeleteMessage, Moderator | Admin) => OnAdmin,
+
+        // Articles
+        (PostArticle, _) => Never,
+        (EditArticle, Own) => Never,
+        (EditArticle, _) => OnAdmin,
+        (DeleteArticle, Own) => Never,
+        (DeleteArticle, Regular) => OnModOrAdmin,
+        (DeleteArticle, Moderator | Admin) => OnAdmin,
+
+        // Rooms
+        (CreateTopicRoom, _) => Never,
+        (CreatePermanentRoom, _) => Never,
+        (JoinPublicRoom, _) => Never,
+        (JoinPrivateRoomWithInvite, _) => Never,
+        (SeePrivateRoomInDiscover, _) => Never,
+        (InviteToPrivateRoom, _) => Never,
+        (LeaveRoom, _) => Never,
+        (KickFromRoom, Regular) => OnModOrAdmin,
+        (KickFromRoom, Moderator | Admin) => OnAdmin,
+        (BanFromRoom, Regular) => OnModOrAdmin,
+        (BanFromRoom, Moderator | Admin) => OnAdmin,
+        (UnbanFromRoom, Regular) => OnModOrAdmin,
+        (UnbanFromRoom, Moderator | Admin) => OnAdmin,
+        (RenameRoom, System) => Never,
+        (RenameRoom, _) => OnModOrAdmin,
+        (SetRoomVisibility, _) => OnAdmin,
+        (DeleteRoom, System) => Never,
+        (DeleteRoom, _) => OnAdmin,
+
+        // Server-level user moderation
+        (DisconnectOneSession, Regular) => OnModOrAdmin,
+        (DisconnectOneSession, Moderator) => OnAdmin,
+        (DisconnectOneSession, Admin) => Never,
+        (DisconnectAllSessions, Regular) => OnModOrAdmin,
+        (DisconnectAllSessions, Moderator) => OnAdmin,
+        (DisconnectAllSessions, Admin) => Never,
+        (TempBanUser, Regular) => OnModOrAdmin,
+        (TempBanUser, Moderator) => OnAdmin,
+        (TempBanUser, Admin) => Never,
+        (PermaBanUser, Regular | Moderator) => OnAdmin,
+        (PermaBanUser, Admin) => Never,
+        (UnbanUser, Regular) => OnModOrAdmin,
+        (UnbanUser, Moderator) => OnAdmin,
+        (UnbanUser, Admin) => Never,
+        (ViewUserFingerprint, _) => Never,
+        (ViewUserIp, _) => Never,
+        (DeleteUserAccountHard, _) => Never,
+        (DeactivateUserAccount, _) => OnAdmin,
+        (RenameUserForced, _) => OnAdmin,
+        (GrantModeratorRole, _) => OnAdmin,
+        (RevokeModeratorRole, _) => OnAdmin,
+        (GrantAdminRole, _) => OnAdmin,
+        (RevokeAdminRole, _) => OnAdmin,
+
+        // Profile
+        (EditProfile, Own) => Never,
+        (EditProfile, _) => OnAdmin,
+        (ClearProfileUgc, Regular) => OnModOrAdmin,
+        (ClearProfileUgc, Moderator | Admin) => OnAdmin,
+        (DeleteOwnAccount, _) => Never,
+
+        // Social
+        (IgnoreUser, _) => Never,
+
+        // Staff surfaces
+        (OpenControlCenter, _) => Never,
+        (ViewStaffUserDirectory, _) => Never,
+        (ViewLiveSessions, _) => Never,
+
+        // Audit
+        (ViewAuditLogSelf, _) => Never,
+        (ViewAuditLogOther, _) => Never,
+        (ViewUserSanctionHistory, _) => Never,
+        (ViewOwnSanctions, _) => Never,
+
+        // Misc
+        (LaunchBlackjackArcade, _) => Never,
+
+        // Fallbacks for (action, target) combinations the CSV does not
+        // enumerate. Call sites should never hit these; default to Never so
+        // an accidental cell doesn't silently generate audit-log noise.
+        (ClearProfileUgc, _) => Never,
+        (KickFromRoom | BanFromRoom | UnbanFromRoom, _) => Never,
+        (DeleteMessage | DeleteArticle, _) => Never,
+        (DisconnectOneSession | DisconnectAllSessions, _) => Never,
+        (TempBanUser | PermaBanUser | UnbanUser, _) => Never,
+    }
+}
+
 const fn admin_only(actor: Tier) -> Decision {
     if matches!(actor, Tier::Admin) {
         Decision::Allow
@@ -323,7 +466,7 @@ const fn admin_ni_else_deny(actor: Tier) -> Decision {
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Decision, Permissions, TargetTier, Tier};
+    use super::{Action, Decision, LogRule, Permissions, TargetTier, Tier};
 
     #[test]
     fn moderator_can_moderate_without_admin_privileges() {
@@ -378,13 +521,14 @@ mod tests {
                 continue;
             }
             let fields = parse_csv_line(line);
-            if fields.len() < 6 {
-                errors.push(format!("line {}: fewer than 6 columns", lineno + 1));
+            if fields.len() < 7 {
+                errors.push(format!("line {}: fewer than 7 columns", lineno + 1));
                 continue;
             }
             let action_name = fields[0].as_str();
             let target_str = fields[2].as_str();
             let actor_cells = [fields[3].as_str(), fields[4].as_str(), fields[5].as_str()];
+            let log_str = fields[6].as_str();
 
             let Some(action) = lookup_action(action_name) else {
                 errors.push(format!(
@@ -406,6 +550,29 @@ mod tests {
                     continue;
                 }
             };
+
+            let expected_log = match parse_log(log_str) {
+                Some(r) => r,
+                None => {
+                    errors.push(format!(
+                        "line {}: unknown log_when_allowed '{}'",
+                        lineno + 1,
+                        log_str
+                    ));
+                    continue;
+                }
+            };
+            let got_log = Permissions::new(false, false).log_rule(action, target);
+            if got_log != expected_log {
+                errors.push(format!(
+                    "line {}: action={} target={}: matrix log={:?} log_rule={:?}",
+                    lineno + 1,
+                    action_name,
+                    target_str,
+                    expected_log,
+                    got_log
+                ));
+            }
 
             for (i, tier) in [Tier::Regular, Tier::Moderator, Tier::Admin]
                 .into_iter()
@@ -543,6 +710,15 @@ mod tests {
             "view_user_sanction_history" => ViewUserSanctionHistory,
             "view_own_sanctions" => ViewOwnSanctions,
             "launch_blackjack_arcade" => LaunchBlackjackArcade,
+            _ => return None,
+        })
+    }
+
+    fn parse_log(s: &str) -> Option<LogRule> {
+        Some(match s {
+            "never" => LogRule::Never,
+            "on_mod_or_admin" => LogRule::OnModOrAdmin,
+            "on_admin" => LogRule::OnAdmin,
             _ => return None,
         })
     }
