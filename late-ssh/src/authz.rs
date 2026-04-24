@@ -24,6 +24,16 @@ impl Permissions {
         self.is_admin || self.is_moderator
     }
 
+    pub const fn tier(self) -> Tier {
+        if self.is_admin {
+            Tier::Admin
+        } else if self.is_moderator {
+            Tier::Moderator
+        } else {
+            Tier::Regular
+        }
+    }
+
     pub const fn can_access_admin_surface(self) -> bool {
         self.is_admin
     }
@@ -51,11 +61,246 @@ impl Permissions {
     pub const fn can_delete_article(self, is_owner: bool) -> bool {
         is_owner || self.can_moderate()
     }
+
+    /// Consult the permissions matrix
+    /// (`docs/PERMISSIONS-MATRIX.csv`) for the given action + target.
+    ///
+    /// This is additive — the legacy `can_*` predicates above are still the
+    /// source of gating at call sites until a follow-up PR migrates them.
+    pub fn decide(self, action: Action, target: TargetTier) -> Decision {
+        decide_matrix(self.tier(), action, target)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tier {
+    Regular,
+    Moderator,
+    Admin,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TargetTier {
+    /// No meaningful target, or the target tier doesn't affect the decision.
+    NotApplicable,
+    /// Target is the actor themself or content they own (owner rule).
+    Own,
+    /// Target is a regular user, or content owned by a regular user.
+    Regular,
+    /// Target is a moderator, or content owned by a moderator.
+    Moderator,
+    /// Target is an admin, or content owned by an admin.
+    Admin,
+    /// Target is a system-protected resource (e.g. `#general`).
+    System,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Allow,
+    Deny,
+    /// The capability is intentionally deferred / not implemented. Treat as
+    /// `Deny` at call sites unless you have a specific reason to handle it.
+    NotImplemented,
+}
+
+/// Every action the permissions matrix enumerates. Multiple CSV rows can map
+/// to the same variant — the `TargetTier` distinguishes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Action {
+    // Chat messages
+    PostMessagePublicRoom,
+    PostMessagePrivateRoomMember,
+    PostMessageAnnouncements,
+    EditMessage,
+    ReactToMessage,
+    RemoveOwnReaction,
+    DeleteMessage,
+    // Articles
+    PostArticle,
+    EditArticle,
+    DeleteArticle,
+    // Rooms
+    CreateTopicRoom,
+    CreatePermanentRoom,
+    JoinPublicRoom,
+    JoinPrivateRoomWithInvite,
+    SeePrivateRoomInDiscover,
+    InviteToPrivateRoom,
+    LeaveRoom,
+    KickFromRoom,
+    BanFromRoom,
+    UnbanFromRoom,
+    RenameRoom,
+    SetRoomVisibility,
+    DeleteRoom,
+    // Server-level user moderation
+    DisconnectOneSession,
+    DisconnectAllSessions,
+    TempBanUser,
+    PermaBanUser,
+    UnbanUser,
+    ViewUserFingerprint,
+    ViewUserIp,
+    DeleteUserAccountHard,
+    DeactivateUserAccount,
+    RenameUserForced,
+    GrantModeratorRole,
+    RevokeModeratorRole,
+    GrantAdminRole,
+    RevokeAdminRole,
+    // Profile
+    EditProfile,
+    ClearProfileUgc,
+    DeleteOwnAccount,
+    // Social
+    IgnoreUser,
+    // Staff surfaces
+    OpenControlCenter,
+    ViewStaffUserDirectory,
+    ViewLiveSessions,
+    // Audit
+    ViewAuditLogSelf,
+    ViewAuditLogOther,
+    ViewUserSanctionHistory,
+    ViewOwnSanctions,
+    // Misc
+    LaunchBlackjackArcade,
+}
+
+fn decide_matrix(actor: Tier, action: Action, target: TargetTier) -> Decision {
+    use Action::*;
+    use Decision::*;
+    use TargetTier::*;
+
+    match (action, target) {
+        // Chat messages
+        (PostMessagePublicRoom, _) => Allow,
+        (PostMessagePrivateRoomMember, _) => Allow,
+        (PostMessageAnnouncements, _) => admin_only(actor),
+        (EditMessage, Own) => Allow,
+        (EditMessage, _) => admin_only(actor),
+        (ReactToMessage, _) => Allow,
+        (RemoveOwnReaction, _) => Allow,
+        (DeleteMessage, Own) => Allow,
+        (DeleteMessage, Regular) => mod_or_admin(actor),
+        (DeleteMessage, Moderator | Admin) => admin_only(actor),
+
+        // Articles
+        (PostArticle, _) => Allow,
+        (EditArticle, Own) => NotImplemented,
+        (EditArticle, _) => admin_ni_else_deny(actor),
+        (DeleteArticle, Own) => Allow,
+        (DeleteArticle, Regular) => mod_or_admin(actor),
+        (DeleteArticle, Moderator | Admin) => admin_only(actor),
+
+        // Rooms
+        (CreateTopicRoom, _) => Allow,
+        (CreatePermanentRoom, _) => admin_only(actor),
+        (JoinPublicRoom, _) => Allow,
+        (JoinPrivateRoomWithInvite, _) => Allow,
+        (SeePrivateRoomInDiscover, _) => mod_or_admin(actor),
+        (InviteToPrivateRoom, _) => Allow,
+        (LeaveRoom, _) => Allow,
+        (KickFromRoom, Regular) => mod_or_admin(actor),
+        (KickFromRoom, Moderator | Admin) => admin_only(actor),
+        (BanFromRoom, Regular) => mod_or_admin(actor),
+        (BanFromRoom, Moderator | Admin) => admin_only(actor),
+        (UnbanFromRoom, Regular) => mod_or_admin(actor),
+        (UnbanFromRoom, Moderator | Admin) => admin_only(actor),
+        (RenameRoom, System) => Deny,
+        (RenameRoom, _) => mod_or_admin(actor),
+        (SetRoomVisibility, _) => admin_only(actor),
+        (DeleteRoom, System) => Deny,
+        (DeleteRoom, _) => admin_only(actor),
+
+        // Server-level user moderation
+        (DisconnectOneSession, Regular) => mod_or_admin(actor),
+        (DisconnectOneSession, Moderator) => admin_only(actor),
+        (DisconnectOneSession, Admin) => Deny,
+        (DisconnectAllSessions, Regular) => mod_or_admin(actor),
+        (DisconnectAllSessions, Moderator) => admin_only(actor),
+        (DisconnectAllSessions, Admin) => Deny,
+        (TempBanUser, Regular) => mod_or_admin(actor),
+        (TempBanUser, Moderator) => admin_only(actor),
+        (TempBanUser, Admin) => Deny,
+        (PermaBanUser, Regular | Moderator) => admin_only(actor),
+        (PermaBanUser, Admin) => Deny,
+        (UnbanUser, Regular) => mod_or_admin(actor),
+        (UnbanUser, Moderator) => admin_only(actor),
+        (UnbanUser, Admin) => Deny,
+        (ViewUserFingerprint, _) => mod_or_admin(actor),
+        (ViewUserIp, _) => mod_or_admin(actor),
+        (DeleteUserAccountHard, _) => NotImplemented,
+        (DeactivateUserAccount, _) => admin_ni_else_deny(actor),
+        (RenameUserForced, _) => admin_ni_else_deny(actor),
+        (GrantModeratorRole, _) => admin_only(actor),
+        (RevokeModeratorRole, _) => admin_only(actor),
+        (GrantAdminRole, _) => admin_only(actor),
+        (RevokeAdminRole, _) => admin_only(actor),
+
+        // Profile
+        (EditProfile, Own) => Allow,
+        (EditProfile, _) => admin_ni_else_deny(actor),
+        (ClearProfileUgc, Regular) => mod_or_admin(actor),
+        (ClearProfileUgc, Moderator | Admin) => admin_only(actor),
+        (DeleteOwnAccount, _) => NotImplemented,
+
+        // Social
+        (IgnoreUser, _) => Allow,
+
+        // Staff surfaces
+        (OpenControlCenter, _) => mod_or_admin(actor),
+        (ViewStaffUserDirectory, _) => mod_or_admin(actor),
+        (ViewLiveSessions, _) => mod_or_admin(actor),
+
+        // Audit
+        (ViewAuditLogSelf, _) => mod_or_admin(actor),
+        (ViewAuditLogOther, _) => mod_or_admin(actor),
+        (ViewUserSanctionHistory, _) => mod_or_admin(actor),
+        (ViewOwnSanctions, _) => NotImplemented,
+
+        // Misc
+        (LaunchBlackjackArcade, _) => admin_only(actor),
+
+        // Fallbacks that the CSV doesn't cover explicitly. Target-tier rows
+        // not present in the matrix (e.g. ClearProfileUgc with target=Own,
+        // EditProfile with target=System) shouldn't occur at call sites; we
+        // return Deny defensively.
+        (ClearProfileUgc, _) => Deny,
+        (KickFromRoom | BanFromRoom | UnbanFromRoom, _) => Deny,
+        (DeleteMessage | DeleteArticle, _) => Deny,
+        (DisconnectOneSession | DisconnectAllSessions, _) => Deny,
+        (TempBanUser | PermaBanUser | UnbanUser, _) => Deny,
+    }
+}
+
+const fn admin_only(actor: Tier) -> Decision {
+    if matches!(actor, Tier::Admin) {
+        Decision::Allow
+    } else {
+        Decision::Deny
+    }
+}
+
+const fn mod_or_admin(actor: Tier) -> Decision {
+    match actor {
+        Tier::Moderator | Tier::Admin => Decision::Allow,
+        Tier::Regular => Decision::Deny,
+    }
+}
+
+const fn admin_ni_else_deny(actor: Tier) -> Decision {
+    if matches!(actor, Tier::Admin) {
+        Decision::NotImplemented
+    } else {
+        Decision::Deny
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Permissions;
+    use super::{Action, Decision, Permissions, TargetTier, Tier};
 
     #[test]
     fn moderator_can_moderate_without_admin_privileges() {
@@ -86,5 +331,217 @@ mod tests {
         assert!(!permissions.can_edit_message(false));
         assert!(!permissions.can_delete_message(false));
         assert!(!permissions.can_delete_article(false));
+    }
+
+    #[test]
+    fn tier_from_flags() {
+        assert_eq!(Permissions::new(false, false).tier(), Tier::Regular);
+        assert_eq!(Permissions::new(false, true).tier(), Tier::Moderator);
+        assert_eq!(Permissions::new(true, false).tier(), Tier::Admin);
+        // Admin flag wins if both are set.
+        assert_eq!(Permissions::new(true, true).tier(), Tier::Admin);
+    }
+
+    #[test]
+    fn decide_matches_permissions_matrix() {
+        const CSV: &str = include_str!("../../docs/PERMISSIONS-MATRIX.csv");
+        let mut errors: Vec<String> = Vec::new();
+        let mut rows_checked = 0usize;
+        let mut rows_skipped = 0usize;
+
+        for (lineno, raw) in CSV.lines().enumerate().skip(1) {
+            let line = raw.trim_end_matches('\r');
+            if line.is_empty() {
+                continue;
+            }
+            let fields = parse_csv_line(line);
+            if fields.len() < 6 {
+                errors.push(format!("line {}: fewer than 6 columns", lineno + 1));
+                continue;
+            }
+            let action_name = fields[0].as_str();
+            let target_str = fields[2].as_str();
+            let actor_cells = [fields[3].as_str(), fields[4].as_str(), fields[5].as_str()];
+
+            let Some(action) = lookup_action(action_name) else {
+                errors.push(format!(
+                    "line {}: action '{}' is in the matrix but not in lookup_action() / the Action enum",
+                    lineno + 1,
+                    action_name
+                ));
+                rows_skipped += 1;
+                continue;
+            };
+            let target = match lookup_target(target_str) {
+                Some(t) => t,
+                None => {
+                    errors.push(format!(
+                        "line {}: unknown target_tier '{}'",
+                        lineno + 1,
+                        target_str
+                    ));
+                    continue;
+                }
+            };
+
+            for (i, tier) in [Tier::Regular, Tier::Moderator, Tier::Admin]
+                .into_iter()
+                .enumerate()
+            {
+                let expected = match parse_cell(actor_cells[i]) {
+                    Some(d) => d,
+                    None => {
+                        errors.push(format!(
+                            "line {}: unknown cell '{}' at {:?}",
+                            lineno + 1,
+                            actor_cells[i],
+                            tier
+                        ));
+                        continue;
+                    }
+                };
+                let actor = permissions_for_tier(tier);
+                let got = actor.decide(action, target);
+                if got != expected {
+                    errors.push(format!(
+                        "line {}: action={} target={} actor={:?}: matrix={:?} decide={:?}",
+                        lineno + 1,
+                        action_name,
+                        target_str,
+                        tier,
+                        expected,
+                        got
+                    ));
+                }
+            }
+            rows_checked += 1;
+        }
+
+        assert!(
+            rows_checked > 0,
+            "no matrix rows were exercised — the CSV may have failed to load"
+        );
+        assert!(
+            errors.is_empty(),
+            "matrix / decide() mismatches ({} errors, {} rows checked, {} rows skipped):\n{}",
+            errors.len(),
+            rows_checked,
+            rows_skipped,
+            errors.join("\n")
+        );
+    }
+
+    fn permissions_for_tier(tier: Tier) -> Permissions {
+        match tier {
+            Tier::Regular => Permissions::new(false, false),
+            Tier::Moderator => Permissions::new(false, true),
+            Tier::Admin => Permissions::new(true, false),
+        }
+    }
+
+    fn parse_csv_line(line: &str) -> Vec<String> {
+        let mut fields: Vec<String> = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = line.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                if c == '"' {
+                    if chars.peek() == Some(&'"') {
+                        current.push('"');
+                        chars.next();
+                    } else {
+                        in_quotes = false;
+                    }
+                } else {
+                    current.push(c);
+                }
+            } else if c == ',' {
+                fields.push(std::mem::take(&mut current));
+            } else if c == '"' && current.is_empty() {
+                in_quotes = true;
+            } else {
+                current.push(c);
+            }
+        }
+        fields.push(current);
+        fields
+    }
+
+    fn lookup_action(name: &str) -> Option<Action> {
+        use Action::*;
+        Some(match name {
+            "post_message_public_room" => PostMessagePublicRoom,
+            "post_message_private_room_member" => PostMessagePrivateRoomMember,
+            "post_message_announcements" => PostMessageAnnouncements,
+            "edit_own_message" | "edit_other_message" => EditMessage,
+            "react_to_message" => ReactToMessage,
+            "remove_own_reaction" => RemoveOwnReaction,
+            "delete_own_message" | "delete_other_message" => DeleteMessage,
+            "post_article" => PostArticle,
+            "edit_own_article" | "edit_other_article" => EditArticle,
+            "delete_own_article" | "delete_other_article" => DeleteArticle,
+            "create_topic_room" => CreateTopicRoom,
+            "create_permanent_room" => CreatePermanentRoom,
+            "join_public_room" => JoinPublicRoom,
+            "join_private_room_with_invite" => JoinPrivateRoomWithInvite,
+            "see_private_room_in_discover" => SeePrivateRoomInDiscover,
+            "invite_to_private_room" => InviteToPrivateRoom,
+            "leave_room" => LeaveRoom,
+            "kick_from_room" => KickFromRoom,
+            "ban_from_room" => BanFromRoom,
+            "unban_from_room" => UnbanFromRoom,
+            "rename_room" | "rename_room_system" => RenameRoom,
+            "set_room_visibility" => SetRoomVisibility,
+            "delete_room_nonsystem" | "delete_room_system" => DeleteRoom,
+            "disconnect_one_session" => DisconnectOneSession,
+            "disconnect_all_sessions" => DisconnectAllSessions,
+            "temp_ban_user" => TempBanUser,
+            "perma_ban_user" => PermaBanUser,
+            "unban_user" => UnbanUser,
+            "view_user_fingerprint" => ViewUserFingerprint,
+            "view_user_ip" => ViewUserIp,
+            "delete_user_account_hard" => DeleteUserAccountHard,
+            "deactivate_user_account" => DeactivateUserAccount,
+            "rename_user_forced" => RenameUserForced,
+            "grant_moderator_role" => GrantModeratorRole,
+            "revoke_moderator_role" => RevokeModeratorRole,
+            "grant_admin_role" => GrantAdminRole,
+            "revoke_admin_role" => RevokeAdminRole,
+            "edit_own_profile" | "edit_other_profile" => EditProfile,
+            "clear_other_profile_ugc" => ClearProfileUgc,
+            "delete_own_account" => DeleteOwnAccount,
+            "ignore_user" => IgnoreUser,
+            "open_control_center" => OpenControlCenter,
+            "view_staff_user_directory" => ViewStaffUserDirectory,
+            "view_live_sessions" => ViewLiveSessions,
+            "view_audit_log_self" => ViewAuditLogSelf,
+            "view_audit_log_other" => ViewAuditLogOther,
+            "view_user_sanction_history" => ViewUserSanctionHistory,
+            "view_own_sanctions" => ViewOwnSanctions,
+            "launch_blackjack_arcade" => LaunchBlackjackArcade,
+            _ => return None,
+        })
+    }
+
+    fn lookup_target(s: &str) -> Option<TargetTier> {
+        Some(match s {
+            "any" => TargetTier::NotApplicable,
+            "self" => TargetTier::Own,
+            "regular" => TargetTier::Regular,
+            "mod" => TargetTier::Moderator,
+            "admin" => TargetTier::Admin,
+            "system" => TargetTier::System,
+            _ => return None,
+        })
+    }
+
+    fn parse_cell(s: &str) -> Option<Decision> {
+        Some(match s {
+            "allow" => Decision::Allow,
+            "deny" => Decision::Deny,
+            "N/I" => Decision::NotImplemented,
+            _ => return None,
+        })
     }
 }

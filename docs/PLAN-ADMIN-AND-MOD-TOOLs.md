@@ -14,6 +14,17 @@ This plan is based on the current implementation, not on a greenfield assumption
 - [SUBPLAN-SERVER-USER-MODERATION.md](./SUBPLAN-SERVER-USER-MODERATION.md)
 - [SUBPLAN-CONTENT-MODERATION-AND-UX.md](./SUBPLAN-CONTENT-MODERATION-AND-UX.md)
 
+## Permissions Matrix
+
+The authoritative action × actor-tier × target-tier table lives in
+[PERMISSIONS-MATRIX.csv](./PERMISSIONS-MATRIX.csv). Authz code and audit-log
+rules should derive from that matrix.
+
+**Caveat on deferred rows:** any row marked `N/I` or whose notes call out a
+deferral reflects present-day best-guess policy only. Those cells get
+re-examined whenever the feature leaves the deferred state, so treat their
+values and notes as provisional rather than binding.
+
 ## Current Baseline
 
 Today the codebase has a small number of admin-gated behaviors, but it does **not** have a general moderation system.
