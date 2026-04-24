@@ -1,6 +1,6 @@
 use super::{
     chat, dashboard, help_modal, icon_picker, profile_modal, quit_confirm, settings_modal,
-    state::App,
+    state::App, viz_config_modal,
 };
 use crate::app::common::primitives::Screen;
 use crate::app::common::readline::ctrl_byte_to_input;
@@ -78,6 +78,8 @@ pub(crate) enum ParsedInput {
     Home,
     FocusGained,
     FocusLost,
+    /// F12 — debug key, used to cycle visualizer modes.
+    F12,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,6 +312,9 @@ impl Perform for VtCollector {
             '~' if p0 == Some(5) => self.events.push(ParsedInput::PageUp),
             '~' if p0 == Some(6) => self.events.push(ParsedInput::PageDown),
             '~' if p0 == Some(4) || p0 == Some(8) => self.events.push(ParsedInput::End),
+            // F12: xterm sends `CSI 24~`. Modifier-laden forms (`CSI 24;N~`)
+            // fall through here too, which is fine — we don't distinguish.
+            '~' if p0 == Some(24) => self.events.push(ParsedInput::F12),
             // xterm bare form: CSI F (no params, no intermediates).
             'F' if intermediates.is_empty() && p0.unwrap_or(0) <= 1 => {
                 self.events.push(ParsedInput::End);
@@ -561,7 +566,21 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         return;
     }
 
+    // F12 toggles the visualizer config modal. Global so it works regardless
+    // of screen, other modal, or composer state.
+    if matches!(event, ParsedInput::F12) {
+        toggle_viz_config_modal(app);
+        return;
+    }
+
     // The quit confirm is topmost. Otherwise the existing modal stack owns input.
+    // Viz config is visually next-topmost (after quit_confirm) so it intercepts
+    // input before the rest.
+    if app.show_viz_config_modal {
+        viz_config_modal::input::handle_input(app, event);
+        return;
+    }
+
     if app.show_help {
         help_modal::input::handle_input(app, event);
         return;
@@ -603,7 +622,9 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
     }
 
     match event {
-        ParsedInput::FocusGained | ParsedInput::FocusLost => {}
+        // F12 is handled globally above the match; treat as no-op if it
+        // somehow falls through. FocusGained/FocusLost are ignored.
+        ParsedInput::FocusGained | ParsedInput::FocusLost | ParsedInput::F12 => {}
         ParsedInput::Paste(pasted) => handle_bracketed_paste(app, &pasted),
         ParsedInput::AltEnter => {
             if (ctx.screen == Screen::Dashboard || ctx.screen == Screen::Chat) && ctx.chat_composing
@@ -859,6 +880,12 @@ fn dispatch_escape(app: &mut App) {
         quit_confirm::input::handle_escape(app);
         return;
     }
+    // Viz config is visually the topmost modal (after quit_confirm), so it
+    // should also close first on Esc.
+    if app.show_viz_config_modal {
+        viz_config_modal::input::handle_escape(app);
+        return;
+    }
     if app.show_help {
         help_modal::input::handle_escape(app);
         return;
@@ -1054,6 +1081,15 @@ fn compose_room_switch_allowed(screen: Screen) -> bool {
 fn reset_composers_for_page_change(app: &mut App) {
     app.chat.reset_composer();
     app.chat.news.stop_composing();
+}
+
+fn toggle_viz_config_modal(app: &mut App) {
+    if app.show_viz_config_modal {
+        app.show_viz_config_modal = false;
+    } else {
+        app.viz_config_modal_state.reset_focus();
+        app.show_viz_config_modal = true;
+    }
 }
 
 fn open_settings_modal_globally(app: &mut App) {

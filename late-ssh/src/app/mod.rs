@@ -17,4 +17,5 @@ pub(crate) mod settings_modal;
 pub mod state;
 mod tick;
 pub mod visualizer;
+pub(crate) mod viz_config_modal;
 pub mod vote;

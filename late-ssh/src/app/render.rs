@@ -120,6 +120,8 @@ struct DrawContext<'a> {
     show_quit_confirm: bool,
     show_profile_modal: bool,
     profile_modal_state: &'a profile_modal::state::ProfileModalState,
+    show_viz_config_modal: bool,
+    viz_config_modal_state: &'a super::viz_config_modal::state::VizConfigModalState,
     show_help: bool,
     help_modal_state: &'a help_modal::state::HelpModalState,
     show_splash: bool,
@@ -335,6 +337,8 @@ impl App {
                         show_quit_confirm: self.show_quit_confirm,
                         show_profile_modal: self.show_profile_modal,
                         profile_modal_state: &self.profile_modal_state,
+                        show_viz_config_modal: self.show_viz_config_modal,
+                        viz_config_modal_state: &self.viz_config_modal_state,
                         show_help: self.show_help,
                         help_modal_state: &self.help_modal_state,
                         show_splash: self.show_splash,
@@ -592,6 +596,17 @@ impl App {
 
         if ctx.show_help {
             help_modal::ui::draw(frame, inner, ctx.help_modal_state);
+        }
+
+        // Viz config is the outermost-but-quit modal: rendered on top, closed
+        // first by Esc. F12 toggles it regardless of any other modal state.
+        if ctx.show_viz_config_modal {
+            super::viz_config_modal::ui::draw(
+                frame,
+                inner,
+                ctx.viz_config_modal_state,
+                ctx.visualizer,
+            );
         }
 
         if ctx.show_quit_confirm {
