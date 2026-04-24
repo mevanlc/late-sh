@@ -2368,10 +2368,24 @@ impl ChatService {
         let msg = ChatMessage::get(client, message_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Message not found"))?;
-        let count = if permissions.can_delete_message(false) {
-            ChatMessage::delete_by_admin(client, message_id).await?
+        let target_tier = if msg.user_id == user_id {
+            TargetTier::Own
         } else {
+            let target = User::get(client, msg.user_id)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("target user not found"))?;
+            TargetTier::from_user_flags(target.is_admin, target.is_moderator)
+        };
+        if !permissions
+            .decide(Action::DeleteMessage, target_tier)
+            .is_allowed()
+        {
+            anyhow::bail!("Cannot delete this message");
+        }
+        let count = if matches!(target_tier, TargetTier::Own) {
             ChatMessage::delete_by_author(client, message_id, user_id).await?
+        } else {
+            ChatMessage::delete_by_admin(client, message_id).await?
         };
         if count == 0 {
             anyhow::bail!("Cannot delete this message");
