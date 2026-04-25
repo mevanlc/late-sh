@@ -1,6 +1,9 @@
-use crate::app::{input::ParsedInput, state::App};
+use crate::app::{
+    input::{MouseButton, MouseEventKind, ParsedInput},
+    state::App,
+};
 
-use super::state::Field;
+use super::state::{Field, HitTarget};
 
 pub fn handle_input(app: &mut App, event: ParsedInput) {
     if app.viz_config_modal_state.is_editing() {
@@ -26,6 +29,15 @@ pub fn handle_input(app: &mut App, event: ParsedInput) {
             app.viz_config_modal_state.begin_edit();
             return;
         }
+        ParsedInput::Mouse(mouse)
+            if mouse.kind == MouseEventKind::Down
+                && mouse.button == Some(MouseButton::Left) =>
+        {
+            if let Some(target) = app.viz_config_modal_state.hit_test(mouse.x, mouse.y) {
+                apply_hit(app, target);
+            }
+            return;
+        }
         _ => {}
     }
 
@@ -42,32 +54,59 @@ pub fn handle_input(app: &mut App, event: ParsedInput) {
         _ => return,
     };
 
-    let sign = delta_sign as f32;
-    let small_step = 0.01_f32;
+    apply_field_delta(app, app.viz_config_modal_state.focused(), delta_sign, large);
+}
 
-    match app.viz_config_modal_state.focused() {
+fn apply_field_delta(app: &mut App, field: Field, sign: i32, large: bool) {
+    let small_step = 0.01_f32;
+    let signf = sign as f32;
+    match field {
         Field::Mode => {
-            if delta_sign > 0 {
+            if sign > 0 {
                 app.visualizer.mode_next();
             } else {
                 app.visualizer.mode_prev();
             }
         }
+        Field::Scale => {
+            let step = if large { 0.25 } else { small_step };
+            app.visualizer.adjust_scale(signf * step);
+        }
         Field::Gain => {
             let step = if large { 0.25 } else { small_step };
-            app.visualizer.adjust_gain(sign * step);
+            app.visualizer.adjust_gain(signf * step);
         }
         Field::Attack => {
             let step = if large { 0.05 } else { small_step };
-            app.visualizer.adjust_attack(sign * step);
+            app.visualizer.adjust_attack(signf * step);
         }
         Field::Release => {
             let step = if large { 0.05 } else { small_step };
-            app.visualizer.adjust_release(sign * step);
+            app.visualizer.adjust_release(signf * step);
         }
         Field::Tilt => {
             app.visualizer.toggle_tilt();
         }
+    }
+}
+
+fn apply_hit(app: &mut App, target: HitTarget) {
+    let field = match target {
+        HitTarget::Label(f)
+        | HitTarget::SmallDec(f)
+        | HitTarget::LargeDec(f)
+        | HitTarget::LargeInc(f)
+        | HitTarget::SmallInc(f) => f,
+    };
+    // Clicks always move focus to the row that was clicked.
+    app.viz_config_modal_state.focus_field(field);
+
+    match target {
+        HitTarget::Label(_) => {}
+        HitTarget::SmallDec(_) => apply_field_delta(app, field, -1, false),
+        HitTarget::LargeDec(_) => apply_field_delta(app, field, -1, true),
+        HitTarget::LargeInc(_) => apply_field_delta(app, field, 1, true),
+        HitTarget::SmallInc(_) => apply_field_delta(app, field, 1, false),
     }
 }
 
@@ -110,6 +149,7 @@ fn commit_edit(app: &mut App) {
         && let Ok(value) = buffer.trim().parse::<f32>()
     {
         match field {
+            Field::Scale => app.visualizer.set_scale(value),
             Field::Gain => app.visualizer.set_gain(value),
             Field::Attack => app.visualizer.set_attack(value),
             Field::Release => app.visualizer.set_release(value),

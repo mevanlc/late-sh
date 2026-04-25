@@ -36,6 +36,12 @@ const ATTACK_MIN: f32 = 0.0;
 const ATTACK_MAX: f32 = 0.95;
 const RELEASE_MIN: f32 = 0.0;
 const RELEASE_MAX: f32 = 0.99;
+/// Final-stage multiplier applied to each band right before render. Unlike
+/// `gain`, which only feeds modes built on a pivot/expansion, `scale` always
+/// affects the rendered height.
+const DEFAULT_SCALE: f32 = 1.0;
+const SCALE_MIN: f32 = 0.0;
+const SCALE_MAX: f32 = 5.0;
 
 /// Dynamic-range transform applied at render time. Each mode is a pure
 /// function of `(band, band_index, stats)` so switching is instantaneous.
@@ -108,6 +114,7 @@ pub struct Visualizer {
     gain: f32,
     attack: f32,
     release: f32,
+    scale: f32,
     tilt_enabled: bool,
 }
 
@@ -132,6 +139,7 @@ impl Visualizer {
             gain: DEFAULT_GAIN,
             attack: DEFAULT_ATTACK,
             release: DEFAULT_RELEASE,
+            scale: DEFAULT_SCALE,
             tilt_enabled: true,
         }
     }
@@ -150,6 +158,10 @@ impl Visualizer {
 
     pub fn release(&self) -> f32 {
         self.release
+    }
+
+    pub fn scale(&self) -> f32 {
+        self.scale
     }
 
     pub fn tilt_enabled(&self) -> bool {
@@ -179,6 +191,16 @@ impl Visualizer {
 
     pub fn adjust_release(&mut self, delta: f32) {
         self.release = (self.release + delta).clamp(RELEASE_MIN, RELEASE_MAX);
+    }
+
+    pub fn adjust_scale(&mut self, delta: f32) {
+        self.scale = (self.scale + delta).clamp(SCALE_MIN, SCALE_MAX);
+    }
+
+    pub fn set_scale(&mut self, value: f32) {
+        if value.is_finite() {
+            self.scale = value;
+        }
     }
 
     pub fn set_gain(&mut self, value: f32) {
@@ -330,6 +352,13 @@ impl Visualizer {
             let len = bands.len();
             for (i, band) in bands.iter_mut().enumerate() {
                 *band = Self::tilt(*band, i, len);
+            }
+        }
+        // Final-stage scale: applied after every other transform so it acts
+        // uniformly across all modes, including Raw. Display loop clamps.
+        if (self.scale - 1.0).abs() > f32::EPSILON {
+            for band in bands.iter_mut() {
+                *band *= self.scale;
             }
         }
 
