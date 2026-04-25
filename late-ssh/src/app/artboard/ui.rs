@@ -13,7 +13,7 @@ use ratatui::{
 use crate::app::{common::theme, games::ui::info_label_value};
 
 use super::data::lines_for;
-use super::state::{BrushMode, HelpTab, PRIMARY_SWATCH_IDX, State};
+use super::state::{BrushMode, HelpTab, PAINT_PALETTE, PRIMARY_SWATCH_IDX, State};
 
 const INFO_WIDTH: u16 = 28;
 const SWATCH_BOX_WIDTH: u16 = 16;
@@ -130,6 +130,17 @@ fn artboard_info_lines(state: &State, interacting: bool) -> Vec<Line<'static>> {
         },
         theme::TEXT_BRIGHT(),
     ));
+    lines.push(info_label_value(
+        "Color",
+        format!(
+            "{}/{} {}",
+            state.active_paint_color_index() + 1,
+            PAINT_PALETTE.len(),
+            rgb_hex(state.active_paint_color())
+        ),
+        rgb(state.active_paint_color()),
+    ));
+    lines.push(color_palette_line(state));
 
     let (brush, brush_color) = match state.brush_mode() {
         BrushMode::None => ("none".to_string(), theme::TEXT_FAINT()),
@@ -259,8 +270,25 @@ fn section_label(text: &str) -> Line<'static> {
     ))
 }
 
+fn color_palette_line(state: &State) -> Line<'static> {
+    let mut spans = vec![Span::styled(
+        format!("{:<11}", "Palette"),
+        Style::default().fg(theme::TEXT_DIM()),
+    )];
+    let active_idx = state.active_paint_color_index();
+    for (idx, color) in PAINT_PALETTE.iter().copied().enumerate() {
+        let marker = if idx == active_idx { "●" } else { "■" };
+        spans.push(Span::styled(marker, Style::default().fg(rgb(color))));
+    }
+    Line::from(spans)
+}
+
 fn rgb(color: dartboard_core::RgbColor) -> ratatui::style::Color {
     ratatui::style::Color::Rgb(color.r, color.g, color.b)
+}
+
+fn rgb_hex(color: dartboard_core::RgbColor) -> String {
+    format!("#{:02X}{:02X}{:02X}", color.r, color.g, color.b)
 }
 
 fn artboard_layout(area: Rect) -> ArtboardLayout {
@@ -1174,7 +1202,7 @@ mod tests {
         let state = test_state();
         assert_eq!(
             artboard_info_area_for_screen((80, 24), &state),
-            Some(Rect::new(27, 1, 28, 13))
+            Some(Rect::new(27, 1, 28, 15))
         );
     }
 
@@ -1265,11 +1293,12 @@ mod tests {
         assert_eq!(lines[3].to_string(), "Cell       0,0");
         assert_eq!(lines[4].to_string(), "Pan        ◀ ▲ ▼ ▶");
         assert_eq!(lines[5].to_string(), "Snapshots  g open");
-        assert_eq!(lines[6].to_string(), "Brush      none");
-        assert_eq!(lines[7].to_string(), "Selection  none");
-        assert_eq!(lines[8].to_string(), "");
-        assert_eq!(lines[9].to_string(), "Users");
-        assert_eq!(lines[10].to_string(), "• painter (you)");
+        assert_eq!(lines[6].to_string(), "Color      2/16 #FFEC60");
+        assert_eq!(lines[8].to_string(), "Brush      none");
+        assert_eq!(lines[9].to_string(), "Selection  none");
+        assert_eq!(lines[10].to_string(), "");
+        assert_eq!(lines[11].to_string(), "Users");
+        assert_eq!(lines[12].to_string(), "• painter (you)");
     }
 
     #[test]
@@ -1283,7 +1312,7 @@ mod tests {
 
         let lines = artboard_info_lines(&state, true);
         assert_eq!(lines[0].to_string(), "Mode       active");
-        assert_eq!(lines[7].to_string(), "Selection  3x2");
+        assert_eq!(lines[9].to_string(), "Selection  3x2");
     }
 
     #[test]
@@ -1305,10 +1334,10 @@ mod tests {
     #[test]
     fn swatch_boxes_use_full_artboard_width_below_short_info_block() {
         let state = test_state();
-        let rects = swatch_box_rects((80, 24), &state);
-        assert_eq!(rects[0], Some(Rect::new(9, 14, 16, 8)));
-        assert_eq!(rects[1], Some(Rect::new(24, 14, 16, 8)));
-        assert_eq!(rects[2], Some(Rect::new(39, 14, 16, 8)));
+        let rects = swatch_box_rects((80, 26), &state);
+        assert_eq!(rects[0], Some(Rect::new(9, 16, 16, 8)));
+        assert_eq!(rects[1], Some(Rect::new(24, 16, 16, 8)));
+        assert_eq!(rects[2], Some(Rect::new(39, 16, 16, 8)));
         assert!(rects[3].is_none());
     }
 
@@ -1360,20 +1389,28 @@ mod tests {
             clipboard: Clipboard::new(1, 1, vec![Some(CellValue::Narrow('B'))]),
             pinned: false,
         });
-        let rects = swatch_box_rects((80, 24), &state);
+        let screen_size = (80, 26);
+        let rects = swatch_box_rects(screen_size, &state);
+        let first = rects[0].expect("first swatch visible");
         let second = rects[1].expect("second swatch visible");
+        let first_body = swatch_body_rect(first);
         let second_pin = swatch_pin_rect(second);
 
         assert_eq!(
-            swatch_hit((80, 24), &state, 11, 16),
+            swatch_hit(screen_size, &state, first_body.x + 1, first_body.y + 1),
             Some(SwatchHit::Body(0))
         );
         assert_eq!(
-            swatch_hit((80, 24), &state, 23, 21),
+            swatch_hit(
+                screen_size,
+                &state,
+                first_body.right(),
+                first_body.bottom().saturating_sub(1),
+            ),
             Some(SwatchHit::Body(0))
         );
         assert_eq!(
-            swatch_hit((80, 24), &state, second_pin.x + 1, second_pin.y + 1),
+            swatch_hit(screen_size, &state, second_pin.x + 1, second_pin.y + 1),
             Some(SwatchHit::Pin(1))
         );
     }
@@ -1473,7 +1510,7 @@ mod tests {
             provenance: ArtboardProvenance::default(),
             your_name: "painter".to_string(),
             your_user_id: Some(1),
-            your_color: Some(RgbColor::new(255, 196, 64)),
+            your_color: Some(PAINT_PALETTE[1]),
             ..Default::default()
         };
         let svc = DartboardService::disconnected_for_tests(snapshot);
