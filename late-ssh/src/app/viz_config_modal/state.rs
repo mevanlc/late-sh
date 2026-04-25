@@ -19,11 +19,22 @@ impl Field {
             Field::Tilt => "Tilt",
         }
     }
+
+    pub fn is_numeric(self) -> bool {
+        matches!(self, Field::Gain | Field::Attack | Field::Release)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct EditState {
+    pub field: Field,
+    pub buffer: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct VizConfigModalState {
     focus: RingCursor<Field>,
+    editing: Option<EditState>,
 }
 
 impl Default for VizConfigModalState {
@@ -36,6 +47,7 @@ impl Default for VizConfigModalState {
                 Field::Release,
                 Field::Tilt,
             ]),
+            editing: None,
         }
     }
 }
@@ -64,5 +76,41 @@ impl VizConfigModalState {
     pub fn reset_focus(&mut self) {
         let first = self.focus.items()[0];
         self.focus.set(&first);
+        self.editing = None;
+    }
+
+    pub fn editing(&self) -> Option<&EditState> {
+        self.editing.as_ref()
+    }
+
+    pub fn is_editing(&self) -> bool {
+        self.editing.is_some()
+    }
+
+    /// Begin editing the focused field. No-op for non-numeric fields.
+    pub fn begin_edit(&mut self) {
+        let field = self.focused();
+        if field.is_numeric() {
+            self.editing = Some(EditState {
+                field,
+                buffer: String::new(),
+            });
+        }
+    }
+
+    pub fn cancel_edit(&mut self) {
+        self.editing = None;
+    }
+
+    pub fn push_edit_char(&mut self, c: char) {
+        if let Some(state) = self.editing.as_mut() {
+            state.buffer.push(c);
+        }
+    }
+
+    pub fn pop_edit_char(&mut self) {
+        if let Some(state) = self.editing.as_mut() {
+            state.buffer.pop();
+        }
     }
 }

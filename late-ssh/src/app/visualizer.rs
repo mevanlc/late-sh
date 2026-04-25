@@ -181,6 +181,24 @@ impl Visualizer {
         self.release = (self.release + delta).clamp(RELEASE_MIN, RELEASE_MAX);
     }
 
+    pub fn set_gain(&mut self, value: f32) {
+        if value.is_finite() {
+            self.gain = value;
+        }
+    }
+
+    pub fn set_attack(&mut self, value: f32) {
+        if value.is_finite() {
+            self.attack = value;
+        }
+    }
+
+    pub fn set_release(&mut self, value: f32) {
+        if value.is_finite() {
+            self.release = value;
+        }
+    }
+
     pub fn toggle_tilt(&mut self) {
         self.tilt_enabled = !self.tilt_enabled;
     }
