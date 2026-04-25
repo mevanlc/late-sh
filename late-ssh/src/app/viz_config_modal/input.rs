@@ -33,7 +33,10 @@ pub fn handle_input(app: &mut App, event: ParsedInput) {
             if mouse.kind == MouseEventKind::Down
                 && mouse.button == Some(MouseButton::Left) =>
         {
-            if let Some(target) = app.viz_config_modal_state.hit_test(mouse.x, mouse.y) {
+            // SGR mouse reports 1-based coords; ratatui Rects are 0-based.
+            let x = mouse.x.saturating_sub(1);
+            let y = mouse.y.saturating_sub(1);
+            if let Some(target) = app.viz_config_modal_state.hit_test(x, y) {
                 apply_hit(app, target);
             }
             return;
