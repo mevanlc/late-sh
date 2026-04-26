@@ -24,7 +24,7 @@ use super::{
     discover, news, notifications,
     notifications::svc::NotificationService,
     svc::{
-        AdminRoomAction, ChatEvent, ChatService, ChatSnapshot, RoomModerationAction,
+        AdminRoomAction, AuditLogEntry, ChatEvent, ChatService, ChatSnapshot, RoomModerationAction,
         StaffRoomRecord, StaffUserRecord, StaffViewScope,
     },
 };
@@ -122,6 +122,7 @@ pub struct ChatState {
     requested_quit: bool,
     staff_users_snapshot: Vec<StaffUserRecord>,
     staff_rooms_snapshot: Vec<StaffRoomRecord>,
+    audit_log_snapshot: Vec<AuditLogEntry>,
 }
 
 pub(crate) struct PendingNotification {
@@ -198,6 +199,7 @@ impl ChatState {
             requested_quit: false,
             staff_users_snapshot: Vec::new(),
             staff_rooms_snapshot: Vec::new(),
+            audit_log_snapshot: Vec::new(),
         }
     }
 
@@ -810,6 +812,14 @@ impl ChatState {
             .refresh_staff_users_snapshot_task(self.user_id, self.permissions, scope);
     }
 
+    pub fn refresh_audit_log_snapshot(&self) {
+        if !self.permissions.can_access_mod_surface() {
+            return;
+        }
+        self.service
+            .refresh_audit_log_snapshot_task(self.user_id, self.permissions);
+    }
+
     pub fn refresh_staff_rooms_snapshot(&self) {
         if !self.permissions.can_access_mod_surface() {
             return;
@@ -923,6 +933,24 @@ impl ChatState {
         selected_staff_id: Option<Uuid>,
     ) -> Vec<String> {
         format_control_center_staff_detail_lines(&self.staff_users_snapshot, selected_staff_id)
+    }
+
+    pub fn control_center_audit_ids(&self) -> Vec<Uuid> {
+        self.audit_log_snapshot
+            .iter()
+            .map(|entry| entry.id)
+            .collect()
+    }
+
+    pub fn control_center_audit_list_lines(&self, selected_audit_id: Option<Uuid>) -> Vec<String> {
+        format_control_center_audit_list_lines(&self.audit_log_snapshot, selected_audit_id)
+    }
+
+    pub fn control_center_audit_detail_lines(
+        &self,
+        selected_audit_id: Option<Uuid>,
+    ) -> Vec<String> {
+        format_control_center_audit_detail_lines(&self.audit_log_snapshot, selected_audit_id)
     }
 
     pub fn control_center_room_ids(&self) -> Vec<Uuid> {
@@ -1900,6 +1928,7 @@ impl ChatState {
                     }
                     if self.permissions.can_access_mod_surface() {
                         self.refresh_staff_rooms_snapshot();
+                        self.refresh_audit_log_snapshot();
                     }
                 }
                 ChatEvent::AdminUserModerated {
@@ -1956,6 +1985,7 @@ impl ChatState {
                     }
                     if self.permissions.can_access_mod_surface() {
                         self.refresh_staff_users_snapshot();
+                        self.refresh_audit_log_snapshot();
                     }
                 }
                 ChatEvent::UserTierChanged {
@@ -1976,6 +2006,7 @@ impl ChatState {
                     }
                     if self.permissions.can_access_mod_surface() {
                         self.refresh_staff_users_snapshot();
+                        self.refresh_audit_log_snapshot();
                     }
                 }
                 ChatEvent::ModerationFailed { user_id, message } if self.user_id == user_id => {
@@ -2020,6 +2051,7 @@ impl ChatState {
                     }
                     if self.permissions.can_access_mod_surface() {
                         self.refresh_staff_rooms_snapshot();
+                        self.refresh_audit_log_snapshot();
                     }
                 }
                 ChatEvent::MessageDeleted {
@@ -2116,6 +2148,11 @@ impl ChatState {
                     if self.user_id == user_id =>
                 {
                     self.staff_rooms_snapshot = rooms;
+                }
+                ChatEvent::AuditLogSnapshotUpdated { user_id, entries }
+                    if self.user_id == user_id =>
+                {
+                    self.audit_log_snapshot = entries;
                 }
                 ChatEvent::StaffRoomsListed {
                     user_id,
@@ -2817,6 +2854,95 @@ fn control_center_user_label(user: &StaffUserRecord) -> String {
     } else {
         format!("@{}", user.username)
     }
+}
+
+fn format_audit_actor(entry: &AuditLogEntry) -> String {
+    entry
+        .actor_username
+        .as_deref()
+        .map(|name| format!("@{name}"))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn format_audit_target(entry: &AuditLogEntry) -> String {
+    match (entry.target_id, entry.target_username.as_deref()) {
+        (None, _) => "—".to_string(),
+        (Some(_), Some(name)) => format!("@{name}"),
+        (Some(_), None) => "@<unknown>".to_string(),
+    }
+}
+
+fn format_control_center_audit_list_lines(
+    entries: &[AuditLogEntry],
+    selected_audit_id: Option<Uuid>,
+) -> Vec<String> {
+    if entries.is_empty() {
+        return vec!["No audit entries".to_string()];
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let marker = if Some(entry.id) == selected_audit_id {
+                ">"
+            } else {
+                " "
+            };
+            format!(
+                "{marker} {when}  {action:<22} {target} by {actor}",
+                when = entry.created.format("%Y-%m-%d %H:%M"),
+                action = entry.action,
+                target = format_audit_target(entry),
+                actor = format_audit_actor(entry),
+            )
+        })
+        .collect()
+}
+
+fn format_control_center_audit_detail_lines(
+    entries: &[AuditLogEntry],
+    selected_audit_id: Option<Uuid>,
+) -> Vec<String> {
+    if entries.is_empty() {
+        return vec!["No audit entries".to_string()];
+    }
+    let selected = selected_audit_id
+        .and_then(|id| entries.iter().find(|entry| entry.id == id))
+        .or_else(|| entries.first());
+    let Some(entry) = selected else {
+        return vec!["No entry selected".to_string()];
+    };
+    let mut lines = vec![
+        format!("action      : {}", entry.action),
+        format!("actor       : {}", format_audit_actor(entry)),
+        format!("target      : {}", format_audit_target(entry)),
+        format!("target_kind : {}", entry.target_kind),
+        format!(
+            "when        : {}",
+            entry.created.format("%Y-%m-%d %H:%M:%S UTC")
+        ),
+        String::new(),
+        "metadata:".to_string(),
+    ];
+    if let Some(map) = entry.metadata.as_object() {
+        if map.is_empty() {
+            lines.push("  (none)".to_string());
+        } else {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            for key in keys {
+                let value = &map[key];
+                let rendered = match value {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Null => "null".to_string(),
+                    other => other.to_string(),
+                };
+                lines.push(format!("  {key}: {rendered}"));
+            }
+        }
+    } else {
+        lines.push(format!("  {}", entry.metadata));
+    }
+    lines
 }
 
 fn control_center_user_flags(user: &StaffUserRecord) -> Vec<String> {

@@ -17,7 +17,7 @@ use late_core::{
         user::User,
     },
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 use tokio_postgres::Client;
 use tracing::{Instrument, info_span};
@@ -52,6 +52,19 @@ pub struct ActiveBanSummary {
     pub actor_username: Option<String>,
     pub created: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuditLogEntry {
+    pub id: Uuid,
+    pub created: DateTime<Utc>,
+    pub action: String,
+    pub target_kind: String,
+    pub target_id: Option<Uuid>,
+    pub actor_user_id: Uuid,
+    pub actor_username: Option<String>,
+    pub target_username: Option<String>,
+    pub metadata: Value,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -406,6 +419,10 @@ pub enum ChatEvent {
     StaffRoomsSnapshotUpdated {
         user_id: Uuid,
         rooms: Vec<StaffRoomRecord>,
+    },
+    AuditLogSnapshotUpdated {
+        user_id: Uuid,
+        entries: Vec<AuditLogEntry>,
     },
     StaffRoomsListed {
         user_id: Uuid,
@@ -1258,6 +1275,63 @@ impl ChatService {
             }
             .instrument(span),
         );
+    }
+
+    pub fn refresh_audit_log_snapshot_task(&self, user_id: Uuid, permissions: Permissions) {
+        let service = self.clone();
+        let span = info_span!("chat.refresh_audit_log_snapshot_task", user_id = %user_id);
+        tokio::spawn(
+            async move {
+                let event = match service.list_audit_log_data(permissions).await {
+                    Ok(entries) => ChatEvent::AuditLogSnapshotUpdated { user_id, entries },
+                    Err(e) => ChatEvent::StaffQueryFailed {
+                        user_id,
+                        message: e.to_string(),
+                    },
+                };
+                let _ = service.evt_tx.send(event);
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn list_audit_log_data(&self, permissions: Permissions) -> Result<Vec<AuditLogEntry>> {
+        if !permissions
+            .decide(Action::ViewAuditLogOther, TargetTier::NotApplicable)
+            .is_allowed()
+        {
+            anyhow::bail!("Moderator or admin only");
+        }
+
+        let client = &self.db.get().await?;
+        let rows = client
+            .query(
+                "SELECT log.id, log.created, log.action, log.target_kind,
+                        log.target_id, log.actor_user_id, log.metadata,
+                        actor.username AS actor_username,
+                        target.username AS target_username
+                 FROM moderation_audit_log AS log
+                 LEFT JOIN users AS actor ON actor.id = log.actor_user_id
+                 LEFT JOIN users AS target ON target.id = log.target_id
+                 ORDER BY log.created DESC
+                 LIMIT 100",
+                &[],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| AuditLogEntry {
+                id: row.get("id"),
+                created: row.get("created"),
+                action: row.get("action"),
+                target_kind: row.get("target_kind"),
+                target_id: row.get("target_id"),
+                actor_user_id: row.get("actor_user_id"),
+                actor_username: row.get("actor_username"),
+                target_username: row.get("target_username"),
+                metadata: row.get("metadata"),
+            })
+            .collect())
     }
 
     async fn list_staff_users(

@@ -763,6 +763,7 @@ impl App {
         if self.screen == Screen::ControlCenter {
             self.chat.refresh_staff_users_snapshot();
             self.chat.refresh_staff_rooms_snapshot();
+            self.chat.refresh_audit_log_snapshot();
         }
 
         if self.screen == Screen::Artboard {

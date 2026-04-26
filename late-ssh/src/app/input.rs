@@ -1493,7 +1493,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                     );
                 }
                 crate::app::control_center::state::Focus::Tabs
-                | crate::app::control_center::state::Focus::StaffList => {}
+                | crate::app::control_center::state::Focus::StaffList
+                | crate::app::control_center::state::Focus::AuditList => {}
             },
             b'b' | b'B' => match app.control_center.focus() {
                 crate::app::control_center::state::Focus::UserList
@@ -1507,7 +1508,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                     );
                 }
                 crate::app::control_center::state::Focus::Tabs
-                | crate::app::control_center::state::Focus::StaffList => {}
+                | crate::app::control_center::state::Focus::StaffList
+                | crate::app::control_center::state::Focus::AuditList => {}
             },
             b'u' | b'U' => match app.control_center.focus() {
                 crate::app::control_center::state::Focus::UserList
@@ -1529,7 +1531,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                     );
                 }
                 crate::app::control_center::state::Focus::Tabs
-                | crate::app::control_center::state::Focus::StaffList => {}
+                | crate::app::control_center::state::Focus::StaffList
+                | crate::app::control_center::state::Focus::AuditList => {}
             },
             b'm' | b'M'
                 if app.control_center.focus()
@@ -1625,7 +1628,18 @@ fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
         crate::app::control_center::state::Focus::StaffList => {
             control_center_move_staff_selection(app, delta)
         }
+        crate::app::control_center::state::Focus::AuditList => {
+            control_center_move_audit_selection(app, delta)
+        }
     }
+}
+
+fn control_center_move_audit_selection(app: &mut App, delta: isize) -> bool {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Audit {
+        return false;
+    }
+    let audit_ids = app.chat.control_center_audit_ids();
+    app.control_center.move_audit_selection(&audit_ids, delta)
 }
 
 fn control_center_move_room_selection(app: &mut App, delta: isize) -> bool {

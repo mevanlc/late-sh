@@ -38,6 +38,8 @@ pub struct ControlCenterView<'a> {
     pub room_detail_lines: &'a [String],
     pub staff_list_lines: &'a [String],
     pub staff_detail_lines: &'a [String],
+    pub audit_list_lines: &'a [String],
+    pub audit_detail_lines: &'a [String],
     pub room_prompt: Option<RoomPromptView<'a>>,
     pub ban_prompt: Option<BanPromptView<'a>>,
 }
@@ -108,6 +110,8 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
             "Tab focus tabs · j/k or ↑/↓ move · x kick · b ban · u unban · r rename · p public · v private · d delete"
         }
         (Focus::Tabs, Tab::Staff) => "Tab focus staff · h/l or ←/→ switch tabs",
+        (Focus::Tabs, Tab::Audit) => "Tab focus audit · h/l or ←/→ switch tabs",
+        (Focus::AuditList, Tab::Audit) => "Tab focus tabs · j/k or ↑/↓ move",
         (Focus::StaffList, Tab::Staff) if view.is_admin => {
             "Tab focus tabs · j/k or ↑/↓ move · g grant admin · r revoke mod"
         }
@@ -228,7 +232,33 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
             view.staff_list_lines,
             view.staff_detail_lines,
         ),
+        Tab::Audit => draw_audit_panel(
+            frame,
+            inner,
+            view.focus,
+            view.audit_list_lines,
+            view.audit_detail_lines,
+        ),
     }
+}
+
+fn draw_audit_panel(
+    frame: &mut Frame,
+    area: Rect,
+    focus: Focus,
+    audit_list_lines: &[String],
+    audit_detail_lines: &[String],
+) {
+    let columns =
+        Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
+    draw_panel_card(
+        frame,
+        columns[0],
+        "Entries",
+        audit_list_lines,
+        focus == Focus::AuditList,
+    );
+    draw_panel_card(frame, columns[1], "Entry detail", audit_detail_lines, false);
 }
 
 fn draw_staff_panel(

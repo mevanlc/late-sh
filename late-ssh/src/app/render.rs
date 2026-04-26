@@ -125,6 +125,8 @@ struct DrawContext<'a> {
     control_center_room_detail_lines: &'a [String],
     control_center_staff_list_lines: &'a [String],
     control_center_staff_detail_lines: &'a [String],
+    control_center_audit_list_lines: &'a [String],
+    control_center_audit_detail_lines: &'a [String],
     control_center_room_prompt_panel_title: Option<&'a str>,
     control_center_room_prompt_title: Option<&'a str>,
     control_center_room_prompt_value: Option<&'a str>,
@@ -356,6 +358,16 @@ impl App {
         let control_center_staff_detail_lines = self
             .chat
             .control_center_staff_detail_lines(selected_control_center_staff_id);
+        let control_center_audit_ids = self.chat.control_center_audit_ids();
+        self.control_center
+            .sync_audit_ids(&control_center_audit_ids);
+        let selected_control_center_audit_id = self.control_center.selected_audit_id();
+        let control_center_audit_list_lines = self
+            .chat
+            .control_center_audit_list_lines(selected_control_center_audit_id);
+        let control_center_audit_detail_lines = self
+            .chat
+            .control_center_audit_detail_lines(selected_control_center_audit_id);
         let control_center_room_prompt_title = self
             .control_center
             .prompt()
@@ -418,6 +430,8 @@ impl App {
                         control_center_room_detail_lines: &control_center_room_detail_lines,
                         control_center_staff_list_lines: &control_center_staff_list_lines,
                         control_center_staff_detail_lines: &control_center_staff_detail_lines,
+                        control_center_audit_list_lines: &control_center_audit_list_lines,
+                        control_center_audit_detail_lines: &control_center_audit_detail_lines,
                         control_center_room_prompt_panel_title,
                         control_center_room_prompt_title,
                         control_center_room_prompt_value,
@@ -619,6 +633,8 @@ impl App {
                     room_detail_lines: ctx.control_center_room_detail_lines,
                     staff_list_lines: ctx.control_center_staff_list_lines,
                     staff_detail_lines: ctx.control_center_staff_detail_lines,
+                    audit_list_lines: ctx.control_center_audit_list_lines,
+                    audit_detail_lines: ctx.control_center_audit_detail_lines,
                     room_prompt: ctx
                         .control_center_room_prompt_panel_title
                         .zip(ctx.control_center_room_prompt_title)

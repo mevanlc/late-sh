@@ -6,6 +6,7 @@ pub enum Tab {
     Users,
     Rooms,
     Staff,
+    Audit,
 }
 
 impl Tab {
@@ -14,11 +15,12 @@ impl Tab {
             Tab::Users => "Users",
             Tab::Rooms => "Rooms",
             Tab::Staff => "Staff",
+            Tab::Audit => "Audit",
         }
     }
 }
 
-const TAB_COUNT: usize = 3;
+const TAB_COUNT: usize = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -28,6 +30,7 @@ pub enum Focus {
     UserSessions,
     RoomList,
     StaffList,
+    AuditList,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,6 +157,7 @@ pub struct State {
     selected_user_session_id: Option<Uuid>,
     selected_room_id: Option<Uuid>,
     selected_staff_id: Option<Uuid>,
+    selected_audit_id: Option<Uuid>,
     prompt: Option<Prompt>,
     ban_prompt: Option<BanPrompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
@@ -164,6 +168,7 @@ impl State {
         match self.selected_tab {
             1 => Tab::Rooms,
             2 => Tab::Staff,
+            3 => Tab::Audit,
             _ => Tab::Users,
         }
     }
@@ -178,17 +183,30 @@ impl State {
             (Tab::Users, Focus::UserList, false) => Focus::Tabs,
             (Tab::Users, Focus::UserSessions, _) => Focus::Tabs,
             (Tab::Users, Focus::Tabs, _) => Focus::UserList,
-            (Tab::Users, Focus::RoomList | Focus::StaffList, _) => Focus::UserList,
+            (Tab::Users, Focus::RoomList | Focus::StaffList | Focus::AuditList, _) => {
+                Focus::UserList
+            }
             (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
-            (Tab::Rooms, Focus::UserList | Focus::UserSessions | Focus::StaffList, _) => {
-                Focus::RoomList
-            }
+            (
+                Tab::Rooms,
+                Focus::UserList | Focus::UserSessions | Focus::StaffList | Focus::AuditList,
+                _,
+            ) => Focus::RoomList,
             (Tab::Staff, Focus::StaffList, _) => Focus::Tabs,
             (Tab::Staff, Focus::Tabs, _) => Focus::StaffList,
-            (Tab::Staff, Focus::UserList | Focus::UserSessions | Focus::RoomList, _) => {
-                Focus::StaffList
-            }
+            (
+                Tab::Staff,
+                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::AuditList,
+                _,
+            ) => Focus::StaffList,
+            (Tab::Audit, Focus::AuditList, _) => Focus::Tabs,
+            (Tab::Audit, Focus::Tabs, _) => Focus::AuditList,
+            (
+                Tab::Audit,
+                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::StaffList,
+                _,
+            ) => Focus::AuditList,
         };
     }
 
@@ -198,31 +216,56 @@ impl State {
             (Tab::Users, Focus::UserSessions, _) => Focus::UserList,
             (Tab::Users, Focus::Tabs, true) => Focus::UserSessions,
             (Tab::Users, Focus::Tabs, false) => Focus::UserList,
-            (Tab::Users, Focus::RoomList | Focus::StaffList, _) => Focus::Tabs,
+            (Tab::Users, Focus::RoomList | Focus::StaffList | Focus::AuditList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
-            (Tab::Rooms, Focus::UserList | Focus::UserSessions | Focus::StaffList, _) => {
-                Focus::Tabs
-            }
+            (
+                Tab::Rooms,
+                Focus::UserList | Focus::UserSessions | Focus::StaffList | Focus::AuditList,
+                _,
+            ) => Focus::Tabs,
             (Tab::Staff, Focus::StaffList, _) => Focus::Tabs,
             (Tab::Staff, Focus::Tabs, _) => Focus::StaffList,
-            (Tab::Staff, Focus::UserList | Focus::UserSessions | Focus::RoomList, _) => Focus::Tabs,
+            (
+                Tab::Staff,
+                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::AuditList,
+                _,
+            ) => Focus::Tabs,
+            (Tab::Audit, Focus::AuditList, _) => Focus::Tabs,
+            (Tab::Audit, Focus::Tabs, _) => Focus::AuditList,
+            (
+                Tab::Audit,
+                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::StaffList,
+                _,
+            ) => Focus::Tabs,
         };
     }
 
     pub fn normalize_focus(&mut self, has_user_sessions: bool) {
         self.focus = match (self.selected_tab(), self.focus, has_user_sessions) {
-            (Tab::Users, Focus::RoomList | Focus::StaffList, _) => Focus::UserList,
+            (Tab::Users, Focus::RoomList | Focus::StaffList | Focus::AuditList, _) => {
+                Focus::UserList
+            }
             (Tab::Users, Focus::UserSessions, false) => Focus::UserList,
             (Tab::Users, focus, _) => focus,
-            (Tab::Rooms, Focus::UserList | Focus::UserSessions | Focus::StaffList, _) => {
-                Focus::RoomList
-            }
+            (
+                Tab::Rooms,
+                Focus::UserList | Focus::UserSessions | Focus::StaffList | Focus::AuditList,
+                _,
+            ) => Focus::RoomList,
             (Tab::Rooms, focus, _) => focus,
-            (Tab::Staff, Focus::UserList | Focus::UserSessions | Focus::RoomList, _) => {
-                Focus::StaffList
-            }
+            (
+                Tab::Staff,
+                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::AuditList,
+                _,
+            ) => Focus::StaffList,
             (Tab::Staff, focus, _) => focus,
+            (
+                Tab::Audit,
+                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::StaffList,
+                _,
+            ) => Focus::AuditList,
+            (Tab::Audit, focus, _) => focus,
         };
     }
 
@@ -236,6 +279,10 @@ impl State {
 
     pub fn focus_staff_list(&mut self) {
         self.focus = Focus::StaffList;
+    }
+
+    pub fn focus_audit_list(&mut self) {
+        self.focus = Focus::AuditList;
     }
 
     fn clear_pending_state(&mut self) {
@@ -372,6 +419,42 @@ impl State {
 
     pub fn selected_staff_id(&self) -> Option<Uuid> {
         self.selected_staff_id
+    }
+
+    pub fn selected_audit_id(&self) -> Option<Uuid> {
+        self.selected_audit_id
+    }
+
+    pub fn sync_audit_ids(&mut self, audit_ids: &[Uuid]) {
+        if audit_ids.is_empty() {
+            self.selected_audit_id = None;
+            return;
+        }
+        if self
+            .selected_audit_id
+            .is_some_and(|id| audit_ids.contains(&id))
+        {
+            return;
+        }
+        self.selected_audit_id = audit_ids.first().copied();
+    }
+
+    pub fn move_audit_selection(&mut self, audit_ids: &[Uuid], delta: isize) -> bool {
+        if audit_ids.is_empty() {
+            self.selected_audit_id = None;
+            return false;
+        }
+
+        let current_index = self
+            .selected_audit_id
+            .and_then(|id| audit_ids.iter().position(|candidate| *candidate == id))
+            .unwrap_or(0);
+        let next_index =
+            ((current_index as isize + delta).rem_euclid(audit_ids.len() as isize)) as usize;
+        let next_id = audit_ids[next_index];
+        let changed = self.selected_audit_id != Some(next_id);
+        self.selected_audit_id = Some(next_id);
+        changed
     }
 
     pub fn sync_staff_ids(&mut self, staff_ids: &[Uuid]) {

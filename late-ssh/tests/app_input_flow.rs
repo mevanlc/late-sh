@@ -308,6 +308,50 @@ async fn admin_can_grant_moderator_from_users_tab() {
 }
 
 #[tokio::test]
+async fn audit_tab_lists_recent_actions_and_shows_detail() {
+    let test_db = new_test_db().await;
+    let actor = create_test_user(&test_db.db, "cc-audit-actor").await;
+    let _target = create_test_user(&test_db.db, "cc-audit-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&actor.id],
+        )
+        .await
+        .expect("promote actor admin");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        actor.id,
+        "cc-audit-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> @cc-audit-target").await;
+    app.handle_input(b"m");
+    wait_for_render_contains(&mut app, " Grant Moderator ").await;
+    app.handle_input(b"@cc-audit-target\r");
+    wait_for_render_contains(&mut app, "Granted moderator to @cc-audit-target").await;
+
+    app.handle_input(b"l");
+    app.handle_input(b"l");
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Entries ").await;
+    wait_for_render_contains(&mut app, " Entry detail ").await;
+    wait_for_render_contains(&mut app, "grant_moderator").await;
+    wait_for_render_contains(&mut app, "@cc-audit-target by @cc-audit-actor").await;
+    wait_for_render_contains(&mut app, "action      : grant_moderator").await;
+    wait_for_render_contains(&mut app, "actor       : @cc-audit-actor").await;
+    wait_for_render_contains(&mut app, "target      : @cc-audit-target").await;
+    wait_for_render_contains(&mut app, "target_username: cc-audit-target").await;
+}
+
+#[tokio::test]
 async fn admin_can_grant_admin_from_staff_tab() {
     let test_db = new_test_db().await;
     let actor = create_test_user(&test_db.db, "cc-grant-admin-actor").await;
