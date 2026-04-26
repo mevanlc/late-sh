@@ -301,8 +301,8 @@ fn draw_user_panel(
     } else {
         Layout::horizontal([
             Constraint::Percentage(60),
-            Constraint::Percentage(20),
-            Constraint::Percentage(20),
+            Constraint::Percentage(18),
+            Constraint::Percentage(22),
         ])
         .split(area)
     };

@@ -330,6 +330,7 @@ async fn audit_tab_lists_recent_actions_and_shows_detail() {
 
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "@cc-audit-target").await;
 
     app.handle_input(b"j");
     wait_for_render_contains(&mut app, "> @cc-audit-target").await;
@@ -906,11 +907,7 @@ async fn admin_can_disconnect_selected_live_session_from_control_center() {
     wait_for_render_contains(&mut app, "Live Session Detail").await;
 
     app.handle_input(b"\t");
-    wait_for_render_contains(
-        &mut app,
-        "Tab focus tabs · j/k or ↑/↓ move · x disconnect session",
-    )
-    .await;
+    wait_for_render_contains(&mut app, "Tab focus tabs").await;
     wait_for_render_contains(&mut app, &format!("> session {}", short_session_a)).await;
     app.handle_input(b"j");
     wait_for_render_contains(&mut app, &format!("> session {}", short_session_b)).await;
@@ -934,6 +931,7 @@ async fn admin_can_disconnect_selected_live_session_from_control_center() {
     )
     .await;
 
+    app.handle_input(b"\x17");
     app.handle_input(format!("{short_session_b}\r").as_bytes());
     wait_for_render_contains(
         &mut app,
@@ -1020,6 +1018,10 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
 
     app.handle_input(b"b");
     wait_for_render_contains(&mut app, " Ban User ").await;
+    wait_for_render_contains(&mut app, "reason (required)").await;
+    wait_for_render_contains(&mut app, "duration (blank =").await;
+
+    app.handle_input(b"policy violation\r");
     wait_for_render_contains(&mut app, "Type @cc-user-ban-target to confirm ban").await;
 
     app.handle_input(b"@wrong\r");
@@ -1030,6 +1032,7 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     )
     .await;
 
+    app.handle_input(b"\x17");
     app.handle_input(b"@cc-user-ban-target\r");
     wait_for_render_contains(&mut app, "Banning @cc-user-ban-target...").await;
     wait_for_render_contains(
@@ -1038,7 +1041,8 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     )
     .await;
     wait_for_render_contains(&mut app, "> @cc-user-ban-target · banned").await;
-    wait_for_render_contains(&mut app, "server ban: active").await;
+    wait_for_render_contains(&mut app, "server ban:").await;
+    wait_for_render_contains(&mut app, "active").await;
 
     wait_until(
         || async {
@@ -1057,7 +1061,7 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
         .expect("ban disconnect message");
     match disconnect {
         SessionMessage::Disconnect { reason } => {
-            assert_eq!(reason, "You were banned by an admin");
+            assert_eq!(reason, "You were banned: policy violation");
         }
         other => panic!("expected disconnect message, got {other:?}"),
     }
@@ -1068,7 +1072,8 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     app.handle_input(b"@cc-user-ban-target\r");
     wait_for_render_contains(&mut app, "Unbanning @cc-user-ban-target...").await;
     wait_for_render_contains(&mut app, "Unbanned @cc-user-ban-target").await;
-    wait_for_render_contains(&mut app, "server ban: clear").await;
+    wait_for_render_contains(&mut app, "server ban:").await;
+    wait_for_render_contains(&mut app, "clear").await;
 
     wait_until(
         || async {

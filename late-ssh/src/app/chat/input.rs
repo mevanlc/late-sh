@@ -33,12 +33,14 @@ pub fn handle_compose_input(
     from_dashboard: bool,
 ) {
     if app.chat.is_autocomplete_active() {
+        let submit_exact_slash_mention =
+            matches!(byte, b'\r' | b'\n') && app.chat.autocomplete_exact_slash_command_mention();
         match byte {
             0x1B => {
                 app.chat.ac_dismiss();
                 return;
             }
-            b'\t' | b'\r' | b'\n' => {
+            b'\t' | b'\r' | b'\n' if !submit_exact_slash_mention => {
                 app.chat.ac_confirm();
                 return;
             }

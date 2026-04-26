@@ -762,6 +762,7 @@ impl ChatState {
         self.reaction_leader_active = false;
         self.reply_target = None;
         self.edited_message_id = None;
+        self.mention_ac = MentionAutocomplete::default();
     }
 
     fn clear_composer_after_send(&mut self) {
@@ -771,6 +772,7 @@ impl ChatState {
         self.reaction_leader_active = false;
         self.reply_target = None;
         self.edited_message_id = None;
+        self.mention_ac = MentionAutocomplete::default();
     }
 
     fn open_overlay(&mut self, title: &str, lines: Vec<String>) {
@@ -1720,6 +1722,20 @@ impl ChatState {
         self.composer.insert_str(next);
         composer::set_themed_textarea_cursor_visible(&mut self.composer, composing);
         self.mention_ac = MentionAutocomplete::default();
+    }
+
+    pub fn autocomplete_exact_slash_command_mention(&self) -> bool {
+        if !self.mention_ac.active || self.mention_ac.matches.is_empty() {
+            return false;
+        }
+        let text = self.composer.lines().join("\n");
+        if !text.trim_start().starts_with('/') {
+            return false;
+        }
+        let Some(selected) = self.mention_ac.matches.get(self.mention_ac.selected) else {
+            return false;
+        };
+        selected.name.eq_ignore_ascii_case(&self.mention_ac.query)
     }
 
     pub fn ac_dismiss(&mut self) {
