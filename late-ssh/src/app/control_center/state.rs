@@ -110,6 +110,12 @@ pub enum PendingConfirmAction {
     GrantModerator {
         user_id: Uuid,
     },
+    GrantAdmin {
+        user_id: Uuid,
+    },
+    RevokeModerator {
+        user_id: Uuid,
+    },
     SetRoomVisibility {
         room_id: Uuid,
         visibility: String,

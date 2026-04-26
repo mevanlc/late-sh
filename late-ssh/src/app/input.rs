@@ -1537,12 +1537,21 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             {
                 control_center_request_grant_moderator(app);
             }
-            b'r' | b'R'
+            b'g' | b'G'
                 if app.control_center.focus()
-                    == crate::app::control_center::state::Focus::RoomList =>
+                    == crate::app::control_center::state::Focus::StaffList =>
             {
-                control_center_begin_admin_rename(app)
+                control_center_request_grant_admin(app);
             }
+            b'r' | b'R' => match app.control_center.focus() {
+                crate::app::control_center::state::Focus::RoomList => {
+                    control_center_begin_admin_rename(app)
+                }
+                crate::app::control_center::state::Focus::StaffList => {
+                    control_center_request_revoke_moderator(app)
+                }
+                _ => {}
+            },
             b'p' | b'P'
                 if app.control_center.focus()
                     == crate::app::control_center::state::Focus::RoomList =>
@@ -1750,6 +1759,18 @@ fn submit_confirm_dialog(app: &mut App) {
                 crate::app::chat::svc::TierChangeAction::GrantModerator,
             ));
         }
+        crate::app::control_center::state::PendingConfirmAction::GrantAdmin { user_id } => {
+            app.banner = Some(app.chat.tier_change_user_action(
+                user_id,
+                crate::app::chat::svc::TierChangeAction::GrantAdmin,
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::RevokeModerator { user_id } => {
+            app.banner = Some(app.chat.tier_change_user_action(
+                user_id,
+                crate::app::chat::svc::TierChangeAction::RevokeModerator,
+            ));
+        }
         crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
             room_id,
             visibility,
@@ -1939,6 +1960,113 @@ fn control_center_request_grant_moderator(app: &mut App) {
             "Promotes this user to moderator. Audit-logged.",
             user_label,
             "grant moderator",
+            "cancel",
+        ),
+    );
+}
+
+fn control_center_request_grant_admin(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Staff {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_staff_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No staffer selected",
+        ));
+        return;
+    };
+    if user_id == app.user_id {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Cannot change your own tier",
+        ));
+        return;
+    }
+    let Some((is_admin, _is_moderator)) = app.chat.control_center_user_tier_flags(user_id) else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target not found",
+        ));
+        return;
+    };
+    if is_admin {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target is already an admin",
+        ));
+        return;
+    }
+    let user_label = app
+        .chat
+        .control_center_user_label(user_id)
+        .unwrap_or_else(|| "@user".to_string());
+    let action = crate::app::control_center::state::PendingConfirmAction::GrantAdmin { user_id };
+    app.control_center.set_pending_confirm_action(action);
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            "Grant Admin",
+            format!("Type {} to confirm grant admin", user_label),
+            "Promotes this moderator to admin. Audit-logged.",
+            user_label,
+            "grant admin",
+            "cancel",
+        ),
+    );
+}
+
+fn control_center_request_revoke_moderator(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Staff {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_staff_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No staffer selected",
+        ));
+        return;
+    };
+    if user_id == app.user_id {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Cannot change your own tier",
+        ));
+        return;
+    }
+    let Some((is_admin, is_moderator)) = app.chat.control_center_user_tier_flags(user_id) else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target not found",
+        ));
+        return;
+    };
+    if is_admin {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target is an admin; revoke admin is deferred",
+        ));
+        return;
+    }
+    if !is_moderator {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target is not a moderator",
+        ));
+        return;
+    }
+    let user_label = app
+        .chat
+        .control_center_user_label(user_id)
+        .unwrap_or_else(|| "@user".to_string());
+    let action =
+        crate::app::control_center::state::PendingConfirmAction::RevokeModerator { user_id };
+    app.control_center.set_pending_confirm_action(action);
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            "Revoke Moderator",
+            format!("Type {} to confirm revoke moderator", user_label),
+            "Demotes this moderator to regular user. Audit-logged.",
+            user_label,
+            "revoke moderator",
             "cancel",
         ),
     );

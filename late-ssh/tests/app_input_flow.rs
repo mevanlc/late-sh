@@ -308,6 +308,166 @@ async fn admin_can_grant_moderator_from_users_tab() {
 }
 
 #[tokio::test]
+async fn admin_can_grant_admin_from_staff_tab() {
+    let test_db = new_test_db().await;
+    let actor = create_test_user(&test_db.db, "cc-grant-admin-actor").await;
+    let target = create_test_user(&test_db.db, "cc-grant-admin-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&actor.id],
+        )
+        .await
+        .expect("promote actor admin");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&target.id],
+        )
+        .await
+        .expect("promote target moderator");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        actor.id,
+        "cc-grant-admin-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+
+    app.handle_input(b"l");
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Selected Staffer ").await;
+    wait_for_render_contains(&mut app, "@cc-grant-admin-target").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> @cc-grant-admin-target m").await;
+
+    app.handle_input(b"g");
+    wait_for_render_contains(&mut app, " Grant Admin ").await;
+    wait_for_render_contains(
+        &mut app,
+        "Type @cc-grant-admin-target to confirm grant admin",
+    )
+    .await;
+
+    app.handle_input(b"@cc-grant-admin-target\r");
+    wait_for_render_contains(&mut app, "Granting admin to @cc-grant-admin-target...").await;
+    wait_for_render_contains(&mut app, "Granted admin to @cc-grant-admin-target").await;
+
+    wait_until(
+        || async {
+            let row = client
+                .query_one(
+                    "SELECT is_admin, is_moderator FROM users WHERE id = $1",
+                    &[&target.id],
+                )
+                .await
+                .expect("lookup target");
+            let is_admin: bool = row.get(0);
+            let is_moderator: bool = row.get(1);
+            is_admin && !is_moderator
+        },
+        "target user becomes admin (and not moderator)",
+    )
+    .await;
+
+    let audit_action = client
+        .query_one(
+            "SELECT action FROM moderation_audit_log
+             WHERE actor_user_id = $1 AND target_id = $2
+             ORDER BY created DESC LIMIT 1",
+            &[&actor.id, &target.id],
+        )
+        .await
+        .expect("audit row");
+    assert_eq!(audit_action.get::<_, String>(0), "grant_admin");
+}
+
+#[tokio::test]
+async fn admin_can_revoke_moderator_from_staff_tab() {
+    let test_db = new_test_db().await;
+    let actor = create_test_user(&test_db.db, "cc-revoke-mod-actor").await;
+    let target = create_test_user(&test_db.db, "cc-revoke-mod-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&actor.id],
+        )
+        .await
+        .expect("promote actor admin");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&target.id],
+        )
+        .await
+        .expect("promote target moderator");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        actor.id,
+        "cc-revoke-mod-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+
+    app.handle_input(b"l");
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Selected Staffer ").await;
+    wait_for_render_contains(&mut app, "@cc-revoke-mod-target").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> @cc-revoke-mod-target m").await;
+
+    app.handle_input(b"r");
+    wait_for_render_contains(&mut app, " Revoke Moderator ").await;
+    wait_for_render_contains(
+        &mut app,
+        "Type @cc-revoke-mod-target to confirm revoke moderator",
+    )
+    .await;
+
+    app.handle_input(b"@cc-revoke-mod-target\r");
+    wait_for_render_contains(&mut app, "Revoking moderator from @cc-revoke-mod-target...").await;
+    wait_for_render_contains(&mut app, "Revoked moderator from @cc-revoke-mod-target").await;
+
+    wait_until(
+        || async {
+            let row = client
+                .query_one(
+                    "SELECT is_admin, is_moderator FROM users WHERE id = $1",
+                    &[&target.id],
+                )
+                .await
+                .expect("lookup target");
+            let is_admin: bool = row.get(0);
+            let is_moderator: bool = row.get(1);
+            !is_admin && !is_moderator
+        },
+        "target user becomes regular",
+    )
+    .await;
+
+    let audit_action = client
+        .query_one(
+            "SELECT action FROM moderation_audit_log
+             WHERE actor_user_id = $1 AND target_id = $2
+             ORDER BY created DESC LIMIT 1",
+            &[&actor.id, &target.id],
+        )
+        .await
+        .expect("audit row");
+    assert_eq!(audit_action.get::<_, String>(0), "revoke_moderator");
+}
+
+#[tokio::test]
 async fn staff_tab_lists_moderators_and_admins() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "cc-staff-tab-mod").await;

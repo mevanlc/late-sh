@@ -108,6 +108,9 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
             "Tab focus tabs · j/k or ↑/↓ move · x kick · b ban · u unban · r rename · p public · v private · d delete"
         }
         (Focus::Tabs, Tab::Staff) => "Tab focus staff · h/l or ←/→ switch tabs",
+        (Focus::StaffList, Tab::Staff) if view.is_admin => {
+            "Tab focus tabs · j/k or ↑/↓ move · g grant admin · r revoke mod"
+        }
         (Focus::StaffList, Tab::Staff) => "Tab focus tabs · j/k or ↑/↓ move",
         _ => "Tab cycles focus",
     };

@@ -193,7 +193,7 @@ Replaces `/admin mods`. Shows mods + admins in one list.
   │   @carol      a       ││  Last action      : 2026-04-23 15:22       ││ >  Open DM with @alice      │
   │   @dave       a       ││  Account created  : 2026-01-15             ││ p  View profile             │
   │   @evan       a       ││  Sessions         : 1                      ││ g  Grant admin      (admin) │
-  │   …                   ││  Currently online : yes                    ││ R  Revoke mod       (admin) │
+  │   …                   ││  Currently online : yes                    ││ r  Revoke mod       (admin) │
   │   …                   ││                                            ││ —  Revoke admin  (deferred) │
   │   …                   ││                                            ││                             │
   │   …                   ││                                            ││                             │
@@ -223,12 +223,12 @@ Notes:
 - Tier-change actions are admin-only and target-sensitive:
   - `g` Grant admin: enabled when target is `m`, hidden when target is
     already `a`
-  - `R` Revoke mod: enabled when target is `m`, hidden when target is
+  - `r` Revoke mod: enabled when target is `m`, hidden when target is
     `a` (an admin is not a mod to revoke)
   - Revoke admin: stays parked at `—` until the deferred matrix entry
     lands. Admin-on-admin demote is permitted by the matrix but the
     superadmin DB path is the current escape hatch
-- **Mod's view**: identical layout, but `g` / `R` render with `—` for
+- **Mod's view**: identical layout, but `g` / `r` render with `—` for
   the hotkey since tier changes are admin-only
 
 ## Tab: Audit
