@@ -62,10 +62,10 @@ view_user_ip,users,any,deny,allow,allow,never,deferred; passive view; privacy of
 delete_user_account_hard,users,any,N/I,N/I,N/I,never,"deferred; out-of-band superadmin task (DB/infra); not exposed in-app"
 deactivate_user_account,users,regular,deny,deny,N/I,on_admin,deferred; soft-delete not implemented
 rename_user_forced,users,regular,deny,deny,N/I,on_admin,deferred; remediation for bad usernames is kick/ban; superadmin can edit DB directly
-grant_moderator_role,users,any,deny,deny,allow,on_admin,deferred; no in-app UI yet
-revoke_moderator_role,users,any,deny,deny,allow,on_admin,deferred; no in-app UI yet
-grant_admin_role,users,any,deny,deny,allow,on_admin,deferred; no in-app UI yet
-revoke_admin_role,users,any,deny,deny,allow,on_admin,"deferred; admin-on-admin permitted; superadmin has infra/root as the nuclear option"
+grant_moderator,users,any,deny,deny,allow,on_admin,deferred; no in-app UI yet
+revoke_moderator,users,any,deny,deny,allow,on_admin,deferred; no in-app UI yet
+grant_admin,users,any,deny,deny,allow,on_admin,deferred; no in-app UI yet
+revoke_admin,users,any,deny,deny,allow,on_admin,"deferred; admin-on-admin permitted; superadmin has infra/root as the nuclear option"
 edit_own_profile,profile,self,allow,allow,allow,never,self-service
 edit_other_profile,profile,regular,deny,deny,N/I,on_admin,deferred
 edit_other_profile,profile,mod,deny,deny,N/I,on_admin,deferred

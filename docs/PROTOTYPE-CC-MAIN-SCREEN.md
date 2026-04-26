@@ -50,7 +50,7 @@ these with decorative readouts. Future features will earn them.
 Notes on what we removed and why:
 
 - *"Staff Control Center"* → *"Control Center"*. "Staff" is redundant
-  (only staff see this screen) and the role indicator `(admin)` carries
+  (only staff see this screen) and the tier indicator `(admin)` carries
   more signal per character.
 - *"0 hidden entry"* removed. It was a hardcoded placeholder in the
   live CC (`control_center/ui.rs:67`) that was never wired to data. If
@@ -220,7 +220,7 @@ Notes:
 - `m` / `a` tags indicate moderator / admin
 - Detail panel is one regularized key:value list. The "recent actions"
   mini-feed was dropped — use `a` to jump to a pre-filtered Audit view
-- Role-change actions are admin-only and target-sensitive:
+- Tier-change actions are admin-only and target-sensitive:
   - `g` Grant admin: enabled when target is `m`, hidden when target is
     already `a`
   - `R` Revoke mod: enabled when target is `m`, hidden when target is
@@ -229,7 +229,7 @@ Notes:
     lands. Admin-on-admin demote is permitted by the matrix but the
     superadmin DB path is the current escape hatch
 - **Mod's view**: identical layout, but `g` / `R` render with `—` for
-  the hotkey since role changes are admin-only
+  the hotkey since tier changes are admin-only
 
 ## Tab: Audit
 
