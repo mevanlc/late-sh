@@ -60,6 +60,22 @@ Notes on what we removed and why:
   ground in one row.
 - No "recent activity" readout in the frame. The Audit tab owns that.
 
+## Focus model
+
+Each tab with a filter has two focus states. This matters because the
+action hotkeys are modifierless (`k`, `b`, `r`, …) and would otherwise
+collide with typing into the filter.
+
+- **Filter focused** (default when the tab opens): typing edits the
+  filter; the list re-renders live. ↑/↓ moves focus into the list and
+  starts navigating. Esc clears the filter and stays focused.
+- **List focused**: ↑/↓ navigates rows. Modifierless hotkeys
+  (`k`, `b`, `r`, …) fire the corresponding action on the selection.
+  `^F` jumps back to the filter.
+
+Tab cycles focus across List → Detail → Actions (where present), then
+wraps. This holds for Users, Rooms, Staff, and Audit.
+
 ## Tab: Users
 
 Four-column variant when a user is selected, three when nothing is
@@ -78,7 +94,7 @@ selected. Mod's view differs from admin's by which actions are enabled.
   │   @dave        ·0     ││  Past kicks      : {N} {mostrecentlydate}  ││ u  Unban                    │
   │   @dave        ·0     ││  Past warnings   : {N} {mostrecentlydate}  ││ >  Open DM with user        │
   │   @evan        ·0     ││  Past UGC deletes: {N} {mostrecentlydate}  ││ p  View profile             │
-  │   …                   ││  Incoming KB/s   : {N} KB/s                ││                             │
+  │   …                   ││  Incoming KB/s   : {N} KB/s                ││ m  Grant mod        (admin) │
   │   …                   ││  Commands / sec  : {N}                     ││                             │
   │   …                   ││                                            ││                             │
   │   …                   ││                                            ││                             │
@@ -94,7 +110,7 @@ selected. Mod's view differs from admin's by which actions are enabled.
   │                       ││                                            ││                             │
   │                       ││                                            ││                             │
   └───────────────────────┘└────────────────────────────────────────────┘└─────────────────────────────┘
-   ^F filter  ^P help
+   ^F filter  ^P help  ↑↓ Select User
 
 ```
 
@@ -110,97 +126,155 @@ Notes:
 - **Mod's view**: when the selected target is a mod or admin, the
   Sessions column and Actions column both grey out (`TEXT_DIM`) and
   each action line shows `—` in place of the hotkey
+- `m` Grant mod is admin-only and only enabled when the target is a
+  regular user. On a target that's already staff it's hidden (and
+  contributes to the "hidden entries" count); use the Staff tab for
+  promote-to-admin or revoke
 - "jump to chat with @user" opens a DM or pins their name into the
   composer for @mention — design TBD
 
 ## Tab: Rooms
 
 ```
-┌─ Rooms (3) ──────────┐┌─ #lounge · topic · public · 42 members ──┐┌─ Members (42) ─────────────┐
-│ > #general  ·42 p    ││  kind          topic                      ││ > @alice       mod          │
-│   #lounge   ·42      ││  visibility    public                      ││   @bob                      │
-│   #news     ·18 p    ││  permanent     no                          ││   @carol      admin         │
-│                      ││  auto-join     no                          ││   @dave                     │
-│                      ││  created       2026-02-14 by @mike         ││   …                         │
-│ / filter: _          ││                                            ││                             │
-└──────────────────────┘│  ── Active room bans ──                    │└─────────────────────────────┘
-                       │  2 users · most recent: 12m ago             │┌─ Actions ──────────────────┐
-                       │                                             ││  k  kick member…            │
-                       │  ── Recent moderation ──                    ││  b  ban member…             │
-                       │  2026-04-23 15:10  kick @troll by @alice    ││  u  unban                   │
-                       │                                             ││  r  rename…                 │
-                       │                                             ││  p  make public       (admin)│
-                       │                                             ││  v  make private      (admin)│
-                       │                                             ││  d  delete…           (admin)│
-                       │                                             ││  →  jump to chat in #lounge  │
-                       └─────────────────────────────────────────────┘└─────────────────────────────┘
-  Tab focus members · j/k or ↑/↓ move · / filter · k kick · b ban · u unban · r rename
+  ┌─ Rooms (3) ───────────┐┌─ #lounge ──────────────────────────────────┐┌─ Actions ───────────────────┐
+  │filter ^F: ___________ ││                                            ││                             │
+  │───────────────────────││  Kind             : topic                  ││ k  Kick member…             │
+  │ > #general    ·42 p   ││  Visibility       : public                 ││ b  Ban member…              │
+  │   #lounge     ·42     ││  Permanent        : no                     ││ u  Unban member             │
+  │   #news       ·18 p   ││  Auto-join        : no                     ││ r  Rename…                  │
+  │   …                   ││  Created          : 2026-02-14 by @mike    ││ p  Make public      (admin) │
+  │   …                   ││  Members          : 42                     ││ v  Make private     (admin) │
+  │   …                   ││  Active room bans : 2 (most recent 12m)    ││ d  Delete room…     (admin) │
+  │   …                   ││  Last moderation  : 2026-04-23 15:10       ││ a  View audit trail         │
+  │   …                   ││  Last message     : 2m ago                 ││ →  Jump to #lounge          │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │                       ││                                            ││                             │
+  │                       ││                                            ││                             │
+  │                       ││                                            ││                             │
+  └───────────────────────┘└────────────────────────────────────────────┘└─────────────────────────────┘
+   ^F filter  ^P help  ↑↓ Select Room
 ```
 
+Notes:
+
 - `·42 p` = 42 members, permanent
-- Members column appears when a room is selected; letting staff target
-  members for kick/ban without switching to the Users tab
+- Detail panel is one regularized key:value list (no inline section
+  dividers). "Last moderation" and "Active room bans" are summarized
+  here; the full audit lives in the Audit tab
+- Action column collapses when no room is selected
 - **Mod's view**: `p / v / d` rows show `(admin)` and are disabled;
   `r` (rename) is enabled per matrix
 - Kick / ban here default to **room** kick/ban (current-room context),
-  not server kick/ban — that's the Users tab
+  not server kick/ban — that's the Users tab. They open a member-picker
+  modal since the Members panel was dropped (use Users tab for direct
+  member browsing)
 
 ## Tab: Staff
 
 Replaces `/admin mods`. Shows mods + admins in one list.
 
 ```
-┌─ Staff (5) ──────────┐┌─ @alice · moderator · since 2026-03-01 ───────────────────────────────────┐
-│ > @alice      mod    ││  role          moderator                                                  │
-│   @bob        mod    ││  granted       2026-03-01 by @mike                                        │
-│   @carol      admin  ││  last seen     2m ago                                                     │
-│   @dave       admin  ││                                                                           │
-│   @evan       admin  ││  ── Recent actions (7 days) ──                                            │
-│                      ││  2026-04-23 15:22  ban @troll                                             │
-│                      ││  2026-04-23 10:05  delete message in #news                                │
-│                      ││  2026-04-22 19:30  rename #general-chat → #general                        │
-│                      ││  …                                                                        │
-│                      ││                                                                           │
-│                      ││  Actions:  g  grant admin    (admin only, deferred)                       │
-│                      ││            r  revoke moderator role  (admin only, deferred)               │
-└──────────────────────┘└───────────────────────────────────────────────────────────────────────────┘
-  Tab focus detail · j/k or ↑/↓ move
+  ┌─ Staff (5) ───────────┐┌─ @alice ───────────────────────────────────┐┌─ Actions ───────────────────┐
+  │filter ^F: ___________ ││                                            ││                             │
+  │───────────────────────││  Role             : moderator              ││ a  View audit trail         │
+  │ > @alice      m       ││  Granted          : 2026-03-01 by @mike    ││ s  Sanction history         │
+  │   @bob        m       ││  Last seen        : 2m ago                 ││ r  Recent chats             │
+  │   @carol      a       ││  Last action      : 2026-04-23 15:22       ││ >  Open DM with @alice      │
+  │   @dave       a       ││  Account created  : 2026-01-15             ││ p  View profile             │
+  │   @evan       a       ││  Sessions         : 1                      ││ g  Grant admin      (admin) │
+  │   …                   ││  Currently online : yes                    ││ R  Revoke mod       (admin) │
+  │   …                   ││                                            ││ —  Revoke admin  (deferred) │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │   …                   ││                                            ││                             │
+  │                       ││                                            ││                             │
+  │                       ││                                            ││                             │
+  │                       ││                                            ││                             │
+  └───────────────────────┘└────────────────────────────────────────────┘└─────────────────────────────┘
+   ^F filter  ^P help  ↑↓ Select Staffer
 ```
 
-- Two-column layout (no actions column needed — role changes are
-  deferred; read-only for now)
-- Mod's view: identical, but the Actions section shows `— deferred —`
-  instead of hotkeys
-- Recent actions is a mini audit view scoped to this staffer; full
-  audit is on the Audit tab
+Notes:
+
+- `m` / `a` tags indicate moderator / admin
+- Detail panel is one regularized key:value list. The "recent actions"
+  mini-feed was dropped — use `a` to jump to a pre-filtered Audit view
+- Role-change actions are admin-only and target-sensitive:
+  - `g` Grant admin: enabled when target is `m`, hidden when target is
+    already `a`
+  - `R` Revoke mod: enabled when target is `m`, hidden when target is
+    `a` (an admin is not a mod to revoke)
+  - Revoke admin: stays parked at `—` until the deferred matrix entry
+    lands. Admin-on-admin demote is permitted by the matrix but the
+    superadmin DB path is the current escape hatch
+- **Mod's view**: identical layout, but `g` / `R` render with `—` for
+  the hotkey since role changes are admin-only
 
 ## Tab: Audit
 
 ```
-┌─ Filters ────────────────────────────────┐┌─ Entry detail ──────────────────────────────────────┐
-│  actor      @alice                        ││  id            a2f9…                                │
-│  target     @troll                        ││  action        temp_ban_user                        │
-│  action     (any)                         ││  actor         @alice (moderator)                   │
-│  since      2026-04-20                    ││  target        @troll (regular)                     │
-│  [Enter]    apply · [R] reset             ││  when          2026-04-23 15:22 UTC                 │
-└───────────────────────────────────────────┘│                                                      │
-┌─ Entries (128) ──────────────────────────┐│  metadata                                             │
-│ > 15:22  ban          @troll  by @alice  ││    reason       "spam"                               │
-│   15:10  kick room    @troll  by @alice  ││    expires_at   2026-04-25 15:22 UTC                 │
-│   14:55  delete msg   @evan   by @bob    ││    fingerprint  SHA256:8f3a…                         │
-│   13:40  rename room  #games  by @mike   ││    ip           38.1.2.3                             │
-│   09:12  grant mod    @alice  by @mike   ││                                                      │
-│   …                                       ││  Related: 3 entries targeting @troll                 │
-│                                           ││                                                      │
-└───────────────────────────────────────────┘└─────────────────────────────────────────────────────┘
-  Tab cycles filter/list/detail · j/k or ↑/↓ move · Enter apply filter · Esc clear filter
+  ┌─ Entries (128) ───────────────────────────────────────────┐┌─ Entry detail ──────────────────────┐
+  │filter ^F: actor:@alice target:@troll since:2026-04-20     ││                                     │
+  │───────────────────────────────────────────────────────────││  Id            : a2f9…              │
+  │ > 2026-04-23 15:22  ban          @troll      by @alice    ││  Action        : temp_ban_user      │
+  │   2026-04-23 15:10  kick room    @troll      by @alice    ││  Actor         : @alice (moderator) │
+  │   2026-04-23 14:55  delete msg   @evan       by @bob      ││  Target        : @troll (regular)   │
+  │   2026-04-23 13:40  rename room  #games      by @mike     ││  When          : 2026-04-23 15:22Z  │
+  │   2026-04-23 09:12  grant mod    @alice      by @mike     ││  Reason        : "spam"             │
+  │   2026-04-22 22:01  warn         @troll      by @alice    ││  Expires at    : 2026-04-25 15:22Z  │
+  │   2026-04-22 19:30  rename room  #general    by @mike     ││  Fingerprint   : SHA256:8f3a…       │
+  │   2026-04-22 18:14  unban        @foo        by @carol    ││  IP            : 38.1.2.3           │
+  │   …                                                        ││  Related       : 3 (target:@troll)  │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │   …                                                        ││                                     │
+  │                                                            ││                                     │
+  │                                                            ││                                     │
+  │                                                            ││                                     │
+  └───────────────────────────────────────────────────────────┘└─────────────────────────────────────┘
+   ^F filter  ^P help  ↑↓ Select Entry  ^R reset filter
 ```
 
-- Filters pane up top, fixed-size
-- Left column is the entry list (newest first); right column is the
-  selected entry's full JSON-ish metadata rendered as key/value pairs
-- **Mod's view**: per matrix, mods can see everything that's not
-  explicitly admin-redacted; no action column here — this is read-only
+Notes:
+
+- Filter is inline at the top of the entries panel, same shape as the
+  other tabs. Multi-dimensional filtering uses a `key:value` syntax
+  (`actor:@alice target:@troll action:ban since:2026-04-20`) — one
+  input field, no separate filters pane
+- Detail panel is regularized key:value pairs (no nested `metadata`
+  block — flat is easier to scan)
+- No actions column — this tab is read-only
+- **Mod's view**: identical; mods see everything not explicitly
+  admin-redacted per matrix
 
 ## Modals (keep these)
 
@@ -256,7 +330,10 @@ Same screen, same tabs. Differences:
 | Rooms tab: kick/ban room | yes | yes |
 | Rooms tab: rename | yes | yes |
 | Rooms tab: public/private/delete | disabled | yes |
-| Staff tab: grant/revoke role | disabled (deferred) | disabled (deferred) |
+| Users tab: grant mod (regular → mod) | disabled | yes |
+| Staff tab: grant admin (mod → admin) | disabled | yes |
+| Staff tab: revoke mod | disabled | yes |
+| Staff tab: revoke admin | disabled (deferred) | disabled (deferred) |
 | Audit tab: view all | yes | yes |
 
 Disabled actions render the hotkey column as `—` and the label in
