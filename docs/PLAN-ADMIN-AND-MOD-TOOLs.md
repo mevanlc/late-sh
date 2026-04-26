@@ -14,6 +14,16 @@ This plan is based on the current implementation, not on a greenfield assumption
 - [SUBPLAN-SERVER-USER-MODERATION.md](./SUBPLAN-SERVER-USER-MODERATION.md)
 - [SUBPLAN-CONTENT-MODERATION-AND-UX.md](./SUBPLAN-CONTENT-MODERATION-AND-UX.md)
 
+## Primary surface: Control Center (Screen 0)
+
+The TUI Control Center (Screen 0) is the primary admin/mod surface.
+The `/admin` and `/mod` slash-command family is **legacy** — kept wired
+as it is today, but new moderation features land in CC, not in commands.
+See [PROTOTYPE-CC-MAIN-SCREEN.md](./PROTOTYPE-CC-MAIN-SCREEN.md) for the
+mockup. Phase 6 below is the CC build-out; phases 2–5 retain the
+service-layer / matrix work but their command-shaped UX is now a
+fallback rather than the destination.
+
 ## Permissions Matrix
 
 The authoritative action × actor-tier × target-tier table lives in
@@ -252,21 +262,29 @@ Unify moderation of chat messages and articles.
 
 Right now message deletion is hard delete. If moderation volume grows, soft-delete plus audit metadata will be more operationally sane.
 
-## Phase 6: Better TUI UX
+## Phase 6: Control Center build-out
 
-After the command path is proven, add richer panels.
+Build out the Control Center (Screen 0) tabs as the staff surface.
+Spec: [PROTOTYPE-CC-MAIN-SCREEN.md](./PROTOTYPE-CC-MAIN-SCREEN.md).
 
-### UX target
+### Tabs
 
-- `/admin users` opens a management panel
-- `/admin rooms` opens a management panel
-- `/mod users` and `/mod rooms` open permission-reduced variants
+- **Users** — list + detail + actions; full mod/admin action set
+- **Rooms** — list + detail + actions; admin-only rename/visibility/delete
+- **Staff** — replaces `/admin mods`; grant admin and revoke mod live here
+- **Audit** — read-only entry list with key:value filter
 
-### Reuse
+### Mod vs admin
 
-- existing overlay/banner/event patterns
-- existing chat slash-command entry point
-- existing profile/settings style for focused modal workflows
+Same screen, same tabs. Differences are gating, not separate flows:
+disabled actions render with `—` for the hotkey and `TEXT_DIM()` label.
+
+### Commands
+
+The `/admin` and `/mod` slash-command family stays as it is. No new
+features land in commands. A late-phase cleanup may collapse some of
+them into CC-jump shortcuts once real usage data tells us which
+commands staff still reach for.
 
 ## Draft-To-Plan Mapping
 

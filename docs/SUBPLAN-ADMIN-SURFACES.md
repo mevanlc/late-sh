@@ -1,5 +1,11 @@
 # Subplan: Admin Surfaces
 
+> **Note (current direction):** the primary admin/mod surface is now the
+> Control Center (Screen 0). See
+> [PROTOTYPE-CC-MAIN-SCREEN.md](./PROTOTYPE-CC-MAIN-SCREEN.md). The
+> command-driven scope below is preserved as legacy — keep what's
+> already wired, but new staff-facing UX lands in CC, not in commands.
+
 ## Purpose
 
 Add read-only `/admin` and `/mod` entry points so staff can inspect current state before mutation tools ship.

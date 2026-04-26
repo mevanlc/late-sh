@@ -1,5 +1,11 @@
 # Subplan: Content Moderation And UX
 
+> **Note (current direction):** the "UX follow-through" half of this
+> subplan is now scoped to the Control Center (Screen 0) build-out, not
+> richer `/admin` panels. See
+> [PROTOTYPE-CC-MAIN-SCREEN.md](./PROTOTYPE-CC-MAIN-SCREEN.md). Content
+> moderation permissions/audit work below is unchanged.
+
 ## Purpose
 
 Finish the moderation surface by broadening content controls and improving the TUI experience after the core permission and enforcement work exists.
