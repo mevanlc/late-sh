@@ -12,18 +12,39 @@ use dartboard_editor::{
 };
 use dartboard_tui::{FloatingView, SelectionShape as TuiSelectionShape, SelectionView};
 use ratatui::layout::Rect;
-use std::time::Instant;
+use std::{cell::Cell, time::Instant};
 use tokio::sync::{
     broadcast::{self, error::TryRecvError},
     watch,
 };
 
 use super::provenance::{SharedArtboardProvenance, apply_shared_op};
-use super::svc::{DartboardEvent, DartboardService, DartboardSnapshot};
+use super::svc::{
+    ArtboardArchiveLoader, ArtboardArchiveResult, ArtboardArchiveSnapshot, ArtboardSnapshotService,
+    DartboardEvent, DartboardService, DartboardSnapshot,
+};
 use crate::app::icon_picker::{self, catalog::IconCatalogData};
 
 const DOUBLE_CLICK_WINDOW_MS: u128 = 400;
 pub(crate) const PRIMARY_SWATCH_IDX: usize = 0;
+pub(crate) const PAINT_PALETTE: [RgbColor; 16] = [
+    RgbColor::new(255, 110, 64),
+    RgbColor::new(255, 236, 96),
+    RgbColor::new(255, 214, 102),
+    RgbColor::new(145, 226, 88),
+    RgbColor::new(188, 255, 128),
+    RgbColor::new(72, 220, 170),
+    RgbColor::new(86, 245, 214),
+    RgbColor::new(84, 196, 255),
+    RgbColor::new(96, 225, 255),
+    RgbColor::new(128, 163, 255),
+    RgbColor::new(164, 146, 255),
+    RgbColor::new(192, 132, 255),
+    RgbColor::new(224, 116, 255),
+    RgbColor::new(255, 124, 196),
+    RgbColor::new(255, 142, 158),
+    RgbColor::new(238, 242, 255),
+];
 
 pub struct State {
     pub snapshot: DartboardSnapshot,
@@ -33,6 +54,7 @@ pub struct State {
     pub(crate) editor: EditorSession,
     active_brush: Option<Brush>,
     drag_brush: Option<Brush>,
+    paint_color_index: Option<usize>,
     floating_source_selection: Option<EditorSelection>,
     suppress_swatch_preview: bool,
     last_canvas_click: Option<(Instant, Pos)>,
@@ -48,17 +70,21 @@ pub struct State {
     hover_pos: Option<Pos>,
     snapshot_rx: watch::Receiver<DartboardSnapshot>,
     event_rx: broadcast::Receiver<DartboardEvent>,
+    archive_loader: ArtboardArchiveLoader,
+    snapshot_browser: SnapshotBrowserState,
 }
 
 impl State {
     pub fn new(
         svc: DartboardService,
+        snapshot_service: ArtboardSnapshotService,
         username: String,
         shared_provenance: SharedArtboardProvenance,
     ) -> Self {
         let snapshot_rx = svc.subscribe_state();
         let snapshot = snapshot_rx.borrow().clone();
         let event_rx = svc.subscribe_events();
+        let archive_loader = ArtboardArchiveLoader::new(snapshot_service);
         Self {
             snapshot,
             private_notice: None,
@@ -66,6 +92,7 @@ impl State {
             editor: EditorSession::default(),
             active_brush: None,
             drag_brush: None,
+            paint_color_index: None,
             floating_source_selection: None,
             suppress_swatch_preview: false,
             last_canvas_click: None,
@@ -81,11 +108,15 @@ impl State {
             hover_pos: None,
             snapshot_rx,
             event_rx,
+            archive_loader,
+            snapshot_browser: SnapshotBrowserState::default(),
         }
     }
 
     pub fn tick(&mut self) {
-        if self.snapshot_rx.has_changed().unwrap_or(false) {
+        self.drain_archive_results();
+
+        if !self.is_archive_view_active() && self.snapshot_rx.has_changed().unwrap_or(false) {
             self.snapshot = self.snapshot_rx.borrow_and_update().clone();
             self.editor.clamp_cursor(&self.snapshot.canvas);
             self.editor.clamp_viewport_origin(&self.snapshot.canvas);
@@ -601,6 +632,24 @@ impl State {
         }
     }
 
+    pub fn active_paint_color(&self) -> RgbColor {
+        self.active_user_color()
+    }
+
+    pub fn active_paint_color_index(&self) -> usize {
+        self.paint_color_index
+            .or_else(|| palette_index(self.active_user_color()))
+            .unwrap_or(1)
+    }
+
+    pub fn cycle_paint_color(&mut self, delta: isize) {
+        let len = PAINT_PALETTE.len() as isize;
+        let current = self.active_paint_color_index() as isize;
+        let next = (current + delta).rem_euclid(len) as usize;
+        self.paint_color_index = Some(next);
+        self.suppress_swatch_preview = false;
+    }
+
     pub fn swatches(&self) -> &[Option<Swatch>; SWATCH_CAPACITY] {
         &self.editor.swatches
     }
@@ -671,11 +720,136 @@ impl State {
         self.last_canvas_click = None;
     }
 
+    pub fn is_snapshot_browser_open(&self) -> bool {
+        self.snapshot_browser.open
+    }
+
+    pub fn is_archive_view_active(&self) -> bool {
+        self.snapshot_browser.active.is_some()
+    }
+
+    pub fn active_archive_snapshot(&self) -> Option<&ArtboardArchiveSnapshot> {
+        self.snapshot_browser.active.as_ref()
+    }
+
+    pub fn snapshot_browser_items(&self) -> &[ArtboardArchiveSnapshot] {
+        &self.snapshot_browser.items
+    }
+
+    pub fn snapshot_browser_selected_index(&self) -> usize {
+        self.snapshot_browser.selected_index
+    }
+
+    pub fn snapshot_browser_scroll_offset(&self) -> usize {
+        self.snapshot_browser.scroll_offset
+    }
+
+    pub fn snapshot_browser_loading(&self) -> bool {
+        self.snapshot_browser.loading
+    }
+
+    pub fn snapshot_browser_error(&self) -> Option<&str> {
+        self.snapshot_browser.error.as_deref()
+    }
+
+    pub fn set_snapshot_browser_visible_height(&self, height: usize) {
+        self.snapshot_browser.visible_height.set(height);
+    }
+
+    pub fn toggle_snapshot_browser_or_live(&mut self) {
+        if self.snapshot_browser.open {
+            self.close_snapshot_browser();
+        } else if self.is_archive_view_active() {
+            self.exit_archive_view();
+        } else {
+            self.open_snapshot_browser();
+        }
+    }
+
+    pub fn open_snapshot_browser(&mut self) {
+        self.close_help();
+        self.close_glyph_picker();
+        self.clear_local_state();
+        self.snapshot_browser.open = true;
+        self.snapshot_browser.error = None;
+        self.snapshot_browser.loading = true;
+        self.snapshot_browser.selected_index = self
+            .snapshot_browser
+            .active
+            .as_ref()
+            .and_then(|active| {
+                self.snapshot_browser
+                    .items
+                    .iter()
+                    .position(|item| item.board_key == active.board_key)
+                    .map(|idx| idx + 1)
+            })
+            .unwrap_or(0);
+        self.clamp_snapshot_browser_selection();
+        self.archive_loader.request_list();
+    }
+
+    pub fn close_snapshot_browser(&mut self) {
+        self.snapshot_browser.open = false;
+    }
+
+    pub fn move_snapshot_browser_selection(&mut self, delta: isize) {
+        if !self.snapshot_browser.open {
+            return;
+        }
+        let last = self.snapshot_browser_option_count().saturating_sub(1) as isize;
+        self.snapshot_browser.selected_index =
+            (self.snapshot_browser.selected_index as isize + delta).clamp(0, last) as usize;
+        self.ensure_snapshot_browser_selection_visible();
+    }
+
+    pub fn snapshot_browser_home(&mut self) {
+        self.snapshot_browser.selected_index = 0;
+        self.snapshot_browser.scroll_offset = 0;
+    }
+
+    pub fn snapshot_browser_page(&mut self, delta_pages: isize) {
+        let page = self.snapshot_browser.visible_height.get().max(1) as isize;
+        self.move_snapshot_browser_selection(delta_pages.saturating_mul(page));
+    }
+
+    pub fn activate_snapshot_browser_selection(&mut self) {
+        if !self.snapshot_browser.open {
+            return;
+        }
+        if self.snapshot_browser.selected_index == 0 {
+            self.exit_archive_view();
+            self.snapshot_browser.open = false;
+            return;
+        }
+        let Some(item) = self
+            .snapshot_browser
+            .items
+            .get(self.snapshot_browser.selected_index - 1)
+            .cloned()
+        else {
+            return;
+        };
+        self.activate_archive_snapshot(item);
+        self.snapshot_browser.open = false;
+    }
+
+    pub fn exit_archive_view(&mut self) {
+        self.snapshot_browser.active = None;
+        self.snapshot = self.snapshot_rx.borrow_and_update().clone();
+        self.editor.clamp_cursor(&self.snapshot.canvas);
+        self.editor.clamp_viewport_origin(&self.snapshot.canvas);
+        self.clear_local_state();
+    }
+
     pub fn is_help_open(&self) -> bool {
         self.help_open
     }
 
     pub fn toggle_help(&mut self) {
+        if self.is_archive_view_active() {
+            return;
+        }
         self.help_open = !self.help_open;
     }
 
@@ -730,6 +904,9 @@ impl State {
     }
 
     pub fn open_glyph_picker(&mut self) {
+        if self.is_archive_view_active() {
+            return;
+        }
         // Enforce the "at most one of {selection, floating, picker}" invariant:
         // opening dismisses any floating preview and clears any selection.
         let _ = self.dismiss_floating();
@@ -836,10 +1013,61 @@ impl State {
         true
     }
 
+    fn drain_archive_results(&mut self) {
+        while let Some(result) = self.archive_loader.try_recv() {
+            self.snapshot_browser.loading = false;
+            match result {
+                ArtboardArchiveResult::Loaded(items) => {
+                    self.snapshot_browser.items = items;
+                    self.snapshot_browser.error = None;
+                    self.clamp_snapshot_browser_selection();
+                }
+                ArtboardArchiveResult::Failed(error) => {
+                    self.snapshot_browser.error = Some(error);
+                    self.clamp_snapshot_browser_selection();
+                }
+            }
+        }
+    }
+
+    fn snapshot_browser_option_count(&self) -> usize {
+        self.snapshot_browser.items.len() + 1
+    }
+
+    fn clamp_snapshot_browser_selection(&mut self) {
+        let last = self.snapshot_browser_option_count().saturating_sub(1);
+        self.snapshot_browser.selected_index = self.snapshot_browser.selected_index.min(last);
+        self.ensure_snapshot_browser_selection_visible();
+    }
+
+    fn ensure_snapshot_browser_selection_visible(&mut self) {
+        let visible = self.snapshot_browser.visible_height.get().max(1);
+        if self.snapshot_browser.selected_index < self.snapshot_browser.scroll_offset {
+            self.snapshot_browser.scroll_offset = self.snapshot_browser.selected_index;
+        } else if self.snapshot_browser.selected_index
+            >= self.snapshot_browser.scroll_offset + visible
+        {
+            self.snapshot_browser.scroll_offset =
+                self.snapshot_browser.selected_index + 1 - visible;
+        }
+    }
+
+    fn activate_archive_snapshot(&mut self, item: ArtboardArchiveSnapshot) {
+        self.clear_local_state();
+        self.snapshot.canvas = item.canvas.clone();
+        self.snapshot.provenance = item.provenance.clone();
+        self.snapshot.peers.clear();
+        self.snapshot.connect_rejected = None;
+        self.editor.clamp_cursor(&self.snapshot.canvas);
+        self.editor.clamp_viewport_origin(&self.snapshot.canvas);
+        self.snapshot_browser.active = Some(item);
+    }
+
     fn active_user_color(&self) -> RgbColor {
-        self.snapshot
-            .your_color
-            .unwrap_or_else(|| RgbColor::new(255, 196, 64))
+        self.paint_color_index
+            .and_then(|idx| PAINT_PALETTE.get(idx).copied())
+            .or(self.snapshot.your_color)
+            .unwrap_or(PAINT_PALETTE[1])
     }
 
     fn swatch_preview_suppressed(&self) -> bool {
@@ -860,6 +1088,9 @@ impl State {
         &mut self,
         edit: impl FnOnce(&mut EditorSession, &mut Canvas, RgbColor) -> bool,
     ) -> bool {
+        if self.is_archive_view_active() {
+            return false;
+        }
         let before = self.snapshot.canvas.clone();
         let before_provenance = self.snapshot.provenance.clone();
         let color = self.active_user_color();
@@ -875,6 +1106,9 @@ impl State {
         before: Canvas,
         before_provenance: super::provenance::ArtboardProvenance,
     ) -> bool {
+        if self.is_archive_view_active() {
+            return false;
+        }
         let Some(op) = diff_canvas_op(&before, &self.snapshot.canvas, self.active_user_color())
         else {
             return false;
@@ -1016,7 +1250,7 @@ fn owner_initial(username: &str) -> char {
 }
 
 fn owner_color(username: &str) -> RgbColor {
-    const PALETTE: [RgbColor; 8] = [
+    const OWNER_PALETTE: [RgbColor; 8] = [
         RgbColor::new(255, 110, 64),
         RgbColor::new(255, 196, 64),
         RgbColor::new(145, 226, 88),
@@ -1030,8 +1264,14 @@ fn owner_color(username: &str) -> RgbColor {
     let idx = username
         .bytes()
         .fold(0usize, |acc, byte| acc.wrapping_add(byte as usize))
-        % PALETTE.len();
-    PALETTE[idx]
+        % OWNER_PALETTE.len();
+    OWNER_PALETTE[idx]
+}
+
+fn palette_index(color: RgbColor) -> Option<usize> {
+    PAINT_PALETTE
+        .iter()
+        .position(|candidate| *candidate == color)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1055,6 +1295,18 @@ pub enum BrushMode {
     None,
     Swatch,
     Glyph(char),
+}
+
+#[derive(Default)]
+struct SnapshotBrowserState {
+    open: bool,
+    loading: bool,
+    error: Option<String>,
+    items: Vec<ArtboardArchiveSnapshot>,
+    selected_index: usize,
+    scroll_offset: usize,
+    visible_height: Cell<usize>,
+    active: Option<ArtboardArchiveSnapshot>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1194,7 +1446,7 @@ fn canvas_pos_for_screen_point(
 mod tests {
     use super::*;
     use crate::app::artboard::provenance::ArtboardProvenance;
-    use crate::app::artboard::svc::{DartboardService, DartboardSnapshot};
+    use crate::app::artboard::svc::{ArtboardSnapshotService, DartboardService, DartboardSnapshot};
     use dartboard_core::{CanvasOp, CellValue, RgbColor};
     use dartboard_editor::Clipboard;
 
@@ -1204,11 +1456,16 @@ mod tests {
             provenance: ArtboardProvenance::default(),
             your_name: "painter".to_string(),
             your_user_id: Some(1),
-            your_color: Some(RgbColor::new(255, 196, 64)),
+            your_color: Some(PAINT_PALETTE[1]),
             ..Default::default()
         };
         let svc = DartboardService::disconnected_for_tests(snapshot);
-        let mut state = State::new(svc, "painter".to_string(), shared_provenance);
+        let mut state = State::new(
+            svc,
+            ArtboardSnapshotService::disabled(),
+            "painter".to_string(),
+            shared_provenance,
+        );
         state.set_viewport_for_screen((80, 24));
         state
     }
@@ -1260,6 +1517,33 @@ mod tests {
         state.type_char('A', (80, 24));
         assert_eq!(state.snapshot.canvas.get(Pos { x: 0, y: 0 }), 'A');
         assert_eq!(state.cursor(), Pos { x: 1, y: 0 });
+    }
+
+    #[test]
+    fn paint_color_cycles_and_typed_glyphs_use_selection() {
+        let mut state = test_state();
+        assert_eq!(state.active_paint_color_index(), 1);
+
+        state.cycle_paint_color(1);
+        assert_eq!(state.active_paint_color_index(), 2);
+        assert_eq!(state.active_paint_color(), PAINT_PALETTE[2]);
+
+        state.type_char('C', (80, 24));
+        assert_eq!(
+            state.snapshot.canvas.fg(Pos { x: 0, y: 0 }),
+            Some(PAINT_PALETTE[2])
+        );
+    }
+
+    #[test]
+    fn paint_color_cycle_wraps() {
+        let mut state = test_state();
+        state.cycle_paint_color(-2);
+        assert_eq!(state.active_paint_color_index(), PAINT_PALETTE.len() - 1);
+        assert_eq!(
+            state.active_paint_color(),
+            PAINT_PALETTE[PAINT_PALETTE.len() - 1]
+        );
     }
 
     #[test]

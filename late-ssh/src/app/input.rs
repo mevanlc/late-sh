@@ -4,6 +4,10 @@ use super::{
 };
 use crate::app::common::primitives::Screen;
 use crate::app::common::readline::ctrl_byte_to_input;
+use ratatui::{
+    layout::{Constraint, Layout, Rect},
+    widgets::{Block, Borders},
+};
 use std::{mem, time::Duration};
 use vte::{Params, Parser, Perform};
 
@@ -463,6 +467,11 @@ pub fn handle(app: &mut App, data: &[u8]) {
         return;
     }
 
+    if data == [0x1B] && (app.confirm_dialog.is_some() || app.chat.has_overlay()) {
+        dispatch_escape(app);
+        return;
+    }
+
     // Split-across-reads `ESC` chords: previous read ended with a lone ESC
     // and this one begins with a control byte that should be treated as an
     // Alt chord instead of feeding a wedged parser.
@@ -582,6 +591,11 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         return;
     }
 
+    if app.show_bonsai_modal {
+        crate::app::bonsai::modal_input::handle_input(app, event);
+        return;
+    }
+
     // Picker intercepts all input when open (ESC is handled via dispatch_escape).
     if app.icon_picker_open {
         handle_icon_picker_input(app, event);
@@ -628,11 +642,15 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             }
         }
         ParsedInput::AltC => {}
-        // Mouse events only matter to a few specific consumers (icon picker,
-        // dartboard). The general dispatch path only uses vertical wheel
-        // events as a fallback for screens that scroll outside those richer
-        // handlers.
+        // Mouse events feed global hit tests first, then vertical wheel
+        // fallback for screens that scroll outside richer local handlers.
         ParsedInput::Mouse(mouse) => {
+            if handle_mouse_click(app, ctx.screen, mouse) {
+                return;
+            }
+            if handle_notifications_hud_click(app, mouse) {
+                return;
+            }
             if let Some(delta) = mouse_scroll_delta(mouse) {
                 handle_scroll_for_screen(app, ctx.screen, delta);
             }
@@ -910,6 +928,10 @@ fn dispatch_escape(app: &mut App) {
         profile_modal::input::handle_escape(app);
         return;
     }
+    if app.show_bonsai_modal {
+        crate::app::bonsai::modal_input::handle_escape(app);
+        return;
+    }
     if app.icon_picker_open {
         app.icon_picker_open = false;
         return;
@@ -937,6 +959,10 @@ fn dispatch_escape(app: &mut App) {
         let Some(state) = app.dartboard_state.as_ref() else {
             return;
         };
+        if state.is_snapshot_browser_open() {
+            dispatch_screen_key(app, ctx.screen, 0x1B);
+            return;
+        }
         if state.is_glyph_picker_open() || state.is_help_open() {
             dispatch_screen_key(app, ctx.screen, 0x1B);
             return;
@@ -1036,6 +1062,141 @@ fn handle_scroll_for_screen(app: &mut App, screen: Screen, delta: isize) {
         Screen::ControlCenter => {}
         Screen::Artboard => {}
         _ => {}
+    }
+}
+
+fn handle_mouse_click(app: &mut App, screen: Screen, mouse: MouseEvent) -> bool {
+    if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
+        return false;
+    }
+    let Some(x) = mouse.x.checked_sub(1) else {
+        return false;
+    };
+    let Some(y) = mouse.y.checked_sub(1) else {
+        return false;
+    };
+    let content_area = app_content_area(app);
+
+    match screen {
+        Screen::Dashboard => {
+            let Some(pins) = app.dashboard_strip_pins() else {
+                return false;
+            };
+            let room_id = crate::app::dashboard::ui::favorites_strip_hit_test(
+                content_area,
+                app.profile_state.profile().show_dashboard_header,
+                &pins,
+                x,
+                y,
+            );
+            if let Some(room_id) = room_id {
+                app.select_dashboard_favorite_room(room_id);
+                app.sync_visible_chat_room();
+                return true;
+            }
+            false
+        }
+        Screen::Chat => {
+            let slot = {
+                let chat_badges = app.leaderboard.badges();
+                let discover_view = crate::app::chat::discover::ui::DiscoverListView {
+                    items: app.chat.discover.all_items(),
+                    selected_index: app.chat.discover.selected_index(),
+                };
+                let notifications_view =
+                    crate::app::chat::notifications::ui::NotificationListView {
+                        items: app.chat.notifications.all_items(),
+                        selected_index: app.chat.notifications.selected_index(),
+                    };
+                let mut rows_cache = crate::app::chat::ui::ChatRowsCache::default();
+                let view = crate::app::chat::ui::ChatRenderInput {
+                    news_selected: app.chat.news_selected,
+                    news_unread_count: app.chat.news.unread_count(),
+                    news_view: crate::app::chat::news::ui::ArticleListView {
+                        articles: app.chat.news.all_articles(),
+                        selected_index: app.chat.news.selected_index(),
+                    },
+                    discover_selected: app.chat.discover_selected,
+                    discover_view,
+                    rows_cache: &mut rows_cache,
+                    chat_rooms: &app.chat.rooms,
+                    overlay: app.chat.overlay(),
+                    usernames: app.chat.usernames(),
+                    countries: app.chat.countries(),
+                    badges: &chat_badges,
+                    message_reactions: app.chat.message_reactions(),
+                    unread_counts: &app.chat.unread_counts,
+                    selected_room_id: app.chat.selected_room_id,
+                    room_jump_active: app.chat.room_jump_active,
+                    selected_message_id: app.chat.selected_message_id,
+                    reaction_picker_active: app.chat.is_reaction_leader_active(),
+                    highlighted_message_id: app.chat.highlighted_message_id,
+                    composer: app.chat.composer(),
+                    composing: app.chat.composing,
+                    current_user_id: app.user_id,
+                    cursor_visible: true,
+                    mention_matches: &app.chat.mention_ac.matches,
+                    mention_selected: app.chat.mention_ac.selected,
+                    mention_active: app.chat.mention_ac.active,
+                    reply_author: app.chat.reply_target().map(|reply| reply.author.as_str()),
+                    is_editing: app.chat.edited_message_id.is_some(),
+                    bonsai_glyphs: app.chat.bonsai_glyphs(),
+                    news_composer: app.chat.news.composer(),
+                    news_composing: app.chat.news.composing(),
+                    news_processing: app.chat.news.processing(),
+                    notifications_selected: app.chat.notifications_selected,
+                    notifications_unread_count: app.chat.notifications.unread_count(),
+                    notifications_view,
+                };
+                crate::app::chat::ui::room_list_hit_test(content_area, &view, x, y)
+            };
+            if let Some(slot) = slot {
+                let changed = app.chat.select_room_slot(slot);
+                if changed {
+                    app.chat.reset_composer();
+                    app.sync_visible_chat_room();
+                    app.chat.request_list();
+                }
+                return true;
+            }
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_notifications_hud_click(app: &mut App, mouse: MouseEvent) -> bool {
+    if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
+        return false;
+    }
+    if app.show_splash {
+        return false;
+    }
+
+    let unread = app.chat.notifications.unread_count();
+    // SGR mouse coords are 1-indexed; the top border row is y=1.
+    if unread == 0 || mouse.y != 1 {
+        return false;
+    }
+
+    let noun = if unread == 1 { "mention" } else { "mentions" };
+    let hud_width = format!(" {unread} unread {noun} ").len() as u16;
+    if mouse.x < app.size.0.saturating_sub(hud_width) {
+        return false;
+    }
+
+    app.set_screen(Screen::Chat);
+    app.chat.select_notifications();
+    true
+}
+
+fn app_content_area(app: &App) -> Rect {
+    let area = Rect::new(0, 0, app.size.0, app.size.1);
+    let inner = Block::default().borders(Borders::ALL).inner(area);
+    if app.profile_state.profile().show_right_sidebar {
+        Layout::horizontal([Constraint::Fill(1), Constraint::Length(24)]).split(inner)[0]
+    } else {
+        inner
     }
 }
 
@@ -1188,6 +1349,7 @@ fn open_settings_modal_globally(app: &mut App) {
     app.show_help = false;
     app.show_profile_modal = false;
     app.confirm_dialog = None;
+    app.show_bonsai_modal = false;
     app.show_web_chat_qr = false;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
@@ -1274,10 +1436,7 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return false;
     }
 
-    if ctx.screen == Screen::Games
-        && app.is_playing_game
-        && !matches!(byte, b'm' | b'M' | b'+' | b'=' | b'-' | b'_')
-    {
+    if ctx.screen == Screen::Games && app.is_playing_game {
         return false;
     }
 
@@ -1287,10 +1446,18 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
 
     match byte {
         b'q' | b'Q' => {
+            if ctx.screen == Screen::Artboard
+                && app
+                    .dartboard_state
+                    .as_ref()
+                    .is_some_and(|state| state.is_snapshot_browser_open())
+            {
+                return false;
+            }
             trigger_global_quit(app);
             true
         }
-        b'm' | b'M' => {
+        b'm' | b'M' if ctx.screen != Screen::ControlCenter => {
             let label = app
                 .paired_client_state()
                 .map(|state| match state.client_kind {
@@ -1347,45 +1514,12 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             }
             true
         }
-        b'x' | b'X' if !ctx.chat_composing && !ctx.news_composing => {
-            if app.bonsai_state.cut() {
-                app.banner = Some(crate::app::common::primitives::Banner::success(
-                    "Bonsai pruned!",
-                ));
-            } else if !app.bonsai_state.is_alive {
-                app.banner = Some(crate::app::common::primitives::Banner::error(
-                    "Can't prune a dead tree",
-                ));
-            } else {
-                app.banner = Some(crate::app::common::primitives::Banner::error(
-                    "Not enough growth to prune",
-                ));
-            }
-            true
-        }
         b'w' | b'W' if !ctx.chat_composing && !ctx.news_composing => {
-            if !app.bonsai_state.is_alive {
-                app.bonsai_state.respawn();
-                app.banner = Some(crate::app::common::primitives::Banner::success(
-                    "New seed planted!",
-                ));
-            } else if app.bonsai_state.water() {
-                app.banner = Some(crate::app::common::primitives::Banner::success(
-                    "Bonsai watered!",
-                ));
-            } else {
-                app.banner = Some(crate::app::common::primitives::Banner::success(
-                    "Already watered today",
-                ));
-            }
-            true
-        }
-        b's' | b'S' if !ctx.chat_composing && !ctx.news_composing => {
-            let snippet = app.bonsai_state.share_snippet();
-            app.pending_clipboard = Some(snippet);
-            app.banner = Some(crate::app::common::primitives::Banner::success(
-                "Bonsai copied to clipboard!",
-            ));
+            app.show_help = false;
+            app.show_profile_modal = false;
+            app.show_settings = false;
+            app.show_quit_confirm = false;
+            app.show_bonsai_modal = true;
             true
         }
         b'1' if !artboard_blocks_page_switch => {

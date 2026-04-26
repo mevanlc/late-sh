@@ -357,11 +357,14 @@ impl State {
 
     pub fn sync_user_session_ids(&mut self, session_ids: &[Uuid]) {
         if session_ids.is_empty() {
+            let had_selected_session = self.selected_user_session_id.take().is_some();
             self.selected_user_session_id = None;
             if self.focus == Focus::UserSessions {
                 self.focus = Focus::UserList;
             }
-            self.pending_confirm_action = None;
+            if had_selected_session {
+                self.pending_confirm_action = None;
+            }
             return;
         }
         if self

@@ -160,11 +160,11 @@ async fn zero_does_not_open_control_center_for_regular_users() {
 
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains(" 1  2  3  4 "),
+        frame.contains(" 1 2 3 4 "),
         "expected standard switcher entries for regular user; frame={frame:?}"
     );
     assert!(
-        !frame.contains(" 0  1  2  3  4 "),
+        !frame.contains(" 0 1 2 3 4 "),
         "expected screen 0 switcher entry to stay hidden from regular user; frame={frame:?}"
     );
 
@@ -209,7 +209,7 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
 
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains(" 0  1  2  3  4 "),
+        frame.contains(" 0 1 2 3 4 "),
         "expected staff switcher to include screen 0 entry; frame={frame:?}"
     );
 
@@ -1161,8 +1161,8 @@ async fn active_artboard_ctrl_c_copies_without_quitting() {
     tokio::time::sleep(Duration::from_millis(60)).await;
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains("Mode       active"),
-        "expected Ctrl+C to stay inside active artboard; frame={frame:?}"
+        frame.contains("Mode       swatch"),
+        "expected Ctrl+C to copy into the primary swatch and stay inside active artboard; frame={frame:?}"
     );
     assert!(
         !frame.contains(" Quit? "),
@@ -1420,6 +1420,97 @@ async fn chat_reaction_leader_uses_digits_without_switching_screens() {
                 .is_some_and(|reaction| reaction.kind == 1)
         },
         "f leader reaction to persist",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn chat_room_list_is_mouse_clickable() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "chat-room-mouse-it").await;
+    let author = create_test_user(&test_db.db, "chat-room-mouse-author-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    let rust = ChatRoom::get_or_create_public_room(&client, "rust")
+        .await
+        .expect("create rust room");
+    for room in [general.id, rust.id] {
+        ChatRoomMember::join(&client, room, user.id)
+            .await
+            .expect("join viewer");
+        ChatRoomMember::join(&client, room, author.id)
+            .await
+            .expect("join author");
+    }
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: rust.id,
+            user_id: author.id,
+            body: "rust room backlog".to_string(),
+        },
+    )
+    .await
+    .expect("create rust message");
+
+    let mut app = make_app(test_db.db.clone(), user.id, "chat-room-mouse-flow-it");
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, " Rooms ").await;
+    wait_for_render_contains(&mut app, "rust").await;
+
+    let click = "\x1b[<0;5;10M";
+    app.handle_input(click.as_bytes());
+
+    wait_for_render_contains(&mut app, "rust room backlog").await;
+}
+
+#[tokio::test]
+async fn chat_reaction_leader_persists_extended_reaction_digits() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "f-react-extended-viewer").await;
+    let author = create_test_user(&test_db.db, "f-react-extended-author").await;
+    let client = test_db.db.get().await.expect("db client");
+    let general = ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    ChatRoomMember::join(&client, general.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, general.id, author.id)
+        .await
+        .expect("join author");
+    let message = ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: general.id,
+            user_id: author.id,
+            body: "extended reaction target".to_string(),
+        },
+    )
+    .await
+    .expect("create message");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "f-react-extended-flow-it");
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, " Rooms ").await;
+    wait_for_render_contains(&mut app, "extended reaction target").await;
+
+    app.handle_input(b"j");
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "8 🤔").await;
+    app.handle_input(b"8");
+
+    wait_for_render_contains(&mut app, " Rooms ").await;
+    wait_until(
+        || async {
+            ChatMessageReaction::get_by_user_and_message(&client, message.id, viewer.id)
+                .await
+                .expect("load reaction")
+                .is_some_and(|reaction| reaction.kind == 8)
+        },
+        "extended f leader reaction to persist",
     )
     .await;
 }
@@ -1687,7 +1778,12 @@ async fn mod_room_command_opens_overlay_and_kicks_selected_room_member() {
         .await
         .expect("promote moderator");
 
-    let mut app = make_app(test_db.db.clone(), moderator.id, "mod-room-flow-it");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        moderator.id,
+        "mod-room-flow-it",
+        Permissions::new(false, true),
+    );
 
     app.handle_input(b"2");
     wait_for_render_contains(&mut app, " Rooms ").await;
@@ -1744,7 +1840,12 @@ async fn admin_room_command_opens_overlay_and_renames_selected_room() {
         .await
         .expect("promote admin");
 
-    let mut app = make_app(test_db.db.clone(), admin.id, "admin-room-flow-it");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        admin.id,
+        "admin-room-flow-it",
+        Permissions::new(true, false),
+    );
 
     app.handle_input(b"2");
     wait_for_render_contains(&mut app, " Rooms ").await;

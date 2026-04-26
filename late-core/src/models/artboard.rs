@@ -1,4 +1,5 @@
 use anyhow::Result;
+use chrono::{DateTime, Utc};
 use serde_json::Value;
 use tokio_postgres::Client;
 
@@ -13,6 +14,12 @@ crate::model! {
     }
 }
 
+#[derive(Debug)]
+pub struct SnapshotSummary {
+    pub board_key: String,
+    pub updated: DateTime<Utc>,
+}
+
 impl Snapshot {
     pub const MAIN_BOARD_KEY: &'static str = "main";
 
@@ -24,6 +31,67 @@ impl Snapshot {
             )
             .await?;
         Ok(row.map(Self::from))
+    }
+
+    pub async fn list_by_board_key_prefix(client: &Client, prefix: &str) -> Result<Vec<Self>> {
+        let pattern = format!("{prefix}%");
+        let rows = client
+            .query(
+                "SELECT * FROM artboard_snapshots
+                 WHERE board_key LIKE $1
+                 ORDER BY board_key DESC, created DESC",
+                &[&pattern],
+            )
+            .await?;
+        Ok(rows.into_iter().map(Self::from).collect())
+    }
+
+    pub async fn find_summary_by_board_key(
+        client: &Client,
+        board_key: &str,
+    ) -> Result<Option<SnapshotSummary>> {
+        let row = client
+            .query_opt(
+                "SELECT board_key, updated FROM artboard_snapshots WHERE board_key = $1",
+                &[&board_key],
+            )
+            .await?;
+        Ok(row.map(|row| SnapshotSummary {
+            board_key: row.get("board_key"),
+            updated: row.get("updated"),
+        }))
+    }
+
+    pub async fn list_summaries_by_board_key_prefix(
+        client: &Client,
+        prefix: &str,
+    ) -> Result<Vec<SnapshotSummary>> {
+        let pattern = format!("{prefix}%");
+        let rows = client
+            .query(
+                "SELECT board_key, updated FROM artboard_snapshots
+                 WHERE board_key LIKE $1
+                 ORDER BY board_key DESC, created DESC",
+                &[&pattern],
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| SnapshotSummary {
+                board_key: row.get("board_key"),
+                updated: row.get("updated"),
+            })
+            .collect())
+    }
+
+    pub async fn delete_by_board_key(client: &Client, board_key: &str) -> Result<u64> {
+        let count = client
+            .execute(
+                "DELETE FROM artboard_snapshots WHERE board_key = $1",
+                &[&board_key],
+            )
+            .await?;
+        Ok(count)
     }
 
     pub async fn upsert(

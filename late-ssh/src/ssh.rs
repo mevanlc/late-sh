@@ -709,11 +709,16 @@ impl russh::server::Handler for ClientHandler {
                     Vec::new()
                 }
             };
-        let initial_bonsai_tree = match self.state.bonsai_service.ensure_tree(user_id).await {
-            Ok(tree) => Some(tree),
+        let (initial_bonsai_tree, initial_bonsai_care) = match self
+            .state
+            .bonsai_service
+            .ensure_tree_with_care(user_id)
+            .await
+        {
+            Ok((tree, care)) => (Some(tree), Some(care)),
             Err(e) => {
                 tracing::warn!(error = ?e, "failed to load/create bonsai tree");
-                None
+                (None, None)
             }
         };
 
@@ -754,9 +759,13 @@ impl russh::server::Handler for ClientHandler {
             blackjack_service: self.state.blackjack_service.clone(),
             dartboard_server: self.state.dartboard_server.clone(),
             dartboard_provenance: self.state.dartboard_provenance.clone(),
+            artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService::new(
+                self.state.db.clone(),
+            ),
             username: user.username.clone(),
             bonsai_service: self.state.bonsai_service.clone(),
             initial_bonsai_tree,
+            initial_bonsai_care,
             nonogram_library,
             initial_chip_balance,
             leaderboard_rx: Some(self.state.leaderboard_service.subscribe()),
@@ -1135,8 +1144,9 @@ async fn render_once(
         (frame, terminal_commands)
     };
 
-    match timeout(Duration::from_millis(50), handle.data(channel_id, frame)).await {
-        Ok(Ok(())) => {}
+    let frame_sent = match timeout(Duration::from_millis(50), handle.data(channel_id, frame)).await
+    {
+        Ok(Ok(())) => true,
         Ok(Err(err)) => {
             return Err(anyhow::anyhow!(
                 "render_once: handle send failed: {:?}",
@@ -1149,6 +1159,18 @@ async fn render_once(
             if drops.is_multiple_of(frame_drop_log_every) {
                 tracing::debug!(drops, "frame drops (handle busy)");
             }
+            false
+        }
+    };
+
+    if !frame_sent {
+        // `app.render()` already advanced ratatui's diff buffers. If the SSH
+        // write is dropped, force the next successful frame to repaint from a
+        // blank previous buffer so old terminal cells cannot leak through.
+        let mut app = app.lock().await;
+        app.force_full_repaint();
+        if !signal.dirty.swap(true, Ordering::AcqRel) {
+            signal.notify.notify_one();
         }
     }
 

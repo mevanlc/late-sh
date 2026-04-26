@@ -66,11 +66,6 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
             .fg(theme::TEXT_BRIGHT())
             .add_modifier(Modifier::BOLD),
     )];
-    spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
-    spans.push(Span::styled(
-        "0 hidden entry",
-        Style::default().fg(theme::TEXT_DIM()),
-    ));
     spans.push(Span::raw("   "));
 
     for tab in tabs {
@@ -305,9 +300,9 @@ fn draw_user_panel(
         .split(area)
     } else {
         Layout::horizontal([
-            Constraint::Percentage(34),
-            Constraint::Percentage(28),
-            Constraint::Percentage(38),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+            Constraint::Percentage(20),
         ])
         .split(area)
     };

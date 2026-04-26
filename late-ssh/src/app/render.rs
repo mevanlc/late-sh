@@ -14,7 +14,7 @@ use ratatui::{
 use late_core::models::leaderboard::LeaderboardData;
 
 use super::{
-    artboard, chat,
+    artboard, bonsai, chat,
     common::{
         primitives::{Banner, BannerKind, Screen, draw_banner},
         sidebar::{SidebarProps, draw_sidebar, sidebar_clock_text},
@@ -141,6 +141,8 @@ struct DrawContext<'a> {
     show_quit_confirm: bool,
     show_profile_modal: bool,
     profile_modal_state: &'a profile_modal::state::ProfileModalState,
+    show_bonsai_modal: bool,
+    bonsai_care_state: &'a bonsai::care::BonsaiCareState,
     show_help: bool,
     help_modal_state: &'a help_modal::state::HelpModalState,
     show_splash: bool,
@@ -152,6 +154,7 @@ struct DrawContext<'a> {
     icon_picker_open: bool,
     icon_picker_state: &'a icon_picker::IconPickerState,
     icon_catalog: Option<&'a icon_picker::catalog::IconCatalogData>,
+    mentions_unread_count: i64,
 }
 
 impl App {
@@ -167,6 +170,7 @@ impl App {
             self.profile_state.theme_id().to_string()
         };
         theme::set_current_by_id(&active_theme_id);
+        self.chat.refresh_composer_theme();
 
         // Synchronize terminal background color with theme bg_canvas if enabled
         let enabled = if self.show_settings {
@@ -446,6 +450,8 @@ impl App {
                         show_quit_confirm: self.show_quit_confirm,
                         show_profile_modal: self.show_profile_modal,
                         profile_modal_state: &self.profile_modal_state,
+                        show_bonsai_modal: self.show_bonsai_modal,
+                        bonsai_care_state: &self.bonsai_care_state,
                         show_help: self.show_help,
                         help_modal_state: &self.help_modal_state,
                         show_splash: self.show_splash,
@@ -457,6 +463,7 @@ impl App {
                         icon_picker_open: self.icon_picker_open,
                         icon_picker_state: &self.icon_picker_state,
                         icon_catalog: self.icon_catalog.as_ref(),
+                        mentions_unread_count: self.chat.notifications.unread_count(),
                     },
                 )
             })
@@ -593,13 +600,17 @@ impl App {
             return;
         }
 
-        let block = Block::default()
+        let mut block = Block::default()
             .title(app_frame_title(screen, &ctx))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+        if let Some(hud) = mentions_hud_title(ctx.mentions_unread_count) {
+            block = block.title_top(hud);
+        }
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        frame.render_widget(Clear, inner);
 
         let (content_area, sidebar_area) = if ctx.show_right_sidebar {
             let main_layout =
@@ -686,8 +697,6 @@ impl App {
                 frame,
                 sidebar_area,
                 &SidebarProps {
-                    screen,
-                    show_control_center: ctx.show_control_center,
                     game_selection: ctx.game_selection,
                     is_playing_game: ctx.is_playing_game,
                     visualizer: ctx.visualizer,
@@ -743,6 +752,16 @@ impl App {
             profile_modal::ui::draw(frame, inner, ctx.profile_modal_state);
         }
 
+        if ctx.show_bonsai_modal {
+            bonsai::modal_ui::draw(
+                frame,
+                inner,
+                ctx.bonsai,
+                ctx.bonsai_care_state,
+                ctx.visualizer.beat(),
+            );
+        }
+
         if ctx.show_help {
             help_modal::ui::draw(frame, inner, ctx.help_modal_state);
         }
@@ -782,6 +801,22 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             .add_modifier(Modifier::BOLD),
     )];
 
+    spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
+    for (idx, (tab_screen, key)) in frame_title_tabs(ctx.show_control_center).iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+        let style = if *tab_screen == screen {
+            Style::default()
+                .fg(theme::BG_SELECTION())
+                .bg(theme::AMBER())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT_DIM())
+        };
+        spans.push(Span::styled(*key, style));
+    }
+
     let page_title = match screen {
         Screen::ControlCenter => "Control Center",
         Screen::Dashboard => "Dashboard",
@@ -789,7 +824,10 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Games => "The Arcade",
         Screen::Artboard => "Artboard",
     };
-    spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
+    spans.push(Span::styled(
+        " | ",
+        Style::default().fg(theme::BORDER_DIM()),
+    ));
     spans.push(Span::styled(
         format!("{page_title} "),
         Style::default().fg(theme::TEXT_MUTED()),
@@ -828,10 +866,9 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         } else {
             &[
                 ("view", "pan"),
-                ("Alt+arrows", "pan"),
-                ("R-drag", "pan"),
+                ("Alt+arrows/R-drag", "pan"),
                 ("i", "edit"),
-                ("Ctrl+\\", "owners"),
+                ("g", "gallery"),
             ]
         };
         for (key, desc) in hints {
@@ -852,11 +889,49 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     Line::from(spans)
 }
 
+fn frame_title_tabs(show_control_center: bool) -> Vec<(Screen, &'static str)> {
+    let mut tabs = Vec::with_capacity(if show_control_center { 5 } else { 4 });
+    if show_control_center {
+        tabs.push((Screen::ControlCenter, "0"));
+    }
+    tabs.extend([
+        (Screen::Dashboard, "1"),
+        (Screen::Chat, "2"),
+        (Screen::Games, "3"),
+        (Screen::Artboard, "4"),
+    ]);
+    tabs
+}
+
+fn mentions_hud_title(unread: i64) -> Option<Line<'static>> {
+    if unread <= 0 {
+        return None;
+    }
+    let noun = if unread == 1 { "mention" } else { "mentions" };
+    Some(
+        Line::from(vec![
+            Span::styled(
+                format!(" {unread}"),
+                Style::default()
+                    .fg(theme::MENTION())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" unread {noun} "),
+                Style::default().fg(theme::TEXT_MUTED()),
+            ),
+        ])
+        .right_aligned(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        NotificationMode, desktop_notification_bytes, games_sidebar_enabled, sidebar_enabled,
+        NotificationMode, desktop_notification_bytes, frame_title_tabs, games_sidebar_enabled,
+        mentions_hud_title, sidebar_enabled,
     };
+    use crate::app::common::primitives::Screen;
 
     #[test]
     fn desktop_notification_bytes_both_mode_with_bell_emits_osc_777_and_osc_9() {
@@ -934,5 +1009,52 @@ mod tests {
     fn games_sidebar_enabled_uses_saved_profile_when_modal_is_closed() {
         assert!(games_sidebar_enabled(false, false, true));
         assert!(!games_sidebar_enabled(false, true, false));
+    }
+
+    #[test]
+    fn frame_title_tabs_hide_control_center_for_non_staff() {
+        assert_eq!(
+            frame_title_tabs(false),
+            vec![
+                (Screen::Dashboard, "1"),
+                (Screen::Chat, "2"),
+                (Screen::Games, "3"),
+                (Screen::Artboard, "4"),
+            ]
+        );
+    }
+
+    #[test]
+    fn frame_title_tabs_prepend_control_center_for_staff() {
+        assert_eq!(
+            frame_title_tabs(true),
+            vec![
+                (Screen::ControlCenter, "0"),
+                (Screen::Dashboard, "1"),
+                (Screen::Chat, "2"),
+                (Screen::Games, "3"),
+                (Screen::Artboard, "4"),
+            ]
+        );
+    }
+
+    #[test]
+    fn mentions_hud_title_hidden_when_unread_is_zero_or_negative() {
+        assert!(mentions_hud_title(0).is_none());
+        assert!(mentions_hud_title(-3).is_none());
+    }
+
+    #[test]
+    fn mentions_hud_title_renders_right_aligned_pluralized_text() {
+        use ratatui::layout::Alignment;
+
+        let one = mentions_hud_title(1).expect("one mention should render");
+        assert_eq!(one.alignment, Some(Alignment::Right));
+        let text: String = one.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " 1 unread mention ");
+
+        let many = mentions_hud_title(14).expect("many mentions should render");
+        let text: String = many.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, " 14 unread mentions ");
     }
 }

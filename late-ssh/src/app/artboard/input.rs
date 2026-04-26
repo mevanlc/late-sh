@@ -33,6 +33,15 @@ pub fn handle_byte(state: &mut State, screen_size: (u16, u16), byte: u8) -> Inpu
         return handle_help_byte(state, byte);
     }
     match byte {
+        // Ctrl+U / Ctrl+Y cycle paint color without claiming printable glyphs.
+        0x15 => {
+            state.cycle_paint_color(-1);
+            InputAction::Handled
+        }
+        0x19 => {
+            state.cycle_paint_color(1);
+            InputAction::Handled
+        }
         // Ctrl+] / Ctrl+5 / raw GS — open the glyph picker.
         0x1D => {
             state.open_glyph_picker();
@@ -213,6 +222,12 @@ fn handle_picker_mouse(
 }
 
 fn app_key_from_raw_control_byte(byte: u8) -> Option<AppKey> {
+    // These legacy C0 chords used to drive shape push/pull ops; leave them
+    // unmapped so the artboard no longer claims them as editor shortcuts.
+    if matches!(byte, 0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0F | 0x15 | 0x19) {
+        return None;
+    }
+
     let ctrl = AppModifiers {
         ctrl: true,
         ..Default::default()
@@ -543,8 +558,9 @@ fn map_button(button: MouseButton) -> Option<AppPointerButton> {
 mod tests {
     use super::*;
     use crate::app::artboard::provenance::ArtboardProvenance;
-    use crate::app::artboard::svc::{DartboardService, DartboardSnapshot};
-    use dartboard_core::{Canvas, CellValue, RgbColor};
+    use crate::app::artboard::state::PAINT_PALETTE;
+    use crate::app::artboard::svc::{ArtboardSnapshotService, DartboardService, DartboardSnapshot};
+    use dartboard_core::{Canvas, CellValue};
     use dartboard_editor::Clipboard;
 
     #[test]
@@ -580,16 +596,9 @@ mod tests {
                 },
             })
         );
-        assert_eq!(
-            app_key_from_raw_control_byte(0x09),
-            Some(AppKey {
-                code: AppKeyCode::Tab,
-                modifiers: AppModifiers {
-                    ctrl: true,
-                    ..Default::default()
-                },
-            })
-        );
+        for byte in [0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0F, 0x15, 0x19] {
+            assert_eq!(app_key_from_raw_control_byte(byte), None);
+        }
         assert_eq!(app_key_from_raw_control_byte(0x0D), None);
         assert_eq!(app_key_from_raw_control_byte(0x1B), None);
     }
@@ -662,8 +671,8 @@ mod tests {
             &MouseEvent {
                 kind: MouseEventKind::Down,
                 button: Some(MouseButton::Left),
-                x: 11,
-                y: 17,
+                x: 21,
+                y: 20,
                 modifiers: Default::default(),
             },
         );
@@ -676,8 +685,8 @@ mod tests {
             &MouseEvent {
                 kind: MouseEventKind::Up,
                 button: Some(MouseButton::Left),
-                x: 11,
-                y: 17,
+                x: 21,
+                y: 20,
                 modifiers: Default::default(),
             },
         );
@@ -690,8 +699,8 @@ mod tests {
             &MouseEvent {
                 kind: MouseEventKind::Moved,
                 button: None,
-                x: 11,
-                y: 17,
+                x: 21,
+                y: 20,
                 modifiers: Default::default(),
             },
         );
@@ -757,8 +766,8 @@ mod tests {
             &MouseEvent {
                 kind: MouseEventKind::Down,
                 button: Some(MouseButton::Left),
-                x: 11,
-                y: 17,
+                x: 21,
+                y: 20,
                 modifiers: crate::app::input::MouseModifiers {
                     ctrl: true,
                     ..Default::default()
@@ -786,8 +795,8 @@ mod tests {
             &MouseEvent {
                 kind: MouseEventKind::Down,
                 button: Some(MouseButton::Left),
-                x: 11,
-                y: 17,
+                x: 21,
+                y: 20,
                 modifiers: crate::app::input::MouseModifiers {
                     ctrl: true,
                     ..Default::default()
@@ -982,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn raw_lf_maps_to_ctrl_j_instead_of_enter() {
+    fn raw_lf_is_ignored_after_push_pull_removal() {
         let mut state = test_state();
         state.snapshot.canvas = Canvas::with_size(3, 3);
         state
@@ -992,19 +1001,19 @@ mod tests {
 
         let action = handle_byte(&mut state, (80, 24), b'\n');
 
-        assert!(matches!(action, InputAction::Handled));
+        assert!(matches!(action, InputAction::Ignored));
         assert_eq!(
             state
                 .snapshot
                 .canvas
-                .get(dartboard_core::Pos { x: 0, y: 1 }),
+                .get(dartboard_core::Pos { x: 0, y: 0 }),
             'A'
         );
         assert_eq!(
             state
                 .snapshot
                 .canvas
-                .get(dartboard_core::Pos { x: 0, y: 0 }),
+                .get(dartboard_core::Pos { x: 0, y: 1 }),
             ' '
         );
     }
@@ -1086,6 +1095,19 @@ mod tests {
         assert!(matches!(open, InputAction::Handled));
         assert!(matches!(close, InputAction::Handled));
         assert!(!state.is_help_open());
+    }
+
+    #[test]
+    fn ctrl_u_and_ctrl_y_cycle_paint_color() {
+        let mut state = test_state();
+
+        let prev = handle_byte(&mut state, (80, 24), 0x15);
+        assert!(matches!(prev, InputAction::Handled));
+        assert_eq!(state.active_paint_color_index(), 0);
+
+        let next = handle_byte(&mut state, (80, 24), 0x19);
+        assert!(matches!(next, InputAction::Handled));
+        assert_eq!(state.active_paint_color_index(), 1);
     }
 
     #[test]
@@ -1196,7 +1218,7 @@ mod tests {
             &MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 button: None,
-                x: 30,
+                x: 35,
                 y: 3,
                 modifiers: Default::default(),
             },
@@ -1211,10 +1233,15 @@ mod tests {
         let snapshot = DartboardSnapshot {
             provenance: ArtboardProvenance::default(),
             your_user_id: Some(1),
-            your_color: Some(RgbColor::new(255, 196, 64)),
+            your_color: Some(PAINT_PALETTE[1]),
             ..Default::default()
         };
         let svc = DartboardService::disconnected_for_tests(snapshot);
-        State::new(svc, "painter".to_string(), shared_provenance)
+        State::new(
+            svc,
+            ArtboardSnapshotService::disabled(),
+            "painter".to_string(),
+            shared_provenance,
+        )
     }
 }

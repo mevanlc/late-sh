@@ -8,17 +8,19 @@ pub enum HelpTopic {
     Music,
     News,
     Arcade,
+    Artboard,
     Bonsai,
     Settings,
 }
 
 impl HelpTopic {
-    pub const ALL: [HelpTopic; 8] = [
+    pub const ALL: [HelpTopic; 9] = [
         HelpTopic::Overview,
         HelpTopic::Chat,
         HelpTopic::Music,
         HelpTopic::News,
         HelpTopic::Arcade,
+        HelpTopic::Artboard,
         HelpTopic::Bonsai,
         HelpTopic::Settings,
         HelpTopic::Architecture,
@@ -32,6 +34,7 @@ impl HelpTopic {
             HelpTopic::Music => "Music",
             HelpTopic::News => "News",
             HelpTopic::Arcade => "Arcade",
+            HelpTopic::Artboard => "Artboard",
             HelpTopic::Bonsai => "Bonsai",
             HelpTopic::Settings => "Settings",
         }
@@ -45,6 +48,7 @@ impl HelpTopic {
             HelpTopic::Music => "Music",
             HelpTopic::News => "News",
             HelpTopic::Arcade => "Arcade",
+            HelpTopic::Artboard => "Art",
             HelpTopic::Bonsai => "Bonsai",
             HelpTopic::Settings => "Settings",
         }
@@ -57,9 +61,10 @@ impl HelpTopic {
             HelpTopic::Music => 2,
             HelpTopic::News => 3,
             HelpTopic::Arcade => 4,
-            HelpTopic::Bonsai => 5,
-            HelpTopic::Settings => 6,
-            HelpTopic::Architecture => 7,
+            HelpTopic::Artboard => 5,
+            HelpTopic::Bonsai => 6,
+            HelpTopic::Settings => 7,
+            HelpTopic::Architecture => 8,
         }
     }
 }
@@ -72,6 +77,7 @@ pub fn lines_for(topic: HelpTopic) -> Vec<String> {
         HelpTopic::Music => music_help_lines(),
         HelpTopic::News => news_help_lines(),
         HelpTopic::Arcade => arcade_help_lines(),
+        HelpTopic::Artboard => artboard_help_lines(),
         HelpTopic::Bonsai => bonsai_help_lines(),
         HelpTopic::Settings => settings_help_lines(),
     }
@@ -134,7 +140,7 @@ pub fn chat_help_lines() -> Vec<String> {
         "  h / l  or  ← / →   previous / next room",
         "  Space              room jump hints",
         "  Enter / i          start composing",
-        "  c                  copy a web-chat link to this session",
+        "  C                  copy a web-chat link to this session",
         "",
         "Compose",
         "  Enter              send and exit",
@@ -221,7 +227,7 @@ fn overview_lines() -> Vec<String> {
         "This modal",
         "  Tab / Shift+Tab   next / previous tab",
         "  j / k / ↑ / ↓     scroll current tab",
-        "  ? / q / Esc       close",
+        "  Esc / q / ?       close",
         "",
         "Use /help and /music in chat if you want to jump directly to those slides from the composer.",
     ]
@@ -336,6 +342,63 @@ fn arcade_help_lines() -> Vec<String> {
     .collect()
 }
 
+fn artboard_help_lines() -> Vec<String> {
+    [
+        "Artboard",
+        "",
+        "The Artboard is a shared, persistent ASCII canvas. Everyone paints on the same live board from the dedicated screen.",
+        "",
+        "Where to find it",
+        "  4                 open the Artboard screen",
+        "  Tab / Shift+Tab   cycle to it from other screens",
+        "  https://late.sh/gallery",
+        "                    web gallery for Artboard snapshots",
+        "",
+        "Modes",
+        "  view mode         inspect and pan without editing",
+        "  active mode       type, erase, select, stamp, and draw",
+        "  i / Enter         enter active mode from live view",
+        "  Esc               return to view mode or dismiss local editor state",
+        "",
+        "Important keys",
+        "  ?                 toggle Artboard page help in view mode",
+        "  Ctrl+P            toggle Artboard help while editing",
+        "  g                 open daily/monthly snapshot browser",
+        "  Ctrl+\\           toggle owner overlay",
+        "  Ctrl+]            open emoji / Unicode glyph picker",
+        "  Ctrl+U / Ctrl+Y   previous / next paint color",
+        "",
+        "Drawing basics",
+        "  arrows            move cursor / focus",
+        "  Home / End        jump to line edges",
+        "  PgUp / PgDn       jump vertically",
+        "  <type>            draw a character",
+        "  Space             erase",
+        "  Shift+arrows      start or extend a selection",
+        "  Ctrl+C / Ctrl+X   copy or cut selection into swatches",
+        "  Ctrl+A/S/D/F/G    activate swatch slots 1..5",
+        "  Enter / Ctrl+V    stamp the floating brush",
+        "",
+        "Snapshots and gallery",
+        "  live board saves every 5 minutes and on shutdown",
+        "  daily snapshots are archived as daily:YYYY-MM-DD",
+        "  the newest 7 daily snapshots are kept",
+        "  monthly snapshots are archived as monthly:YYYY-MM",
+        "  on UTC month rollover, the prior daily snapshot becomes the monthly archive and the live board resets blank",
+        "  Artboard view mode g opens the terminal snapshot gallery",
+        "  web gallery is public at https://late.sh/gallery",
+        "",
+        "What is shared",
+        "  canvas cells, connected peers, your assigned color, and cell ownership provenance",
+        "",
+        "What stays local",
+        "  cursor, viewport, selections, swatches, selected paint color, brush previews, glyph search, and help scroll",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 fn settings_help_lines() -> Vec<String> {
     let graybeard_interval_min = GRAYBEARD_CHAT_INTERVAL.as_secs() / 60;
     let graybeard_mention_cooldown_sec = GRAYBEARD_MENTION_COOLDOWN.as_secs();
@@ -400,14 +463,28 @@ fn bonsai_help_lines() -> Vec<String> {
         "",
         "Controls",
         "  w                 water or replant",
-        "  x                 prune and reshape",
+        "  hjkl / arrows     move the pruning cursor",
+        "  x                 cut the branch under the cursor",
+        "  p                 prune hard: -1 stage, new shape",
         "  s                 copy the bonsai to clipboard",
+        "  ?                 open this help section",
         "",
         "How growth works",
-        "  water it daily to keep it healthy",
-        "  it grows while connected",
+        "  watering gives +10 growth",
+        "  it also grows slowly while connected",
         "  after 7 dry days it dies",
-        "  pruning changes shape but costs some growth",
+        "  missed daily wrong-branch cuts cost -10 growth",
+        "  cutting the wrong spot costs -10 growth immediately",
+        "  cutting all wrong branches preserves the current shape",
+        "",
+        "Stages",
+        "  0-99              Seed",
+        "  100-199           Sprout",
+        "  200-299           Sapling",
+        "  300-399           Young Tree",
+        "  400-499           Mature",
+        "  500-599           Ancient",
+        "  600-700           Blossom",
         "",
         "Why it matters",
         "  it gives the app a calm personal loop outside chat and games",
