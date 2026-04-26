@@ -59,7 +59,7 @@ pub fn draw_control_center(frame: &mut Frame, area: Rect, view: &ControlCenterVi
 
 fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
     let selected = view.selected_tab;
-    let tabs = [Tab::Users, Tab::Rooms, Tab::Staff];
+    let tabs = [Tab::Users, Tab::Rooms, Tab::Staff, Tab::Audit];
     let mut spans = vec![Span::styled(
         " Staff Control Center ",
         Style::default()
