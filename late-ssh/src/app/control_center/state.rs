@@ -107,6 +107,9 @@ pub enum PendingConfirmAction {
     UnbanUser {
         user_id: Uuid,
     },
+    GrantModerator {
+        user_id: Uuid,
+    },
     SetRoomVisibility {
         room_id: Uuid,
         visibility: String,

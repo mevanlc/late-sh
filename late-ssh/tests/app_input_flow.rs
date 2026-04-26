@@ -240,6 +240,74 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
 }
 
 #[tokio::test]
+async fn admin_can_grant_moderator_from_users_tab() {
+    let test_db = new_test_db().await;
+    let actor = create_test_user(&test_db.db, "cc-grant-mod-actor").await;
+    let target = create_test_user(&test_db.db, "cc-grant-mod-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&actor.id],
+        )
+        .await
+        .expect("promote admin");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        actor.id,
+        "cc-grant-mod-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "@cc-grant-mod-target").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> @cc-grant-mod-target").await;
+
+    app.handle_input(b"m");
+    wait_for_render_contains(&mut app, " Grant Moderator ").await;
+    wait_for_render_contains(
+        &mut app,
+        "Type @cc-grant-mod-target to confirm grant moderator",
+    )
+    .await;
+
+    app.handle_input(b"@cc-grant-mod-target\r");
+    wait_for_render_contains(&mut app, "Granting moderator to @cc-grant-mod-target...").await;
+    wait_for_render_contains(&mut app, "Granted moderator to @cc-grant-mod-target").await;
+
+    wait_until(
+        || async {
+            let row = client
+                .query_one(
+                    "SELECT is_moderator FROM users WHERE id = $1",
+                    &[&target.id],
+                )
+                .await
+                .expect("lookup target user");
+            row.get::<_, bool>(0)
+        },
+        "target user is_moderator to flip true",
+    )
+    .await;
+
+    let audit_row = client
+        .query_opt(
+            "SELECT action FROM moderation_audit_log
+             WHERE actor_user_id = $1 AND target_id = $2
+             ORDER BY created DESC LIMIT 1",
+            &[&actor.id, &target.id],
+        )
+        .await
+        .expect("audit lookup");
+    let audit_row = audit_row.expect("audit row should exist");
+    assert_eq!(audit_row.get::<_, String>(0), "grant_moderator");
+}
+
+#[tokio::test]
 async fn staff_tab_lists_moderators_and_admins() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "cc-staff-tab-mod").await;

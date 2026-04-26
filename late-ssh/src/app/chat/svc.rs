@@ -134,6 +134,38 @@ impl AdminRoomAction {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TierChangeAction {
+    GrantModerator,
+    RevokeModerator,
+    GrantAdmin,
+}
+
+impl TierChangeAction {
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::GrantModerator => "grant_moderator",
+            Self::RevokeModerator => "revoke_moderator",
+            Self::GrantAdmin => "grant_admin",
+        }
+    }
+
+    fn authz_action(self) -> Action {
+        match self {
+            Self::GrantModerator => Action::GrantModerator,
+            Self::RevokeModerator => Action::RevokeModerator,
+            Self::GrantAdmin => Action::GrantAdmin,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TierChangeResult {
+    target_user_id: Uuid,
+    target_username: String,
+    action: TierChangeAction,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminUserAction {
     DisconnectAllSessions,
@@ -327,6 +359,12 @@ pub enum ChatEvent {
         target_username: String,
         action: AdminUserAction,
         disconnected_sessions: usize,
+    },
+    UserTierChanged {
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        target_username: String,
+        action: TierChangeAction,
     },
     ModerationFailed {
         user_id: Uuid,
@@ -2352,6 +2390,123 @@ impl ChatService {
             target_username: target.username,
             action,
             disconnected_sessions,
+        })
+    }
+
+    pub fn change_user_tier_task(
+        &self,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        action: TierChangeAction,
+        permissions: Permissions,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.change_user_tier_task",
+            actor_user_id = %actor_user_id,
+            target_user_id = %target_user_id,
+            action = action.verb()
+        );
+        tokio::spawn(
+            async move {
+                match service
+                    .change_user_tier(actor_user_id, target_user_id, action, permissions)
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = service.evt_tx.send(ChatEvent::UserTierChanged {
+                            actor_user_id,
+                            target_user_id: result.target_user_id,
+                            target_username: result.target_username,
+                            action: result.action,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
+                            user_id: actor_user_id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn change_user_tier(
+        &self,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        action: TierChangeAction,
+        permissions: Permissions,
+    ) -> Result<TierChangeResult> {
+        if actor_user_id == target_user_id {
+            anyhow::bail!("Cannot change your own tier");
+        }
+        let client = &self.db.get().await?;
+        let target = User::get(client, target_user_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        let target_tier = TargetTier::from_user_flags(target.is_admin, target.is_moderator);
+        if !permissions
+            .decide(action.authz_action(), target_tier)
+            .is_allowed()
+        {
+            anyhow::bail!("Not permitted");
+        }
+
+        match action {
+            TierChangeAction::GrantModerator => {
+                if target.is_admin {
+                    anyhow::bail!("@{} is already an admin", target.username);
+                }
+                if target.is_moderator {
+                    anyhow::bail!("@{} is already a moderator", target.username);
+                }
+            }
+            TierChangeAction::RevokeModerator => {
+                if !target.is_moderator || target.is_admin {
+                    anyhow::bail!("@{} is not a moderator", target.username);
+                }
+            }
+            TierChangeAction::GrantAdmin => {
+                if target.is_admin {
+                    anyhow::bail!("@{} is already an admin", target.username);
+                }
+            }
+        }
+
+        let (new_is_moderator, new_is_admin) = match action {
+            TierChangeAction::GrantModerator => (true, false),
+            TierChangeAction::RevokeModerator => (false, false),
+            TierChangeAction::GrantAdmin => (false, true),
+        };
+        client
+            .execute(
+                "UPDATE users SET is_moderator = $1, is_admin = $2 WHERE id = $3",
+                &[&new_is_moderator, &new_is_admin, &target_user_id],
+            )
+            .await?;
+
+        if permissions.should_audit(action.authz_action(), target_tier) {
+            ModerationAuditLog::record(
+                client,
+                actor_user_id,
+                action.verb().to_string(),
+                "user",
+                Some(target_user_id),
+                json!({
+                    "target_user_id": target_user_id,
+                    "target_username": target.username.clone(),
+                }),
+            )
+            .await?;
+        }
+
+        Ok(TierChangeResult {
+            target_user_id,
+            target_username: target.username,
+            action,
         })
     }
 

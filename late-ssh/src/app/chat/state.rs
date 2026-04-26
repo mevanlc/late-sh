@@ -887,6 +887,13 @@ impl ChatState {
             .map(control_center_user_label)
     }
 
+    pub fn control_center_user_tier_flags(&self, user_id: Uuid) -> Option<(bool, bool)> {
+        self.staff_users_snapshot
+            .iter()
+            .find(|user| user.user_id == user_id)
+            .map(|user| (user.is_admin, user.is_moderator))
+    }
+
     pub fn control_center_user_session_label(&self, session_id: Uuid) -> Option<String> {
         self.session_registry
             .as_ref()
@@ -1035,6 +1042,25 @@ impl ChatState {
             self.permissions,
             self.session_registry.clone(),
         );
+        banner
+    }
+
+    pub fn tier_change_user_action(
+        &self,
+        target_user_id: Uuid,
+        action: super::svc::TierChangeAction,
+    ) -> Banner {
+        let user_label = self
+            .control_center_user_label(target_user_id)
+            .unwrap_or_else(|| "user".to_string());
+        let verb = match action {
+            super::svc::TierChangeAction::GrantModerator => "Granting moderator to",
+            super::svc::TierChangeAction::RevokeModerator => "Revoking moderator from",
+            super::svc::TierChangeAction::GrantAdmin => "Granting admin to",
+        };
+        let banner = Banner::success(&format!("{verb} {user_label}..."));
+        self.service
+            .change_user_tier_task(self.user_id, target_user_id, action, self.permissions);
         banner
     }
 
@@ -1927,6 +1953,26 @@ impl ChatState {
                                 )));
                             }
                         }
+                    }
+                    if self.permissions.can_access_mod_surface() {
+                        self.refresh_staff_users_snapshot();
+                    }
+                }
+                ChatEvent::UserTierChanged {
+                    actor_user_id,
+                    target_user_id: _,
+                    target_username,
+                    action,
+                } => {
+                    if self.user_id == actor_user_id {
+                        let verb = match action {
+                            super::svc::TierChangeAction::GrantModerator => "Granted moderator to",
+                            super::svc::TierChangeAction::RevokeModerator => {
+                                "Revoked moderator from"
+                            }
+                            super::svc::TierChangeAction::GrantAdmin => "Granted admin to",
+                        };
+                        banner = Some(Banner::success(&format!("{verb} @{target_username}")));
                     }
                     if self.permissions.can_access_mod_surface() {
                         self.refresh_staff_users_snapshot();

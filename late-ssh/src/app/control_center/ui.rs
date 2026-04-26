@@ -97,7 +97,7 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
         (Focus::Tabs, Tab::Users) => "Tab focus users · h/l or ←/→ switch tabs",
         (Focus::Tabs, Tab::Rooms) => "Tab focus rooms · h/l or ←/→ switch tabs",
         (Focus::UserList, Tab::Users) if view.is_admin => {
-            "Tab focus sessions · j/k or ↑/↓ move · x disconnect all · b ban · u unban"
+            "Tab focus sessions · j/k or ↑/↓ move · x disconnect all · b ban · u unban · m grant mod"
         }
         (Focus::UserList, Tab::Users) => "Tab focus tabs · j/k or ↑/↓ move",
         (Focus::UserSessions, Tab::Users) if view.is_admin => {

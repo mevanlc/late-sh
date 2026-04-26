@@ -1531,6 +1531,12 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 crate::app::control_center::state::Focus::Tabs
                 | crate::app::control_center::state::Focus::StaffList => {}
             },
+            b'm' | b'M'
+                if app.control_center.focus()
+                    == crate::app::control_center::state::Focus::UserList =>
+            {
+                control_center_request_grant_moderator(app);
+            }
             b'r' | b'R'
                 if app.control_center.focus()
                     == crate::app::control_center::state::Focus::RoomList =>
@@ -1738,6 +1744,12 @@ fn submit_confirm_dialog(app: &mut App) {
                 crate::app::chat::svc::AdminUserAction::Unban,
             ));
         }
+        crate::app::control_center::state::PendingConfirmAction::GrantModerator { user_id } => {
+            app.banner = Some(app.chat.tier_change_user_action(
+                user_id,
+                crate::app::chat::svc::TierChangeAction::GrantModerator,
+            ));
+        }
         crate::app::control_center::state::PendingConfirmAction::SetRoomVisibility {
             room_id,
             visibility,
@@ -1880,6 +1892,53 @@ fn control_center_request_user_session_confirmation(
             detail,
             session_label,
             confirm_label,
+            "cancel",
+        ),
+    );
+}
+
+fn control_center_request_grant_moderator(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    if !app.permissions.can_access_admin_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
+        ));
+        return;
+    };
+    if user_id == app.user_id {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Cannot change your own tier",
+        ));
+        return;
+    }
+    if let Some((is_admin, is_moderator)) = app.chat.control_center_user_tier_flags(user_id)
+        && (is_admin || is_moderator)
+    {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target is already staff",
+        ));
+        return;
+    }
+    let user_label = app
+        .chat
+        .control_center_user_label(user_id)
+        .unwrap_or_else(|| "@user".to_string());
+    let action =
+        crate::app::control_center::state::PendingConfirmAction::GrantModerator { user_id };
+    app.control_center.set_pending_confirm_action(action);
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            "Grant Moderator",
+            format!("Type {} to confirm grant moderator", user_label),
+            "Promotes this user to moderator. Audit-logged.",
+            user_label,
+            "grant moderator",
             "cancel",
         ),
     );
