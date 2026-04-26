@@ -1492,7 +1492,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                         crate::app::control_center::state::RoomAction::Kick,
                     );
                 }
-                crate::app::control_center::state::Focus::Tabs => {}
+                crate::app::control_center::state::Focus::Tabs
+                | crate::app::control_center::state::Focus::StaffList => {}
             },
             b'b' | b'B' => match app.control_center.focus() {
                 crate::app::control_center::state::Focus::UserList
@@ -1505,7 +1506,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                         crate::app::control_center::state::RoomAction::Ban,
                     );
                 }
-                crate::app::control_center::state::Focus::Tabs => {}
+                crate::app::control_center::state::Focus::Tabs
+                | crate::app::control_center::state::Focus::StaffList => {}
             },
             b'u' | b'U' => match app.control_center.focus() {
                 crate::app::control_center::state::Focus::UserList
@@ -1526,7 +1528,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                         crate::app::control_center::state::RoomAction::Unban,
                     );
                 }
-                crate::app::control_center::state::Focus::Tabs => {}
+                crate::app::control_center::state::Focus::Tabs
+                | crate::app::control_center::state::Focus::StaffList => {}
             },
             b'r' | b'R'
                 if app.control_center.focus()
@@ -1604,6 +1607,9 @@ fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
         crate::app::control_center::state::Focus::RoomList => {
             control_center_move_room_selection(app, delta)
         }
+        crate::app::control_center::state::Focus::StaffList => {
+            control_center_move_staff_selection(app, delta)
+        }
     }
 }
 
@@ -1613,6 +1619,14 @@ fn control_center_move_room_selection(app: &mut App, delta: isize) -> bool {
     }
     let room_ids = app.chat.control_center_room_ids();
     app.control_center.move_room_selection(&room_ids, delta)
+}
+
+fn control_center_move_staff_selection(app: &mut App, delta: isize) -> bool {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Staff {
+        return false;
+    }
+    let staff_ids = app.chat.control_center_staff_user_ids();
+    app.control_center.move_staff_selection(&staff_ids, delta)
 }
 
 fn control_center_move_user_selection(app: &mut App, delta: isize) -> bool {

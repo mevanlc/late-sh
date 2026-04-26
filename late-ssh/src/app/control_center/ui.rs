@@ -36,6 +36,8 @@ pub struct ControlCenterView<'a> {
     pub user_session_lines: &'a [String],
     pub room_list_lines: &'a [String],
     pub room_detail_lines: &'a [String],
+    pub staff_list_lines: &'a [String],
+    pub staff_detail_lines: &'a [String],
     pub room_prompt: Option<RoomPromptView<'a>>,
     pub ban_prompt: Option<BanPromptView<'a>>,
 }
@@ -55,7 +57,7 @@ pub fn draw_control_center(frame: &mut Frame, area: Rect, view: &ControlCenterVi
 
 fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
     let selected = view.selected_tab;
-    let tabs = [Tab::Users, Tab::Rooms];
+    let tabs = [Tab::Users, Tab::Rooms, Tab::Staff];
     let mut spans = vec![Span::styled(
         " Staff Control Center ",
         Style::default()
@@ -105,6 +107,8 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
         (Focus::RoomList, Tab::Rooms) => {
             "Tab focus tabs · j/k or ↑/↓ move · x kick · b ban · u unban · r rename · p public · v private · d delete"
         }
+        (Focus::Tabs, Tab::Staff) => "Tab focus staff · h/l or ←/→ switch tabs",
+        (Focus::StaffList, Tab::Staff) => "Tab focus tabs · j/k or ↑/↓ move",
         _ => "Tab cycles focus",
     };
     spans.push(Span::styled(
@@ -214,7 +218,39 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
             view.room_detail_lines,
             view.room_prompt.as_ref(),
         ),
+        Tab::Staff => draw_staff_panel(
+            frame,
+            inner,
+            view.focus,
+            view.staff_list_lines,
+            view.staff_detail_lines,
+        ),
     }
+}
+
+fn draw_staff_panel(
+    frame: &mut Frame,
+    area: Rect,
+    focus: Focus,
+    staff_list_lines: &[String],
+    staff_detail_lines: &[String],
+) {
+    let columns =
+        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).split(area);
+    draw_panel_card(
+        frame,
+        columns[0],
+        "Staff",
+        staff_list_lines,
+        focus == Focus::StaffList,
+    );
+    draw_panel_card(
+        frame,
+        columns[1],
+        "Selected Staffer",
+        staff_detail_lines,
+        false,
+    );
 }
 
 fn draw_user_panel(

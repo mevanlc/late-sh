@@ -240,6 +240,60 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
 }
 
 #[tokio::test]
+async fn staff_tab_lists_moderators_and_admins() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "cc-staff-tab-mod").await;
+    let admin = create_test_user(&test_db.db, "cc-staff-tab-admin").await;
+    let regular = create_test_user(&test_db.db, "cc-staff-tab-regular").await;
+    let client = test_db.db.get().await.expect("db client");
+    ChatRoom::ensure_general(&client)
+        .await
+        .expect("ensure general room");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("promote moderator");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        user.id,
+        "cc-staff-tab-flow",
+        Permissions::new(false, true),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Staff Control Center").await;
+
+    app.handle_input(b"l");
+    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, " Staff ").await;
+    wait_for_render_contains(&mut app, "Tab focus tabs · j/k or ↑/↓ move").await;
+    wait_for_render_contains(&mut app, "@cc-staff-tab-mod").await;
+    wait_for_render_contains(&mut app, "@cc-staff-tab-admin").await;
+    wait_for_render_contains(&mut app, " Selected Staffer ").await;
+
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("@cc-staff-tab-regular"),
+        "Staff tab should exclude non-staff users; frame={frame:?}"
+    );
+
+    app.handle_input(b"\x1b[B");
+    wait_for_render_contains(&mut app, "> @cc-staff-tab-mod").await;
+
+    let _ = (admin, regular);
+}
+
+#[tokio::test]
 async fn moderator_can_kick_user_from_control_center_room() {
     let test_db = new_test_db().await;
     let moderator = create_test_user(&test_db.db, "cc-room-mod").await;

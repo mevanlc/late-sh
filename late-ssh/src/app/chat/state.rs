@@ -899,6 +899,25 @@ impl ChatState {
             .map(|session| short_session_id(session.session_id))
     }
 
+    pub fn control_center_staff_user_ids(&self) -> Vec<Uuid> {
+        self.staff_users_snapshot
+            .iter()
+            .filter(|user| user.is_admin || user.is_moderator)
+            .map(|user| user.user_id)
+            .collect()
+    }
+
+    pub fn control_center_staff_list_lines(&self, selected_staff_id: Option<Uuid>) -> Vec<String> {
+        format_control_center_staff_list_lines(&self.staff_users_snapshot, selected_staff_id)
+    }
+
+    pub fn control_center_staff_detail_lines(
+        &self,
+        selected_staff_id: Option<Uuid>,
+    ) -> Vec<String> {
+        format_control_center_staff_detail_lines(&self.staff_users_snapshot, selected_staff_id)
+    }
+
     pub fn control_center_room_ids(&self) -> Vec<Uuid> {
         self.staff_rooms_snapshot
             .iter()
@@ -2688,6 +2707,62 @@ fn format_control_center_user_session_lines(
             .push("Actions: x disconnect selected session · b ban user · u unban user".to_string());
     }
     lines
+}
+
+fn format_control_center_staff_list_lines(
+    users: &[StaffUserRecord],
+    selected_staff_id: Option<Uuid>,
+) -> Vec<String> {
+    let staff: Vec<&StaffUserRecord> = users
+        .iter()
+        .filter(|user| user.is_admin || user.is_moderator)
+        .collect();
+    if staff.is_empty() {
+        return vec!["No moderators or admins".to_string()];
+    }
+    staff
+        .iter()
+        .map(|user| {
+            let marker = if Some(user.user_id) == selected_staff_id {
+                ">"
+            } else {
+                " "
+            };
+            let role = if user.is_admin { "a" } else { "m" };
+            format!("{marker} {} {}", control_center_user_label(user), role)
+        })
+        .collect()
+}
+
+fn format_control_center_staff_detail_lines(
+    users: &[StaffUserRecord],
+    selected_staff_id: Option<Uuid>,
+) -> Vec<String> {
+    let staff: Vec<&StaffUserRecord> = users
+        .iter()
+        .filter(|user| user.is_admin || user.is_moderator)
+        .collect();
+    if staff.is_empty() {
+        return vec!["No staff to display".to_string()];
+    }
+    let selected = selected_staff_id
+        .and_then(|id| staff.iter().find(|user| user.user_id == id).copied())
+        .or_else(|| staff.first().copied());
+    let Some(user) = selected else {
+        return vec!["No staffer selected".to_string()];
+    };
+    vec![
+        control_center_user_label(user),
+        String::new(),
+        format!(
+            "role: {}",
+            if user.is_admin {
+                "administrator"
+            } else {
+                "moderator"
+            }
+        ),
+    ]
 }
 
 fn control_center_user_label(user: &StaffUserRecord) -> String {

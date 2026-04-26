@@ -5,6 +5,7 @@ use uuid::Uuid;
 pub enum Tab {
     Users,
     Rooms,
+    Staff,
 }
 
 impl Tab {
@@ -12,9 +13,12 @@ impl Tab {
         match self {
             Tab::Users => "Users",
             Tab::Rooms => "Rooms",
+            Tab::Staff => "Staff",
         }
     }
 }
+
+const TAB_COUNT: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Focus {
@@ -23,6 +27,7 @@ pub enum Focus {
     UserList,
     UserSessions,
     RoomList,
+    StaffList,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -139,6 +144,7 @@ pub struct State {
     selected_user_id: Option<Uuid>,
     selected_user_session_id: Option<Uuid>,
     selected_room_id: Option<Uuid>,
+    selected_staff_id: Option<Uuid>,
     prompt: Option<Prompt>,
     ban_prompt: Option<BanPrompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
@@ -148,6 +154,7 @@ impl State {
     pub fn selected_tab(&self) -> Tab {
         match self.selected_tab {
             1 => Tab::Rooms,
+            2 => Tab::Staff,
             _ => Tab::Users,
         }
     }
@@ -162,10 +169,17 @@ impl State {
             (Tab::Users, Focus::UserList, false) => Focus::Tabs,
             (Tab::Users, Focus::UserSessions, _) => Focus::Tabs,
             (Tab::Users, Focus::Tabs, _) => Focus::UserList,
-            (Tab::Users, Focus::RoomList, _) => Focus::UserList,
+            (Tab::Users, Focus::RoomList | Focus::StaffList, _) => Focus::UserList,
             (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
-            (Tab::Rooms, Focus::UserList | Focus::UserSessions, _) => Focus::RoomList,
+            (Tab::Rooms, Focus::UserList | Focus::UserSessions | Focus::StaffList, _) => {
+                Focus::RoomList
+            }
+            (Tab::Staff, Focus::StaffList, _) => Focus::Tabs,
+            (Tab::Staff, Focus::Tabs, _) => Focus::StaffList,
+            (Tab::Staff, Focus::UserList | Focus::UserSessions | Focus::RoomList, _) => {
+                Focus::StaffList
+            }
         };
     }
 
@@ -175,20 +189,31 @@ impl State {
             (Tab::Users, Focus::UserSessions, _) => Focus::UserList,
             (Tab::Users, Focus::Tabs, true) => Focus::UserSessions,
             (Tab::Users, Focus::Tabs, false) => Focus::UserList,
-            (Tab::Users, Focus::RoomList, _) => Focus::Tabs,
+            (Tab::Users, Focus::RoomList | Focus::StaffList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
-            (Tab::Rooms, Focus::UserList | Focus::UserSessions, _) => Focus::Tabs,
+            (Tab::Rooms, Focus::UserList | Focus::UserSessions | Focus::StaffList, _) => {
+                Focus::Tabs
+            }
+            (Tab::Staff, Focus::StaffList, _) => Focus::Tabs,
+            (Tab::Staff, Focus::Tabs, _) => Focus::StaffList,
+            (Tab::Staff, Focus::UserList | Focus::UserSessions | Focus::RoomList, _) => Focus::Tabs,
         };
     }
 
     pub fn normalize_focus(&mut self, has_user_sessions: bool) {
         self.focus = match (self.selected_tab(), self.focus, has_user_sessions) {
-            (Tab::Users, Focus::RoomList, _) => Focus::UserList,
+            (Tab::Users, Focus::RoomList | Focus::StaffList, _) => Focus::UserList,
             (Tab::Users, Focus::UserSessions, false) => Focus::UserList,
             (Tab::Users, focus, _) => focus,
-            (Tab::Rooms, Focus::UserList | Focus::UserSessions, _) => Focus::RoomList,
+            (Tab::Rooms, Focus::UserList | Focus::UserSessions | Focus::StaffList, _) => {
+                Focus::RoomList
+            }
             (Tab::Rooms, focus, _) => focus,
+            (Tab::Staff, Focus::UserList | Focus::UserSessions | Focus::RoomList, _) => {
+                Focus::StaffList
+            }
+            (Tab::Staff, focus, _) => focus,
         };
     }
 
@@ -200,6 +225,10 @@ impl State {
         self.focus = Focus::RoomList;
     }
 
+    pub fn focus_staff_list(&mut self) {
+        self.focus = Focus::StaffList;
+    }
+
     fn clear_pending_state(&mut self) {
         self.prompt = None;
         self.ban_prompt = None;
@@ -207,13 +236,13 @@ impl State {
     }
 
     pub fn next_tab(&mut self) {
-        self.selected_tab = (self.selected_tab + 1) % 2;
+        self.selected_tab = (self.selected_tab + 1) % TAB_COUNT;
         self.normalize_focus(false);
         self.clear_pending_state();
     }
 
     pub fn prev_tab(&mut self) {
-        self.selected_tab = if self.selected_tab == 0 { 1 } else { 0 };
+        self.selected_tab = (self.selected_tab + TAB_COUNT - 1) % TAB_COUNT;
         self.normalize_focus(false);
         self.clear_pending_state();
     }
@@ -330,6 +359,42 @@ impl State {
         }
         self.selected_room_id = room_ids.first().copied();
         self.clear_pending_state();
+    }
+
+    pub fn selected_staff_id(&self) -> Option<Uuid> {
+        self.selected_staff_id
+    }
+
+    pub fn sync_staff_ids(&mut self, staff_ids: &[Uuid]) {
+        if staff_ids.is_empty() {
+            self.selected_staff_id = None;
+            return;
+        }
+        if self
+            .selected_staff_id
+            .is_some_and(|id| staff_ids.contains(&id))
+        {
+            return;
+        }
+        self.selected_staff_id = staff_ids.first().copied();
+    }
+
+    pub fn move_staff_selection(&mut self, staff_ids: &[Uuid], delta: isize) -> bool {
+        if staff_ids.is_empty() {
+            self.selected_staff_id = None;
+            return false;
+        }
+
+        let current_index = self
+            .selected_staff_id
+            .and_then(|id| staff_ids.iter().position(|candidate| *candidate == id))
+            .unwrap_or(0);
+        let next_index =
+            ((current_index as isize + delta).rem_euclid(staff_ids.len() as isize)) as usize;
+        let next_id = staff_ids[next_index];
+        let changed = self.selected_staff_id != Some(next_id);
+        self.selected_staff_id = Some(next_id);
+        changed
     }
 
     pub fn move_room_selection(&mut self, room_ids: &[Uuid], delta: isize) -> bool {
