@@ -932,6 +932,13 @@ fn route_char_to_composer(app: &mut App, ctx: InputContext, ch: char) -> bool {
         app.control_center.ban_prompt_push(ch);
         return true;
     }
+    if ctx.screen == Screen::ControlCenter
+        && app.control_center.is_audit_filter_focused()
+        && !ch.is_control()
+    {
+        app.control_center.audit_filter_push(ch);
+        return true;
+    }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && ctx.chat_composing {
         chat::input::handle_compose_char(app, ch);
         return true;
@@ -1370,6 +1377,30 @@ fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         };
     }
 
+    if ctx.screen == Screen::ControlCenter && app.control_center.is_audit_filter_focused() {
+        match byte {
+            0x1B => {
+                app.control_center.clear_audit_filter();
+                return true;
+            }
+            0x7F => {
+                app.control_center.audit_filter_backspace();
+                return true;
+            }
+            0x17 | 0x08 => {
+                app.control_center.audit_filter_delete_word_left();
+                return true;
+            }
+            b'\r' | b'\n' => {
+                // Stepping into the list is what Enter / ↓ both do; we let
+                // ↓ remain the canonical move so Enter just no-ops the field.
+                app.control_center.focus_audit_list();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     if ctx.screen == Screen::ControlCenter && app.control_center.is_ban_prompt_open() {
         return match byte {
             0x1B => {
@@ -1678,6 +1709,19 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             dashboard::input::handle_key(app, byte);
         }
         Screen::ControlCenter => match byte {
+            // ^F focuses the Audit tab's filter from anywhere within the tab.
+            0x06 if app.control_center.selected_tab()
+                == crate::app::control_center::state::Tab::Audit =>
+            {
+                app.control_center.focus_audit_filter();
+            }
+            // ^R resets the Audit filter when on the Audit tab.
+            0x12 if app.control_center.selected_tab()
+                == crate::app::control_center::state::Tab::Audit =>
+            {
+                app.control_center.clear_audit_filter();
+                app.control_center.focus_audit_filter();
+            }
             b'h' | b'H' => app.control_center.prev_tab(),
             b'l' | b'L' => app.control_center.next_tab(),
             b'j' | b'J' => {
@@ -1721,6 +1765,7 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 }
                 crate::app::control_center::state::Focus::Tabs
                 | crate::app::control_center::state::Focus::StaffList
+                | crate::app::control_center::state::Focus::AuditFilter
                 | crate::app::control_center::state::Focus::AuditList => {}
             },
             b'b' | b'B' => match app.control_center.focus() {
@@ -1736,6 +1781,7 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 }
                 crate::app::control_center::state::Focus::Tabs
                 | crate::app::control_center::state::Focus::StaffList
+                | crate::app::control_center::state::Focus::AuditFilter
                 | crate::app::control_center::state::Focus::AuditList => {}
             },
             b'u' | b'U' => match app.control_center.focus() {
@@ -1759,6 +1805,7 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 }
                 crate::app::control_center::state::Focus::Tabs
                 | crate::app::control_center::state::Focus::StaffList
+                | crate::app::control_center::state::Focus::AuditFilter
                 | crate::app::control_center::state::Focus::AuditList => {}
             },
             b'm' | b'M'
@@ -1858,6 +1905,12 @@ fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
         crate::app::control_center::state::Focus::StaffList => {
             control_center_move_staff_selection(app, delta)
         }
+        crate::app::control_center::state::Focus::AuditFilter => {
+            // ↑/↓ from the filter steps into the entries list.
+            app.control_center.focus_audit_list();
+            control_center_move_audit_selection(app, delta);
+            true
+        }
         crate::app::control_center::state::Focus::AuditList => {
             control_center_move_audit_selection(app, delta)
         }
@@ -1868,7 +1921,8 @@ fn control_center_move_audit_selection(app: &mut App, delta: isize) -> bool {
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Audit {
         return false;
     }
-    let audit_ids = app.chat.control_center_audit_ids();
+    let filter = crate::app::chat::state::parse_audit_filter(app.control_center.audit_filter());
+    let audit_ids = app.chat.control_center_audit_ids(&filter);
     app.control_center.move_audit_selection(&audit_ids, delta)
 }
 

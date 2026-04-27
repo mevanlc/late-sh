@@ -40,6 +40,8 @@ pub struct ControlCenterView<'a> {
     pub staff_detail_lines: &'a [String],
     pub audit_list_lines: &'a [String],
     pub audit_detail_lines: &'a [String],
+    pub audit_filter: &'a str,
+    pub audit_filter_focused: bool,
     pub room_prompt: Option<RoomPromptView<'a>>,
     pub ban_prompt: Option<BanPromptView<'a>>,
 }
@@ -105,8 +107,11 @@ fn draw_tab_row(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
             "Tab focus tabs · j/k or ↑/↓ move · x kick · b ban · u unban · r rename · p public · v private · d delete"
         }
         (Focus::Tabs, Tab::Staff) => "Tab focus staff · h/l or ←/→ switch tabs",
-        (Focus::Tabs, Tab::Audit) => "Tab focus audit · h/l or ←/→ switch tabs",
-        (Focus::AuditList, Tab::Audit) => "Tab focus tabs · j/k or ↑/↓ move",
+        (Focus::Tabs, Tab::Audit) => "Tab focus filter · h/l or ←/→ switch tabs",
+        (Focus::AuditFilter, Tab::Audit) => {
+            "Type to filter · ↓ enter list · Esc clear · ^R reset · ←/→ switch tabs"
+        }
+        (Focus::AuditList, Tab::Audit) => "Tab focus tabs · j/k or ↑/↓ move · ^F refocus filter",
         (Focus::StaffList, Tab::Staff) if view.is_admin => {
             "Tab focus tabs · j/k or ↑/↓ move · g grant admin · r revoke mod"
         }
@@ -233,6 +238,8 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
             view.focus,
             view.audit_list_lines,
             view.audit_detail_lines,
+            view.audit_filter,
+            view.audit_filter_focused,
         ),
     }
 }
@@ -243,17 +250,114 @@ fn draw_audit_panel(
     focus: Focus,
     audit_list_lines: &[String],
     audit_detail_lines: &[String],
+    audit_filter: &str,
+    audit_filter_focused: bool,
 ) {
     let columns =
         Layout::horizontal([Constraint::Percentage(60), Constraint::Percentage(40)]).split(area);
-    draw_panel_card(
+    draw_audit_entries_card(
         frame,
         columns[0],
-        "Entries",
+        focus,
         audit_list_lines,
-        focus == Focus::AuditList,
+        audit_filter,
+        audit_filter_focused,
     );
     draw_panel_card(frame, columns[1], "Entry detail", audit_detail_lines, false);
+}
+
+fn draw_audit_entries_card(
+    frame: &mut Frame,
+    area: Rect,
+    focus: Focus,
+    audit_list_lines: &[String],
+    audit_filter: &str,
+    audit_filter_focused: bool,
+) {
+    let entries_focused = focus == Focus::AuditList;
+    let border_style = if audit_filter_focused || entries_focused {
+        Style::default().fg(theme::BORDER_ACTIVE())
+    } else {
+        Style::default().fg(theme::BORDER())
+    };
+    let block = Block::default()
+        .title(" Entries ")
+        .borders(Borders::ALL)
+        .border_style(border_style);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(audit_filter_line(audit_filter, audit_filter_focused)),
+        layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(layout[1].width as usize),
+            Style::default().fg(theme::BORDER()),
+        ))),
+        layout[1],
+    );
+    let body_lines: Vec<Line<'_>> = audit_list_lines
+        .iter()
+        .map(|line| {
+            Line::from(Span::styled(
+                line.as_str(),
+                Style::default().fg(theme::TEXT()),
+            ))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(body_lines).wrap(Wrap { trim: true }),
+        layout[2],
+    );
+}
+
+fn audit_filter_line(value: &str, focused: bool) -> Line<'static> {
+    let label_style = if focused {
+        Style::default()
+            .fg(theme::AMBER_GLOW())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::TEXT_DIM())
+    };
+    let caret_style = if focused {
+        Style::default().fg(theme::AMBER_GLOW())
+    } else {
+        Style::default().fg(theme::AMBER_DIM())
+    };
+    let value_style = if focused {
+        Style::default().fg(theme::TEXT_BRIGHT())
+    } else {
+        Style::default().fg(theme::TEXT())
+    };
+    let mut spans = vec![
+        Span::styled("filter ^F".to_string(), label_style),
+        Span::raw(" "),
+        Span::styled("> ".to_string(), caret_style),
+    ];
+    if value.is_empty() {
+        spans.push(Span::styled(
+            "actor:@alice target:@troll action:ban since:2026-04-20".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ));
+    } else {
+        spans.push(Span::styled(value.to_string(), value_style));
+        if focused {
+            spans.push(Span::styled(
+                "_".to_string(),
+                Style::default().fg(theme::AMBER_GLOW()),
+            ));
+        }
+    }
+    Line::from(spans)
 }
 
 fn draw_staff_panel(

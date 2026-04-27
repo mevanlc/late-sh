@@ -30,6 +30,7 @@ pub enum Focus {
     UserSessions,
     RoomList,
     StaffList,
+    AuditFilter,
     AuditList,
 }
 
@@ -158,6 +159,7 @@ pub struct State {
     selected_room_id: Option<Uuid>,
     selected_staff_id: Option<Uuid>,
     selected_audit_id: Option<Uuid>,
+    audit_filter: String,
     prompt: Option<Prompt>,
     ban_prompt: Option<BanPrompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
@@ -183,30 +185,41 @@ impl State {
             (Tab::Users, Focus::UserList, false) => Focus::Tabs,
             (Tab::Users, Focus::UserSessions, _) => Focus::Tabs,
             (Tab::Users, Focus::Tabs, _) => Focus::UserList,
-            (Tab::Users, Focus::RoomList | Focus::StaffList | Focus::AuditList, _) => {
-                Focus::UserList
-            }
+            (
+                Tab::Users,
+                Focus::RoomList | Focus::StaffList | Focus::AuditFilter | Focus::AuditList,
+                _,
+            ) => Focus::UserList,
             (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
             (
                 Tab::Rooms,
-                Focus::UserList | Focus::UserSessions | Focus::StaffList | Focus::AuditList,
+                Focus::UserList
+                | Focus::UserSessions
+                | Focus::StaffList
+                | Focus::AuditFilter
+                | Focus::AuditList,
                 _,
             ) => Focus::RoomList,
             (Tab::Staff, Focus::StaffList, _) => Focus::Tabs,
             (Tab::Staff, Focus::Tabs, _) => Focus::StaffList,
             (
                 Tab::Staff,
-                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::AuditList,
+                Focus::UserList
+                | Focus::UserSessions
+                | Focus::RoomList
+                | Focus::AuditFilter
+                | Focus::AuditList,
                 _,
             ) => Focus::StaffList,
+            (Tab::Audit, Focus::AuditFilter, _) => Focus::AuditList,
             (Tab::Audit, Focus::AuditList, _) => Focus::Tabs,
-            (Tab::Audit, Focus::Tabs, _) => Focus::AuditList,
+            (Tab::Audit, Focus::Tabs, _) => Focus::AuditFilter,
             (
                 Tab::Audit,
                 Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::StaffList,
                 _,
-            ) => Focus::AuditList,
+            ) => Focus::AuditFilter,
         };
     }
 
@@ -216,22 +229,35 @@ impl State {
             (Tab::Users, Focus::UserSessions, _) => Focus::UserList,
             (Tab::Users, Focus::Tabs, true) => Focus::UserSessions,
             (Tab::Users, Focus::Tabs, false) => Focus::UserList,
-            (Tab::Users, Focus::RoomList | Focus::StaffList | Focus::AuditList, _) => Focus::Tabs,
+            (
+                Tab::Users,
+                Focus::RoomList | Focus::StaffList | Focus::AuditFilter | Focus::AuditList,
+                _,
+            ) => Focus::Tabs,
             (Tab::Rooms, Focus::RoomList, _) => Focus::Tabs,
             (Tab::Rooms, Focus::Tabs, _) => Focus::RoomList,
             (
                 Tab::Rooms,
-                Focus::UserList | Focus::UserSessions | Focus::StaffList | Focus::AuditList,
+                Focus::UserList
+                | Focus::UserSessions
+                | Focus::StaffList
+                | Focus::AuditFilter
+                | Focus::AuditList,
                 _,
             ) => Focus::Tabs,
             (Tab::Staff, Focus::StaffList, _) => Focus::Tabs,
             (Tab::Staff, Focus::Tabs, _) => Focus::StaffList,
             (
                 Tab::Staff,
-                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::AuditList,
+                Focus::UserList
+                | Focus::UserSessions
+                | Focus::RoomList
+                | Focus::AuditFilter
+                | Focus::AuditList,
                 _,
             ) => Focus::Tabs,
-            (Tab::Audit, Focus::AuditList, _) => Focus::Tabs,
+            (Tab::Audit, Focus::AuditFilter, _) => Focus::Tabs,
+            (Tab::Audit, Focus::AuditList, _) => Focus::AuditFilter,
             (Tab::Audit, Focus::Tabs, _) => Focus::AuditList,
             (
                 Tab::Audit,
@@ -243,20 +269,30 @@ impl State {
 
     pub fn normalize_focus(&mut self, has_user_sessions: bool) {
         self.focus = match (self.selected_tab(), self.focus, has_user_sessions) {
-            (Tab::Users, Focus::RoomList | Focus::StaffList | Focus::AuditList, _) => {
-                Focus::UserList
-            }
+            (
+                Tab::Users,
+                Focus::RoomList | Focus::StaffList | Focus::AuditFilter | Focus::AuditList,
+                _,
+            ) => Focus::UserList,
             (Tab::Users, Focus::UserSessions, false) => Focus::UserList,
             (Tab::Users, focus, _) => focus,
             (
                 Tab::Rooms,
-                Focus::UserList | Focus::UserSessions | Focus::StaffList | Focus::AuditList,
+                Focus::UserList
+                | Focus::UserSessions
+                | Focus::StaffList
+                | Focus::AuditFilter
+                | Focus::AuditList,
                 _,
             ) => Focus::RoomList,
             (Tab::Rooms, focus, _) => focus,
             (
                 Tab::Staff,
-                Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::AuditList,
+                Focus::UserList
+                | Focus::UserSessions
+                | Focus::RoomList
+                | Focus::AuditFilter
+                | Focus::AuditList,
                 _,
             ) => Focus::StaffList,
             (Tab::Staff, focus, _) => focus,
@@ -264,7 +300,7 @@ impl State {
                 Tab::Audit,
                 Focus::UserList | Focus::UserSessions | Focus::RoomList | Focus::StaffList,
                 _,
-            ) => Focus::AuditList,
+            ) => Focus::AuditFilter,
             (Tab::Audit, focus, _) => focus,
         };
     }
@@ -281,8 +317,16 @@ impl State {
         self.focus = Focus::StaffList;
     }
 
+    pub fn focus_audit_filter(&mut self) {
+        self.focus = Focus::AuditFilter;
+    }
+
     pub fn focus_audit_list(&mut self) {
         self.focus = Focus::AuditList;
+    }
+
+    pub fn is_audit_filter_focused(&self) -> bool {
+        self.selected_tab() == Tab::Audit && self.focus == Focus::AuditFilter
     }
 
     fn clear_pending_state(&mut self) {
@@ -293,14 +337,30 @@ impl State {
 
     pub fn next_tab(&mut self) {
         self.selected_tab = (self.selected_tab + 1) % TAB_COUNT;
-        self.normalize_focus(false);
+        self.apply_default_tab_focus();
         self.clear_pending_state();
     }
 
     pub fn prev_tab(&mut self) {
         self.selected_tab = (self.selected_tab + TAB_COUNT - 1) % TAB_COUNT;
-        self.normalize_focus(false);
+        self.apply_default_tab_focus();
         self.clear_pending_state();
+    }
+
+    fn apply_default_tab_focus(&mut self) {
+        // Tabs focus is sticky — h/l between tabs keeps the user on the row.
+        // Otherwise each tab opens with its primary input area focused; for
+        // Audit that's the filter so typing edits text instead of bouncing
+        // through hotkeys.
+        if self.focus == Focus::Tabs {
+            return;
+        }
+        self.focus = match self.selected_tab() {
+            Tab::Users => Focus::UserList,
+            Tab::Rooms => Focus::RoomList,
+            Tab::Staff => Focus::StaffList,
+            Tab::Audit => Focus::AuditFilter,
+        };
     }
 
     pub fn selected_room_id(&self) -> Option<Uuid> {
@@ -440,6 +500,43 @@ impl State {
             return;
         }
         self.selected_audit_id = audit_ids.first().copied();
+    }
+
+    pub fn audit_filter(&self) -> &str {
+        &self.audit_filter
+    }
+
+    pub fn audit_filter_push(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.audit_filter.push(ch);
+    }
+
+    pub fn audit_filter_backspace(&mut self) {
+        self.audit_filter.pop();
+    }
+
+    pub fn audit_filter_delete_word_left(&mut self) {
+        while self.audit_filter.ends_with(char::is_whitespace) {
+            self.audit_filter.pop();
+        }
+        while self
+            .audit_filter
+            .chars()
+            .last()
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            self.audit_filter.pop();
+        }
+    }
+
+    pub fn clear_audit_filter(&mut self) -> bool {
+        if self.audit_filter.is_empty() {
+            return false;
+        }
+        self.audit_filter.clear();
+        true
     }
 
     pub fn move_audit_selection(&mut self, audit_ids: &[Uuid], delta: isize) -> bool {

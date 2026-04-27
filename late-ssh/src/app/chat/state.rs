@@ -967,22 +967,38 @@ impl ChatState {
         format_control_center_staff_detail_lines(&self.staff_users_snapshot, selected_staff_id)
     }
 
-    pub fn control_center_audit_ids(&self) -> Vec<Uuid> {
+    pub fn control_center_audit_ids(&self, filter: &AuditFilter) -> Vec<Uuid> {
         self.audit_log_snapshot
             .iter()
+            .filter(|entry| audit_entry_matches(entry, filter))
             .map(|entry| entry.id)
             .collect()
     }
 
-    pub fn control_center_audit_list_lines(&self, selected_audit_id: Option<Uuid>) -> Vec<String> {
-        format_control_center_audit_list_lines(&self.audit_log_snapshot, selected_audit_id)
+    pub fn control_center_audit_list_lines(
+        &self,
+        selected_audit_id: Option<Uuid>,
+        filter: &AuditFilter,
+    ) -> Vec<String> {
+        let entries: Vec<&AuditLogEntry> = self
+            .audit_log_snapshot
+            .iter()
+            .filter(|entry| audit_entry_matches(entry, filter))
+            .collect();
+        format_control_center_audit_list_lines(&entries, selected_audit_id)
     }
 
     pub fn control_center_audit_detail_lines(
         &self,
         selected_audit_id: Option<Uuid>,
+        filter: &AuditFilter,
     ) -> Vec<String> {
-        format_control_center_audit_detail_lines(&self.audit_log_snapshot, selected_audit_id)
+        let entries: Vec<&AuditLogEntry> = self
+            .audit_log_snapshot
+            .iter()
+            .filter(|entry| audit_entry_matches(entry, filter))
+            .collect();
+        format_control_center_audit_detail_lines(&entries, selected_audit_id)
     }
 
     pub fn control_center_room_ids(&self) -> Vec<Uuid> {
@@ -2979,8 +2995,161 @@ fn format_audit_target(entry: &AuditLogEntry) -> String {
     }
 }
 
+/// Parsed audit-log filter built from the Audit tab's text input.
+///
+/// Tokens are whitespace-separated. A token of the form `key:value` is
+/// structured (supported keys: `actor`, `target`, `action`, `kind`,
+/// `since`, `until`); any bare token becomes a free-text fragment matched
+/// case-insensitively against actor / target / action / kind. An empty
+/// filter matches every entry.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AuditFilter {
+    actor: Option<String>,
+    target: Option<String>,
+    action: Option<String>,
+    kind: Option<String>,
+    since: Option<chrono::DateTime<chrono::Utc>>,
+    until: Option<chrono::DateTime<chrono::Utc>>,
+    free_text: Vec<String>,
+}
+
+impl AuditFilter {
+    pub fn is_empty(&self) -> bool {
+        self.actor.is_none()
+            && self.target.is_none()
+            && self.action.is_none()
+            && self.kind.is_none()
+            && self.since.is_none()
+            && self.until.is_none()
+            && self.free_text.is_empty()
+    }
+}
+
+pub fn parse_audit_filter(input: &str) -> AuditFilter {
+    let mut out = AuditFilter::default();
+    for raw in input.split_whitespace() {
+        if let Some((key, value)) = raw.split_once(':') {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            match key.to_ascii_lowercase().as_str() {
+                "actor" => out.actor = Some(strip_at(value).to_ascii_lowercase()),
+                "target" => out.target = Some(strip_at(value).to_ascii_lowercase()),
+                "action" => out.action = Some(value.to_ascii_lowercase()),
+                "kind" => out.kind = Some(value.to_ascii_lowercase()),
+                "since" => {
+                    if let Some(dt) = parse_filter_date_start(value) {
+                        out.since = Some(dt);
+                    }
+                }
+                "until" => {
+                    if let Some(dt) = parse_filter_date_end(value) {
+                        out.until = Some(dt);
+                    }
+                }
+                _ => out.free_text.push(raw.to_ascii_lowercase()),
+            }
+        } else {
+            out.free_text.push(raw.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+fn strip_at(value: &str) -> &str {
+    value.strip_prefix('@').unwrap_or(value)
+}
+
+fn parse_filter_date_start(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    let dt = date.and_time(NaiveTime::from_hms_opt(0, 0, 0)?);
+    Utc.from_local_datetime(&dt).single()
+}
+
+fn parse_filter_date_end(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::{Days, NaiveDate, NaiveTime, TimeZone, Utc};
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").ok()?;
+    // until: is exclusive end-of-day so that until:2026-04-20 includes the 20th.
+    let next = date.checked_add_days(Days::new(1))?;
+    let dt = next.and_time(NaiveTime::from_hms_opt(0, 0, 0)?);
+    Utc.from_local_datetime(&dt).single()
+}
+
+fn audit_entry_matches(entry: &AuditLogEntry, filter: &AuditFilter) -> bool {
+    if filter.is_empty() {
+        return true;
+    }
+    if let Some(want) = filter.actor.as_deref() {
+        let actor = entry
+            .actor_username
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if actor != want {
+            return false;
+        }
+    }
+    if let Some(want) = filter.target.as_deref() {
+        let target = entry
+            .target_username
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        if target != want {
+            return false;
+        }
+    }
+    if let Some(want) = filter.action.as_deref()
+        && !entry.action.to_ascii_lowercase().contains(want)
+    {
+        return false;
+    }
+    if let Some(want) = filter.kind.as_deref()
+        && entry.target_kind.to_ascii_lowercase() != want
+    {
+        return false;
+    }
+    if let Some(since) = filter.since
+        && entry.created < since
+    {
+        return false;
+    }
+    if let Some(until) = filter.until
+        && entry.created >= until
+    {
+        return false;
+    }
+    if !filter.free_text.is_empty() {
+        let haystack = audit_entry_haystack(entry);
+        for needle in &filter.free_text {
+            if !haystack.contains(needle) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn audit_entry_haystack(entry: &AuditLogEntry) -> String {
+    let mut buf = String::new();
+    buf.push_str(&entry.action.to_ascii_lowercase());
+    buf.push(' ');
+    buf.push_str(&entry.target_kind.to_ascii_lowercase());
+    if let Some(name) = entry.actor_username.as_deref() {
+        buf.push(' ');
+        buf.push_str(&name.to_ascii_lowercase());
+    }
+    if let Some(name) = entry.target_username.as_deref() {
+        buf.push(' ');
+        buf.push_str(&name.to_ascii_lowercase());
+    }
+    buf
+}
+
 fn format_control_center_audit_list_lines(
-    entries: &[AuditLogEntry],
+    entries: &[&AuditLogEntry],
     selected_audit_id: Option<Uuid>,
 ) -> Vec<String> {
     if entries.is_empty() {
@@ -2988,7 +3157,7 @@ fn format_control_center_audit_list_lines(
     }
     entries
         .iter()
-        .map(|entry| {
+        .map(|&entry| {
             let marker = if Some(entry.id) == selected_audit_id {
                 ">"
             } else {
@@ -3006,15 +3175,15 @@ fn format_control_center_audit_list_lines(
 }
 
 fn format_control_center_audit_detail_lines(
-    entries: &[AuditLogEntry],
+    entries: &[&AuditLogEntry],
     selected_audit_id: Option<Uuid>,
 ) -> Vec<String> {
     if entries.is_empty() {
         return vec!["No audit entries".to_string()];
     }
     let selected = selected_audit_id
-        .and_then(|id| entries.iter().find(|entry| entry.id == id))
-        .or_else(|| entries.first());
+        .and_then(|id| entries.iter().find(|entry| entry.id == id).copied())
+        .or_else(|| entries.first().copied());
     let Some(entry) = selected else {
         return vec!["No entry selected".to_string()];
     };
@@ -4406,5 +4575,169 @@ mod tests {
 
         let names: Vec<_> = dms.iter().map(|r| dm_sort_key(r, me, &usernames)).collect();
         assert_eq!(names, vec!["@alice", "@bob", "@charlie"]);
+    }
+}
+
+#[cfg(test)]
+mod audit_filter_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use serde_json::json;
+
+    fn entry(
+        action: &str,
+        target_kind: &str,
+        actor: Option<&str>,
+        target: Option<&str>,
+        created: chrono::DateTime<chrono::Utc>,
+    ) -> AuditLogEntry {
+        AuditLogEntry {
+            id: Uuid::from_u128(1),
+            created,
+            action: action.to_string(),
+            target_kind: target_kind.to_string(),
+            target_id: target.map(|_| Uuid::from_u128(2)),
+            actor_user_id: Uuid::from_u128(3),
+            actor_username: actor.map(str::to_string),
+            target_username: target.map(str::to_string),
+            metadata: json!({}),
+        }
+    }
+
+    #[test]
+    fn empty_filter_matches_all() {
+        let f = parse_audit_filter("");
+        assert!(f.is_empty());
+        let e = entry(
+            "ban_user",
+            "user",
+            Some("alice"),
+            Some("troll"),
+            chrono::Utc::now(),
+        );
+        assert!(audit_entry_matches(&e, &f));
+    }
+
+    #[test]
+    fn actor_and_target_strip_at_and_ignore_case() {
+        let f = parse_audit_filter("actor:@Alice target:troll");
+        let hit = entry(
+            "ban_user",
+            "user",
+            Some("alice"),
+            Some("Troll"),
+            chrono::Utc::now(),
+        );
+        assert!(audit_entry_matches(&hit, &f));
+        let miss = entry(
+            "ban_user",
+            "user",
+            Some("bob"),
+            Some("Troll"),
+            chrono::Utc::now(),
+        );
+        assert!(!audit_entry_matches(&miss, &f));
+    }
+
+    #[test]
+    fn action_is_substring_match() {
+        let f = parse_audit_filter("action:ban");
+        let permaban = entry(
+            "ban_user_permanent",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        let kick = entry(
+            "room_kick",
+            "room",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        assert!(audit_entry_matches(&permaban, &f));
+        assert!(!audit_entry_matches(&kick, &f));
+    }
+
+    #[test]
+    fn since_until_bracket_creation_time() {
+        let f = parse_audit_filter("since:2026-04-20 until:2026-04-22");
+        let on_20 = entry(
+            "x",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc.with_ymd_and_hms(2026, 4, 20, 12, 0, 0).unwrap(),
+        );
+        let on_22 = entry(
+            "x",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc.with_ymd_and_hms(2026, 4, 22, 23, 0, 0).unwrap(),
+        );
+        let on_23 = entry(
+            "x",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc.with_ymd_and_hms(2026, 4, 23, 0, 0, 0).unwrap(),
+        );
+        let before = entry(
+            "x",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc
+                .with_ymd_and_hms(2026, 4, 19, 23, 59, 59)
+                .unwrap(),
+        );
+        assert!(audit_entry_matches(&on_20, &f));
+        assert!(audit_entry_matches(&on_22, &f));
+        assert!(!audit_entry_matches(&on_23, &f));
+        assert!(!audit_entry_matches(&before, &f));
+    }
+
+    #[test]
+    fn free_text_searches_actor_target_action_kind() {
+        let f = parse_audit_filter("troll");
+        let hit = entry(
+            "delete_message",
+            "message",
+            Some("alice"),
+            Some("troll"),
+            chrono::Utc::now(),
+        );
+        let miss = entry(
+            "delete_message",
+            "message",
+            Some("alice"),
+            Some("evan"),
+            chrono::Utc::now(),
+        );
+        assert!(audit_entry_matches(&hit, &f));
+        assert!(!audit_entry_matches(&miss, &f));
+    }
+
+    #[test]
+    fn unknown_keys_become_free_text() {
+        let f = parse_audit_filter("color:blue");
+        let hit = entry(
+            "color:blue",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        let miss = entry("ban", "user", Some("a"), Some("t"), chrono::Utc::now());
+        assert!(audit_entry_matches(&hit, &f));
+        assert!(!audit_entry_matches(&miss, &f));
+    }
+
+    #[test]
+    fn malformed_dates_are_ignored() {
+        let f = parse_audit_filter("since:not-a-date");
+        assert!(f.since.is_none());
     }
 }
