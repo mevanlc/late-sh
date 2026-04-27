@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use getrandom::SysRng;
 use late_core::MutexRecover;
 use late_core::models::server_ban::ServerBan;
+use late_core::models::ssh_session_event::{SshEventType, SshSessionEvent};
 use late_core::models::user::{User, UserParams, extract_theme_id};
 use russh::keys::{PrivateKey, signature::rand_core::UnwrapErr};
 use russh::server::{Auth, Msg, Session};
@@ -412,6 +413,27 @@ impl Drop for ClientHandler {
                     active.connection_count -= 1;
                 }
             }
+
+            let db = self.state.db.clone();
+            let user_id = user.id;
+            tokio::spawn(async move {
+                match db.get().await {
+                    Ok(client) => {
+                        if let Err(e) = SshSessionEvent::record(
+                            &client,
+                            Some(user_id),
+                            SshEventType::Disconnect,
+                        )
+                        .await
+                        {
+                            tracing::warn!(error = ?e, "failed to log ssh disconnect event");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "failed to get db client for ssh disconnect event")
+                    }
+                }
+            });
         }
 
         if self.over_limit || !self.per_ip_incremented {
@@ -535,6 +557,24 @@ impl russh::server::Handler for ClientHandler {
             }
             self.active_user_incremented = true;
             metrics::add_ssh_session(1);
+
+            let db = self.state.db.clone();
+            let user_id = user.id;
+            tokio::spawn(async move {
+                match db.get().await {
+                    Ok(client) => {
+                        if let Err(e) =
+                            SshSessionEvent::record(&client, Some(user_id), SshEventType::Connect)
+                                .await
+                        {
+                            tracing::warn!(error = ?e, "failed to log ssh connect event");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = ?e, "failed to get db client for ssh connect event")
+                    }
+                }
+            });
         }
 
         let username = user.username.clone();

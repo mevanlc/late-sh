@@ -20,6 +20,7 @@ pub mod server_ban;
 pub mod showcase;
 pub mod showcase_feed_read;
 pub mod solitaire;
+pub mod ssh_session_event;
 pub mod sudoku;
 pub mod tetris;
 pub mod twenty_forty_eight;

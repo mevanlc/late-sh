@@ -6,7 +6,14 @@ use std::{
 
 use anyhow::Context;
 use late_core::{
-    api_types::NowPlaying, db::Db, icecast, models::chat_room::ChatRoom, rate_limit::IpRateLimiter,
+    api_types::NowPlaying,
+    db::Db,
+    icecast,
+    models::{
+        chat_room::ChatRoom,
+        ssh_session_event::{SshEventType, SshSessionEvent},
+    },
+    rate_limit::IpRateLimiter,
     shutdown::CancellationToken,
 };
 use late_ssh::{
@@ -38,6 +45,22 @@ fn begin_drain(
         .store(true, std::sync::atomic::Ordering::Relaxed);
     accept_shutdown.cancel();
     singleton_shutdown.cancel();
+
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        match db.get().await {
+            Ok(client) => {
+                if let Err(e) =
+                    SshSessionEvent::record(&client, None, SshEventType::ServerShutdown).await
+                {
+                    tracing::warn!(error = ?e, "failed to log server_shutdown event");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error = ?e, "failed to get db client for server_shutdown event")
+            }
+        }
+    });
 }
 
 async fn finish_ssh_drain(
@@ -304,6 +327,28 @@ async fn main() -> anyhow::Result<()> {
                     return Ok(());
                 }
                 std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        }
+        Ok(())
+    });
+
+    let prune_shutdown = singleton_shutdown.clone();
+    let prune_db = state.db.clone();
+    tasks.spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(86_400));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = prune_shutdown.cancelled() => break,
+                _ = interval.tick() => {
+                    match prune_db.get().await {
+                        Ok(client) => match SshSessionEvent::prune(&client, 90).await {
+                            Ok(n) => tracing::info!(rows = n, "pruned ssh_session_events"),
+                            Err(e) => tracing::warn!(error = ?e, "failed to prune ssh_session_events"),
+                        },
+                        Err(e) => tracing::warn!(error = ?e, "failed to get db client for ssh_session_events prune"),
+                    }
+                }
             }
         }
         Ok(())
