@@ -52,6 +52,7 @@ pub enum Screen {
     Dashboard,
     Chat,
     Games,
+    Rooms,
     Artboard,
 }
 
@@ -61,7 +62,8 @@ impl Screen {
             Screen::ControlCenter => Screen::Dashboard,
             Screen::Dashboard => Screen::Chat,
             Screen::Chat => Screen::Games,
-            Screen::Games => Screen::Artboard,
+            Screen::Games => Screen::Rooms,
+            Screen::Rooms => Screen::Artboard,
             Screen::Artboard => Screen::Dashboard,
         }
     }
@@ -72,7 +74,8 @@ impl Screen {
             Screen::Dashboard => Screen::Artboard,
             Screen::Chat => Screen::Dashboard,
             Screen::Games => Screen::Chat,
-            Screen::Artboard => Screen::Games,
+            Screen::Rooms => Screen::Games,
+            Screen::Artboard => Screen::Rooms,
         }
     }
 }
@@ -99,6 +102,7 @@ pub fn draw_tabs(frame: &mut Frame, area: Rect, current: Screen) {
         Screen::Dashboard => "Dashboard",
         Screen::Chat => "Chat",
         Screen::Games => "Games",
+        Screen::Rooms => "Rooms",
         Screen::Artboard => "Artboard",
     };
 
@@ -157,7 +161,8 @@ mod tests {
         assert_eq!(Screen::ControlCenter.next(), Screen::Dashboard);
         assert_eq!(Screen::Dashboard.next(), Screen::Chat);
         assert_eq!(Screen::Chat.next(), Screen::Games);
-        assert_eq!(Screen::Games.next(), Screen::Artboard);
+        assert_eq!(Screen::Games.next(), Screen::Rooms);
+        assert_eq!(Screen::Rooms.next(), Screen::Artboard);
         assert_eq!(Screen::Artboard.next(), Screen::Dashboard);
     }
 
@@ -167,7 +172,8 @@ mod tests {
         assert_eq!(Screen::Dashboard.prev(), Screen::Artboard);
         assert_eq!(Screen::Chat.prev(), Screen::Dashboard);
         assert_eq!(Screen::Games.prev(), Screen::Chat);
-        assert_eq!(Screen::Artboard.prev(), Screen::Games);
+        assert_eq!(Screen::Rooms.prev(), Screen::Games);
+        assert_eq!(Screen::Artboard.prev(), Screen::Rooms);
     }
 
     #[test]

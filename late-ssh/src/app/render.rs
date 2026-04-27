@@ -95,13 +95,18 @@ struct DrawContext<'a> {
     chat_view: chat::ui::ChatRenderInput<'a>,
     game_selection: usize,
     is_playing_game: bool,
+    rooms_add_form_open: bool,
+    rooms_display_name_input: &'a str,
+    rooms_snapshot: &'a crate::app::rooms::svc::RoomsSnapshot,
+    rooms_selected_index: usize,
+    rooms_active_room: Option<&'a crate::app::rooms::svc::RoomListItem>,
     twenty_forty_eight_state: &'a crate::app::games::twenty_forty_eight::state::State,
     tetris_state: &'a crate::app::games::tetris::state::State,
     sudoku_state: &'a crate::app::games::sudoku::state::State,
     nonogram_state: &'a crate::app::games::nonogram::state::State,
     solitaire_state: &'a crate::app::games::solitaire::state::State,
     minesweeper_state: &'a crate::app::games::minesweeper::state::State,
-    blackjack_state: &'a crate::app::games::blackjack::state::State,
+    blackjack_state: &'a crate::app::rooms::blackjack::state::State,
     dartboard_state: Option<&'a crate::app::artboard::state::State>,
     artboard_interacting: bool,
     leaderboard: &'a Arc<LeaderboardData>,
@@ -269,6 +274,7 @@ impl App {
         let news_view = chat::news::ui::ArticleListView {
             articles: self.chat.news.all_articles(),
             selected_index: self.chat.news.selected_index(),
+            marker_read_at: self.chat.news.marker_read_at(),
         };
         let discover_view = chat::discover::ui::DiscoverListView {
             items: self.chat.discover.all_items(),
@@ -277,7 +283,17 @@ impl App {
         let notifications_view = chat::notifications::ui::NotificationListView {
             items: self.chat.notifications.all_items(),
             selected_index: self.chat.notifications.selected_index(),
+            marker_read_at: self.chat.notifications.marker_read_at(),
         };
+        let showcase_view = chat::showcase::ui::ShowcaseListView {
+            items: self.chat.showcase.all_items(),
+            selected_index: self.chat.showcase.selected_index(),
+            current_user_id: self.user_id,
+            is_admin: self.chat.showcase.is_admin(),
+            marker_read_at: self.chat.showcase.marker_read_at(),
+        };
+        let showcase_unread_count = self.chat.showcase.unread_count();
+        let showcase_composing = self.chat.showcase.composing();
         let chat_view = chat::ui::ChatRenderInput {
             news_selected: self.chat.news_selected,
             news_unread_count: self.chat.news.unread_count(),
@@ -313,6 +329,11 @@ impl App {
             notifications_selected: self.chat.notifications_selected,
             notifications_unread_count: self.chat.notifications.unread_count(),
             notifications_view,
+            showcase_selected: self.chat.showcase_selected,
+            showcase_unread_count,
+            showcase_view,
+            showcase_state: Some(&self.chat.showcase),
+            showcase_composing,
         };
         self.settings_modal_state
             .set_modal_width(settings_modal::ui::MODAL_WIDTH);
@@ -404,6 +425,11 @@ impl App {
                         chat_view,
                         game_selection: self.game_selection,
                         is_playing_game: self.is_playing_game,
+                        rooms_add_form_open: self.rooms_add_form_open,
+                        rooms_display_name_input: self.rooms_display_name_input.as_str(),
+                        rooms_snapshot: &self.rooms_snapshot,
+                        rooms_selected_index: self.rooms_selected_index,
+                        rooms_active_room: self.rooms_active_room.as_ref(),
                         twenty_forty_eight_state: &self.twenty_forty_eight_state,
                         tetris_state: &self.tetris_state,
                         sudoku_state: &self.sudoku_state,
@@ -690,6 +716,19 @@ impl App {
                     show_sidebar: ctx.show_games_sidebar,
                 },
             ),
+            Screen::Rooms => crate::app::rooms::ui::draw_rooms_page(
+                frame,
+                content_area,
+                &crate::app::rooms::ui::RoomsPageView {
+                    add_form_open: ctx.rooms_add_form_open,
+                    display_name: ctx.rooms_display_name_input,
+                    snapshot: ctx.rooms_snapshot,
+                    selected_index: ctx.rooms_selected_index,
+                    active_room: ctx.rooms_active_room,
+                    blackjack_state: ctx.blackjack_state,
+                    is_admin: ctx.is_admin,
+                },
+            ),
         }
 
         if let Some(sidebar_area) = sidebar_area {
@@ -782,7 +821,7 @@ impl App {
             } else {
                 ("Pair", "Scan to pair audio")
             };
-            super::qr::draw_qr_overlay(frame, inner, url, title, subtitle);
+            super::common::qr::draw_qr_overlay(frame, inner, url, title, subtitle);
         }
 
         if ctx.icon_picker_open
@@ -823,6 +862,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Chat => "Chat",
         Screen::Games => "The Arcade",
         Screen::Artboard => "Artboard",
+        Screen::Rooms => "Rooms",
     };
     spans.push(Span::styled(
         " | ",
@@ -890,7 +930,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
 }
 
 fn frame_title_tabs(show_control_center: bool) -> Vec<(Screen, &'static str)> {
-    let mut tabs = Vec::with_capacity(if show_control_center { 5 } else { 4 });
+    let mut tabs = Vec::with_capacity(if show_control_center { 6 } else { 5 });
     if show_control_center {
         tabs.push((Screen::ControlCenter, "0"));
     }
@@ -898,7 +938,8 @@ fn frame_title_tabs(show_control_center: bool) -> Vec<(Screen, &'static str)> {
         (Screen::Dashboard, "1"),
         (Screen::Chat, "2"),
         (Screen::Games, "3"),
-        (Screen::Artboard, "4"),
+        (Screen::Rooms, "4"),
+        (Screen::Artboard, "5"),
     ]);
     tabs
 }
@@ -1019,7 +1060,8 @@ mod tests {
                 (Screen::Dashboard, "1"),
                 (Screen::Chat, "2"),
                 (Screen::Games, "3"),
-                (Screen::Artboard, "4"),
+                (Screen::Rooms, "4"),
+                (Screen::Artboard, "5"),
             ]
         );
     }
@@ -1033,7 +1075,8 @@ mod tests {
                 (Screen::Dashboard, "1"),
                 (Screen::Chat, "2"),
                 (Screen::Games, "3"),
-                (Screen::Artboard, "4"),
+                (Screen::Rooms, "4"),
+                (Screen::Artboard, "5"),
             ]
         );
     }
