@@ -223,7 +223,7 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
     wait_for_render_contains(&mut app, "Control Center").await;
     app.handle_input(b"2");
     wait_for_render_contains(&mut app, " User Directory ").await;
-    wait_for_render_contains(&mut app, "> @screen-zero-staff  ·0").await;
+    wait_for_render_contains(&mut app, "> @screen-zero-staff    0 m").await;
 
     app.handle_input(b"l");
     wait_for_render_contains(&mut app, " Room Directory ").await;
@@ -894,11 +894,11 @@ async fn admin_can_disconnect_selected_user_from_control_center() {
     wait_for_render_contains(&mut app, "Control Center").await;
     app.handle_input(b"2");
     wait_for_render_contains(&mut app, " User Directory ").await;
-    wait_for_render_contains(&mut app, "> @cc-user-admin  ·0 a").await;
-    wait_for_render_contains(&mut app, "@cc-user-target  ·1").await;
+    wait_for_render_contains(&mut app, "> @cc-user-admin        0 a").await;
+    wait_for_render_contains(&mut app, "@cc-user-target       1").await;
 
     app.handle_input(b"j");
-    wait_for_render_contains(&mut app, "> @cc-user-target  ·1").await;
+    wait_for_render_contains(&mut app, "> @cc-user-target       1").await;
     wait_for_render_contains(&mut app, "# of Sessions").await;
 
     app.handle_input(b"x");
@@ -970,10 +970,10 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, "Control Center").await;
     app.handle_input(b"2");
-    wait_for_render_contains(&mut app, "@cc-user-ban-target  ·1").await;
+    wait_for_render_contains(&mut app, "@cc-user-ban-target   1").await;
 
     app.handle_input(b"j");
-    wait_for_render_contains(&mut app, "> @cc-user-ban-target  ·1").await;
+    wait_for_render_contains(&mut app, "> @cc-user-ban-target   1").await;
 
     app.handle_input(b"b");
     wait_for_render_contains(&mut app, " Ban User ").await;
@@ -999,8 +999,7 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
         "Banned @cc-user-ban-target and disconnected 1 live session",
     )
     .await;
-    wait_for_render_contains(&mut app, "> @cc-user-ban-target !").await;
-    wait_for_render_contains(&mut app, "Currently banned: Yes").await;
+    wait_for_render_contains(&mut app, "Currently banned   Yes").await;
 
     wait_until(
         || async {
@@ -1030,7 +1029,7 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     app.handle_input(b"@cc-user-ban-target\r");
     wait_for_render_contains(&mut app, "Unbanning @cc-user-ban-target...").await;
     wait_for_render_contains(&mut app, "Unbanned @cc-user-ban-target").await;
-    wait_for_render_contains(&mut app, "Currently banned: No").await;
+    wait_for_render_contains(&mut app, "Currently banned   No").await;
 
     wait_until(
         || async {

@@ -124,6 +124,8 @@ struct DrawContext<'a> {
     control_center_tab: control_center::state::Tab,
     control_center_user_list_lines: &'a [String],
     control_center_user_detail_lines: &'a [String],
+    control_center_user_list_rows: Vec<chat::state::UserListRow>,
+    control_center_user_detail_rows: Vec<chat::state::UserDetailRow>,
     control_center_selected_user_name: Option<String>,
     control_center_user_filter: &'a str,
     control_center_user_filter_focused: bool,
@@ -358,6 +360,13 @@ impl App {
         let control_center_user_detail_lines = self
             .chat
             .control_center_user_detail_lines(selected_control_center_user_id);
+        let control_center_user_list_rows = self.chat.control_center_user_list_rows(
+            selected_control_center_user_id,
+            &control_center_user_filter_str,
+        );
+        let control_center_user_detail_rows = self
+            .chat
+            .control_center_user_detail_rows(selected_control_center_user_id);
         let control_center_selected_user_name = self
             .chat
             .control_center_selected_user_name(selected_control_center_user_id);
@@ -460,6 +469,8 @@ impl App {
                         control_center_tab: self.control_center.selected_tab(),
                         control_center_user_list_lines: &control_center_user_list_lines,
                         control_center_user_detail_lines: &control_center_user_detail_lines,
+                        control_center_user_list_rows,
+                        control_center_user_detail_rows,
                         control_center_selected_user_name,
                         control_center_user_filter: &control_center_user_filter_str,
                         control_center_user_filter_focused,
@@ -673,6 +684,8 @@ impl App {
                     live_session_count: ctx.live_session_count,
                     user_list_lines: ctx.control_center_user_list_lines,
                     user_detail_lines: ctx.control_center_user_detail_lines,
+                    user_list_rows: &ctx.control_center_user_list_rows,
+                    user_detail_rows: &ctx.control_center_user_detail_rows,
                     selected_user_name: ctx.control_center_selected_user_name.as_deref(),
                     user_filter: ctx.control_center_user_filter,
                     user_filter_focused: ctx.control_center_user_filter_focused,

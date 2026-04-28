@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 
+use crate::app::chat::state::{DetailValue, UserDetailRow, UserListRow};
 use crate::app::common::theme;
 
 use super::state::{BanPromptField, Tab};
@@ -32,6 +33,8 @@ pub struct ControlCenterView<'a> {
     pub live_session_count: usize,
     pub user_list_lines: &'a [String],
     pub user_detail_lines: &'a [String],
+    pub user_list_rows: &'a [UserListRow],
+    pub user_detail_rows: &'a [UserDetailRow],
     pub selected_user_name: Option<&'a str>,
     pub user_filter: &'a str,
     pub user_filter_focused: bool,
@@ -373,9 +376,9 @@ fn draw_user_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) 
         .split(area)
     } else {
         Layout::horizontal([
-            Constraint::Percentage(28),
-            Constraint::Percentage(42),
-            Constraint::Percentage(30),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
         ])
         .split(area)
     };
@@ -384,21 +387,26 @@ fn draw_user_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) 
         frame,
         columns[0],
         view.user_list_lines,
+        view.user_list_rows,
         view.user_filter,
         view.user_filter_focused,
     );
 
     let detail_title = view
         .selected_user_name
-        .map(|name| format!(" @{name} "))
-        .unwrap_or_else(|| " User Detail ".to_string());
-    draw_panel_card(
-        frame,
-        columns[1],
-        &detail_title,
-        view.user_detail_lines,
-        false,
-    );
+        .map(|name| format!("User: @{name}"))
+        .unwrap_or_else(|| "User Detail".to_string());
+    if view.user_detail_rows.is_empty() {
+        draw_panel_card(
+            frame,
+            columns[1],
+            &detail_title,
+            view.user_detail_lines,
+            false,
+        );
+    } else {
+        draw_user_detail_card(frame, columns[1], &detail_title, view.user_detail_rows);
+    }
 
     if let Some(prompt) = ban_prompt {
         draw_panel_card(
@@ -414,10 +422,13 @@ fn draw_user_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) 
     }
 }
 
+const USER_COL_WIDTH: usize = 22;
+
 fn draw_user_directory_card(
     frame: &mut Frame,
     area: Rect,
     user_list_lines: &[String],
+    user_list_rows: &[UserListRow],
     user_filter: &str,
     user_filter_focused: bool,
 ) {
@@ -434,9 +445,12 @@ fn draw_user_directory_card(
     frame.render_widget(block, area);
 
     let layout = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Fill(1),
+        Constraint::Length(1), // filter (top)
+        Constraint::Length(1), // divider
+        Constraint::Length(1), // header: "banned" flag line
+        Constraint::Length(1), // header: column labels
+        Constraint::Length(1), // divider
+        Constraint::Fill(1),   // list body
     ])
     .split(inner);
 
@@ -451,19 +465,163 @@ fn draw_user_directory_card(
         ))),
         layout[1],
     );
-    let body_lines: Vec<Line<'_>> = user_list_lines
-        .iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                line.as_str(),
-                Style::default().fg(theme::TEXT()),
-            ))
-        })
-        .collect();
+    frame.render_widget(Paragraph::new(user_list_header_line_2()), layout[2]);
+    frame.render_widget(Paragraph::new(user_list_header_line_1()), layout[3]);
     frame.render_widget(
-        Paragraph::new(body_lines).wrap(Wrap { trim: true }),
-        layout[2],
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(layout[4].width as usize),
+            Style::default().fg(theme::BORDER()),
+        ))),
+        layout[4],
     );
+
+    let body_lines: Vec<Line<'_>> = if user_list_rows.is_empty() {
+        user_list_lines
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.as_str(),
+                    Style::default().fg(theme::TEXT_FAINT()),
+                ))
+            })
+            .collect()
+    } else {
+        user_list_rows.iter().map(user_list_row_line).collect()
+    };
+    // No wrap: preserve leading whitespace (reserved arrow column) and clip long names.
+    frame.render_widget(Paragraph::new(body_lines), layout[5]);
+}
+
+fn user_list_header_line_1() -> Line<'static> {
+    // Layout (no · separator): prefix(2) + user(USER_COL_WIDTH) + count(1) + role(2) + ban(1)
+    // 'a' in admin/mod lands at position 2+USER_COL_WIDTH+1+1 = role indicator position.
+    // Fill gap so "#sessions " ends at the count column and 'a' lines up with the role letter.
+    // fill = role_indicator_pos - prefix(2) - "user"(4) - "#sessions "(10)
+    //      = (2 + USER_COL_WIDTH + 2) - 16 = USER_COL_WIDTH - 12
+    // Spaces must be styled so ratatui emits them (default-style spaces are no-ops in diff rendering).
+    let fill = " ".repeat(USER_COL_WIDTH - 12);
+    Line::from(vec![
+        Span::styled("  ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("user".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(fill, Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            "#sessions ".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+        Span::styled("a".to_string(), Style::default().fg(theme::AMBER())),
+        Span::styled(
+            "dmin/".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+        Span::styled("m".to_string(), Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("od".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+    ])
+}
+
+fn user_list_header_line_2() -> Line<'static> {
+    // Rendered above the column-labels line. 'b' aligns with ban column:
+    // prefix(2) + USER_COL_WIDTH + count(1) + role(2) = ban position.
+    // Styled so ratatui emits the spaces (default-style spaces are no-ops).
+    let pad = " ".repeat(2 + USER_COL_WIDTH + 1 + 2);
+    Line::from(vec![
+        Span::styled(pad, Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled("b".to_string(), Style::default().fg(theme::ERROR())),
+        Span::styled(
+            "anned".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+    ])
+}
+
+fn user_list_row_line(row: &UserListRow) -> Line<'static> {
+    // Columns 0-1: fixed 2-char prefix — arrow occupies col 0, space occupies col 1.
+    // Paragraph renders without trimming so the "  " for non-selected is preserved,
+    // keeping @username pinned at col 2 regardless of selection state.
+    let prefix_span = if row.selected {
+        Span::styled("> ".to_string(), Style::default().fg(theme::AMBER_GLOW()))
+    } else {
+        Span::styled("  ".to_string(), Style::default().fg(theme::TEXT_FAINT()))
+    };
+
+    let at_name = format!("@{}", row.username);
+    let padded = format!("{:<width$}", at_name, width = USER_COL_WIDTH);
+    let username_style = if row.banned {
+        Style::default().fg(theme::ERROR())
+    } else if row.session_count > 0 {
+        Style::default().fg(theme::TEXT_BRIGHT())
+    } else {
+        Style::default().fg(theme::TEXT())
+    };
+    let username_span = Span::styled(padded, username_style);
+
+    let count_style = if row.session_count > 0 {
+        Style::default().fg(theme::AMBER())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
+    let count_span = Span::styled(row.session_count.to_string(), count_style);
+
+    // Role span is 2 chars (space + indicator) so the ban column stays fixed regardless of
+    // staff status. Spaces must be styled — default-style spaces are no-ops in differential rendering.
+    let role_span = if row.is_admin {
+        Span::styled(" a".to_string(), Style::default().fg(theme::AMBER()))
+    } else if row.is_moderator {
+        Span::styled(" m".to_string(), Style::default().fg(theme::TEXT_DIM()))
+    } else {
+        Span::styled("  ".to_string(), Style::default().fg(theme::TEXT_FAINT()))
+    };
+
+    let ban_span = if row.banned {
+        Span::styled("b".to_string(), Style::default().fg(theme::ERROR()))
+    } else {
+        Span::raw("")
+    };
+
+    Line::from(vec![
+        prefix_span,
+        username_span,
+        count_span,
+        role_span,
+        ban_span,
+    ])
+}
+
+fn draw_user_detail_card(frame: &mut Frame, area: Rect, title: &str, rows: &[UserDetailRow]) {
+    let block = Block::default()
+        .title(format!(" {title} "))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line<'_>> = rows.iter().map(user_detail_row_line).collect();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn user_detail_row_line(row: &UserDetailRow) -> Line<'static> {
+    // Pad to 19 so labels up to 18 chars always have at least one space before value.
+    let label_span = Span::styled(
+        format!("{:<19}", row.label),
+        Style::default().fg(theme::TEXT_DIM()),
+    );
+    let value_span = match &row.value {
+        DetailValue::Placeholder => Span::styled(
+            "\u{2014}".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+        DetailValue::Count(0) => {
+            Span::styled("0".to_string(), Style::default().fg(theme::TEXT_FAINT()))
+        }
+        DetailValue::Count(n) => Span::styled(n.to_string(), Style::default().fg(theme::AMBER())),
+        DetailValue::BanActive(note) => Span::styled(
+            format!("Yes  ({note})"),
+            Style::default().fg(theme::ERROR()),
+        ),
+        DetailValue::BanNone => {
+            Span::styled("No".to_string(), Style::default().fg(theme::TEXT_FAINT()))
+        }
+    };
+    Line::from(vec![label_span, value_span])
 }
 
 fn user_filter_line(value: &str, focused: bool) -> Line<'static> {
@@ -538,12 +696,22 @@ fn draw_actions_panel(frame: &mut Frame, area: Rect, is_admin: bool) {
         .into_iter()
         .map(|line| {
             let key = line.split_whitespace().next().unwrap_or("");
-            let style = if implemented.contains(&key) {
+            let active = implemented.contains(&key);
+            let key_style = if active {
+                Style::default().fg(theme::AMBER())
+            } else {
+                Style::default().fg(theme::TEXT_FAINT())
+            };
+            let label_style = if active {
                 Style::default().fg(theme::TEXT())
             } else {
                 Style::default().fg(theme::TEXT_FAINT())
             };
-            Line::from(Span::styled(line, style))
+            let (key_part, label_part) = line.split_at(line.find("  ").unwrap_or(line.len()));
+            Line::from(vec![
+                Span::styled(key_part.to_string(), key_style),
+                Span::styled(label_part.to_string(), label_style),
+            ])
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);

@@ -905,6 +905,33 @@ impl ChatState {
         )
     }
 
+    pub fn control_center_user_list_rows(
+        &self,
+        selected_user_id: Option<Uuid>,
+        filter: &str,
+    ) -> Vec<UserListRow> {
+        build_user_list_rows(
+            &self.staff_users_snapshot,
+            self.session_registry.as_ref(),
+            selected_user_id,
+            filter,
+        )
+    }
+
+    pub fn control_center_user_detail_rows(
+        &self,
+        selected_user_id: Option<Uuid>,
+    ) -> Vec<UserDetailRow> {
+        let live_session_count = self
+            .user_sessions_for_control_center(selected_user_id)
+            .len();
+        build_user_detail_rows(
+            &self.staff_users_snapshot,
+            control_center_selected_user(&self.staff_users_snapshot, selected_user_id),
+            live_session_count,
+        )
+    }
+
     pub fn control_center_selected_user_name(
         &self,
         selected_user_id: Option<Uuid>,
@@ -2686,6 +2713,133 @@ fn annotate_staff_user_lines(
         }));
     }
     annotated
+}
+
+// --- Structured row types for Control Center UI rendering ---
+
+#[derive(Clone, Debug)]
+pub struct UserListRow {
+    pub selected: bool,
+    pub username: String,
+    pub banned: bool,
+    pub session_count: usize,
+    pub is_admin: bool,
+    pub is_moderator: bool,
+}
+
+#[derive(Clone, Debug)]
+pub enum DetailValue {
+    Placeholder,
+    Count(usize),
+    BanActive(String),
+    BanNone,
+}
+
+#[derive(Clone, Debug)]
+pub struct UserDetailRow {
+    pub label: &'static str,
+    pub value: DetailValue,
+}
+
+fn build_user_list_rows(
+    users: &[StaffUserRecord],
+    session_registry: Option<&SessionRegistry>,
+    selected_user_id: Option<Uuid>,
+    filter: &str,
+) -> Vec<UserListRow> {
+    if users.is_empty() {
+        return Vec::new();
+    }
+    let filter_lower = filter.trim().to_lowercase();
+    let visible: Vec<&StaffUserRecord> = users
+        .iter()
+        .filter(|user| {
+            filter_lower.is_empty() || user.username.to_lowercase().contains(&filter_lower)
+        })
+        .collect();
+    if visible.is_empty() {
+        return Vec::new();
+    }
+    visible
+        .iter()
+        .map(|user| {
+            let session_count = session_registry
+                .map(|r| r.sessions_for_user(user.user_id).len())
+                .unwrap_or(0);
+            UserListRow {
+                selected: Some(user.user_id) == selected_user_id,
+                username: user.username.clone(),
+                banned: user.active_server_ban.is_some(),
+                session_count,
+                is_admin: user.is_admin,
+                is_moderator: user.is_moderator,
+            }
+        })
+        .collect()
+}
+
+fn build_user_detail_rows(
+    users: &[StaffUserRecord],
+    selected_user: Option<&StaffUserRecord>,
+    live_session_count: usize,
+) -> Vec<UserDetailRow> {
+    if users.is_empty() {
+        return Vec::new();
+    }
+    let Some(user) = selected_user else {
+        return Vec::new();
+    };
+    let ban_value = if let Some(ban) = &user.active_server_ban {
+        let expires = match ban.expires_at {
+            None => "permanent".to_string(),
+            Some(expires_at) => format_relative_future(expires_at, chrono::Utc::now()),
+        };
+        DetailValue::BanActive(expires)
+    } else {
+        DetailValue::BanNone
+    };
+    vec![
+        UserDetailRow {
+            label: "Account Created",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "Last Login",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "Last Chat",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "Last Action",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "# of Sessions",
+            value: DetailValue::Count(live_session_count),
+        },
+        UserDetailRow {
+            label: "Currently banned",
+            value: ban_value,
+        },
+        UserDetailRow {
+            label: "Past bans",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "Past kicks",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "Past warnings",
+            value: DetailValue::Placeholder,
+        },
+        UserDetailRow {
+            label: "Past UGC deletes",
+            value: DetailValue::Placeholder,
+        },
+    ]
 }
 
 fn format_control_center_user_list_lines(
