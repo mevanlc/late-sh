@@ -669,11 +669,6 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
             }
         }
         ParsedInput::BackTab => {
-            if ctx.screen == Screen::ControlCenter {
-                app.control_center
-                    .focus_prev(control_center_has_user_sessions(app));
-                return;
-            }
             if ctx.screen == Screen::Chat && app.chat.room_jump_active {
                 return;
             }
@@ -937,6 +932,13 @@ fn route_char_to_composer(app: &mut App, ctx: InputContext, ch: char) -> bool {
         && !ch.is_control()
     {
         app.control_center.audit_filter_push(ch);
+        return true;
+    }
+    if ctx.screen == Screen::ControlCenter
+        && app.control_center.is_user_filter_focused()
+        && !ch.is_control()
+    {
+        app.control_center.user_filter_push(ch);
         return true;
     }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && ctx.chat_composing {
@@ -1381,6 +1383,7 @@ fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         match byte {
             0x1B => {
                 app.control_center.clear_audit_filter();
+                app.control_center.unfocus();
                 return true;
             }
             0x7F => {
@@ -1392,9 +1395,30 @@ fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
                 return true;
             }
             b'\r' | b'\n' => {
-                // Stepping into the list is what Enter / ↓ both do; we let
-                // ↓ remain the canonical move so Enter just no-ops the field.
-                app.control_center.focus_audit_list();
+                app.control_center.unfocus();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
+    if ctx.screen == Screen::ControlCenter && app.control_center.is_user_filter_focused() {
+        match byte {
+            0x1B => {
+                app.control_center.clear_user_filter();
+                app.control_center.unfocus();
+                return true;
+            }
+            0x7F => {
+                app.control_center.user_filter_backspace();
+                return true;
+            }
+            0x17 | 0x08 => {
+                app.control_center.user_filter_delete_word_left();
+                return true;
+            }
+            b'\r' | b'\n' => {
+                app.control_center.unfocus();
                 return true;
             }
             _ => {}
@@ -1564,6 +1588,10 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
     }
 
     match byte {
+        0x11 if ctx.screen == Screen::ControlCenter => {
+            app.set_screen(Screen::Dashboard);
+            true
+        }
         b'q' | b'Q' => {
             if ctx.screen == Screen::Artboard
                 && app
@@ -1641,6 +1669,26 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             app.show_bonsai_modal = true;
             true
         }
+        b'1' if ctx.screen == Screen::ControlCenter => {
+            app.control_center.go_to_tab(0);
+            true
+        }
+        b'2' if ctx.screen == Screen::ControlCenter => {
+            app.control_center.go_to_tab(1);
+            true
+        }
+        b'3' if ctx.screen == Screen::ControlCenter => {
+            app.control_center.go_to_tab(2);
+            true
+        }
+        b'4' if ctx.screen == Screen::ControlCenter => {
+            app.control_center.go_to_tab(3);
+            true
+        }
+        b'5' if ctx.screen == Screen::ControlCenter => {
+            app.control_center.go_to_tab(4);
+            true
+        }
         b'1' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);
             app.set_screen(Screen::Dashboard);
@@ -1674,11 +1722,6 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             true
         }
         b'\t' if !artboard_blocks_page_switch => {
-            if ctx.screen == Screen::ControlCenter {
-                app.control_center
-                    .focus_next(control_center_has_user_sessions(app));
-                return true;
-            }
             reset_composers_for_page_change(app);
             app.set_screen(ctx.screen.next());
             true
@@ -1709,15 +1752,20 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             dashboard::input::handle_key(app, byte);
         }
         Screen::ControlCenter => match byte {
-            // ^F focuses the Audit tab's filter from anywhere within the tab.
+            // ^F focuses the active tab's filter.
             0x06 if app.control_center.selected_tab()
-                == crate::app::control_center::state::Tab::Audit =>
+                == crate::app::control_center::state::Tab::Log =>
             {
                 app.control_center.focus_audit_filter();
             }
-            // ^R resets the Audit filter when on the Audit tab.
+            0x06 if app.control_center.selected_tab()
+                == crate::app::control_center::state::Tab::Users =>
+            {
+                app.control_center.focus_user_filter();
+            }
+            // ^R resets the Log filter when on the Log tab.
             0x12 if app.control_center.selected_tab()
-                == crate::app::control_center::state::Tab::Audit =>
+                == crate::app::control_center::state::Tab::Log =>
             {
                 app.control_center.clear_audit_filter();
                 app.control_center.focus_audit_filter();
@@ -1730,8 +1778,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             b'k' | b'K' => {
                 let _ = control_center_move_active_selection(app, -1);
             }
-            b'x' | b'X' => match app.control_center.focus() {
-                crate::app::control_center::state::Focus::UserList => {
+            b'x' | b'X' => match app.control_center.selected_tab() {
+                crate::app::control_center::state::Tab::Users => {
                     control_center_request_user_confirmation(
                         app,
                         crate::app::control_center::state::PendingConfirmAction::DisconnectUser {
@@ -1742,51 +1790,28 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                         "disconnect",
                     );
                 }
-                crate::app::control_center::state::Focus::UserSessions => {
-                    control_center_request_user_session_confirmation(
-                        app,
-                        crate::app::control_center::state::PendingConfirmAction::DisconnectUserSession {
-                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
-                            session_id: app
-                                .control_center
-                                .selected_user_session_id()
-                                .unwrap_or_default(),
-                        },
-                        "Disconnect Session",
-                        "This closes only the selected live session.",
-                        "disconnect",
-                    );
-                }
-                crate::app::control_center::state::Focus::RoomList => {
+                crate::app::control_center::state::Tab::Rooms => {
                     control_center_begin_room_action(
                         app,
                         crate::app::control_center::state::RoomAction::Kick,
                     );
                 }
-                crate::app::control_center::state::Focus::Tabs
-                | crate::app::control_center::state::Focus::StaffList
-                | crate::app::control_center::state::Focus::AuditFilter
-                | crate::app::control_center::state::Focus::AuditList => {}
+                _ => {}
             },
-            b'b' | b'B' => match app.control_center.focus() {
-                crate::app::control_center::state::Focus::UserList
-                | crate::app::control_center::state::Focus::UserSessions => {
+            b'b' | b'B' => match app.control_center.selected_tab() {
+                crate::app::control_center::state::Tab::Users => {
                     control_center_begin_ban_prompt(app);
                 }
-                crate::app::control_center::state::Focus::RoomList => {
+                crate::app::control_center::state::Tab::Rooms => {
                     control_center_begin_room_action(
                         app,
                         crate::app::control_center::state::RoomAction::Ban,
                     );
                 }
-                crate::app::control_center::state::Focus::Tabs
-                | crate::app::control_center::state::Focus::StaffList
-                | crate::app::control_center::state::Focus::AuditFilter
-                | crate::app::control_center::state::Focus::AuditList => {}
+                _ => {}
             },
-            b'u' | b'U' => match app.control_center.focus() {
-                crate::app::control_center::state::Focus::UserList
-                | crate::app::control_center::state::Focus::UserSessions => {
+            b'u' | b'U' => match app.control_center.selected_tab() {
+                crate::app::control_center::state::Tab::Users => {
                     control_center_request_user_confirmation(
                         app,
                         crate::app::control_center::state::PendingConfirmAction::UnbanUser {
@@ -1797,41 +1822,38 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                         "unban",
                     );
                 }
-                crate::app::control_center::state::Focus::RoomList => {
+                crate::app::control_center::state::Tab::Rooms => {
                     control_center_begin_room_action(
                         app,
                         crate::app::control_center::state::RoomAction::Unban,
                     );
                 }
-                crate::app::control_center::state::Focus::Tabs
-                | crate::app::control_center::state::Focus::StaffList
-                | crate::app::control_center::state::Focus::AuditFilter
-                | crate::app::control_center::state::Focus::AuditList => {}
+                _ => {}
             },
             b'm' | b'M'
-                if app.control_center.focus()
-                    == crate::app::control_center::state::Focus::UserList =>
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
             {
                 control_center_request_grant_moderator(app);
             }
             b'g' | b'G'
-                if app.control_center.focus()
-                    == crate::app::control_center::state::Focus::StaffList =>
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Staff =>
             {
                 control_center_request_grant_admin(app);
             }
-            b'r' | b'R' => match app.control_center.focus() {
-                crate::app::control_center::state::Focus::RoomList => {
+            b'r' | b'R' => match app.control_center.selected_tab() {
+                crate::app::control_center::state::Tab::Rooms => {
                     control_center_begin_admin_rename(app)
                 }
-                crate::app::control_center::state::Focus::StaffList => {
+                crate::app::control_center::state::Tab::Staff => {
                     control_center_request_revoke_moderator(app)
                 }
                 _ => {}
             },
             b'p' | b'P'
-                if app.control_center.focus()
-                    == crate::app::control_center::state::Focus::RoomList =>
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Rooms =>
             {
                 control_center_request_admin_confirmation(
                     app,
@@ -1845,8 +1867,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 )
             }
             b'v' | b'V'
-                if app.control_center.focus()
-                    == crate::app::control_center::state::Focus::RoomList =>
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Rooms =>
             {
                 control_center_request_admin_confirmation(
                     app,
@@ -1860,8 +1882,8 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 )
             }
             b'd' | b'D'
-                if app.control_center.focus()
-                    == crate::app::control_center::state::Focus::RoomList =>
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Rooms =>
             {
                 control_center_request_admin_confirmation(
                     app,
@@ -1891,34 +1913,33 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
 }
 
 fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
-    match app.control_center.focus() {
-        crate::app::control_center::state::Focus::Tabs => false,
-        crate::app::control_center::state::Focus::UserList => {
+    if app.control_center.is_user_filter_focused() {
+        app.control_center.unfocus();
+        return control_center_move_user_selection(app, delta);
+    }
+    if app.control_center.is_audit_filter_focused() {
+        app.control_center.unfocus();
+        return control_center_move_audit_selection(app, delta);
+    }
+    match app.control_center.selected_tab() {
+        crate::app::control_center::state::Tab::Status => false,
+        crate::app::control_center::state::Tab::Users => {
             control_center_move_user_selection(app, delta)
         }
-        crate::app::control_center::state::Focus::UserSessions => {
-            control_center_move_user_session_selection(app, delta)
-        }
-        crate::app::control_center::state::Focus::RoomList => {
+        crate::app::control_center::state::Tab::Rooms => {
             control_center_move_room_selection(app, delta)
         }
-        crate::app::control_center::state::Focus::StaffList => {
+        crate::app::control_center::state::Tab::Staff => {
             control_center_move_staff_selection(app, delta)
         }
-        crate::app::control_center::state::Focus::AuditFilter => {
-            // ↑/↓ from the filter steps into the entries list.
-            app.control_center.focus_audit_list();
-            control_center_move_audit_selection(app, delta);
-            true
-        }
-        crate::app::control_center::state::Focus::AuditList => {
+        crate::app::control_center::state::Tab::Log => {
             control_center_move_audit_selection(app, delta)
         }
     }
 }
 
 fn control_center_move_audit_selection(app: &mut App, delta: isize) -> bool {
-    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Audit {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Log {
         return false;
     }
     let filter = crate::app::chat::state::parse_audit_filter(app.control_center.audit_filter());
@@ -1946,19 +1967,9 @@ fn control_center_move_user_selection(app: &mut App, delta: isize) -> bool {
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
         return false;
     }
-    let user_ids = app.chat.control_center_user_ids();
+    let filter = app.control_center.user_filter().to_string();
+    let user_ids = app.chat.control_center_user_ids_filtered(&filter);
     app.control_center.move_user_selection(&user_ids, delta)
-}
-
-fn control_center_move_user_session_selection(app: &mut App, delta: isize) -> bool {
-    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
-        return false;
-    }
-    let session_ids = app
-        .chat
-        .control_center_user_session_ids(app.control_center.selected_user_id());
-    app.control_center
-        .move_user_session_selection(&session_ids, delta)
 }
 
 fn control_center_begin_room_action(
@@ -2024,15 +2035,6 @@ fn submit_confirm_dialog(app: &mut App) {
             app.banner = Some(app.chat.admin_control_center_user_action(
                 user_id,
                 crate::app::chat::svc::AdminUserAction::DisconnectAllSessions,
-            ));
-        }
-        crate::app::control_center::state::PendingConfirmAction::DisconnectUserSession {
-            user_id,
-            session_id,
-        } => {
-            app.banner = Some(app.chat.admin_control_center_user_action(
-                user_id,
-                crate::app::chat::svc::AdminUserAction::DisconnectSession { session_id },
             ));
         }
         crate::app::control_center::state::PendingConfirmAction::BanUser {
@@ -2173,43 +2175,6 @@ fn control_center_request_user_confirmation(
             format!("Type {} to confirm {}", user_label, confirm_label),
             detail,
             user_label,
-            confirm_label,
-            "cancel",
-        ),
-    );
-}
-
-fn control_center_request_user_session_confirmation(
-    app: &mut App,
-    action: crate::app::control_center::state::PendingConfirmAction,
-    title: &str,
-    detail: &str,
-    confirm_label: &str,
-) {
-    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
-        return;
-    }
-    if !app.permissions.can_access_admin_surface() {
-        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
-        return;
-    }
-    let Some(session_id) = app.control_center.selected_user_session_id() else {
-        app.banner = Some(crate::app::common::primitives::Banner::error(
-            "No live session selected",
-        ));
-        return;
-    };
-    let session_label = app
-        .chat
-        .control_center_user_session_label(session_id)
-        .unwrap_or_else(|| "session".to_string());
-    app.control_center.set_pending_confirm_action(action);
-    app.confirm_dialog = Some(
-        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
-            title,
-            format!("Type {} to confirm {}", session_label, confirm_label),
-            detail,
-            session_label,
             confirm_label,
             "cancel",
         ),
@@ -2469,12 +2434,6 @@ fn humanize_chrono_duration(duration: chrono::Duration) -> String {
     } else {
         parts.join(" ")
     }
-}
-
-fn control_center_has_user_sessions(app: &App) -> bool {
-    !app.chat
-        .control_center_user_session_ids(app.control_center.selected_user_id())
-        .is_empty()
 }
 
 fn try_open_icon_picker(app: &mut App) {

@@ -42,9 +42,6 @@ rename_room_system,rooms,system,deny,deny,deny,never,#general / #announcements n
 set_room_visibility,rooms,any,deny,deny,allow,on_admin,admin-only per your note (public<->private)
 delete_room_nonsystem,rooms,any,deny,deny,allow,on_admin,admin-only per your note
 delete_room_system,rooms,system,deny,deny,deny,never,never deletable
-disconnect_one_session,users,regular,deny,allow,allow,on_mod_or_admin,one live session
-disconnect_one_session,users,mod,deny,deny,allow,on_admin,
-disconnect_one_session,users,admin,deny,deny,deny,never,admins cannot be targeted
 disconnect_all_sessions,users,regular,deny,allow,allow,on_mod_or_admin,
 disconnect_all_sessions,users,mod,deny,deny,allow,on_admin,
 disconnect_all_sessions,users,admin,deny,deny,deny,never,

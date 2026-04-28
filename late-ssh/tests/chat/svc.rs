@@ -763,9 +763,6 @@ async fn moderate_room_member_task_bans_target_and_writes_audit_log() {
     let room = ChatRoom::get_or_create_public_room(&client, "side")
         .await
         .expect("create room");
-    ChatRoomMember::join(&client, room.id, moderator.id)
-        .await
-        .expect("join moderator");
     ChatRoomMember::join(&client, room.id, target.id)
         .await
         .expect("join target");
@@ -776,6 +773,12 @@ async fn moderate_room_member_task_bans_target_and_writes_audit_log() {
         )
         .await
         .expect("promote moderator");
+    assert!(
+        !ChatRoomMember::is_member(&client, room.id, moderator.id)
+            .await
+            .expect("check moderator membership"),
+        "moderation should not require the actor to be a room member"
+    );
 
     service.moderate_room_member_task(
         moderator.id,

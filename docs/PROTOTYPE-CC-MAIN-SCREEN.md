@@ -82,36 +82,42 @@ Four-column variant when a user is selected, three when nothing is
 selected. Mod's view differs from admin's by which actions are enabled.
 
 ```
-  ┌─ Users (14) ──────────┐┌─ @troll ─────────────────────── > DM user ─┐┌─ Actions ───────────────────┐
-  │filter ^F: ___________ ││                                            ││                             │
-  │───────────────────────││  Account Created : {datetime}              ││ s  Sanction history         │
-  │ > @troll       ·2     ││  Last Login      : {datetime}              ││ c  Clear offensive profile  │
-  │   @foo         ·2     ││  Last Chat       : {datetime}              ││ a  View audit trail         │
-  │   @alice       ·1 m   ││  Last Action     : {datetime}              ││ !  Warn user                │
-  │   @bob         ·1     ││  # of Sessions   : {N}                     ││ k  Kick user                │
-  │   @bob         ·1     ││  Currently banned: {Yes/No}                ││ r  Recent chats             │
-  │   @carol       ·1 a   ││  Past bans       : {N} {mostrecentlydate}  ││ b  Ban…                     │
-  │   @dave        ·0     ││  Past kicks      : {N} {mostrecentlydate}  ││ u  Unban                    │
-  │   @dave        ·0     ││  Past warnings   : {N} {mostrecentlydate}  ││ >  Open DM with user        │
-  │   @evan        ·0     ││  Past UGC deletes: {N} {mostrecentlydate}  ││ p  View profile             │
-  │   …                   ││  Incoming KB/s   : {N} KB/s                ││ m  Grant mod        (admin) │
-  │   …                   ││  Commands / sec  : {N}                     ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │   …                   ││                                            ││                             │
-  │                       ││                                            ││                             │
-  │                       ││                                            ││                             │
-  │                       ││                                            ││                             │
-  └───────────────────────┘└────────────────────────────────────────────┘└─────────────────────────────┘
-   ^F filter  ^P help  ↑↓ Select User
-
+                   ┌ late.sh | ^Q to leave | Control Center · @username (Admin|Mod|User) ───────────────────────────────┐
+                   │                                                                                                    │
+                   │┌ 1 Status | 2 [ Users ] · 3 Rooms · 4 Staff · 5 Log ──────────────────────────────────────────────┐│
+                   ││                                                                                                  ││
+                   ││ ┌ User Directory ──────┐┌ Selected user: @artboard ───────────────┐┌ Actions ──────────────────┐ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │ filter ^F: _________ ││ Account Created : {datetime}            ││ s  Sanction history       │ ││
+                   ││ │──────────────────────││ Last Login      : {datetime}            ││ c  Clear offensive profile│ ││
+                   ││ │ > @troll       ·2    ││ Last Chat       : {datetime}            ││ a  View audit trail       │ ││
+                   ││ │   @foo         ·2    ││ Last Action     : {datetime}            ││ !  Warn user              │ ││
+                   ││ │   @alice       ·1 m  ││ # of Sessions   : {N}                   ││ k  Kick user              │ ││
+                   ││ │   @bob         ·1    ││ Currently banned: {Yes/No}              ││ r  Recent chats           │ ││
+                   ││ │   @bob         ·1    ││ Past bans       : {N} {mostrecentlydate}││ b  Ban…                   │ ││
+                   ││ │   @carol       ·1 a  ││ Past kicks      : {N} {mostrecentlydate}││ u  Unban                  │ ││
+                   ││ │   @dave        ·0    ││ Past warnings   : {N} {mostrecentlydate}││ >  Open DM with user      │ ││
+                   ││ │   @dave        ·0    ││ Past UGC deletes: {N} {mostrecentlydate}││ p  View profile           │ ││
+                   ││ │   @evan        ·0    ││                                         ││ m  Grant mod  (admin only)│ ││
+                   ││ │   …                  ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ │                      ││                                         ││                           │ ││
+                   ││ └──────────────────────┘└─────────────────────────────────────────┘└───────────────────────────┘ ││
+                   │└──────────────────────────────────────────────────────────────────────────────────────────────────┘│
+                   └────────────────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 Notes:

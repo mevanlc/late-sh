@@ -195,7 +195,6 @@ pub enum Action {
     SetRoomVisibility,
     DeleteRoom,
     // Server-level user moderation
-    DisconnectOneSession,
     DisconnectAllSessions,
     TempBanUser,
     PermaBanUser,
@@ -275,9 +274,6 @@ fn decide_matrix(actor: Tier, action: Action, target: TargetTier) -> Decision {
         (DeleteRoom, _) => admin_only(actor),
 
         // Server-level user moderation
-        (DisconnectOneSession, Regular) => mod_or_admin(actor),
-        (DisconnectOneSession, Moderator) => admin_only(actor),
-        (DisconnectOneSession, Admin) => Deny,
         (DisconnectAllSessions, Regular) => mod_or_admin(actor),
         (DisconnectAllSessions, Moderator) => admin_only(actor),
         (DisconnectAllSessions, Admin) => Deny,
@@ -330,7 +326,7 @@ fn decide_matrix(actor: Tier, action: Action, target: TargetTier) -> Decision {
         (ClearProfileUgc, _) => Deny,
         (KickFromRoom | BanFromRoom | UnbanFromRoom, _) => Deny,
         (DeleteMessage | DeleteArticle, _) => Deny,
-        (DisconnectOneSession | DisconnectAllSessions, _) => Deny,
+        (DisconnectAllSessions, _) => Deny,
         (TempBanUser | PermaBanUser | UnbanUser, _) => Deny,
     }
 }
@@ -382,9 +378,6 @@ fn log_rule_matrix(action: Action, target: TargetTier) -> LogRule {
         (DeleteRoom, _) => OnAdmin,
 
         // Server-level user moderation
-        (DisconnectOneSession, Regular) => OnModOrAdmin,
-        (DisconnectOneSession, Moderator) => OnAdmin,
-        (DisconnectOneSession, Admin) => Never,
         (DisconnectAllSessions, Regular) => OnModOrAdmin,
         (DisconnectAllSessions, Moderator) => OnAdmin,
         (DisconnectAllSessions, Admin) => Never,
@@ -436,7 +429,7 @@ fn log_rule_matrix(action: Action, target: TargetTier) -> LogRule {
         (ClearProfileUgc, _) => Never,
         (KickFromRoom | BanFromRoom | UnbanFromRoom, _) => Never,
         (DeleteMessage | DeleteArticle, _) => Never,
-        (DisconnectOneSession | DisconnectAllSessions, _) => Never,
+        (DisconnectAllSessions, _) => Never,
         (TempBanUser | PermaBanUser | UnbanUser, _) => Never,
     }
 }
@@ -684,7 +677,6 @@ mod tests {
             "rename_room" | "rename_room_system" => RenameRoom,
             "set_room_visibility" => SetRoomVisibility,
             "delete_room_nonsystem" | "delete_room_system" => DeleteRoom,
-            "disconnect_one_session" => DisconnectOneSession,
             "disconnect_all_sessions" => DisconnectAllSessions,
             "temp_ban_user" => TempBanUser,
             "perma_ban_user" => PermaBanUser,

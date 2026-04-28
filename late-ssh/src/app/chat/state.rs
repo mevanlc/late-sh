@@ -872,11 +872,25 @@ impl ChatState {
             .collect()
     }
 
-    pub fn control_center_user_list_lines(&self, selected_user_id: Option<Uuid>) -> Vec<String> {
+    pub fn control_center_user_ids_filtered(&self, filter: &str) -> Vec<Uuid> {
+        let filter = filter.trim().to_lowercase();
+        self.staff_users_snapshot
+            .iter()
+            .filter(|user| filter.is_empty() || user.username.to_lowercase().contains(&filter))
+            .map(|user| user.user_id)
+            .collect()
+    }
+
+    pub fn control_center_user_list_lines(
+        &self,
+        selected_user_id: Option<Uuid>,
+        filter: &str,
+    ) -> Vec<String> {
         format_control_center_user_list_lines(
             &self.staff_users_snapshot,
             self.session_registry.as_ref(),
             selected_user_id,
+            filter,
         )
     }
 
@@ -888,8 +902,15 @@ impl ChatState {
             &self.staff_users_snapshot,
             control_center_selected_user(&self.staff_users_snapshot, selected_user_id),
             live_session_count,
-            self.permissions.can_access_admin_surface(),
         )
+    }
+
+    pub fn control_center_selected_user_name(
+        &self,
+        selected_user_id: Option<Uuid>,
+    ) -> Option<String> {
+        control_center_selected_user(&self.staff_users_snapshot, selected_user_id)
+            .map(|user| user.username.clone())
     }
 
     pub fn control_center_user_session_ids(&self, selected_user_id: Option<Uuid>) -> Vec<Uuid> {
@@ -908,20 +929,6 @@ impl ChatState {
             .unwrap_or_default()
     }
 
-    pub fn control_center_user_session_lines(
-        &self,
-        selected_user_id: Option<Uuid>,
-        selected_session_id: Option<Uuid>,
-    ) -> Vec<String> {
-        format_control_center_user_session_lines(
-            self.user_sessions_for_control_center(selected_user_id)
-                .as_slice(),
-            self.paired_client_registry.as_ref(),
-            selected_session_id,
-            self.permissions.can_access_admin_surface(),
-        )
-    }
-
     pub fn control_center_user_label(&self, user_id: Uuid) -> Option<String> {
         self.staff_users_snapshot
             .iter()
@@ -934,18 +941,6 @@ impl ChatState {
             .iter()
             .find(|user| user.user_id == user_id)
             .map(|user| (user.is_admin, user.is_moderator))
-    }
-
-    pub fn control_center_user_session_label(&self, session_id: Uuid) -> Option<String> {
-        self.session_registry
-            .as_ref()
-            .and_then(|registry| {
-                registry
-                    .snapshot_all()
-                    .into_iter()
-                    .find(|session| session.session_id == session_id)
-            })
-            .map(|session| short_session_id(session.session_id))
     }
 
     pub fn control_center_staff_user_ids(&self) -> Vec<Uuid> {
@@ -1095,14 +1090,6 @@ impl ChatState {
         let banner = match &action {
             super::svc::AdminUserAction::DisconnectAllSessions => {
                 Banner::success(&format!("Disconnecting {}...", user_label))
-            }
-            super::svc::AdminUserAction::DisconnectSession { session_id } => {
-                Banner::success(&format!(
-                    "Disconnecting session {} for {}...",
-                    self.control_center_user_session_label(*session_id)
-                        .unwrap_or_else(|| "session".to_string()),
-                    user_label
-                ))
             }
             super::svc::AdminUserAction::Ban { .. } => {
                 Banner::success(&format!("Banning {}...", user_label))
@@ -2050,13 +2037,6 @@ impl ChatState {
                                     }
                                 )));
                             }
-                            super::svc::AdminUserAction::DisconnectSession { session_id } => {
-                                banner = Some(Banner::success(&format!(
-                                    "Disconnected session {} for @{}",
-                                    short_session_id(session_id),
-                                    target_username
-                                )));
-                            }
                             super::svc::AdminUserAction::Ban { .. } => {
                                 banner = Some(Banner::success(&if disconnected_sessions == 0 {
                                     format!("Banned @{}", target_username)
@@ -2712,12 +2692,25 @@ fn format_control_center_user_list_lines(
     users: &[StaffUserRecord],
     session_registry: Option<&SessionRegistry>,
     selected_user_id: Option<Uuid>,
+    filter: &str,
 ) -> Vec<String> {
     if users.is_empty() {
         return vec!["Loading users...".to_string()];
     }
 
-    users
+    let filter_lower = filter.trim().to_lowercase();
+    let visible: Vec<&StaffUserRecord> = users
+        .iter()
+        .filter(|user| {
+            filter_lower.is_empty() || user.username.to_lowercase().contains(&filter_lower)
+        })
+        .collect();
+
+    if visible.is_empty() {
+        return vec![format!("No users match \"{filter}\"")];
+    }
+
+    visible
         .iter()
         .map(|user| {
             let marker = if Some(user.user_id) == selected_user_id {
@@ -2725,33 +2718,25 @@ fn format_control_center_user_list_lines(
             } else {
                 " "
             };
-            let sessions = session_registry
-                .map(|registry| registry.sessions_for_user(user.user_id))
-                .unwrap_or_default();
-            let mut summary = control_center_user_statuses(user);
-            if !sessions.is_empty() {
-                summary.push("online now".to_string());
-                summary.push(format!(
-                    "{} live {}",
-                    sessions.len(),
-                    if sessions.len() == 1 {
-                        "session"
-                    } else {
-                        "sessions"
-                    }
-                ));
-            }
-            let label = match control_center_user_role_label(user) {
-                Some(role_label) => {
-                    format!("{} {role_label}", control_center_user_label(user))
-                }
-                None => control_center_user_label(user),
-            };
-            if summary.is_empty() {
-                format!("{marker} {label}")
+            let session_count = session_registry
+                .map(|registry| registry.sessions_for_user(user.user_id).len())
+                .unwrap_or(0);
+            let role_char = if user.is_admin {
+                " a"
+            } else if user.is_moderator {
+                " m"
             } else {
-                format!("{marker} {label} · {}", summary.join(" · "))
-            }
+                ""
+            };
+            let ban_flag = if user.active_server_ban.is_some() {
+                " !"
+            } else {
+                ""
+            };
+            format!(
+                "{marker} @{}{ban_flag}  ·{session_count}{role_char}",
+                user.username,
+            )
         })
         .collect()
 }
@@ -2769,13 +2754,12 @@ fn format_control_center_user_detail_lines(
     users: &[StaffUserRecord],
     selected_user: Option<&StaffUserRecord>,
     live_session_count: usize,
-    can_admin_disconnect: bool,
 ) -> Vec<String> {
     if users.is_empty() {
         return vec![
-            "Loading staff user directory...".to_string(),
+            "Loading user directory...".to_string(),
             String::new(),
-            "Staff user details will populate here once the snapshot arrives.".to_string(),
+            "User details will appear here once the snapshot arrives.".to_string(),
         ];
     }
 
@@ -2783,67 +2767,28 @@ fn format_control_center_user_detail_lines(
         return vec!["No user selected".to_string()];
     };
 
-    let mut lines = vec![
-        control_center_user_label(user),
-        String::new(),
-        format!(
-            "role: {}",
-            if user.is_admin {
-                "administrator"
-            } else if user.is_moderator {
-                "moderator"
-            } else {
-                "member"
-            }
-        ),
-        format!("live sessions: {}", live_session_count),
-        format!(
-            "server ban: {}",
-            if user.active_server_ban.is_some() {
-                "active"
-            } else {
-                "clear"
-            }
-        ),
-    ];
-    if let Some(ban) = &user.active_server_ban {
-        let actor = ban
-            .actor_username
-            .as_ref()
-            .map(|u| format!("@{u}"))
-            .unwrap_or_else(|| "unknown".to_string());
-        let reason = if ban.reason.trim().is_empty() {
-            "(no reason recorded)".to_string()
-        } else {
-            ban.reason.clone()
-        };
+    let banned_str = if let Some(ban) = &user.active_server_ban {
         let expires = match ban.expires_at {
             None => "permanent".to_string(),
             Some(expires_at) => format_relative_future(expires_at, chrono::Utc::now()),
         };
-        lines.push(format!("  reason: {reason}"));
-        lines.push(format!("  banned by: {actor}"));
-        lines.push(format!(
-            "  banned at: {}",
-            ban.created.format("%Y-%m-%d %H:%M UTC")
-        ));
-        lines.push(format!("  expires: {expires}"));
-    }
-    lines.push(format!(
-        "status: {}",
-        if live_session_count == 0 {
-            "offline"
-        } else {
-            "online now"
-        }
-    ));
-    lines.push(String::new());
-    lines.push(if can_admin_disconnect {
-        "Actions next: disconnect all sessions, ban or unban from the user list, or target one session from the live-session pane.".to_string()
+        format!("Yes  ({expires})")
     } else {
-        "Admin actions unavailable in moderator view.".to_string()
-    });
-    lines
+        "No".to_string()
+    };
+
+    vec![
+        format!("Account Created : \u{2014}"),
+        format!("Last Login      : \u{2014}"),
+        format!("Last Chat       : \u{2014}"),
+        format!("Last Action     : \u{2014}"),
+        format!("# of Sessions   : {live_session_count}"),
+        format!("Currently banned: {banned_str}"),
+        format!("Past bans       : \u{2014}"),
+        format!("Past kicks      : \u{2014}"),
+        format!("Past warnings   : \u{2014}"),
+        format!("Past UGC deletes: \u{2014}"),
+    ]
 }
 
 fn format_relative_future(
@@ -2875,44 +2820,6 @@ fn format_relative_future(
         return format!("in {minutes}m");
     }
     "in <1m".to_string()
-}
-
-fn format_control_center_user_session_lines(
-    sessions: &[LiveSessionSnapshot],
-    paired_client_registry: Option<&PairedClientRegistry>,
-    selected_session_id: Option<Uuid>,
-    can_admin_disconnect: bool,
-) -> Vec<String> {
-    if sessions.is_empty() {
-        return vec![
-            "No live sessions".to_string(),
-            String::new(),
-            if can_admin_disconnect {
-                "Select a user with active sessions to target one session.".to_string()
-            } else {
-                "Live sessions will appear here when the selected user is online.".to_string()
-            },
-        ];
-    }
-
-    let mut lines = vec!["Live Session Detail".to_string(), String::new()];
-    lines.extend(sessions.iter().map(|session| {
-        let marker = if Some(session.session_id) == selected_session_id {
-            ">"
-        } else {
-            " "
-        };
-        format!(
-            "{marker} {}",
-            format_live_session_line(session, paired_client_registry)
-        )
-    }));
-    if can_admin_disconnect {
-        lines.push(String::new());
-        lines
-            .push("Actions: x disconnect selected session · b ban user · u unban user".to_string());
-    }
-    lines
 }
 
 fn format_control_center_staff_list_lines(
@@ -3219,25 +3126,6 @@ fn format_control_center_audit_detail_lines(
         lines.push(format!("  {}", entry.metadata));
     }
     lines
-}
-
-fn control_center_user_role_label(user: &StaffUserRecord) -> Option<String> {
-    let mut roles = Vec::new();
-    if user.is_admin {
-        roles.push("admin");
-    }
-    if user.is_moderator {
-        roles.push("mod");
-    }
-    (!roles.is_empty()).then(|| format!("[{}]", roles.join(", ")))
-}
-
-fn control_center_user_statuses(user: &StaffUserRecord) -> Vec<String> {
-    let mut flags = Vec::new();
-    if user.active_server_ban.is_some() {
-        flags.push("banned".to_string());
-    }
-    flags
 }
 
 fn control_center_selected_room(

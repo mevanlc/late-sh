@@ -220,9 +220,10 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-    wait_for_render_contains(&mut app, "Tab focus tabs · j/k or ↑/↓ move").await;
-    wait_for_render_contains(&mut app, "> @screen-zero-staff [mod]").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, " User Directory ").await;
+    wait_for_render_contains(&mut app, "> @screen-zero-staff  ·0").await;
 
     app.handle_input(b"l");
     wait_for_render_contains(&mut app, " Room Directory ").await;
@@ -233,16 +234,104 @@ async fn staff_user_can_open_control_center_and_switch_tabs() {
     app.handle_input(b"\x1b[B");
     wait_for_render_contains(&mut app, "> #ops").await;
 
-    app.handle_input(b"\t");
-    wait_for_render_contains(&mut app, "Tab focus rooms · h/l or ←/→ switch tabs").await;
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-
     app.handle_input(b"\x1b[D");
     wait_for_render_contains(&mut app, " User Directory ").await;
-    wait_for_render_contains(&mut app, "Selected User").await;
+    wait_for_render_contains(&mut app, "# of Sessions").await;
+}
 
-    app.handle_input(b"\t");
-    wait_for_render_contains(&mut app, "Tab focus tabs · j/k or ↑/↓ move").await;
+#[tokio::test]
+async fn ctrl_q_exits_control_center_to_dashboard() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "cc-ctrl-q-user").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("promote moderator");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        user.id,
+        "cc-ctrl-q-flow",
+        Permissions::new(false, true),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Control Center").await;
+    wait_for_render_contains(&mut app, "^Q to leave").await;
+
+    app.handle_input(b"\x11");
+    wait_for_render_contains(&mut app, " Dashboard ").await;
+}
+
+#[tokio::test]
+async fn digit_keys_switch_cc_tabs_not_global_screens() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "cc-digit-tabs-user").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_moderator = true WHERE id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("promote moderator");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        user.id,
+        "cc-digit-tabs-flow",
+        Permissions::new(false, true),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Control Center").await;
+
+    // 3 → Rooms tab (not Games screen)
+    app.handle_input(b"3");
+    wait_for_render_contains(&mut app, "Room Directory").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Control Center"),
+        "pressing 3 in CC should stay in CC; frame={frame:?}"
+    );
+
+    // 4 → Staff tab (not Rooms screen)
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Staff").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Control Center"),
+        "pressing 4 in CC should stay in CC; frame={frame:?}"
+    );
+
+    // 1 → Status tab (not Dashboard) — tested before Log tab to avoid filter-focus
+    app.handle_input(b"1");
+    wait_for_render_contains(&mut app, "Users online").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Control Center"),
+        "pressing 1 in CC should stay in CC; frame={frame:?}"
+    );
+
+    // 2 → Users tab (not Chat screen)
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, "User Directory").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Control Center"),
+        "pressing 2 in CC should stay in CC; frame={frame:?}"
+    );
+
+    // 5 → Log tab (not Artboard screen)
+    app.handle_input(b"5");
+    wait_for_render_contains(&mut app, "Entries").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Control Center"),
+        "pressing 5 in CC should stay in CC; frame={frame:?}"
+    );
 }
 
 #[tokio::test]
@@ -267,7 +356,8 @@ async fn admin_can_grant_moderator_from_users_tab() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"2");
     wait_for_render_contains(&mut app, "@cc-grant-mod-target").await;
 
     app.handle_input(b"j");
@@ -335,7 +425,8 @@ async fn audit_tab_lists_recent_actions_and_shows_detail() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"2");
     wait_for_render_contains(&mut app, "@cc-audit-target").await;
 
     app.handle_input(b"j");
@@ -345,11 +436,8 @@ async fn audit_tab_lists_recent_actions_and_shows_detail() {
     app.handle_input(b"@cc-audit-target\r");
     wait_for_render_contains(&mut app, "Granted moderator to @cc-audit-target").await;
 
-    app.handle_input(b"l");
-    app.handle_input(b"l");
-    app.handle_input(b"l");
+    app.handle_input(b"5");
     wait_for_render_contains(&mut app, " Entries ").await;
-    wait_for_render_contains(&mut app, " Entry detail ").await;
     wait_for_render_contains(&mut app, "grant_moderator").await;
     wait_for_render_contains(&mut app, "@cc-audit-target by @cc-audit-actor").await;
     wait_for_render_contains(&mut app, "action      : grant_moderator").await;
@@ -387,10 +475,9 @@ async fn admin_can_grant_admin_from_staff_tab() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
 
-    app.handle_input(b"l");
-    app.handle_input(b"l");
+    app.handle_input(b"4");
     wait_for_render_contains(&mut app, " Selected Staffer ").await;
     wait_for_render_contains(&mut app, "@cc-grant-admin-target").await;
 
@@ -467,10 +554,9 @@ async fn admin_can_revoke_moderator_from_staff_tab() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
 
-    app.handle_input(b"l");
-    app.handle_input(b"l");
+    app.handle_input(b"4");
     wait_for_render_contains(&mut app, " Selected Staffer ").await;
     wait_for_render_contains(&mut app, "@cc-revoke-mod-target").await;
 
@@ -550,12 +636,10 @@ async fn staff_tab_lists_moderators_and_admins() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
 
-    app.handle_input(b"l");
-    app.handle_input(b"l");
+    app.handle_input(b"4");
     wait_for_render_contains(&mut app, " Staff ").await;
-    wait_for_render_contains(&mut app, "Tab focus tabs · j/k or ↑/↓ move").await;
     wait_for_render_contains(&mut app, "@cc-staff-tab-mod").await;
     wait_for_render_contains(&mut app, "@cc-staff-tab-admin").await;
     wait_for_render_contains(&mut app, " Selected Staffer ").await;
@@ -609,8 +693,8 @@ async fn moderator_can_kick_user_from_control_center_room() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"3");
     wait_for_render_contains(&mut app, " Room Directory ").await;
     wait_for_render_contains(&mut app, "> #general").await;
 
@@ -669,8 +753,8 @@ async fn admin_can_rename_room_from_control_center() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"3");
     wait_for_render_contains(&mut app, " Room Directory ").await;
     wait_for_render_contains(&mut app, "> #general").await;
 
@@ -732,8 +816,8 @@ async fn admin_must_type_room_name_before_deleting_from_control_center() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-    app.handle_input(b"l");
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"3");
     wait_for_render_contains(&mut app, " Room Directory ").await;
     wait_for_render_contains(&mut app, "> #general").await;
 
@@ -807,15 +891,15 @@ async fn admin_can_disconnect_selected_user_from_control_center() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"2");
     wait_for_render_contains(&mut app, " User Directory ").await;
-    wait_for_render_contains(&mut app, "> @cc-user-admin [admin]").await;
-    wait_for_render_contains(&mut app, "@cc-user-target · online now · 1 live session").await;
+    wait_for_render_contains(&mut app, "> @cc-user-admin  ·0 a").await;
+    wait_for_render_contains(&mut app, "@cc-user-target  ·1").await;
 
     app.handle_input(b"j");
-    wait_for_render_contains(&mut app, "> @cc-user-target · online now · 1 live session").await;
-    wait_for_render_contains(&mut app, " Selected User ").await;
-    wait_for_render_contains(&mut app, "Live Session Detail").await;
+    wait_for_render_contains(&mut app, "> @cc-user-target  ·1").await;
+    wait_for_render_contains(&mut app, "# of Sessions").await;
 
     app.handle_input(b"x");
     wait_for_render_contains(&mut app, " Disconnect User ").await;
@@ -852,130 +936,6 @@ async fn admin_can_disconnect_selected_user_from_control_center() {
 }
 
 #[tokio::test]
-async fn admin_can_disconnect_selected_live_session_from_control_center() {
-    let test_db = new_test_db().await;
-    let admin = create_test_user(&test_db.db, "cc-user-session-admin").await;
-    let target = create_test_user(&test_db.db, "cc-user-session-target").await;
-    let client = test_db.db.get().await.expect("db client");
-    client
-        .execute(
-            "UPDATE users SET is_admin = true WHERE id = $1",
-            &[&admin.id],
-        )
-        .await
-        .expect("promote admin");
-
-    let session_registry = SessionRegistry::new();
-    let (target_tx_a, mut target_rx_a) = tokio::sync::mpsc::channel(4);
-    let (target_tx_b, mut target_rx_b) = tokio::sync::mpsc::channel(4);
-    let session_id_a = Uuid::now_v7();
-    let session_id_b = Uuid::now_v7();
-    session_registry.register(SessionRegistration {
-        session_id: session_id_a,
-        token: "cc-user-session-target-token-a".to_string(),
-        user_id: target.id,
-        username: target.username.clone(),
-        tx: target_tx_a,
-    });
-    session_registry.register(SessionRegistration {
-        session_id: session_id_b,
-        token: "cc-user-session-target-token-b".to_string(),
-        user_id: target.id,
-        username: target.username.clone(),
-        tx: target_tx_b,
-    });
-
-    let mut app = make_app_with_runtime_permissions(
-        test_db.db.clone(),
-        admin.id,
-        "cc-user-session-admin-flow",
-        Permissions::new(true, false),
-        Some(session_registry.clone()),
-    );
-
-    let short_session_a: String = session_id_a.to_string().chars().take(8).collect();
-    let short_session_b: String = session_id_b.to_string().chars().take(8).collect();
-
-    app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-    wait_for_render_contains(
-        &mut app,
-        "@cc-user-session-target · online now · 2 live sessions",
-    )
-    .await;
-
-    app.handle_input(b"j");
-    wait_for_render_contains(
-        &mut app,
-        "> @cc-user-session-target · online now · 2 live sessions",
-    )
-    .await;
-    wait_for_render_contains(&mut app, "Live Session Detail").await;
-
-    app.handle_input(b"\t");
-    wait_for_render_contains(&mut app, "Tab focus tabs").await;
-    wait_for_render_contains(&mut app, &format!("> session {}", short_session_a)).await;
-    app.handle_input(b"j");
-    wait_for_render_contains(&mut app, &format!("> session {}", short_session_b)).await;
-
-    app.handle_input(b"x");
-    wait_for_render_contains(&mut app, " Disconnect Session ").await;
-    wait_for_render_contains(
-        &mut app,
-        &format!("Type {} to confirm disconnect", short_session_b),
-    )
-    .await;
-
-    app.handle_input(b"wrong\r");
-    assert_render_not_contains_for(
-        &mut app,
-        &format!(
-            "Disconnecting session {} for @cc-user-session-target...",
-            short_session_b
-        ),
-        Duration::from_millis(200),
-    )
-    .await;
-
-    app.handle_input(b"\x17");
-    app.handle_input(format!("{short_session_b}\r").as_bytes());
-    wait_for_render_contains(
-        &mut app,
-        &format!(
-            "Disconnecting session {} for @cc-user-session-target...",
-            short_session_b
-        ),
-    )
-    .await;
-    wait_for_render_contains(
-        &mut app,
-        &format!(
-            "Disconnected session {} for @cc-user-session-target",
-            short_session_b
-        ),
-    )
-    .await;
-
-    let disconnect_b = tokio::time::timeout(Duration::from_secs(1), target_rx_b.recv())
-        .await
-        .expect("disconnect session message to arrive")
-        .expect("disconnect session message");
-    match disconnect_b {
-        SessionMessage::Disconnect { reason } => {
-            assert_eq!(reason, "You were disconnected by an admin");
-        }
-        other => panic!("expected disconnect message, got {other:?}"),
-    }
-
-    assert!(
-        tokio::time::timeout(Duration::from_millis(200), target_rx_a.recv())
-            .await
-            .is_err(),
-        "expected first live session to remain connected"
-    );
-}
-
-#[tokio::test]
 async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     let test_db = new_test_db().await;
     let admin = create_test_user(&test_db.db, "cc-user-ban-admin").await;
@@ -1008,19 +968,12 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     );
 
     app.handle_input(b"0");
-    wait_for_render_contains(&mut app, "Staff Control Center").await;
-    wait_for_render_contains(
-        &mut app,
-        "@cc-user-ban-target · online now · 1 live session",
-    )
-    .await;
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, "@cc-user-ban-target  ·1").await;
 
     app.handle_input(b"j");
-    wait_for_render_contains(
-        &mut app,
-        "> @cc-user-ban-target · online now · 1 live session",
-    )
-    .await;
+    wait_for_render_contains(&mut app, "> @cc-user-ban-target  ·1").await;
 
     app.handle_input(b"b");
     wait_for_render_contains(&mut app, " Ban User ").await;
@@ -1046,9 +999,8 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
         "Banned @cc-user-ban-target and disconnected 1 live session",
     )
     .await;
-    wait_for_render_contains(&mut app, "> @cc-user-ban-target · banned").await;
-    wait_for_render_contains(&mut app, "server ban:").await;
-    wait_for_render_contains(&mut app, "active").await;
+    wait_for_render_contains(&mut app, "> @cc-user-ban-target !").await;
+    wait_for_render_contains(&mut app, "Currently banned: Yes").await;
 
     wait_until(
         || async {
@@ -1078,8 +1030,7 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
     app.handle_input(b"@cc-user-ban-target\r");
     wait_for_render_contains(&mut app, "Unbanning @cc-user-ban-target...").await;
     wait_for_render_contains(&mut app, "Unbanned @cc-user-ban-target").await;
-    wait_for_render_contains(&mut app, "server ban:").await;
-    wait_for_render_contains(&mut app, "clear").await;
+    wait_for_render_contains(&mut app, "Currently banned: No").await;
 
     wait_until(
         || async {
@@ -1807,8 +1758,8 @@ async fn mod_room_command_opens_overlay_and_kicks_selected_room_member() {
     wait_for_render_contains(&mut app, " mod-side").await;
 
     app.handle_input(b" ");
-    wait_for_render_contains(&mut app, "[g] mod-side").await;
-    app.handle_input(b"g");
+    wait_for_render_contains(&mut app, "[h] mod-side").await;
+    app.handle_input(b"h");
     wait_for_render_contains(&mut app, "> mod-side").await;
 
     app.handle_input(b"i/mod room\r");
@@ -1869,8 +1820,8 @@ async fn admin_room_command_opens_overlay_and_renames_selected_room() {
     wait_for_render_contains(&mut app, " admin-side").await;
 
     app.handle_input(b" ");
-    wait_for_render_contains(&mut app, "[g] admin-side").await;
-    app.handle_input(b"g");
+    wait_for_render_contains(&mut app, "[h] admin-side").await;
+    app.handle_input(b"h");
     wait_for_render_contains(&mut app, "> admin-side").await;
 
     app.handle_input(b"i/admin room\r");

@@ -122,10 +122,11 @@ struct DrawContext<'a> {
     confirm_dialog: Option<&'a confirm_dialog::state::ConfirmDialogState>,
     username: &'a str,
     control_center_tab: control_center::state::Tab,
-    control_center_focus: control_center::state::Focus,
     control_center_user_list_lines: &'a [String],
     control_center_user_detail_lines: &'a [String],
-    control_center_user_session_lines: &'a [String],
+    control_center_selected_user_name: Option<String>,
+    control_center_user_filter: &'a str,
+    control_center_user_filter_focused: bool,
     control_center_room_list_lines: &'a [String],
     control_center_room_detail_lines: &'a [String],
     control_center_staff_list_lines: &'a [String],
@@ -344,28 +345,23 @@ impl App {
             .as_ref()
             .map(|active_users| active_users.lock_recover().len())
             .unwrap_or(0);
-        let control_center_user_ids = self.chat.control_center_user_ids();
+        let control_center_user_filter_str = self.control_center.user_filter().to_string();
+        let control_center_user_ids = self
+            .chat
+            .control_center_user_ids_filtered(&control_center_user_filter_str);
         self.control_center.sync_user_ids(&control_center_user_ids);
         let selected_control_center_user_id = self.control_center.selected_user_id();
-        let control_center_user_session_ids = self
-            .chat
-            .control_center_user_session_ids(selected_control_center_user_id);
-        self.control_center
-            .sync_user_session_ids(&control_center_user_session_ids);
-        self.control_center
-            .normalize_focus(!control_center_user_session_ids.is_empty());
-        let selected_control_center_user_session_id =
-            self.control_center.selected_user_session_id();
-        let control_center_user_list_lines = self
-            .chat
-            .control_center_user_list_lines(selected_control_center_user_id);
+        let control_center_user_list_lines = self.chat.control_center_user_list_lines(
+            selected_control_center_user_id,
+            &control_center_user_filter_str,
+        );
         let control_center_user_detail_lines = self
             .chat
             .control_center_user_detail_lines(selected_control_center_user_id);
-        let control_center_user_session_lines = self.chat.control_center_user_session_lines(
-            selected_control_center_user_id,
-            selected_control_center_user_session_id,
-        );
+        let control_center_selected_user_name = self
+            .chat
+            .control_center_selected_user_name(selected_control_center_user_id);
+        let control_center_user_filter_focused = self.control_center.is_user_filter_focused();
         let control_center_room_ids = self.chat.control_center_room_ids();
         self.control_center.sync_room_ids(&control_center_room_ids);
         let selected_control_center_room_id = self.control_center.selected_room_id();
@@ -462,10 +458,11 @@ impl App {
                         confirm_dialog: self.confirm_dialog.as_ref(),
                         username: &self.username,
                         control_center_tab: self.control_center.selected_tab(),
-                        control_center_focus: self.control_center.focus(),
                         control_center_user_list_lines: &control_center_user_list_lines,
                         control_center_user_detail_lines: &control_center_user_detail_lines,
-                        control_center_user_session_lines: &control_center_user_session_lines,
+                        control_center_selected_user_name,
+                        control_center_user_filter: &control_center_user_filter_str,
+                        control_center_user_filter_focused,
                         control_center_room_list_lines: &control_center_room_list_lines,
                         control_center_room_detail_lines: &control_center_room_detail_lines,
                         control_center_staff_list_lines: &control_center_staff_list_lines,
@@ -669,7 +666,6 @@ impl App {
                 content_area,
                 &control_center::ui::ControlCenterView {
                     selected_tab: ctx.control_center_tab,
-                    focus: ctx.control_center_focus,
                     username: ctx.username,
                     is_admin: ctx.is_admin,
                     is_moderator: ctx.is_moderator,
@@ -677,7 +673,9 @@ impl App {
                     live_session_count: ctx.live_session_count,
                     user_list_lines: ctx.control_center_user_list_lines,
                     user_detail_lines: ctx.control_center_user_detail_lines,
-                    user_session_lines: ctx.control_center_user_session_lines,
+                    selected_user_name: ctx.control_center_selected_user_name.as_deref(),
+                    user_filter: ctx.control_center_user_filter,
+                    user_filter_focused: ctx.control_center_user_filter_focused,
                     room_list_lines: ctx.control_center_room_list_lines,
                     room_detail_lines: ctx.control_center_room_detail_lines,
                     staff_list_lines: ctx.control_center_staff_list_lines,
@@ -855,19 +853,33 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     )];
 
     spans.push(Span::styled("| ", Style::default().fg(theme::BORDER_DIM())));
-    for (idx, (tab_screen, key)) in frame_title_tabs(ctx.show_control_center).iter().enumerate() {
-        if idx > 0 {
-            spans.push(Span::raw(" "));
-        }
-        let style = if *tab_screen == screen {
+    if screen == Screen::ControlCenter {
+        spans.push(Span::styled(
+            "^Q".to_string(),
             Style::default()
-                .fg(theme::BG_SELECTION())
-                .bg(theme::AMBER())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::TEXT_DIM())
-        };
-        spans.push(Span::styled(*key, style));
+                .fg(theme::AMBER_DIM())
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            " to leave".to_string(),
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+    } else {
+        for (idx, (tab_screen, key)) in frame_title_tabs(ctx.show_control_center).iter().enumerate()
+        {
+            if idx > 0 {
+                spans.push(Span::raw(" "));
+            }
+            let style = if *tab_screen == screen {
+                Style::default()
+                    .fg(theme::BG_SELECTION())
+                    .bg(theme::AMBER())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::TEXT_DIM())
+            };
+            spans.push(Span::styled(*key, style));
+        }
     }
 
     let page_title = match screen {
@@ -888,20 +900,23 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     ));
 
     if screen == Screen::ControlCenter {
-        let hints = [("0", "staff"), ("←/→", "tabs"), ("Tab", "exit")];
-        for (key, desc) in hints {
-            spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
-            spans.push(Span::styled(
-                key.to_string(),
-                Style::default()
-                    .fg(theme::AMBER_DIM())
-                    .add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::styled(
-                format!(" {desc} "),
-                Style::default().fg(theme::TEXT_DIM()),
-            ));
-        }
+        spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
+        spans.push(Span::styled(
+            format!("@{} ", ctx.username),
+            Style::default()
+                .fg(theme::TEXT_BRIGHT())
+                .add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::styled(
+            if ctx.is_admin {
+                "(Admin) ".to_string()
+            } else if ctx.is_moderator {
+                "(Mod) ".to_string()
+            } else {
+                "(User) ".to_string()
+            },
+            Style::default().fg(theme::AMBER()),
+        ));
     }
 
     if screen == Screen::Artboard {

@@ -182,9 +182,6 @@ struct TierChangeResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminUserAction {
     DisconnectAllSessions,
-    DisconnectSession {
-        session_id: Uuid,
-    },
     Ban {
         reason: String,
         expires_at: Option<DateTime<Utc>>,
@@ -196,7 +193,6 @@ impl AdminUserAction {
     pub const fn verb(&self) -> &'static str {
         match self {
             Self::DisconnectAllSessions => "disconnect",
-            Self::DisconnectSession { .. } => "disconnect_session",
             Self::Ban { .. } => "ban",
             Self::Unban => "unban",
         }
@@ -205,7 +201,6 @@ impl AdminUserAction {
     fn authz_action(&self) -> Action {
         match self {
             Self::DisconnectAllSessions => Action::DisconnectAllSessions,
-            Self::DisconnectSession { .. } => Action::DisconnectOneSession,
             Self::Ban {
                 expires_at: Some(_),
                 ..
@@ -2130,11 +2125,6 @@ impl ChatService {
             anyhow::bail!("Room moderation is limited to topic rooms");
         }
 
-        let actor_is_member = ChatRoomMember::is_member(client, room_id, actor_user_id).await?;
-        if !actor_is_member {
-            anyhow::bail!("You are not a member of this room");
-        }
-
         let target = User::find_by_username(client, target_username)
             .await?
             .ok_or_else(|| anyhow::anyhow!("User '{}' not found", target_username))?;
@@ -2423,27 +2413,6 @@ impl ChatService {
                     )
                     .await
             }
-            AdminUserAction::DisconnectSession { session_id } => {
-                let session_exists = session_registry
-                    .sessions_for_user(target_user_id)
-                    .into_iter()
-                    .any(|session| session.session_id == *session_id);
-                if !session_exists {
-                    anyhow::bail!(
-                        "session {} is not live for @{}",
-                        session_id,
-                        target.username
-                    );
-                }
-                usize::from(
-                    session_registry
-                        .disconnect_session(
-                            *session_id,
-                            "You were disconnected by an admin".to_string(),
-                        )
-                        .await,
-                )
-            }
             AdminUserAction::Ban { reason, expires_at } => {
                 if ServerBan::find_active_for_user_id(client, target_user_id)
                     .await?
@@ -2487,9 +2456,6 @@ impl ChatService {
                 AdminUserAction::DisconnectAllSessions => {
                     anyhow::bail!("@{} has no live sessions", target.username);
                 }
-                AdminUserAction::DisconnectSession { session_id } => {
-                    anyhow::bail!("session {} is no longer live", session_id);
-                }
                 AdminUserAction::Ban { .. } | AdminUserAction::Unban => {}
             }
         }
@@ -2511,11 +2477,6 @@ impl ChatService {
             json!({
                 "target_user_id": target_user_id,
                 "target_username": target.username.clone(),
-                "session_id": match &action {
-                    AdminUserAction::DisconnectAllSessions => None::<Uuid>,
-                    AdminUserAction::DisconnectSession { session_id } => Some(*session_id),
-                    AdminUserAction::Ban { .. } | AdminUserAction::Unban => None::<Uuid>,
-                },
                 "reason": ban_reason,
                 "expires_at": ban_expires_at,
                 "disconnected_sessions": disconnected_sessions,

@@ -277,31 +277,6 @@ impl SessionRegistry {
         sessions
     }
 
-    pub async fn disconnect_session(&self, session_id: Uuid, reason: String) -> bool {
-        let target = {
-            let directory = self.directory.lock_recover();
-            directory
-                .sessions_by_token
-                .values()
-                .find(|entry| entry.snapshot.session_id == session_id)
-                .map(|entry| (entry.snapshot.token.clone(), entry.tx.clone()))
-        };
-
-        let Some((token, tx)) = target else {
-            tracing::warn!(%session_id, "no live session found for disconnect");
-            return false;
-        };
-
-        match tx.send(SessionMessage::Disconnect { reason }).await {
-            Ok(_) => true,
-            Err(error) => {
-                tracing::warn!(%session_id, ?error, "failed to send session disconnect");
-                self.unregister(&token);
-                false
-            }
-        }
-    }
-
     pub async fn disconnect_user_sessions(&self, user_id: Uuid, reason: String) -> usize {
         let targets: Vec<(Uuid, String, Sender<SessionMessage>)> = {
             let directory = self.directory.lock_recover();
@@ -674,34 +649,6 @@ mod tests {
             rx2.recv().await,
             Some(SessionMessage::Disconnect { reason }) if reason == "admin kick"
         ));
-    }
-
-    #[tokio::test]
-    async fn disconnect_session_targets_only_matching_session_id() {
-        let registry = SessionRegistry::new();
-        let user_id = Uuid::now_v7();
-        let session_id = Uuid::now_v7();
-        let (tx1, mut rx1) = tokio::sync::mpsc::channel(10);
-        let (tx2, mut rx2) = tokio::sync::mpsc::channel(10);
-        registry.register(SessionRegistration {
-            session_id,
-            token: "tok-target".to_string(),
-            user_id,
-            username: "target".to_string(),
-            tx: tx1,
-        });
-        registry.register(registration("tok-other", tx2, user_id));
-
-        assert!(
-            registry
-                .disconnect_session(session_id, "disconnect one".to_string())
-                .await
-        );
-        assert!(matches!(
-            rx1.recv().await,
-            Some(SessionMessage::Disconnect { reason }) if reason == "disconnect one"
-        ));
-        assert!(rx2.try_recv().is_err());
     }
 
     #[test]
