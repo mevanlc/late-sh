@@ -20,8 +20,8 @@ resource "kubernetes_namespace_v1" "monitoring" {
   }
 }
 
-data "http" "grafana_dashboard_kubernetes_cluster" {
-  url = "https://grafana.com/api/dashboards/14205/revisions/1/download"
+data "http" "grafana_dashboard_k8s" {
+  url = "https://grafana.com/api/dashboards/15661/revisions/latest/download"
 
   request_headers = {
     Accept = "application/json"
@@ -29,10 +29,10 @@ data "http" "grafana_dashboard_kubernetes_cluster" {
 }
 
 locals {
-  grafana_kubernetes_cluster_dashboard = replace(
-    data.http.grafana_dashboard_kubernetes_cluster.response_body,
-    "$${DS_PROMETHEUS}",
-    "VictoriaMetrics"
+  grafana_k8s_dashboard = replace(
+    data.http.grafana_dashboard_k8s.response_body,
+    "$${DS__VICTORIAMETRICS-PROD-ALL}",
+    "victoriametrics"
   )
 }
 
@@ -76,8 +76,8 @@ resource "kubernetes_config_map_v1" "grafana_dashboards" {
   }
 
   data = {
-    "observability.json"      = file("${path.module}/../monitoring/dashboards/observability.json")
-    "kubernetes-cluster.json" = local.grafana_kubernetes_cluster_dashboard
+    "observability.json" = file("${path.module}/../monitoring/dashboards/observability.json")
+    "k8s-dashboard.json" = local.grafana_k8s_dashboard
   }
 }
 
@@ -98,6 +98,10 @@ resource "helm_release" "vmagent" {
         }
       ]
 
+      extraArgs = {
+        "remoteWrite.label" = "origin_prometheus=rke2"
+      }
+
       resources = {
         limits = {
           cpu    = "250m"
@@ -113,6 +117,33 @@ resource "helm_release" "vmagent" {
 
   depends_on = [
     kubernetes_deployment_v1.victoriametrics
+  ]
+}
+
+resource "helm_release" "kube_state_metrics" {
+  name       = "kube-state-metrics"
+  repository = "https://prometheus-community.github.io/helm-charts"
+  chart      = "kube-state-metrics"
+  version    = "7.3.0"
+  namespace  = kubernetes_namespace_v1.monitoring.metadata[0].name
+
+  values = [
+    yamlencode({
+      fullnameOverride = "kube-state-metrics"
+
+      prometheusScrape = true
+
+      resources = {
+        limits = {
+          cpu    = "100m"
+          memory = "128Mi"
+        }
+        requests = {
+          cpu    = "10m"
+          memory = "32Mi"
+        }
+      }
+    })
   ]
 }
 
