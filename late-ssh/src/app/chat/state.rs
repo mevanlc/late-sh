@@ -1049,6 +1049,7 @@ impl ChatState {
         let filter = filter.trim().to_lowercase();
         self.staff_rooms_snapshot
             .iter()
+            .filter(|room| room_is_control_center_visible(room))
             .filter(|room| room_matches_filter(room, &filter))
             .map(|room| room.room_id)
             .collect()
@@ -1190,6 +1191,19 @@ impl ChatState {
             .filter(|entry| audit_entry_matches(entry, filter))
             .collect();
         format_control_center_audit_list_lines(&entries, selected_audit_id)
+    }
+
+    pub fn control_center_audit_list_rows(
+        &self,
+        selected_audit_id: Option<Uuid>,
+        filter: &AuditFilter,
+    ) -> Vec<AuditListRow> {
+        let entries: Vec<&AuditLogEntry> = self
+            .audit_log_snapshot
+            .iter()
+            .filter(|entry| audit_entry_matches(entry, filter))
+            .collect();
+        build_audit_list_rows(&entries, selected_audit_id)
     }
 
     pub fn control_center_audit_detail_lines(
@@ -3004,12 +3018,18 @@ pub struct UserListRow {
 pub struct RoomListRow {
     pub selected: bool,
     pub label: String,
-    pub kind: String,
     pub visibility: String,
     pub member_count: i64,
-    pub permanent: bool,
-    pub auto_join: bool,
     pub active_ban_count: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct AuditListRow {
+    pub selected: bool,
+    pub when: String,
+    pub action: String,
+    pub target: String,
+    pub actor: String,
 }
 
 #[derive(Clone, Debug)]
@@ -3079,15 +3099,13 @@ fn build_room_list_rows(
     let filter_lower = filter.trim().to_lowercase();
     rooms
         .iter()
+        .filter(|room| room_is_control_center_visible(room))
         .filter(|room| room_matches_filter(room, &filter_lower))
         .map(|room| RoomListRow {
             selected: Some(room.room_id) == selected_room_id,
             label: control_center_room_label(room),
-            kind: room.kind.clone(),
             visibility: room.visibility.clone(),
             member_count: room.member_count,
-            permanent: room.permanent,
-            auto_join: room.auto_join,
             active_ban_count: room.active_ban_count,
         })
         .collect()
@@ -3666,6 +3684,22 @@ fn format_control_center_audit_list_lines(
         .collect()
 }
 
+fn build_audit_list_rows(
+    entries: &[&AuditLogEntry],
+    selected_audit_id: Option<Uuid>,
+) -> Vec<AuditListRow> {
+    entries
+        .iter()
+        .map(|&entry| AuditListRow {
+            selected: Some(entry.id) == selected_audit_id,
+            when: entry.created.format("%Y-%m-%d %H:%M").to_string(),
+            action: entry.action.clone(),
+            target: format_audit_target(entry),
+            actor: format_audit_actor(entry),
+        })
+        .collect()
+}
+
 fn format_control_center_audit_detail_lines(
     entries: &[&AuditLogEntry],
     selected_audit_id: Option<Uuid>,
@@ -3680,6 +3714,12 @@ fn format_control_center_audit_detail_lines(
         return vec!["No entry selected".to_string()];
     };
     let mut lines = vec![
+        format!(
+            "{} by {}",
+            format_audit_target(entry),
+            format_audit_actor(entry)
+        ),
+        String::new(),
         format!("action      : {}", entry.action),
         format!("actor       : {}", format_audit_actor(entry)),
         format!("target      : {}", format_audit_target(entry)),
@@ -3718,8 +3758,16 @@ fn control_center_selected_room(
     selected_room_id: Option<Uuid>,
 ) -> Option<&StaffRoomRecord> {
     selected_room_id
-        .and_then(|room_id| rooms.iter().find(|room| room.room_id == room_id))
-        .or_else(|| rooms.first())
+        .and_then(|room_id| {
+            rooms
+                .iter()
+                .find(|room| room_is_control_center_visible(room) && room.room_id == room_id)
+        })
+        .or_else(|| {
+            rooms
+                .iter()
+                .find(|room| room_is_control_center_visible(room))
+        })
 }
 
 fn format_control_center_room_list_lines(
@@ -3734,11 +3782,16 @@ fn format_control_center_room_list_lines(
     let filter_lower = filter.trim().to_lowercase();
     let visible: Vec<&StaffRoomRecord> = rooms
         .iter()
+        .filter(|room| room_is_control_center_visible(room))
         .filter(|room| room_matches_filter(room, &filter_lower))
         .collect();
 
     if visible.is_empty() {
-        return vec!["No rooms match this filter".to_string()];
+        return if filter_lower.is_empty() {
+            vec!["No rooms to display".to_string()]
+        } else {
+            vec!["No rooms match this filter".to_string()]
+        };
     }
 
     visible
@@ -3795,6 +3848,10 @@ fn room_matches_filter(room: &StaffRoomRecord, filter_lower: &str) -> bool {
             .is_some_and(|code| code.to_lowercase().contains(filter_lower))
 }
 
+fn room_is_control_center_visible(room: &StaffRoomRecord) -> bool {
+    room.kind != "dm" && room.visibility != "dm"
+}
+
 fn format_control_center_room_detail_lines(
     rooms: &[StaffRoomRecord],
     selected_room: Option<&StaffRoomRecord>,
@@ -3814,10 +3871,10 @@ fn format_control_center_room_detail_lines(
     let mut lines = vec![
         control_center_room_label(room),
         String::new(),
-        format!("kind: {}", room.kind),
-        format!("visibility: {}", room.visibility),
+        format!("Room type: {}", format_room_kind(&room.kind)),
+        format!("Visibility: {}", format_room_visibility(&room.visibility)),
         format!(
-            "members: {} {}",
+            "Members: {} {}",
             room.member_count,
             if room.member_count == 1 {
                 "user"
@@ -3826,22 +3883,46 @@ fn format_control_center_room_detail_lines(
             }
         ),
         format!(
-            "active room bans: {}",
+            "Active bans: {}",
             if room.active_ban_count == 0 {
                 "none".to_string()
             } else {
                 room.active_ban_count.to_string()
             }
         ),
-        format!("permanent: {}", yes_no(room.permanent)),
-        format!("auto-join: {}", yes_no(room.auto_join)),
+        format!("Permanent room: {}", yes_no(room.permanent)),
+        format!("Auto-join new users: {}", yes_no(room.auto_join)),
+        format!("Created: {}", format_detail_timestamp(room.created)),
+        format!(
+            "Last message: {}",
+            optional_detail_timestamp_text(room.last_message_at)
+        ),
     ];
 
     if let Some(language_code) = &room.language_code {
-        lines.push(format!("language: {}", language_code));
+        lines.push(format!("Language: {}", language_code));
     }
 
     lines
+}
+
+fn format_room_kind(kind: &str) -> &str {
+    match kind {
+        "general" => "General room",
+        "language" => "Language room",
+        "private" => "Private room",
+        "game" => "Game room",
+        "topic" => "Topic room",
+        other => other,
+    }
+}
+
+fn format_room_visibility(visibility: &str) -> &str {
+    match visibility {
+        "public" => "Public",
+        "private" => "Private",
+        other => other,
+    }
 }
 
 fn control_center_room_label(room: &StaffRoomRecord) -> String {

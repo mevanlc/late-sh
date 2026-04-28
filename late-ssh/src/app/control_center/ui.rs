@@ -11,7 +11,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::app::chat::state::{
-    ControlCenterStatusSummary, DetailValue, RoomListRow, UserDetailRow, UserListRow,
+    AuditListRow, ControlCenterStatusSummary, DetailValue, RoomListRow, UserDetailRow, UserListRow,
 };
 use crate::app::common::theme;
 
@@ -60,6 +60,7 @@ pub struct ControlCenterView<'a> {
     pub staff_list_lines: &'a [String],
     pub staff_detail_lines: &'a [String],
     pub audit_list_lines: &'a [String],
+    pub audit_list_rows: &'a [AuditListRow],
     pub audit_detail_lines: &'a [String],
     pub audit_filter: &'a str,
     pub audit_filter_focused: bool,
@@ -168,6 +169,7 @@ fn draw_active_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>
             frame,
             inner,
             view.audit_list_lines,
+            view.audit_list_rows,
             view.audit_detail_lines,
             view.audit_filter,
             view.audit_filter_focused,
@@ -486,6 +488,7 @@ fn draw_audit_panel(
     frame: &mut Frame,
     area: Rect,
     audit_list_lines: &[String],
+    audit_list_rows: &[AuditListRow],
     audit_detail_lines: &[String],
     audit_filter: &str,
     audit_filter_focused: bool,
@@ -496,16 +499,18 @@ fn draw_audit_panel(
         frame,
         columns[0],
         audit_list_lines,
+        audit_list_rows,
         audit_filter,
         audit_filter_focused,
     );
-    draw_panel_card(frame, columns[1], "Entry detail", audit_detail_lines, false);
+    draw_audit_detail_card(frame, columns[1], audit_detail_lines);
 }
 
 fn draw_audit_entries_card(
     frame: &mut Frame,
     area: Rect,
     audit_list_lines: &[String],
+    audit_list_rows: &[AuditListRow],
     audit_filter: &str,
     audit_filter_focused: bool,
 ) {
@@ -524,6 +529,8 @@ fn draw_audit_entries_card(
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
         Constraint::Fill(1),
     ])
     .split(inner);
@@ -539,19 +546,28 @@ fn draw_audit_entries_card(
         ))),
         layout[1],
     );
-    let body_lines: Vec<Line<'_>> = audit_list_lines
-        .iter()
-        .map(|line| {
-            Line::from(Span::styled(
-                line.as_str(),
-                Style::default().fg(theme::TEXT()),
-            ))
-        })
-        .collect();
+    frame.render_widget(Paragraph::new(audit_list_header_line()), layout[2]);
     frame.render_widget(
-        Paragraph::new(body_lines).wrap(Wrap { trim: true }),
-        layout[2],
+        Paragraph::new(Line::from(Span::styled(
+            "─".repeat(layout[3].width as usize),
+            Style::default().fg(theme::BORDER()),
+        ))),
+        layout[3],
     );
+    let body_lines: Vec<Line<'_>> = if audit_list_rows.is_empty() {
+        audit_list_lines
+            .iter()
+            .map(|line| {
+                Line::from(Span::styled(
+                    line.as_str(),
+                    Style::default().fg(theme::TEXT_FAINT()),
+                ))
+            })
+            .collect()
+    } else {
+        audit_list_rows.iter().map(audit_list_row_line).collect()
+    };
+    frame.render_widget(Paragraph::new(body_lines), layout[4]);
 }
 
 fn audit_filter_line(value: &str, focused: bool) -> Line<'static> {
@@ -592,6 +608,175 @@ fn audit_filter_line(value: &str, focused: bool) -> Line<'static> {
         }
     }
     Line::from(spans)
+}
+
+const AUDIT_ACTION_COL_WIDTH: usize = 18;
+const AUDIT_TARGET_COL_WIDTH: usize = 18;
+const AUDIT_ACTOR_COL_WIDTH: usize = 18;
+
+fn audit_list_header_line() -> Line<'static> {
+    Line::from(vec![
+        Span::styled("  ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            "when            ".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+        Span::styled(" ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            format!("{:<width$}", "action", width = AUDIT_ACTION_COL_WIDTH),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+        Span::styled(" ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            format!("{:<width$}", "target", width = AUDIT_TARGET_COL_WIDTH),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+        Span::styled(" by ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            "actor".to_string(),
+            Style::default().fg(theme::TEXT_FAINT()),
+        ),
+    ])
+}
+
+fn audit_list_row_line(row: &AuditListRow) -> Line<'static> {
+    let prefix_span = if row.selected {
+        Span::styled("> ".to_string(), Style::default().fg(theme::AMBER_GLOW()))
+    } else {
+        Span::styled("  ".to_string(), Style::default().fg(theme::TEXT_FAINT()))
+    };
+    let when_style = audit_selected_style(Style::default().fg(theme::TEXT_DIM()), row.selected);
+    let action_style = audit_selected_style(audit_action_style(&row.action), row.selected);
+    let target_style = audit_selected_style(audit_target_style(&row.target), row.selected);
+    let actor_style = audit_selected_style(Style::default().fg(theme::CHAT_AUTHOR()), row.selected);
+    let target = truncate_to_width(&row.target, AUDIT_TARGET_COL_WIDTH);
+    let actor = truncate_to_width(&row.actor, AUDIT_ACTOR_COL_WIDTH);
+
+    Line::from(vec![
+        prefix_span,
+        Span::styled(row.when.clone(), when_style),
+        Span::styled(" ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            format!(
+                "{:<width$}",
+                truncate_to_width(&row.action, AUDIT_ACTION_COL_WIDTH),
+                width = AUDIT_ACTION_COL_WIDTH
+            ),
+            action_style,
+        ),
+        Span::styled(" ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            format!("{target:<width$}", width = AUDIT_TARGET_COL_WIDTH),
+            target_style,
+        ),
+        Span::styled(" by ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
+        Span::styled(
+            format!("{actor:<width$}", width = AUDIT_ACTOR_COL_WIDTH),
+            actor_style,
+        ),
+    ])
+}
+
+fn audit_selected_style(style: Style, selected: bool) -> Style {
+    if selected {
+        style.bg(theme::BG_HIGHLIGHT()).add_modifier(Modifier::BOLD)
+    } else {
+        style
+    }
+}
+
+fn audit_action_style(action: &str) -> Style {
+    let action = action.to_ascii_lowercase();
+    if action.contains("ban")
+        || action.contains("kick")
+        || action.contains("disconnect")
+        || action.contains("warn")
+        || action.contains("clear")
+        || action.contains("delete")
+    {
+        cc_banned_style()
+    } else if action.contains("grant") || action.contains("revoke") {
+        cc_admin_style()
+    } else if action.contains("room") {
+        cc_mod_style()
+    } else {
+        Style::default().fg(theme::TEXT_BRIGHT())
+    }
+}
+
+fn audit_target_style(target: &str) -> Style {
+    if target == "\u{2014}" {
+        Style::default().fg(theme::TEXT_FAINT())
+    } else if target.starts_with('@') {
+        Style::default().fg(theme::MENTION())
+    } else {
+        Style::default().fg(theme::TEXT_BRIGHT())
+    }
+}
+
+fn draw_audit_detail_card(frame: &mut Frame, area: Rect, audit_detail_lines: &[String]) {
+    let block = Block::default()
+        .title(" Entry Detail ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER()));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let lines: Vec<Line<'_>> = audit_detail_lines
+        .iter()
+        .map(|line| audit_detail_line(line))
+        .collect();
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn audit_detail_line(line: &str) -> Line<'static> {
+    if line.is_empty() {
+        return Line::from(Span::raw(""));
+    }
+    if line == "metadata:" {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme::TEXT_BRIGHT())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if line.starts_with("  ") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(theme::TEXT_BRIGHT()),
+        ));
+    }
+    if line.contains(" by ") {
+        return Line::from(Span::styled(
+            line.to_string(),
+            Style::default()
+                .fg(theme::TEXT_BRIGHT())
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    if let Some((label, value)) = line.split_once(':') {
+        let value = value.trim();
+        let value_style = match label.trim() {
+            "action" => audit_action_style(value).add_modifier(Modifier::BOLD),
+            "actor" => Style::default().fg(theme::CHAT_AUTHOR()),
+            "target" => audit_target_style(value),
+            "target_kind" => Style::default().fg(theme::TEXT_DIM()),
+            "when" => Style::default().fg(theme::TEXT_BRIGHT()),
+            _ => Style::default().fg(theme::TEXT()),
+        };
+        return Line::from(vec![
+            Span::styled(
+                format!("{:<12}: ", label.trim()),
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+            Span::styled(value.to_string(), value_style),
+        ]);
+    }
+    Line::from(Span::styled(
+        line.to_string(),
+        Style::default().fg(theme::TEXT()),
+    ))
 }
 
 fn draw_staff_panel(
@@ -898,7 +1083,7 @@ fn user_filter_line(value: &str, focused: bool) -> Line<'static> {
 }
 
 fn room_filter_line(value: &str, focused: bool) -> Line<'static> {
-    filter_line("filter ^F", "#room / kind", value, focused)
+    filter_line("filter ^F", "#room / visibility", value, focused)
 }
 
 fn filter_line(label: &str, placeholder: &str, value: &str, focused: bool) -> Line<'static> {
@@ -1100,6 +1285,8 @@ fn draw_rooms_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>)
 }
 
 const ROOM_COL_WIDTH: usize = 20;
+const ROOM_MEMBERS_COL_WIDTH: usize = 8;
+const ROOM_BANS_COL_WIDTH: usize = 5;
 
 fn draw_room_directory_card(
     frame: &mut Frame,
@@ -1173,14 +1360,13 @@ fn room_list_header_line() -> Line<'static> {
             format!("{:<width$}", "room", width = ROOM_COL_WIDTH),
             Style::default().fg(theme::TEXT_FAINT()),
         ),
-        Span::styled("mem ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
-        Span::styled("vis ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
         Span::styled(
-            "kind ".to_string(),
+            format!("{:>width$} ", "#members", width = ROOM_MEMBERS_COL_WIDTH),
             Style::default().fg(theme::TEXT_FAINT()),
         ),
+        Span::styled("vis ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
         Span::styled(
-            "flags".to_string(),
+            format!("{:>width$}", "#bans", width = ROOM_BANS_COL_WIDTH),
             Style::default().fg(theme::TEXT_FAINT()),
         ),
     ])
@@ -1215,24 +1401,37 @@ fn room_list_row_line(row: &RoomListRow) -> Line<'static> {
     let visibility_style = match row.visibility.as_str() {
         "public" => Style::default().fg(theme::SUCCESS()),
         "private" => Style::default().fg(theme::AMBER()),
-        "dm" => Style::default().fg(theme::TEXT_DIM()),
         _ => Style::default().fg(theme::TEXT()),
     };
-    let flags = room_flags(row);
+    let ban_style = if row.active_ban_count > 0 {
+        cc_banned_style()
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    };
     Line::from(vec![
         prefix_span,
         label_span,
-        Span::styled(format!("{:<4}", row.member_count), member_style),
+        Span::styled(
+            format!(
+                "{:>width$} ",
+                row.member_count,
+                width = ROOM_MEMBERS_COL_WIDTH
+            ),
+            member_style,
+        ),
         Span::styled(
             short_visibility(&row.visibility).to_string(),
             visibility_style,
         ),
         Span::styled(" ".to_string(), Style::default().fg(theme::TEXT_FAINT())),
         Span::styled(
-            format!("{:<5}", short_kind(&row.kind)),
-            Style::default().fg(theme::TEXT_DIM()),
+            format!(
+                "{:>width$}",
+                row.active_ban_count,
+                width = ROOM_BANS_COL_WIDTH
+            ),
+            ban_style,
         ),
-        Span::styled(flags, Style::default().fg(theme::TEXT_FAINT())),
     ])
 }
 
@@ -1249,37 +1448,7 @@ fn short_visibility(visibility: &str) -> &str {
     match visibility {
         "public" => "pub ",
         "private" => "priv",
-        "dm" => "dm  ",
         _ => "oth ",
-    }
-}
-
-fn short_kind(kind: &str) -> &str {
-    match kind {
-        "general" => "gen",
-        "language" => "lang",
-        "private" => "priv",
-        "game" => "game",
-        "dm" => "dm",
-        _ => "room",
-    }
-}
-
-fn room_flags(row: &RoomListRow) -> String {
-    let mut flags = String::new();
-    if row.permanent {
-        flags.push('p');
-    }
-    if row.auto_join {
-        flags.push('a');
-    }
-    if row.active_ban_count > 0 {
-        flags.push('b');
-    }
-    if flags.is_empty() {
-        "-".to_string()
-    } else {
-        flags
     }
 }
 
@@ -1313,15 +1482,18 @@ fn room_detail_line(line: &str) -> Line<'static> {
     if let Some((label, value)) = line.split_once(':') {
         let value = value.trim();
         let value_style = match label {
-            "visibility" if value == "public" => Style::default().fg(theme::SUCCESS()),
-            "visibility" if value == "private" => Style::default().fg(theme::AMBER()),
-            "active room bans" if value != "none" => cc_banned_style(),
-            "permanent" | "auto-join" if value == "yes" => Style::default().fg(theme::AMBER()),
+            "Visibility" if value == "Public" => Style::default().fg(theme::SUCCESS()),
+            "Visibility" if value == "Private" => Style::default().fg(theme::AMBER()),
+            "Active bans" if value != "none" => cc_banned_style(),
+            "Permanent room" | "Auto-join new users" if value == "yes" => {
+                Style::default().fg(theme::AMBER())
+            }
+            "Last message" if value == "\u{2014}" => Style::default().fg(theme::TEXT_FAINT()),
             _ => Style::default().fg(theme::TEXT_BRIGHT()),
         };
         return Line::from(vec![
             Span::styled(
-                format!("{:<18} ", label),
+                format!("{:<21} ", label),
                 Style::default().fg(theme::TEXT_DIM()),
             ),
             Span::styled(value.to_string(), value_style),

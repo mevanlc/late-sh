@@ -140,6 +140,7 @@ struct DrawContext<'a> {
     control_center_staff_list_lines: &'a [String],
     control_center_staff_detail_lines: &'a [String],
     control_center_audit_list_lines: &'a [String],
+    control_center_audit_list_rows: Vec<chat::state::AuditListRow>,
     control_center_audit_detail_lines: &'a [String],
     control_center_audit_filter: &'a str,
     control_center_audit_filter_focused: bool,
@@ -418,6 +419,10 @@ impl App {
             selected_control_center_audit_id,
             &control_center_audit_filter,
         );
+        let control_center_audit_list_rows = self.chat.control_center_audit_list_rows(
+            selected_control_center_audit_id,
+            &control_center_audit_filter,
+        );
         let control_center_audit_detail_lines = self.chat.control_center_audit_detail_lines(
             selected_control_center_audit_id,
             &control_center_audit_filter,
@@ -501,6 +506,7 @@ impl App {
                         control_center_staff_list_lines: &control_center_staff_list_lines,
                         control_center_staff_detail_lines: &control_center_staff_detail_lines,
                         control_center_audit_list_lines: &control_center_audit_list_lines,
+                        control_center_audit_list_rows,
                         control_center_audit_detail_lines: &control_center_audit_detail_lines,
                         control_center_audit_filter: &control_center_audit_filter_str,
                         control_center_audit_filter_focused,
@@ -721,6 +727,7 @@ impl App {
                     staff_list_lines: ctx.control_center_staff_list_lines,
                     staff_detail_lines: ctx.control_center_staff_detail_lines,
                     audit_list_lines: ctx.control_center_audit_list_lines,
+                    audit_list_rows: &ctx.control_center_audit_list_rows,
                     audit_detail_lines: ctx.control_center_audit_detail_lines,
                     audit_filter: ctx.control_center_audit_filter,
                     audit_filter_focused: ctx.control_center_audit_filter_focused,

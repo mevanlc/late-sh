@@ -2408,10 +2408,10 @@ fn control_center_request_toggle_moderator(app: &mut App) {
     } else {
         (
             crate::app::control_center::state::PendingConfirmAction::GrantModerator { user_id },
-            "Give Moderator",
-            format!("Type {} to confirm give moderator", user_label),
+            "Grant Moderator",
+            format!("Type {} to confirm grant moderator", user_label),
             "Promotes this user to moderator. Audit-logged.",
-            "give moderator",
+            "grant moderator",
         )
     };
     app.control_center.set_pending_confirm_action(action);
