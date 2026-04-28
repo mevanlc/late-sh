@@ -25,8 +25,8 @@ use super::{
     notifications::svc::NotificationService,
     showcase,
     svc::{
-        AdminRoomAction, AuditLogEntry, ChatEvent, ChatService, ChatSnapshot, RoomModerationAction,
-        StaffRoomRecord, StaffUserRecord, StaffViewScope,
+        AdminRoomAction, ArtboardModerationAction, AuditLogEntry, ChatEvent, ChatService,
+        ChatSnapshot, RoomModerationAction, StaffRoomRecord, StaffUserRecord, StaffViewScope,
     },
 };
 
@@ -150,6 +150,7 @@ pub struct ChatState {
     staff_users_snapshot: Vec<StaffUserRecord>,
     staff_rooms_snapshot: Vec<StaffRoomRecord>,
     audit_log_snapshot: Vec<AuditLogEntry>,
+    artboard_edit_banned: bool,
 }
 
 pub(crate) struct PendingNotification {
@@ -234,6 +235,7 @@ impl ChatState {
             staff_users_snapshot: Vec::new(),
             staff_rooms_snapshot: Vec::new(),
             audit_log_snapshot: Vec::new(),
+            artboard_edit_banned: false,
         }
     }
 
@@ -1143,6 +1145,13 @@ impl ChatState {
             .map(|user| (user.is_admin, user.is_moderator))
     }
 
+    pub fn control_center_user_artboard_banned(&self, user_id: Uuid) -> bool {
+        self.staff_users_snapshot
+            .iter()
+            .find(|user| user.user_id == user_id)
+            .is_some_and(|user| user.active_artboard_ban.is_some())
+    }
+
     pub fn control_center_staff_user_ids(&self) -> Vec<Uuid> {
         self.staff_users_snapshot
             .iter()
@@ -1301,6 +1310,9 @@ impl ChatState {
             super::svc::AdminUserAction::DisconnectAllSessions => {
                 Banner::success(&format!("Disconnecting {}...", user_label))
             }
+            super::svc::AdminUserAction::ClearProfileBio => {
+                Banner::success(&format!("Clearing {} bio...", user_label))
+            }
             super::svc::AdminUserAction::Ban { .. } => {
                 Banner::success(&format!("Banning {}...", user_label))
             }
@@ -1315,6 +1327,27 @@ impl ChatState {
             self.permissions,
             self.session_registry.clone(),
         );
+        banner
+    }
+
+    pub fn artboard_control_center_user_action(
+        &self,
+        user_id: Uuid,
+        action: ArtboardModerationAction,
+    ) -> Banner {
+        let user_label = self
+            .control_center_user_label(user_id)
+            .unwrap_or_else(|| "user".to_string());
+        let banner = match &action {
+            ArtboardModerationAction::Ban { .. } => {
+                Banner::success(&format!("Artboard-banning {}...", user_label))
+            }
+            ArtboardModerationAction::Unban => {
+                Banner::success(&format!("Removing artboard ban for {}...", user_label))
+            }
+        };
+        self.service
+            .artboard_user_task(self.user_id, user_id, action, self.permissions);
         banner
     }
 
@@ -1335,6 +1368,27 @@ impl ChatState {
         self.service
             .change_user_tier_task(self.user_id, target_user_id, action, self.permissions);
         banner
+    }
+
+    pub fn open_dm_with_username(&self, target_username: &str) -> Banner {
+        self.service
+            .start_dm_task(self.user_id, target_username.to_string());
+        Banner::success(&format!("Opening DM with @{target_username}..."))
+    }
+
+    pub fn open_control_center_recent_chats_overlay(
+        &mut self,
+        selected_user_id: Option<Uuid>,
+    ) -> Banner {
+        let Some(user) = control_center_selected_user(&self.staff_users_snapshot, selected_user_id)
+        else {
+            return Banner::error("No user selected");
+        };
+        let username = user.username.clone();
+        let title = format!("Recent chats · @{}", user.username);
+        let lines = recent_chat_overlay_lines(user);
+        self.open_overlay(&title, lines);
+        Banner::success(&format!("Showing recent chats for @{username}"))
     }
 
     fn user_sessions_for_control_center(
@@ -2030,6 +2084,10 @@ impl ChatState {
         &self.message_reactions
     }
 
+    pub fn artboard_edit_banned(&self) -> bool {
+        self.artboard_edit_banned
+    }
+
     fn drain_snapshot(&mut self) {
         if !self.snapshot_rx.has_changed().unwrap_or(false) {
             return;
@@ -2049,6 +2107,7 @@ impl ChatState {
         self.unread_counts = self.merge_unread_counts(snapshot.unread_counts);
         self.all_usernames = snapshot.all_usernames;
         self.bonsai_glyphs = snapshot.bonsai_glyphs;
+        self.artboard_edit_banned = snapshot.artboard_edit_banned;
         self.message_reactions = self.merge_message_reactions(snapshot.message_reactions);
         self.sync_selection();
     }
@@ -2247,6 +2306,12 @@ impl ChatState {
                                     }
                                 )));
                             }
+                            super::svc::AdminUserAction::ClearProfileBio => {
+                                banner = Some(Banner::success(&format!(
+                                    "Cleared @{} bio",
+                                    target_username
+                                )));
+                            }
                             super::svc::AdminUserAction::Ban { .. } => {
                                 banner = Some(Banner::success(&if disconnected_sessions == 0 {
                                     format!("Banned @{}", target_username)
@@ -2270,6 +2335,31 @@ impl ChatState {
                                 )));
                             }
                         }
+                    }
+                    if self.permissions.can_access_mod_surface() {
+                        self.refresh_staff_users_snapshot();
+                        self.refresh_audit_log_snapshot();
+                    }
+                }
+                ChatEvent::ArtboardUserModerated {
+                    actor_user_id,
+                    target_user_id,
+                    target_username,
+                    action,
+                } => {
+                    if self.user_id == target_user_id {
+                        self.artboard_edit_banned = action.is_ban();
+                    }
+                    if self.user_id == actor_user_id {
+                        let message = match action {
+                            ArtboardModerationAction::Ban { .. } => {
+                                format!("Artboard-banned @{}", target_username)
+                            }
+                            ArtboardModerationAction::Unban => {
+                                format!("Removed artboard ban for @{}", target_username)
+                            }
+                        };
+                        banner = Some(Banner::success(&message));
                     }
                     if self.permissions.can_access_mod_surface() {
                         self.refresh_staff_users_snapshot();
@@ -3023,6 +3113,15 @@ fn build_user_detail_rows(
     } else {
         DetailValue::BanNone
     };
+    let artboard_ban_value = if let Some(ban) = &user.active_artboard_ban {
+        let expires = match ban.expires_at {
+            None => "permanent".to_string(),
+            Some(expires_at) => format_relative_future(expires_at, chrono::Utc::now()),
+        };
+        DetailValue::BanActive(expires)
+    } else {
+        DetailValue::BanNone
+    };
     vec![
         UserDetailRow {
             label: "Account Created",
@@ -3047,6 +3146,10 @@ fn build_user_detail_rows(
         UserDetailRow {
             label: "Currently banned",
             value: ban_value,
+        },
+        UserDetailRow {
+            label: "Artboard banned",
+            value: artboard_ban_value,
         },
         UserDetailRow {
             label: "Past bans",
@@ -3078,6 +3181,26 @@ fn format_detail_timestamp(value: chrono::DateTime<chrono::Utc>) -> String {
     let relative = format_relative_time(value);
     let absolute = value.format("%Y-%m-%d %H:%M UTC");
     format!("{relative} ({absolute})")
+}
+
+fn recent_chat_overlay_lines(user: &StaffUserRecord) -> Vec<String> {
+    if user.recent_chats.is_empty() {
+        return vec![format!("@{} has no recent chats.", user.username)];
+    }
+
+    let mut lines = Vec::new();
+    for chat in &user.recent_chats {
+        lines.push(format!(
+            "{} · {}",
+            format_detail_timestamp(chat.created),
+            chat.room_label
+        ));
+        for body_line in chat.body.lines() {
+            lines.push(format!("  {}", body_line.trim()));
+        }
+        lines.push(String::new());
+    }
+    lines
 }
 
 fn format_control_center_user_list_lines(
@@ -3168,6 +3291,15 @@ fn format_control_center_user_detail_lines(
     } else {
         "No".to_string()
     };
+    let artboard_banned_str = if let Some(ban) = &user.active_artboard_ban {
+        let expires = match ban.expires_at {
+            None => "permanent".to_string(),
+            Some(expires_at) => format_relative_future(expires_at, chrono::Utc::now()),
+        };
+        format!("Yes  ({expires})")
+    } else {
+        "No".to_string()
+    };
 
     vec![
         format!(
@@ -3188,6 +3320,7 @@ fn format_control_center_user_detail_lines(
         ),
         format!("# of Sessions   : {live_session_count}"),
         format!("Currently banned: {banned_str}"),
+        format!("Artboard banned : {artboard_banned_str}"),
         format!("Past bans      : {}", user.past_ban_count),
         format!("Past kicks     : {}", user.past_kick_count),
         format!("Past warnings  : {}", user.past_warning_count),
@@ -3325,8 +3458,8 @@ fn format_audit_summary(entry: &AuditLogEntry) -> String {
 ///
 /// Tokens are whitespace-separated. A token of the form `key:value` is
 /// structured (supported keys: `actor`, `target`, `action`, `kind`,
-/// `since`, `until`); any bare token becomes a free-text fragment matched
-/// case-insensitively against actor / target / action / kind. An empty
+/// `since`, `until`, `sanction`); any bare token becomes a free-text fragment
+/// matched case-insensitively against actor / target / action / kind. An empty
 /// filter matches every entry.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditFilter {
@@ -3334,6 +3467,7 @@ pub struct AuditFilter {
     target: Option<String>,
     action: Option<String>,
     kind: Option<String>,
+    sanction: Option<bool>,
     since: Option<chrono::DateTime<chrono::Utc>>,
     until: Option<chrono::DateTime<chrono::Utc>>,
     free_text: Vec<String>,
@@ -3345,6 +3479,7 @@ impl AuditFilter {
             && self.target.is_none()
             && self.action.is_none()
             && self.kind.is_none()
+            && self.sanction.is_none()
             && self.since.is_none()
             && self.until.is_none()
             && self.free_text.is_empty()
@@ -3364,6 +3499,11 @@ pub fn parse_audit_filter(input: &str) -> AuditFilter {
                 "target" => out.target = Some(strip_at(value).to_ascii_lowercase()),
                 "action" => out.action = Some(value.to_ascii_lowercase()),
                 "kind" => out.kind = Some(value.to_ascii_lowercase()),
+                "sanction" => {
+                    if let Some(value) = parse_filter_bool(value) {
+                        out.sanction = Some(value);
+                    }
+                }
                 "since" => {
                     if let Some(dt) = parse_filter_date_start(value) {
                         out.since = Some(dt);
@@ -3385,6 +3525,14 @@ pub fn parse_audit_filter(input: &str) -> AuditFilter {
 
 fn strip_at(value: &str) -> &str {
     value.strip_prefix('@').unwrap_or(value)
+}
+
+fn parse_filter_bool(value: &str) -> Option<bool> {
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "t" | "yes" | "y" | "on" => Some(true),
+        "0" | "false" | "f" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_filter_date_start(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
@@ -3437,6 +3585,11 @@ fn audit_entry_matches(entry: &AuditLogEntry, filter: &AuditFilter) -> bool {
     {
         return false;
     }
+    if let Some(want) = filter.sanction
+        && audit_entry_is_sanction(entry) != want
+    {
+        return false;
+    }
     if let Some(since) = filter.since
         && entry.created < since
     {
@@ -3456,6 +3609,19 @@ fn audit_entry_matches(entry: &AuditLogEntry, filter: &AuditFilter) -> bool {
         }
     }
     true
+}
+
+fn audit_entry_is_sanction(entry: &AuditLogEntry) -> bool {
+    let action = entry.action.to_ascii_lowercase();
+    action.contains("ban")
+        || action.contains("unban")
+        || action.contains("kick")
+        || action.contains("disconnect")
+        || action.contains("warn")
+        || action.contains("warning")
+        || action == "message_delete"
+        || action == "clear_profile"
+        || action == "profile_clear"
 }
 
 fn audit_entry_haystack(entry: &AuditLogEntry) -> String {
@@ -4995,6 +5161,66 @@ mod audit_filter_tests {
     }
 
     #[test]
+    fn sanction_filter_matches_moderation_actions_only() {
+        let f = parse_audit_filter("sanction:true");
+        assert_eq!(f.sanction, Some(true));
+        let ban = entry(
+            "server_ban",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        let kick = entry(
+            "room_kick",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        let delete = entry(
+            "message_delete",
+            "chat_message",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        let role = entry(
+            "grant_moderator",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        assert!(audit_entry_matches(&ban, &f));
+        assert!(audit_entry_matches(&kick, &f));
+        assert!(audit_entry_matches(&delete, &f));
+        assert!(!audit_entry_matches(&role, &f));
+    }
+
+    #[test]
+    fn sanction_false_excludes_moderation_actions() {
+        let f = parse_audit_filter("sanction:false");
+        assert_eq!(f.sanction, Some(false));
+        let ban = entry(
+            "server_ban",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        let role = entry(
+            "grant_moderator",
+            "user",
+            Some("a"),
+            Some("t"),
+            chrono::Utc::now(),
+        );
+        assert!(!audit_entry_matches(&ban, &f));
+        assert!(audit_entry_matches(&role, &f));
+    }
+
+    #[test]
     fn since_until_bracket_creation_time() {
         let f = parse_audit_filter("since:2026-04-20 until:2026-04-22");
         let on_20 = entry(
@@ -5073,5 +5299,11 @@ mod audit_filter_tests {
     fn malformed_dates_are_ignored() {
         let f = parse_audit_filter("since:not-a-date");
         assert!(f.since.is_none());
+    }
+
+    #[test]
+    fn malformed_sanction_filter_is_ignored() {
+        let f = parse_audit_filter("sanction:maybe");
+        assert!(f.sanction.is_none());
     }
 }

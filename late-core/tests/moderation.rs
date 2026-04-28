@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use late_core::{
     models::{
+        artboard_ban::{ArtboardBan, ArtboardBanParams},
         chat_room::ChatRoom,
         moderation_audit_log::ModerationAuditLog,
         room_ban::{RoomBan, RoomBanParams},
@@ -88,6 +89,63 @@ async fn room_ban_active_lookup_ignores_expired_rows() {
         RoomBan::is_active_for_room_and_user(&client, room.id, target.id)
             .await
             .expect("active room ban check")
+    );
+}
+
+#[tokio::test]
+async fn artboard_ban_active_lookup_and_delete() {
+    let test_db = test_db().await;
+    let actor = create_test_user(&test_db.db, "artboard-ban-actor").await;
+    let target = create_test_user(&test_db.db, "artboard-ban-target").await;
+    let client = test_db.db.get().await.expect("db client");
+
+    let expired = ArtboardBan::create(
+        &client,
+        ArtboardBanParams {
+            target_user_id: target.id,
+            actor_user_id: actor.id,
+            reason: "expired".to_string(),
+            expires_at: Some(Utc::now() - Duration::minutes(5)),
+        },
+    )
+    .await
+    .expect("create expired artboard ban");
+
+    assert!(
+        ArtboardBan::find_active_for_user(&client, target.id)
+            .await
+            .expect("lookup expired artboard ban")
+            .is_none()
+    );
+
+    ArtboardBan::update(
+        &client,
+        expired.id,
+        ArtboardBanParams {
+            target_user_id: target.id,
+            actor_user_id: actor.id,
+            reason: "active".to_string(),
+            expires_at: Some(Utc::now() + Duration::minutes(5)),
+        },
+    )
+    .await
+    .expect("update artboard ban");
+
+    assert!(
+        ArtboardBan::is_active_for_user(&client, target.id)
+            .await
+            .expect("active artboard ban check")
+    );
+
+    let removed = ArtboardBan::delete_for_user(&client, target.id)
+        .await
+        .expect("delete artboard ban");
+    assert_eq!(removed, 1);
+    assert!(
+        ArtboardBan::find_for_user(&client, target.id)
+            .await
+            .expect("lookup deleted artboard ban")
+            .is_none()
     );
 }
 

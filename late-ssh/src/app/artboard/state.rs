@@ -49,6 +49,7 @@ pub(crate) const PAINT_PALETTE: [RgbColor; 16] = [
 pub struct State {
     pub snapshot: DartboardSnapshot,
     pub private_notice: Option<String>,
+    edit_banned: bool,
     #[allow(dead_code)]
     pub(crate) svc: DartboardService,
     pub(crate) editor: EditorSession,
@@ -88,6 +89,7 @@ impl State {
         Self {
             snapshot,
             private_notice: None,
+            edit_banned: false,
             svc,
             editor: EditorSession::default(),
             active_brush: None,
@@ -141,6 +143,20 @@ impl State {
                 }
             }
         }
+    }
+
+    pub fn set_edit_banned(&mut self, banned: bool) {
+        self.edit_banned = banned;
+        if banned {
+            self.private_notice = Some(
+                "You can view the Artboard, but editing is disabled for your account.".to_string(),
+            );
+            self.clear_local_state();
+        }
+    }
+
+    pub fn edit_banned(&self) -> bool {
+        self.edit_banned
     }
 
     pub fn cursor(&self) -> Pos {
@@ -306,6 +322,12 @@ impl State {
     }
 
     pub fn handle_editor_action(&mut self, action: EditorAction) -> EditorKeyDispatch {
+        if self.reject_edit_if_banned() {
+            return EditorKeyDispatch {
+                handled: true,
+                effects: Vec::new(),
+            };
+        }
         let copied_to_slot = matches!(
             action,
             EditorAction::CopySelection | EditorAction::CutSelection
@@ -335,6 +357,9 @@ impl State {
     }
 
     pub fn handle_pointer_event(&mut self, pointer: AppPointerEvent) -> EditorPointerDispatch {
+        if self.reject_edit_if_banned() {
+            return EditorPointerDispatch::default();
+        }
         let before = self.snapshot.canvas.clone();
         let before_provenance = self.snapshot.provenance.clone();
         let had_floating = self.editor.floating.is_some();
@@ -1088,6 +1113,9 @@ impl State {
         &mut self,
         edit: impl FnOnce(&mut EditorSession, &mut Canvas, RgbColor) -> bool,
     ) -> bool {
+        if self.reject_edit_if_banned() {
+            return false;
+        }
         if self.is_archive_view_active() {
             return false;
         }
@@ -1109,6 +1137,9 @@ impl State {
         if self.is_archive_view_active() {
             return false;
         }
+        if self.reject_edit_if_banned() {
+            return false;
+        }
         let Some(op) = diff_canvas_op(&before, &self.snapshot.canvas, self.active_user_color())
         else {
             return false;
@@ -1119,6 +1150,16 @@ impl State {
             .apply_op(&before, &op, &self.username);
         apply_shared_op(&self.shared_provenance, &before, &op, &self.username);
         self.svc.submit_op(op);
+        true
+    }
+
+    fn reject_edit_if_banned(&mut self) -> bool {
+        if !self.edit_banned {
+            return false;
+        }
+        self.private_notice = Some(
+            "You can view the Artboard, but editing is disabled for your account.".to_string(),
+        );
         true
     }
 
@@ -1517,6 +1558,21 @@ mod tests {
         state.type_char('A', (80, 24));
         assert_eq!(state.snapshot.canvas.get(Pos { x: 0, y: 0 }), 'A');
         assert_eq!(state.cursor(), Pos { x: 1, y: 0 });
+    }
+
+    #[test]
+    fn edit_ban_keeps_canvas_read_only() {
+        let mut state = test_state();
+        state.set_edit_banned(true);
+        state.type_char('X', (80, 24));
+
+        assert_eq!(state.snapshot.canvas.get(Pos { x: 0, y: 0 }), ' ');
+        assert!(
+            state
+                .private_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("editing is disabled"))
+        );
     }
 
     #[test]

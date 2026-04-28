@@ -8,6 +8,7 @@ use helpers::{
     wait_for_render_contains, wait_until,
 };
 use late_core::models::{
+    artboard_ban::ArtboardBan,
     chat_message::{ChatMessage, ChatMessageParams},
     chat_message_reaction::ChatMessageReaction,
     chat_room::ChatRoom,
@@ -1039,6 +1040,81 @@ async fn admin_can_ban_and_unban_selected_user_from_control_center() {
                 .is_none()
         },
         "server ban row to be cleared",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn admin_can_artboard_ban_selected_user_from_control_center() {
+    let test_db = new_test_db().await;
+    let admin = create_test_user(&test_db.db, "cc-artboard-ban-admin").await;
+    let target = create_test_user(&test_db.db, "cc-artboard-ban-target").await;
+    let client = test_db.db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE users SET is_admin = true WHERE id = $1",
+            &[&admin.id],
+        )
+        .await
+        .expect("promote admin");
+
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        admin.id,
+        "cc-artboard-ban-admin-flow",
+        Permissions::new(true, false),
+    );
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, "Control Center").await;
+    app.handle_input(b"2");
+    wait_for_render_contains(&mut app, "@cc-artboard-ban-target0").await;
+
+    app.handle_input(b"j");
+    wait_for_render_contains(&mut app, "> @cc-artboard-ban-target0").await;
+
+    app.handle_input(b"o");
+    wait_for_render_contains(&mut app, "Ban Artboard").await;
+    app.handle_input(b"paint flooding\r");
+    wait_for_render_contains(
+        &mut app,
+        "Type @cc-artboard-ban-target to confirm artboard ban",
+    )
+    .await;
+    app.handle_input(b"@cc-artboard-ban-target\r");
+    wait_for_render_contains(&mut app, "Artboard-banned @cc-artboard-ban-target").await;
+    wait_for_render_contains(&mut app, "Artboard banned    Yes").await;
+
+    wait_until(
+        || async {
+            ArtboardBan::find_active_for_user(&client, target.id)
+                .await
+                .expect("lookup active artboard ban")
+                .is_some()
+        },
+        "artboard ban row to be created",
+    )
+    .await;
+
+    app.handle_input(b"O");
+    wait_for_render_contains(&mut app, " Unban Artboard Editing ").await;
+    wait_for_render_contains(
+        &mut app,
+        "Type @cc-artboard-ban-target to confirm artboard unban",
+    )
+    .await;
+    app.handle_input(b"@cc-artboard-ban-target\r");
+    wait_for_render_contains(&mut app, "Removed artboard ban for @cc-artboard-ban-target").await;
+    wait_for_render_contains(&mut app, "Artboard banned    No").await;
+
+    wait_until(
+        || async {
+            ArtboardBan::find_active_for_user(&client, target.id)
+                .await
+                .expect("lookup active artboard ban")
+                .is_none()
+        },
+        "artboard ban row to be removed",
     )
     .await;
 }

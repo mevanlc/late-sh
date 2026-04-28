@@ -8,6 +8,7 @@ use ratatui::{
         Axis, Bar, BarChart, BarGroup, Block, Borders, Chart, Dataset, GraphType, Paragraph, Wrap,
     },
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::app::chat::state::{
     ControlCenterStatusSummary, DetailValue, RoomListRow, UserDetailRow, UserListRow,
@@ -28,6 +29,7 @@ pub struct RoomPromptView<'a> {
 }
 
 pub struct BanPromptView<'a> {
+    pub title: &'a str,
     pub username: &'a str,
     pub reason: &'a str,
     pub duration: &'a str,
@@ -612,19 +614,21 @@ fn draw_staff_panel(
 
 fn draw_user_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
     let ban_prompt = view.ban_prompt.as_ref();
+    let actions_lines = actions_lines(view.is_admin);
+    let actions_panel_width = actions_panel_width(&actions_lines, "Actions");
     let columns = if ban_prompt.is_some() {
         Layout::horizontal([
-            Constraint::Percentage(25),
-            Constraint::Percentage(33),
-            Constraint::Percentage(22),
-            Constraint::Percentage(20),
+            Constraint::Fill(25),
+            Constraint::Fill(33),
+            Constraint::Length(actions_panel_width),
+            Constraint::Min(20),
         ])
         .split(area)
     } else {
         Layout::horizontal([
             Constraint::Fill(1),
             Constraint::Fill(1),
-            Constraint::Fill(1),
+            Constraint::Length(actions_panel_width),
         ])
         .split(area)
     };
@@ -655,16 +659,10 @@ fn draw_user_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) 
     }
 
     if let Some(prompt) = ban_prompt {
-        draw_panel_card(
-            frame,
-            columns[2],
-            "Actions",
-            &actions_lines(view.is_admin),
-            false,
-        );
+        draw_panel_card(frame, columns[2], "Actions", &actions_lines, false);
         draw_ban_prompt_card(frame, columns[3], prompt);
     } else {
-        draw_actions_panel(frame, columns[2], view.is_admin);
+        draw_actions_panel(frame, columns[2], &actions_lines);
     }
 }
 
@@ -945,16 +943,17 @@ fn filter_line(label: &str, placeholder: &str, value: &str, focused: bool) -> Li
 
 fn actions_lines(is_admin: bool) -> Vec<String> {
     let mut lines = vec![
-        "s  Sanction history (TODO)".to_string(),
-        "c  Clear profile (TODO)".to_string(),
+        "s  Sanction history".to_string(),
+        "c  Clear profile bio".to_string(),
         "a  View audit trail".to_string(),
         "!  Warn user (TODO)".to_string(),
-        "k  Kick (server) (TODO)".to_string(),
-        "r  Recent chats (TODO)".to_string(),
+        "x  Disconnect sessions".to_string(),
+        "r  Recent chats".to_string(),
         "b  Ban\u{2026}".to_string(),
         "u  Unban".to_string(),
-        ">  Open DM (TODO)".to_string(),
-        "p  View profile (TODO)".to_string(),
+        "o  Artboard ban/unban\u{2026}".to_string(),
+        ">  Open DM".to_string(),
+        "p  View profile".to_string(),
     ];
     if is_admin {
         lines.push("m  Give/remove mod".to_string());
@@ -962,7 +961,7 @@ fn actions_lines(is_admin: bool) -> Vec<String> {
     lines
 }
 
-fn draw_actions_panel(frame: &mut Frame, area: Rect, is_admin: bool) {
+fn draw_actions_panel(frame: &mut Frame, area: Rect, actions_lines: &[String]) {
     let block = Block::default()
         .title(" Actions ")
         .borders(Borders::ALL)
@@ -970,9 +969,9 @@ fn draw_actions_panel(frame: &mut Frame, area: Rect, is_admin: bool) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let implemented = ["b", "u", "m"];
-    let lines: Vec<Line<'_>> = actions_lines(is_admin)
-        .into_iter()
+    let implemented = ["s", "c", "a", "x", "r", "b", "u", "o", ">", "p", "m"];
+    let lines: Vec<Line<'_>> = actions_lines
+        .iter()
         .map(|line| {
             let key = line.split_whitespace().next().unwrap_or("");
             let active = implemented.contains(&key);
@@ -998,7 +997,7 @@ fn draw_actions_panel(frame: &mut Frame, area: Rect, is_admin: bool) {
 
 fn draw_ban_prompt_card(frame: &mut Frame, area: Rect, prompt: &BanPromptView<'_>) {
     let block = Block::default()
-        .title(" Ban User ")
+        .title(format!(" {} ", prompt.title))
         .borders(Borders::ALL)
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(area);
@@ -1066,12 +1065,23 @@ fn ban_field_line(value: &str, focused: bool, placeholder: &str) -> Line<'static
 }
 
 fn draw_rooms_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>) {
-    let columns = Layout::horizontal([
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-    ])
-    .split(area);
+    let room_actions_lines = room_actions_lines();
+    let room_actions_panel_width = actions_panel_width(&room_actions_lines, "Room Actions");
+    let columns = if view.room_prompt.is_some() {
+        Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+        ])
+        .split(area)
+    } else {
+        Layout::horizontal([
+            Constraint::Fill(1),
+            Constraint::Fill(1),
+            Constraint::Length(room_actions_panel_width),
+        ])
+        .split(area)
+    };
 
     draw_room_directory_card(
         frame,
@@ -1085,7 +1095,7 @@ fn draw_rooms_panel(frame: &mut Frame, area: Rect, view: &ControlCenterView<'_>)
     if let Some(prompt) = view.room_prompt.as_ref() {
         draw_room_prompt_card(frame, columns[2], prompt);
     } else {
-        draw_room_actions_panel(frame, columns[2]);
+        draw_room_actions_panel(frame, columns[2], &room_actions_lines);
     }
 }
 
@@ -1323,7 +1333,7 @@ fn room_detail_line(line: &str) -> Line<'static> {
     ))
 }
 
-fn draw_room_actions_panel(frame: &mut Frame, area: Rect) {
+fn draw_room_actions_panel(frame: &mut Frame, area: Rect, room_actions_lines: &[String]) {
     let block = Block::default()
         .title(" Room Actions ")
         .borders(Borders::ALL)
@@ -1331,8 +1341,8 @@ fn draw_room_actions_panel(frame: &mut Frame, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let lines: Vec<Line<'_>> = room_actions_lines()
-        .into_iter()
+    let lines: Vec<Line<'_>> = room_actions_lines
+        .iter()
         .map(|line| {
             let (key_part, label_part) = line.split_at(line.find("  ").unwrap_or(line.len()));
             Line::from(vec![
@@ -1354,6 +1364,16 @@ fn room_actions_lines() -> Vec<String> {
         "v  Make private".to_string(),
         "d  Delete room".to_string(),
     ]
+}
+
+fn actions_panel_width(lines: &[String], title: &str) -> u16 {
+    let content_width = lines
+        .iter()
+        .map(|line| UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or(0);
+    let title_width = UnicodeWidthStr::width(title);
+    content_width.max(title_width).saturating_add(2) as u16
 }
 
 fn draw_room_prompt_card(frame: &mut Frame, area: Rect, prompt: &RoomPromptView<'_>) {

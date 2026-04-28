@@ -737,6 +737,7 @@ impl App {
                         ),
                     ban_prompt: ctx.control_center_ban_prompt.as_ref().map(|prompt| {
                         control_center::ui::BanPromptView {
+                            title: prompt.scope.panel_title(),
                             username: prompt.username.as_str(),
                             reason: prompt.reason.as_str(),
                             duration: prompt.duration.as_str(),
@@ -994,11 +995,11 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
 
 fn current_user_role_badge(is_admin: bool, is_moderator: bool) -> &'static str {
     if is_admin {
-        "(a) "
+        "(Admin) "
     } else if is_moderator {
-        "(m) "
+        "(Mod) "
     } else {
-        ""
+        "(User) "
     }
 }
 

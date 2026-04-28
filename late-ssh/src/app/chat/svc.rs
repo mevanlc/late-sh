@@ -6,6 +6,7 @@ use uuid::Uuid;
 use late_core::{
     db::Db,
     models::{
+        artboard_ban::ArtboardBan,
         bonsai::Tree,
         chat_message::{ChatMessage, ChatMessageParams},
         chat_message_reaction::{ChatMessageReaction, ChatMessageReactionSummary},
@@ -44,6 +45,7 @@ pub struct StaffUserRecord {
     pub last_seen: DateTime<Utc>,
     pub last_chat_at: Option<DateTime<Utc>>,
     pub last_action_at: Option<DateTime<Utc>>,
+    pub recent_chats: Vec<StaffUserRecentChat>,
     pub past_ban_count: usize,
     pub past_kick_count: usize,
     pub past_warning_count: usize,
@@ -51,6 +53,14 @@ pub struct StaffUserRecord {
     pub is_admin: bool,
     pub is_moderator: bool,
     pub active_server_ban: Option<ActiveBanSummary>,
+    pub active_artboard_ban: Option<ActiveBanSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaffUserRecentChat {
+    pub created: DateTime<Utc>,
+    pub room_label: String,
+    pub body: String,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -202,6 +212,7 @@ struct TierChangeResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdminUserAction {
     DisconnectAllSessions,
+    ClearProfileBio,
     Ban {
         reason: String,
         expires_at: Option<DateTime<Utc>>,
@@ -213,6 +224,7 @@ impl AdminUserAction {
     pub const fn verb(&self) -> &'static str {
         match self {
             Self::DisconnectAllSessions => "disconnect",
+            Self::ClearProfileBio => "clear profile",
             Self::Ban { .. } => "ban",
             Self::Unban => "unban",
         }
@@ -221,6 +233,7 @@ impl AdminUserAction {
     fn authz_action(&self) -> Action {
         match self {
             Self::DisconnectAllSessions => Action::DisconnectAllSessions,
+            Self::ClearProfileBio => Action::ClearProfileUgc,
             Self::Ban {
                 expires_at: Some(_),
                 ..
@@ -230,6 +243,51 @@ impl AdminUserAction {
             } => Action::PermaBanUser,
             Self::Unban => Action::UnbanUser,
         }
+    }
+
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::DisconnectAllSessions => "server_disconnect",
+            Self::ClearProfileBio => "clear_profile",
+            Self::Ban { .. } => "server_ban",
+            Self::Unban => "server_unban",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ArtboardModerationAction {
+    Ban {
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+    },
+    Unban,
+}
+
+impl ArtboardModerationAction {
+    pub const fn verb(&self) -> &'static str {
+        match self {
+            Self::Ban { .. } => "artboard ban",
+            Self::Unban => "artboard unban",
+        }
+    }
+
+    fn authz_action(&self) -> Action {
+        match self {
+            Self::Ban { .. } => Action::BanFromArtboard,
+            Self::Unban => Action::UnbanFromArtboard,
+        }
+    }
+
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::Ban { .. } => "artboard_ban",
+            Self::Unban => "artboard_unban",
+        }
+    }
+
+    pub const fn is_ban(&self) -> bool {
+        matches!(self, Self::Ban { .. })
     }
 }
 
@@ -257,6 +315,13 @@ struct AdminUserResult {
     target_username: String,
     action: AdminUserAction,
     disconnected_sessions: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ArtboardModerationResult {
+    target_user_id: Uuid,
+    target_username: String,
+    action: ArtboardModerationAction,
 }
 
 #[derive(Clone)]
@@ -290,6 +355,7 @@ pub struct ChatSnapshot {
     pub all_usernames: Vec<String>,
     pub bonsai_glyphs: HashMap<Uuid, String>,
     pub ignored_user_ids: Vec<Uuid>,
+    pub artboard_edit_banned: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -387,6 +453,12 @@ pub enum ChatEvent {
         target_username: String,
         action: AdminUserAction,
         disconnected_sessions: usize,
+    },
+    ArtboardUserModerated {
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        target_username: String,
+        action: ArtboardModerationAction,
     },
     UserTierChanged {
         actor_user_id: Uuid,
@@ -571,6 +643,7 @@ impl ChatService {
         let mut all_usernames: Vec<String> = usernames.values().cloned().collect();
         all_usernames.sort();
         let ignored_user_ids = User::ignored_user_ids(&client, user_id).await?;
+        let artboard_edit_banned = ArtboardBan::is_active_for_user(&client, user_id).await?;
         let bonsai_glyphs: HashMap<Uuid, String> = Tree::list_all(&client)
             .await?
             .into_iter()
@@ -604,6 +677,7 @@ impl ChatService {
             all_usernames,
             bonsai_glyphs,
             ignored_user_ids,
+            artboard_edit_banned,
         })
     }
 
@@ -1423,6 +1497,7 @@ impl ChatService {
         });
         let user_ids: Vec<Uuid> = users.iter().map(|user| user.id).collect();
         let activity_by_user = Self::staff_user_activity_summaries(client, &user_ids).await?;
+        let mut recent_chats_by_user = Self::staff_user_recent_chats(client, &user_ids).await?;
 
         let active_bans = ServerBan::active_with_actor_username(client).await?;
         let mut active_bans_by_user: HashMap<Uuid, ActiveBanSummary> = HashMap::new();
@@ -1432,6 +1507,19 @@ impl ChatService {
             };
             active_bans_by_user
                 .entry(target_user_id)
+                .or_insert(ActiveBanSummary {
+                    reason: ban.reason,
+                    actor_user_id: ban.actor_user_id,
+                    actor_username,
+                    created: ban.created,
+                    expires_at: ban.expires_at,
+                });
+        }
+        let active_artboard_bans = ArtboardBan::active_with_actor_username(client).await?;
+        let mut active_artboard_bans_by_user: HashMap<Uuid, ActiveBanSummary> = HashMap::new();
+        for (ban, actor_username) in active_artboard_bans {
+            active_artboard_bans_by_user
+                .entry(ban.target_user_id)
                 .or_insert(ActiveBanSummary {
                     reason: ban.reason,
                     actor_user_id: ban.actor_user_id,
@@ -1452,6 +1540,7 @@ impl ChatService {
                     last_seen: user.last_seen,
                     last_chat_at: activity.last_chat_at,
                     last_action_at: activity.last_action_at,
+                    recent_chats: recent_chats_by_user.remove(&user.id).unwrap_or_default(),
                     past_ban_count: activity.past_ban_count,
                     past_kick_count: activity.past_kick_count,
                     past_warning_count: activity.past_warning_count,
@@ -1459,6 +1548,7 @@ impl ChatService {
                     is_admin: user.is_admin,
                     is_moderator: user.is_moderator,
                     active_server_ban: active_bans_by_user.remove(&user.id),
+                    active_artboard_ban: active_artboard_bans_by_user.remove(&user.id),
                 }
             })
             .collect())
@@ -1507,7 +1597,7 @@ impl ChatService {
                  SELECT subject_user_id,
                         MAX(created) AS last_action_at,
                         COUNT(*) FILTER (
-                            WHERE action IN ('server_ban', 'room_ban')
+                            WHERE action IN ('server_ban', 'room_ban', 'artboard_ban')
                         ) AS past_ban_count,
                         COUNT(*) FILTER (
                             WHERE action IN ('server_disconnect', 'room_kick')
@@ -1516,7 +1606,7 @@ impl ChatService {
                             WHERE action LIKE '%warn%'
                         ) AS past_warning_count,
                         COUNT(*) FILTER (
-                            WHERE action = 'message_delete'
+                            WHERE action IN ('message_delete', 'clear_profile', 'profile_clear')
                         ) AS past_ugc_delete_count
                  FROM audit_subjects
                  WHERE subject_user_id = ANY($1)
@@ -1537,6 +1627,61 @@ impl ChatService {
         }
 
         Ok(summaries)
+    }
+
+    async fn staff_user_recent_chats(
+        client: &Client,
+        user_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Vec<StaffUserRecentChat>>> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let rows = client
+            .query(
+                "SELECT *
+                 FROM (
+                     SELECT cm.user_id,
+                            cm.created,
+                            cm.body,
+                            room.kind,
+                            room.slug,
+                            room.language_code,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY cm.user_id
+                                ORDER BY cm.created DESC, cm.id DESC
+                            ) AS rn
+                     FROM chat_messages AS cm
+                     JOIN chat_rooms AS room ON room.id = cm.room_id
+                     WHERE cm.user_id = ANY($1)
+                 ) ranked
+                 WHERE rn <= 5
+                 ORDER BY user_id, created DESC",
+                &[&user_ids],
+            )
+            .await?;
+
+        let mut recent_chats_by_user: HashMap<Uuid, Vec<StaffUserRecentChat>> = HashMap::new();
+        for row in rows {
+            let user_id: Uuid = row.get("user_id");
+            let kind: String = row.get("kind");
+            let slug: Option<String> = row.get("slug");
+            let language_code: Option<String> = row.get("language_code");
+            recent_chats_by_user
+                .entry(user_id)
+                .or_default()
+                .push(StaffUserRecentChat {
+                    created: row.get("created"),
+                    room_label: staff_chat_room_label(
+                        &kind,
+                        slug.as_deref(),
+                        language_code.as_deref(),
+                    ),
+                    body: row.get("body"),
+                });
+        }
+
+        Ok(recent_chats_by_user)
     }
 
     pub fn list_staff_rooms_task(
@@ -2504,8 +2649,6 @@ impl ChatService {
             anyhow::bail!("Cannot {} yourself", action.verb());
         }
 
-        let session_registry =
-            session_registry.ok_or_else(|| anyhow::anyhow!("Live session registry unavailable"))?;
         let client = &self.db.get().await?;
         let target = User::get(client, target_user_id)
             .await?
@@ -2519,6 +2662,9 @@ impl ChatService {
         }
         let disconnected_sessions = match &action {
             AdminUserAction::DisconnectAllSessions => {
+                let session_registry = session_registry
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Live session registry unavailable"))?;
                 session_registry
                     .disconnect_user_sessions(
                         target_user_id,
@@ -2527,6 +2673,9 @@ impl ChatService {
                     .await
             }
             AdminUserAction::Ban { reason, expires_at } => {
+                let session_registry = session_registry
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Live session registry unavailable"))?;
                 if ServerBan::find_active_for_user_id(client, target_user_id)
                     .await?
                     .is_some()
@@ -2563,13 +2712,27 @@ impl ChatService {
                 }
                 0
             }
+            AdminUserAction::ClearProfileBio => {
+                client
+                    .execute(
+                        "UPDATE users
+                         SET settings = settings || jsonb_build_object('bio', ''::text),
+                             updated = current_timestamp
+                         WHERE id = $1",
+                        &[&target_user_id],
+                    )
+                    .await?;
+                0
+            }
         };
         if disconnected_sessions == 0 {
             match action {
                 AdminUserAction::DisconnectAllSessions => {
                     anyhow::bail!("@{} has no live sessions", target.username);
                 }
-                AdminUserAction::Ban { .. } | AdminUserAction::Unban => {}
+                AdminUserAction::Ban { .. }
+                | AdminUserAction::Unban
+                | AdminUserAction::ClearProfileBio => {}
             }
         }
 
@@ -2584,7 +2747,7 @@ impl ChatService {
         ModerationAuditLog::record(
             client,
             actor_user_id,
-            format!("server_{}", action.verb()),
+            action.audit_action(),
             "user",
             Some(target_user_id),
             json!({
@@ -2602,6 +2765,115 @@ impl ChatService {
             target_username: target.username,
             action,
             disconnected_sessions,
+        })
+    }
+
+    pub fn artboard_user_task(
+        &self,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        action: ArtboardModerationAction,
+        permissions: Permissions,
+    ) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.artboard_user_task",
+            actor_user_id = %actor_user_id,
+            target_user_id = %target_user_id,
+            action = action.verb()
+        );
+        tokio::spawn(
+            async move {
+                match service
+                    .artboard_user_action(actor_user_id, target_user_id, action, permissions)
+                    .await
+                {
+                    Ok(result) => {
+                        let _ = service.evt_tx.send(ChatEvent::ArtboardUserModerated {
+                            actor_user_id,
+                            target_user_id: result.target_user_id,
+                            target_username: result.target_username,
+                            action: result.action,
+                        });
+                    }
+                    Err(e) => {
+                        let _ = service.evt_tx.send(ChatEvent::ModerationFailed {
+                            user_id: actor_user_id,
+                            message: e.to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    async fn artboard_user_action(
+        &self,
+        actor_user_id: Uuid,
+        target_user_id: Uuid,
+        action: ArtboardModerationAction,
+        permissions: Permissions,
+    ) -> Result<ArtboardModerationResult> {
+        if actor_user_id == target_user_id {
+            anyhow::bail!("Cannot {} yourself", action.verb());
+        }
+
+        let client = &self.db.get().await?;
+        let target = User::get(client, target_user_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("User not found"))?;
+        let target_tier = TargetTier::from_user_flags(target.is_admin, target.is_moderator);
+        if !permissions
+            .decide(action.authz_action(), target_tier)
+            .is_allowed()
+        {
+            anyhow::bail!("Not permitted");
+        }
+
+        match &action {
+            ArtboardModerationAction::Ban { reason, expires_at } => {
+                if ArtboardBan::is_active_for_user(client, target_user_id).await? {
+                    anyhow::bail!("@{} is already artboard banned", target.username);
+                }
+                ArtboardBan::activate(client, target_user_id, actor_user_id, reason, *expires_at)
+                    .await?;
+            }
+            ArtboardModerationAction::Unban => {
+                let removed = ArtboardBan::delete_for_user(client, target_user_id).await?;
+                if removed == 0 {
+                    anyhow::bail!("@{} is not artboard banned", target.username);
+                }
+            }
+        }
+
+        let ban_reason = match &action {
+            ArtboardModerationAction::Ban { reason, .. } => Some(reason.clone()),
+            _ => None,
+        };
+        let ban_expires_at = match &action {
+            ArtboardModerationAction::Ban { expires_at, .. } => *expires_at,
+            _ => None,
+        };
+        ModerationAuditLog::record(
+            client,
+            actor_user_id,
+            action.audit_action(),
+            "user",
+            Some(target_user_id),
+            json!({
+                "target_user_id": target_user_id,
+                "target_username": target.username.clone(),
+                "reason": ban_reason,
+                "expires_at": ban_expires_at,
+            }),
+        )
+        .await?;
+
+        Ok(ArtboardModerationResult {
+            target_user_id,
+            target_username: target.username,
+            action,
         })
     }
 
@@ -2859,6 +3131,19 @@ fn staff_rooms_title(scope: StaffViewScope) -> String {
     match scope {
         StaffViewScope::Admin => "Admin Rooms".to_string(),
         StaffViewScope::Moderator => "Mod Rooms".to_string(),
+    }
+}
+
+fn staff_chat_room_label(kind: &str, slug: Option<&str>, language_code: Option<&str>) -> String {
+    match kind {
+        "dm" => "DM".to_string(),
+        "language" => language_code
+            .map(|code| format!("#lang-{code}"))
+            .or_else(|| slug.map(|slug| format!("#{slug}")))
+            .unwrap_or_else(|| "#language".to_string()),
+        _ => slug
+            .map(|slug| format!("#{slug}"))
+            .unwrap_or_else(|| format!("#{kind}")),
     }
 }
 

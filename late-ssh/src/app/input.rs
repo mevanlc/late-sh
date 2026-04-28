@@ -1819,6 +1819,35 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             {
                 control_center_view_selected_user_audit_trail(app);
             }
+            b's' | b'S'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
+            {
+                control_center_view_selected_user_sanction_history(app);
+            }
+            b'c' | b'C'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
+            {
+                control_center_request_clear_profile_bio(app);
+            }
+            b'p' | b'P'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
+            {
+                control_center_open_selected_user_profile(app);
+            }
+            b'>' if app.control_center.selected_tab()
+                == crate::app::control_center::state::Tab::Users =>
+            {
+                control_center_open_selected_user_dm(app);
+            }
+            b'r' | b'R'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
+            {
+                control_center_open_selected_user_recent_chats(app);
+            }
             b'x' | b'X' => match app.control_center.selected_tab() {
                 crate::app::control_center::state::Tab::Users => {
                     control_center_request_user_confirmation(
@@ -1841,7 +1870,10 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             },
             b'b' | b'B' => match app.control_center.selected_tab() {
                 crate::app::control_center::state::Tab::Users => {
-                    control_center_begin_ban_prompt(app);
+                    control_center_begin_ban_prompt(
+                        app,
+                        crate::app::control_center::state::BanScope::Server,
+                    );
                 }
                 crate::app::control_center::state::Tab::Rooms => {
                     control_center_begin_room_action(
@@ -1851,6 +1883,31 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 }
                 _ => {}
             },
+            b'o' | b'O'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
+            {
+                let already_banned = app
+                    .control_center
+                    .selected_user_id()
+                    .is_some_and(|user_id| app.chat.control_center_user_artboard_banned(user_id));
+                if already_banned {
+                    control_center_request_user_confirmation(
+                        app,
+                        crate::app::control_center::state::PendingConfirmAction::UnbanArtboardEdit {
+                            user_id: app.control_center.selected_user_id().unwrap_or_default(),
+                        },
+                        "Unban Artboard Editing",
+                        "This lets the selected user edit the shared artboard again.",
+                        "artboard unban",
+                    );
+                } else {
+                    control_center_begin_ban_prompt(
+                        app,
+                        crate::app::control_center::state::BanScope::ArtboardEdit,
+                    );
+                }
+            }
             b'u' | b'U' => match app.control_center.selected_tab() {
                 crate::app::control_center::state::Tab::Users => {
                     control_center_request_user_confirmation(
@@ -2081,6 +2138,12 @@ fn submit_confirm_dialog(app: &mut App) {
                 crate::app::chat::svc::AdminUserAction::DisconnectAllSessions,
             ));
         }
+        crate::app::control_center::state::PendingConfirmAction::ClearProfileBio { user_id } => {
+            app.banner = Some(app.chat.admin_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::AdminUserAction::ClearProfileBio,
+            ));
+        }
         crate::app::control_center::state::PendingConfirmAction::BanUser {
             user_id,
             reason,
@@ -2095,6 +2158,22 @@ fn submit_confirm_dialog(app: &mut App) {
             app.banner = Some(app.chat.admin_control_center_user_action(
                 user_id,
                 crate::app::chat::svc::AdminUserAction::Unban,
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::BanArtboardEdit {
+            user_id,
+            reason,
+            expires_at,
+        } => {
+            app.banner = Some(app.chat.artboard_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::ArtboardModerationAction::Ban { reason, expires_at },
+            ));
+        }
+        crate::app::control_center::state::PendingConfirmAction::UnbanArtboardEdit { user_id } => {
+            app.banner = Some(app.chat.artboard_control_center_user_action(
+                user_id,
+                crate::app::chat::svc::ArtboardModerationAction::Unban,
             ));
         }
         crate::app::control_center::state::PendingConfirmAction::GrantModerator { user_id } => {
@@ -2131,6 +2210,41 @@ fn submit_confirm_dialog(app: &mut App) {
             ));
         }
     }
+}
+
+fn control_center_request_clear_profile_bio(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    if !app.permissions.can_access_mod_surface() {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Moderator or admin only",
+        ));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
+        ));
+        return;
+    };
+    let user_label = app
+        .chat
+        .control_center_user_label(user_id)
+        .unwrap_or_else(|| "@user".to_string());
+    app.control_center.set_pending_confirm_action(
+        crate::app::control_center::state::PendingConfirmAction::ClearProfileBio { user_id },
+    );
+    app.confirm_dialog = Some(
+        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
+            "Clear Profile Bio",
+            format!("Type {} to confirm clear bio", user_label),
+            "Clears only the user's bio. Other profile fields are left intact. Audit-logged.",
+            user_label,
+            "clear bio",
+            "cancel",
+        ),
+    );
 }
 
 fn control_center_begin_admin_rename(app: &mut App) {
@@ -2198,8 +2312,23 @@ fn control_center_request_user_confirmation(
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
         return;
     }
-    if !app.permissions.can_access_admin_surface() {
-        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+    let is_artboard_action = matches!(
+        &action,
+        crate::app::control_center::state::PendingConfirmAction::BanArtboardEdit { .. }
+            | crate::app::control_center::state::PendingConfirmAction::UnbanArtboardEdit { .. }
+    );
+    let permitted = if is_artboard_action {
+        app.permissions.can_access_mod_surface()
+    } else {
+        app.permissions.can_access_admin_surface()
+    };
+    if !permitted {
+        let message = if is_artboard_action {
+            "Moderator or admin only"
+        } else {
+            "Admin only"
+        };
+        app.banner = Some(crate::app::common::primitives::Banner::error(message));
         return;
     }
     let Some(user_id) = app.control_center.selected_user_id() else {
@@ -2349,6 +2478,14 @@ fn control_center_request_grant_admin(app: &mut App) {
 }
 
 fn control_center_view_selected_user_audit_trail(app: &mut App) {
+    control_center_view_selected_user_audit_filter(app, false);
+}
+
+fn control_center_view_selected_user_sanction_history(app: &mut App) {
+    control_center_view_selected_user_audit_filter(app, true);
+}
+
+fn control_center_view_selected_user_audit_filter(app: &mut App, sanction_only: bool) {
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
         return;
     }
@@ -2370,21 +2507,102 @@ fn control_center_view_selected_user_audit_trail(app: &mut App) {
         ));
         return;
     };
-    app.control_center
-        .set_audit_filter(format!("target:{}", user_label));
+    let filter = if sanction_only {
+        format!("target:{} sanction:true", user_label)
+    } else {
+        format!("target:{}", user_label)
+    };
+    app.control_center.set_audit_filter(filter);
     app.control_center.go_to_tab(4);
+    let message = if sanction_only {
+        "Sanction history filtered for"
+    } else {
+        "Audit trail filtered for"
+    };
     app.banner = Some(crate::app::common::primitives::Banner::success(&format!(
-        "Audit trail filtered for {}",
-        user_label
+        "{} {}",
+        message, user_label
     )));
 }
 
-fn control_center_begin_ban_prompt(app: &mut App) {
+fn control_center_open_selected_user_profile(app: &mut App) {
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
         return;
     }
-    if !app.permissions.can_access_admin_surface() {
-        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
+        ));
+        return;
+    };
+    let Some(username) = app.chat.control_center_selected_user_name(Some(user_id)) else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target not found",
+        ));
+        return;
+    };
+    app.profile_modal_state.open(user_id, username);
+    app.show_profile_modal = true;
+}
+
+fn control_center_open_selected_user_dm(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
+        ));
+        return;
+    };
+    if user_id == app.user_id {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Cannot DM yourself",
+        ));
+        return;
+    }
+    let Some(username) = app.chat.control_center_selected_user_name(Some(user_id)) else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target not found",
+        ));
+        return;
+    };
+    app.banner = Some(app.chat.open_dm_with_username(&username));
+}
+
+fn control_center_open_selected_user_recent_chats(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    let selected_user_id = app.control_center.selected_user_id();
+    app.banner = Some(
+        app.chat
+            .open_control_center_recent_chats_overlay(selected_user_id),
+    );
+    app.set_screen(Screen::Chat);
+}
+
+fn control_center_begin_ban_prompt(
+    app: &mut App,
+    scope: crate::app::control_center::state::BanScope,
+) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
+        return;
+    }
+    let permitted = match scope {
+        crate::app::control_center::state::BanScope::Server => {
+            app.permissions.can_access_admin_surface()
+        }
+        crate::app::control_center::state::BanScope::ArtboardEdit => {
+            app.permissions.can_access_mod_surface()
+        }
+    };
+    if !permitted {
+        let message = match scope {
+            crate::app::control_center::state::BanScope::Server => "Admin only",
+            crate::app::control_center::state::BanScope::ArtboardEdit => "Moderator or admin only",
+        };
+        app.banner = Some(crate::app::common::primitives::Banner::error(message));
         return;
     }
     let Some(user_id) = app.control_center.selected_user_id() else {
@@ -2397,8 +2615,11 @@ fn control_center_begin_ban_prompt(app: &mut App) {
         .chat
         .control_center_user_label(user_id)
         .unwrap_or_else(|| "@user".to_string());
-    app.control_center
-        .begin_ban_prompt(user_id, user_label.trim_start_matches('@').to_string());
+    app.control_center.begin_ban_prompt(
+        scope,
+        user_id,
+        user_label.trim_start_matches('@').to_string(),
+    );
 }
 
 fn submit_control_center_ban_prompt(app: &mut App) {
@@ -2431,24 +2652,44 @@ fn submit_control_center_ban_prompt(app: &mut App) {
         None => "permanent".to_string(),
         Some(d) => format!("expires in {}", humanize_chrono_duration(d)),
     };
-    let detail = format!(
-        "Reason: {} · {} · disconnects every live session.",
-        reason, duration_summary
-    );
-    app.control_center.set_pending_confirm_action(
-        crate::app::control_center::state::PendingConfirmAction::BanUser {
-            user_id: ban_prompt.user_id,
-            reason: reason.clone(),
-            expires_at,
-        },
-    );
+    let (title, detail, action) = match ban_prompt.scope {
+        crate::app::control_center::state::BanScope::Server => (
+            "Ban User",
+            format!(
+                "Reason: {} · {} · disconnects every live session.",
+                reason, duration_summary
+            ),
+            crate::app::control_center::state::PendingConfirmAction::BanUser {
+                user_id: ban_prompt.user_id,
+                reason: reason.clone(),
+                expires_at,
+            },
+        ),
+        crate::app::control_center::state::BanScope::ArtboardEdit => (
+            "Ban Artboard Editing",
+            format!(
+                "Reason: {} · {} · blocks edits only.",
+                reason, duration_summary
+            ),
+            crate::app::control_center::state::PendingConfirmAction::BanArtboardEdit {
+                user_id: ban_prompt.user_id,
+                reason: reason.clone(),
+                expires_at,
+            },
+        ),
+    };
+    app.control_center.set_pending_confirm_action(action);
     app.confirm_dialog = Some(
         crate::app::confirm_dialog::state::ConfirmDialogState::typed(
-            "Ban User",
-            format!("Type {} to confirm ban", user_label),
+            title,
+            format!(
+                "Type {} to confirm {}",
+                user_label,
+                ban_prompt.scope.confirm_label()
+            ),
             detail,
             user_label,
-            "ban",
+            ban_prompt.scope.confirm_label(),
             "cancel",
         ),
     );

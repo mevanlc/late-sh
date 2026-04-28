@@ -93,6 +93,10 @@ impl App {
             self.banner = Some(b);
         }
         if let Some(state) = self.dartboard_state.as_mut() {
+            state.set_edit_banned(self.chat.artboard_edit_banned());
+            if state.edit_banned() {
+                self.artboard_interacting = false;
+            }
             state.tick();
         }
         self.chip_balance = self.blackjack_state.balance;

@@ -778,6 +778,9 @@ impl App {
             self.username.clone(),
             self.dartboard_provenance.clone(),
         ));
+        if let Some(state) = self.dartboard_state.as_mut() {
+            state.set_edit_banned(self.chat.artboard_edit_banned());
+        }
         self.set_cursor_shape(CURSOR_SHAPE_STEADY_UNDERLINE);
     }
 
@@ -793,6 +796,13 @@ impl App {
 
     pub(crate) fn activate_artboard_interaction(&mut self) {
         self.enter_dartboard();
+        if self.chat.artboard_edit_banned() {
+            if let Some(state) = self.dartboard_state.as_mut() {
+                state.set_edit_banned(true);
+            }
+            self.artboard_interacting = false;
+            return;
+        }
         self.artboard_interacting = true;
     }
 

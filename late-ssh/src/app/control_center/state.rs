@@ -42,6 +42,28 @@ pub enum RoomAction {
     Unban,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BanScope {
+    Server,
+    ArtboardEdit,
+}
+
+impl BanScope {
+    pub const fn panel_title(self) -> &'static str {
+        match self {
+            Self::Server => "Ban User",
+            Self::ArtboardEdit => "Ban Artboard Editing",
+        }
+    }
+
+    pub const fn confirm_label(self) -> &'static str {
+        match self {
+            Self::Server => "ban",
+            Self::ArtboardEdit => "artboard ban",
+        }
+    }
+}
+
 impl RoomAction {
     pub const fn label(self) -> &'static str {
         match self {
@@ -100,12 +122,23 @@ pub enum PendingConfirmAction {
     DisconnectUser {
         user_id: Uuid,
     },
+    ClearProfileBio {
+        user_id: Uuid,
+    },
     BanUser {
         user_id: Uuid,
         reason: String,
         expires_at: Option<DateTime<Utc>>,
     },
     UnbanUser {
+        user_id: Uuid,
+    },
+    BanArtboardEdit {
+        user_id: Uuid,
+        reason: String,
+        expires_at: Option<DateTime<Utc>>,
+    },
+    UnbanArtboardEdit {
         user_id: Uuid,
     },
     GrantModerator {
@@ -134,6 +167,7 @@ pub enum BanPromptField {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BanPrompt {
+    pub scope: BanScope,
     pub user_id: Uuid,
     pub username: String,
     pub reason: String,
@@ -610,10 +644,11 @@ impl State {
         Some((room_id, prompt.kind, prompt.value.trim().to_string()))
     }
 
-    pub fn begin_ban_prompt(&mut self, user_id: Uuid, username: String) -> bool {
+    pub fn begin_ban_prompt(&mut self, scope: BanScope, user_id: Uuid, username: String) -> bool {
         self.prompt = None;
         self.pending_confirm_action = None;
         self.ban_prompt = Some(BanPrompt {
+            scope,
             user_id,
             username,
             reason: String::new(),

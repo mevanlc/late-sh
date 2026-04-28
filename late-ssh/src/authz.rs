@@ -199,6 +199,9 @@ pub enum Action {
     TempBanUser,
     PermaBanUser,
     UnbanUser,
+    // Artboard moderation
+    BanFromArtboard,
+    UnbanFromArtboard,
     ViewUserFingerprint,
     ViewUserIp,
     DeleteUserAccountHard,
@@ -285,6 +288,10 @@ fn decide_matrix(actor: Tier, action: Action, target: TargetTier) -> Decision {
         (UnbanUser, Regular) => mod_or_admin(actor),
         (UnbanUser, Moderator) => admin_only(actor),
         (UnbanUser, Admin) => Deny,
+        (BanFromArtboard, Regular) => mod_or_admin(actor),
+        (BanFromArtboard, Moderator | Admin) => admin_only(actor),
+        (UnbanFromArtboard, Regular) => mod_or_admin(actor),
+        (UnbanFromArtboard, Moderator | Admin) => admin_only(actor),
         (ViewUserFingerprint, _) => mod_or_admin(actor),
         (ViewUserIp, _) => mod_or_admin(actor),
         (DeleteUserAccountHard, _) => NotImplemented,
@@ -328,6 +335,7 @@ fn decide_matrix(actor: Tier, action: Action, target: TargetTier) -> Decision {
         (DeleteMessage | DeleteArticle, _) => Deny,
         (DisconnectAllSessions, _) => Deny,
         (TempBanUser | PermaBanUser | UnbanUser, _) => Deny,
+        (BanFromArtboard | UnbanFromArtboard, _) => Deny,
     }
 }
 
@@ -389,6 +397,10 @@ fn log_rule_matrix(action: Action, target: TargetTier) -> LogRule {
         (UnbanUser, Regular) => OnModOrAdmin,
         (UnbanUser, Moderator) => OnAdmin,
         (UnbanUser, Admin) => Never,
+        (BanFromArtboard, Regular) => OnModOrAdmin,
+        (BanFromArtboard, Moderator | Admin) => OnAdmin,
+        (UnbanFromArtboard, Regular) => OnModOrAdmin,
+        (UnbanFromArtboard, Moderator | Admin) => OnAdmin,
         (ViewUserFingerprint, _) => Never,
         (ViewUserIp, _) => Never,
         (DeleteUserAccountHard, _) => Never,
@@ -431,6 +443,7 @@ fn log_rule_matrix(action: Action, target: TargetTier) -> LogRule {
         (DeleteMessage | DeleteArticle, _) => Never,
         (DisconnectAllSessions, _) => Never,
         (TempBanUser | PermaBanUser | UnbanUser, _) => Never,
+        (BanFromArtboard | UnbanFromArtboard, _) => Never,
     }
 }
 
@@ -681,6 +694,8 @@ mod tests {
             "temp_ban_user" => TempBanUser,
             "perma_ban_user" => PermaBanUser,
             "unban_user" => UnbanUser,
+            "ban_from_artboard" => BanFromArtboard,
+            "unban_from_artboard" => UnbanFromArtboard,
             "view_user_fingerprint" => ViewUserFingerprint,
             "view_user_ip" => ViewUserIp,
             "delete_user_account_hard" => DeleteUserAccountHard,
