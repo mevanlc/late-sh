@@ -1,3 +1,5 @@
+use std::time::{Duration as StdDuration, Instant};
+
 use chrono::{DateTime, Duration, Utc};
 use uuid::Uuid;
 
@@ -29,6 +31,7 @@ pub enum Focus {
     #[default]
     None,
     UserFilter,
+    RoomFilter,
     AuditFilter,
 }
 
@@ -154,9 +157,11 @@ pub struct State {
     selected_audit_id: Option<Uuid>,
     audit_filter: String,
     user_filter: String,
+    room_filter: String,
     prompt: Option<Prompt>,
     ban_prompt: Option<BanPrompt>,
     pending_confirm_action: Option<PendingConfirmAction>,
+    last_snapshot_refresh_at: Option<Instant>,
 }
 
 impl Default for State {
@@ -170,9 +175,11 @@ impl Default for State {
             selected_audit_id: None,
             audit_filter: String::new(),
             user_filter: String::new(),
+            room_filter: String::new(),
             prompt: None,
             ban_prompt: None,
             pending_confirm_action: None,
+            last_snapshot_refresh_at: None,
         }
     }
 }
@@ -192,12 +199,25 @@ impl State {
         self.focus
     }
 
+    pub fn mark_snapshot_refresh(&mut self, now: Instant) {
+        self.last_snapshot_refresh_at = Some(now);
+    }
+
+    pub fn snapshot_refresh_due(&self, now: Instant, interval: StdDuration) -> bool {
+        self.last_snapshot_refresh_at
+            .is_none_or(|last_refresh| now.saturating_duration_since(last_refresh) >= interval)
+    }
+
     pub fn focus_audit_filter(&mut self) {
         self.focus = Focus::AuditFilter;
     }
 
     pub fn focus_user_filter(&mut self) {
         self.focus = Focus::UserFilter;
+    }
+
+    pub fn focus_room_filter(&mut self) {
+        self.focus = Focus::RoomFilter;
     }
 
     pub fn unfocus(&mut self) {
@@ -212,8 +232,16 @@ impl State {
         self.focus == Focus::UserFilter
     }
 
+    pub fn is_room_filter_focused(&self) -> bool {
+        self.focus == Focus::RoomFilter
+    }
+
     pub fn user_filter(&self) -> &str {
         &self.user_filter
+    }
+
+    pub fn room_filter(&self) -> &str {
+        &self.room_filter
     }
 
     pub fn user_filter_push(&mut self, ch: char) {
@@ -246,6 +274,39 @@ impl State {
             return false;
         }
         self.user_filter.clear();
+        true
+    }
+
+    pub fn room_filter_push(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.room_filter.push(ch);
+    }
+
+    pub fn room_filter_backspace(&mut self) {
+        self.room_filter.pop();
+    }
+
+    pub fn room_filter_delete_word_left(&mut self) {
+        while self.room_filter.ends_with(char::is_whitespace) {
+            self.room_filter.pop();
+        }
+        while self
+            .room_filter
+            .chars()
+            .last()
+            .is_some_and(|ch| !ch.is_whitespace())
+        {
+            self.room_filter.pop();
+        }
+    }
+
+    pub fn clear_room_filter(&mut self) -> bool {
+        if self.room_filter.is_empty() {
+            return false;
+        }
+        self.room_filter.clear();
         true
     }
 
@@ -359,6 +420,10 @@ impl State {
 
     pub fn audit_filter(&self) -> &str {
         &self.audit_filter
+    }
+
+    pub fn set_audit_filter(&mut self, value: impl Into<String>) {
+        self.audit_filter = value.into();
     }
 
     pub fn audit_filter_push(&mut self, ch: char) {

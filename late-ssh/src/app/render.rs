@@ -16,6 +16,7 @@ use late_core::models::leaderboard::LeaderboardData;
 use super::{
     artboard, bonsai, chat,
     common::{
+        primitives::genre_label,
         primitives::{Banner, BannerKind, Screen, draw_banner},
         sidebar::{SidebarProps, draw_sidebar, sidebar_clock_text},
         theme,
@@ -122,6 +123,8 @@ struct DrawContext<'a> {
     confirm_dialog: Option<&'a confirm_dialog::state::ConfirmDialogState>,
     username: &'a str,
     control_center_tab: control_center::state::Tab,
+    control_center_music_vibe: &'a str,
+    control_center_status_summary: chat::state::ControlCenterStatusSummary,
     control_center_user_list_lines: &'a [String],
     control_center_user_detail_lines: &'a [String],
     control_center_user_list_rows: Vec<chat::state::UserListRow>,
@@ -130,7 +133,10 @@ struct DrawContext<'a> {
     control_center_user_filter: &'a str,
     control_center_user_filter_focused: bool,
     control_center_room_list_lines: &'a [String],
+    control_center_room_list_rows: Vec<chat::state::RoomListRow>,
     control_center_room_detail_lines: &'a [String],
+    control_center_room_filter: &'a str,
+    control_center_room_filter_focused: bool,
     control_center_staff_list_lines: &'a [String],
     control_center_staff_detail_lines: &'a [String],
     control_center_audit_list_lines: &'a [String],
@@ -371,15 +377,24 @@ impl App {
             .chat
             .control_center_selected_user_name(selected_control_center_user_id);
         let control_center_user_filter_focused = self.control_center.is_user_filter_focused();
-        let control_center_room_ids = self.chat.control_center_room_ids();
+        let control_center_room_filter_str = self.control_center.room_filter().to_string();
+        let control_center_room_ids = self
+            .chat
+            .control_center_room_ids_filtered(&control_center_room_filter_str);
         self.control_center.sync_room_ids(&control_center_room_ids);
         let selected_control_center_room_id = self.control_center.selected_room_id();
-        let control_center_room_list_lines = self
-            .chat
-            .control_center_room_list_lines(selected_control_center_room_id);
+        let control_center_room_list_lines = self.chat.control_center_room_list_lines(
+            selected_control_center_room_id,
+            &control_center_room_filter_str,
+        );
+        let control_center_room_list_rows = self.chat.control_center_room_list_rows(
+            selected_control_center_room_id,
+            &control_center_room_filter_str,
+        );
         let control_center_room_detail_lines = self
             .chat
             .control_center_room_detail_lines(selected_control_center_room_id);
+        let control_center_room_filter_focused = self.control_center.is_room_filter_focused();
         let control_center_staff_user_ids = self.chat.control_center_staff_user_ids();
         self.control_center
             .sync_staff_ids(&control_center_staff_user_ids);
@@ -426,6 +441,8 @@ impl App {
             .as_ref()
             .map(|registry| registry.snapshot_all().len())
             .unwrap_or(0);
+        let control_center_status_summary = self.chat.control_center_status_summary();
+        let control_center_music_vibe = genre_label(vote_snapshot.current_genre);
         let terminal = &mut self.terminal;
 
         terminal
@@ -467,6 +484,8 @@ impl App {
                         confirm_dialog: self.confirm_dialog.as_ref(),
                         username: &self.username,
                         control_center_tab: self.control_center.selected_tab(),
+                        control_center_music_vibe,
+                        control_center_status_summary,
                         control_center_user_list_lines: &control_center_user_list_lines,
                         control_center_user_detail_lines: &control_center_user_detail_lines,
                         control_center_user_list_rows,
@@ -475,7 +494,10 @@ impl App {
                         control_center_user_filter: &control_center_user_filter_str,
                         control_center_user_filter_focused,
                         control_center_room_list_lines: &control_center_room_list_lines,
+                        control_center_room_list_rows,
                         control_center_room_detail_lines: &control_center_room_detail_lines,
+                        control_center_room_filter: &control_center_room_filter_str,
+                        control_center_room_filter_focused,
                         control_center_staff_list_lines: &control_center_staff_list_lines,
                         control_center_staff_detail_lines: &control_center_staff_detail_lines,
                         control_center_audit_list_lines: &control_center_audit_list_lines,
@@ -682,6 +704,8 @@ impl App {
                     is_moderator: ctx.is_moderator,
                     online_count: ctx.online_count,
                     live_session_count: ctx.live_session_count,
+                    music_vibe: ctx.control_center_music_vibe,
+                    status_summary: &ctx.control_center_status_summary,
                     user_list_lines: ctx.control_center_user_list_lines,
                     user_detail_lines: ctx.control_center_user_detail_lines,
                     user_list_rows: &ctx.control_center_user_list_rows,
@@ -690,7 +714,10 @@ impl App {
                     user_filter: ctx.control_center_user_filter,
                     user_filter_focused: ctx.control_center_user_filter_focused,
                     room_list_lines: ctx.control_center_room_list_lines,
+                    room_list_rows: &ctx.control_center_room_list_rows,
                     room_detail_lines: ctx.control_center_room_detail_lines,
+                    room_filter: ctx.control_center_room_filter,
+                    room_filter_focused: ctx.control_center_room_filter_focused,
                     staff_list_lines: ctx.control_center_staff_list_lines,
                     staff_detail_lines: ctx.control_center_staff_detail_lines,
                     audit_list_lines: ctx.control_center_audit_list_lines,
@@ -921,13 +948,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 .add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
-            if ctx.is_admin {
-                "(Admin) ".to_string()
-            } else if ctx.is_moderator {
-                "(Mod) ".to_string()
-            } else {
-                "(User) ".to_string()
-            },
+            current_user_role_badge(ctx.is_admin, ctx.is_moderator),
             Style::default().fg(theme::AMBER()),
         ));
     }
@@ -969,6 +990,16 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     }
 
     Line::from(spans)
+}
+
+fn current_user_role_badge(is_admin: bool, is_moderator: bool) -> &'static str {
+    if is_admin {
+        "(a) "
+    } else if is_moderator {
+        "(m) "
+    } else {
+        ""
+    }
 }
 
 fn frame_title_tabs(show_control_center: bool) -> Vec<(Screen, &'static str)> {

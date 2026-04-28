@@ -814,6 +814,9 @@ impl App {
             if screen == Screen::Artboard {
                 self.enter_dartboard();
             }
+            if screen == Screen::ControlCenter {
+                self.refresh_control_center_snapshots();
+            }
             self.sync_visible_chat_room();
             return;
         }
@@ -832,15 +835,20 @@ impl App {
         }
 
         if self.screen == Screen::ControlCenter {
-            self.chat.refresh_staff_users_snapshot();
-            self.chat.refresh_staff_rooms_snapshot();
-            self.chat.refresh_audit_log_snapshot();
+            self.refresh_control_center_snapshots();
         }
 
         if self.screen == Screen::Artboard {
             self.enter_dartboard();
         }
         self.sync_visible_chat_room();
+    }
+
+    pub(crate) fn refresh_control_center_snapshots(&mut self) {
+        self.chat.refresh_staff_users_snapshot();
+        self.chat.refresh_staff_rooms_snapshot();
+        self.chat.refresh_audit_log_snapshot();
+        self.control_center.mark_snapshot_refresh(Instant::now());
     }
 
     fn set_cursor_shape(&mut self, sequence: &[u8]) {

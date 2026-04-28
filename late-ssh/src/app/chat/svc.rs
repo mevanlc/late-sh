@@ -40,9 +40,27 @@ pub enum StaffViewScope {
 pub struct StaffUserRecord {
     pub user_id: Uuid,
     pub username: String,
+    pub created: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub last_chat_at: Option<DateTime<Utc>>,
+    pub last_action_at: Option<DateTime<Utc>>,
+    pub past_ban_count: usize,
+    pub past_kick_count: usize,
+    pub past_warning_count: usize,
+    pub past_ugc_delete_count: usize,
     pub is_admin: bool,
     pub is_moderator: bool,
     pub active_server_ban: Option<ActiveBanSummary>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StaffUserActivitySummary {
+    last_chat_at: Option<DateTime<Utc>>,
+    last_action_at: Option<DateTime<Utc>>,
+    past_ban_count: usize,
+    past_kick_count: usize,
+    past_warning_count: usize,
+    past_ugc_delete_count: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,6 +88,7 @@ pub struct AuditLogEntry {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StaffRoomRecord {
     pub room_id: Uuid,
+    pub created: DateTime<Utc>,
     pub kind: String,
     pub visibility: String,
     pub auto_join: bool,
@@ -78,6 +97,7 @@ pub struct StaffRoomRecord {
     pub language_code: Option<String>,
     pub member_count: i64,
     pub active_ban_count: i64,
+    pub last_message_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1401,6 +1421,8 @@ impl ChatService {
                 .cmp(&b.username.to_ascii_lowercase())
                 .then_with(|| a.created.cmp(&b.created))
         });
+        let user_ids: Vec<Uuid> = users.iter().map(|user| user.id).collect();
+        let activity_by_user = Self::staff_user_activity_summaries(client, &user_ids).await?;
 
         let active_bans = ServerBan::active_with_actor_username(client).await?;
         let mut active_bans_by_user: HashMap<Uuid, ActiveBanSummary> = HashMap::new();
@@ -1421,14 +1443,100 @@ impl ChatService {
 
         Ok(users
             .into_iter()
-            .map(|user| StaffUserRecord {
-                user_id: user.id,
-                username: user.username,
-                is_admin: user.is_admin,
-                is_moderator: user.is_moderator,
-                active_server_ban: active_bans_by_user.remove(&user.id),
+            .map(|user| {
+                let activity = activity_by_user.get(&user.id).copied().unwrap_or_default();
+                StaffUserRecord {
+                    user_id: user.id,
+                    username: user.username,
+                    created: user.created,
+                    last_seen: user.last_seen,
+                    last_chat_at: activity.last_chat_at,
+                    last_action_at: activity.last_action_at,
+                    past_ban_count: activity.past_ban_count,
+                    past_kick_count: activity.past_kick_count,
+                    past_warning_count: activity.past_warning_count,
+                    past_ugc_delete_count: activity.past_ugc_delete_count,
+                    is_admin: user.is_admin,
+                    is_moderator: user.is_moderator,
+                    active_server_ban: active_bans_by_user.remove(&user.id),
+                }
             })
             .collect())
+    }
+
+    async fn staff_user_activity_summaries(
+        client: &Client,
+        user_ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, StaffUserActivitySummary>> {
+        if user_ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let mut summaries = HashMap::new();
+        for row in client
+            .query(
+                "SELECT user_id, MAX(created) AS last_chat_at
+                 FROM chat_messages
+                 WHERE user_id = ANY($1)
+                 GROUP BY user_id",
+                &[&user_ids],
+            )
+            .await?
+        {
+            let user_id: Uuid = row.get("user_id");
+            summaries
+                .entry(user_id)
+                .or_insert_with(StaffUserActivitySummary::default)
+                .last_chat_at = row.get("last_chat_at");
+        }
+
+        for row in client
+            .query(
+                "WITH audit_subjects AS (
+                    SELECT created,
+                           action,
+                           CASE
+                               WHEN target_kind = 'user' THEN target_id
+                               WHEN metadata ? 'target_user_id'
+                                    AND metadata->>'target_user_id' <> ''
+                               THEN (metadata->>'target_user_id')::uuid
+                               ELSE NULL
+                           END AS subject_user_id
+                    FROM moderation_audit_log
+                 )
+                 SELECT subject_user_id,
+                        MAX(created) AS last_action_at,
+                        COUNT(*) FILTER (
+                            WHERE action IN ('server_ban', 'room_ban')
+                        ) AS past_ban_count,
+                        COUNT(*) FILTER (
+                            WHERE action IN ('server_disconnect', 'room_kick')
+                        ) AS past_kick_count,
+                        COUNT(*) FILTER (
+                            WHERE action LIKE '%warn%'
+                        ) AS past_warning_count,
+                        COUNT(*) FILTER (
+                            WHERE action = 'message_delete'
+                        ) AS past_ugc_delete_count
+                 FROM audit_subjects
+                 WHERE subject_user_id = ANY($1)
+                 GROUP BY subject_user_id",
+                &[&user_ids],
+            )
+            .await?
+        {
+            let user_id: Uuid = row.get("subject_user_id");
+            let summary = summaries
+                .entry(user_id)
+                .or_insert_with(StaffUserActivitySummary::default);
+            summary.last_action_at = row.get("last_action_at");
+            summary.past_ban_count = i64_to_usize(row.get("past_ban_count"));
+            summary.past_kick_count = i64_to_usize(row.get("past_kick_count"));
+            summary.past_warning_count = i64_to_usize(row.get("past_warning_count"));
+            summary.past_ugc_delete_count = i64_to_usize(row.get("past_ugc_delete_count"));
+        }
+
+        Ok(summaries)
     }
 
     pub fn list_staff_rooms_task(
@@ -1543,6 +1651,7 @@ impl ChatService {
         let rows = client
             .query(
                 "SELECT r.id,
+                        r.created,
                         r.kind,
                         r.visibility,
                         r.auto_join,
@@ -1550,9 +1659,11 @@ impl ChatService {
                         r.slug,
                         r.language_code,
                         COUNT(DISTINCT m.user_id)::bigint AS member_count,
-                        COALESCE(rb.active_ban_count, 0)::bigint AS active_ban_count
+                        COALESCE(rb.active_ban_count, 0)::bigint AS active_ban_count,
+                        MAX(msg.created) AS last_message_at
                  FROM chat_rooms r
                  LEFT JOIN chat_room_members m ON m.room_id = r.id
+                 LEFT JOIN chat_messages msg ON msg.room_id = r.id
                  LEFT JOIN (
                      SELECT room_id, COUNT(*)::bigint AS active_ban_count
                      FROM room_bans
@@ -1588,6 +1699,7 @@ impl ChatService {
             .into_iter()
             .map(|row| StaffRoomRecord {
                 room_id: row.get("id"),
+                created: row.get("created"),
                 kind: row.get("kind"),
                 visibility: row.get("visibility"),
                 auto_join: row.get("auto_join"),
@@ -1596,6 +1708,7 @@ impl ChatService {
                 language_code: row.get("language_code"),
                 member_count: row.get("member_count"),
                 active_ban_count: row.get("active_ban_count"),
+                last_message_at: row.get("last_message_at"),
             })
             .collect())
     }
@@ -2747,6 +2860,10 @@ fn staff_rooms_title(scope: StaffViewScope) -> String {
         StaffViewScope::Admin => "Admin Rooms".to_string(),
         StaffViewScope::Moderator => "Mod Rooms".to_string(),
     }
+}
+
+fn i64_to_usize(value: i64) -> usize {
+    value.max(0) as usize
 }
 
 fn staff_room_label(room: &StaffRoomRecord) -> String {

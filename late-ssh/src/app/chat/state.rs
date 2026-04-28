@@ -15,6 +15,7 @@ use crate::app::common::overlay::Overlay;
 use crate::authz::Permissions;
 use crate::session::{LiveSessionSnapshot, PairedClientRegistry, SessionRegistry};
 
+use crate::app::common::primitives::format_relative_time;
 use crate::app::common::{composer, primitives::Banner};
 use crate::app::help_modal::data::HelpTopic;
 use crate::state::{ActiveUser, ActiveUsers};
@@ -36,6 +37,29 @@ pub struct ChatRuntimeState {
     pub active_users: Option<ActiveUsers>,
     pub session_registry: Option<SessionRegistry>,
     pub paired_client_registry: Option<PairedClientRegistry>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ControlCenterStatusSummary {
+    pub account_count: usize,
+    pub recent_room_count: usize,
+    pub recent_room_labels: Vec<String>,
+    pub new_users_today: usize,
+    pub new_users_this_week: usize,
+    pub unique_users_today: usize,
+    pub unique_users_this_week: usize,
+    pub idle_users: usize,
+    pub active_users: usize,
+    pub newest_room: Option<String>,
+    pub public_rooms: usize,
+    pub private_rooms: usize,
+    pub active_server_bans: usize,
+    pub active_room_bans: i64,
+    pub most_recent_ban: Option<String>,
+    pub most_recent_kick: Option<String>,
+    pub staff_online_now: usize,
+    pub staff_recently_active: usize,
+    pub last_staff_action: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -872,12 +896,159 @@ impl ChatState {
             .collect()
     }
 
+    pub fn control_center_status_summary(&self) -> ControlCenterStatusSummary {
+        let now = chrono::Utc::now();
+        let today = now.date_naive();
+        let week_start = now - chrono::Duration::days(7);
+        let recent_cutoff = now - chrono::Duration::hours(24);
+        let staff_recent_cutoff = now - chrono::Duration::hours(1);
+
+        let (active_users, idle_users, online_user_ids) = self
+            .active_users
+            .as_ref()
+            .map(|active_users| {
+                let guard = active_users.lock_recover();
+                let mut active = 0;
+                let mut idle = 0;
+                for user in guard.values() {
+                    if user.last_login_at.elapsed() <= std::time::Duration::from_secs(5 * 60) {
+                        active += 1;
+                    } else {
+                        idle += 1;
+                    }
+                }
+                let ids: HashSet<Uuid> = guard.keys().copied().collect();
+                (active, idle, ids)
+            })
+            .unwrap_or_default();
+
+        let new_users_today = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| user.created.date_naive() == today)
+            .count();
+        let new_users_this_week = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| user.created >= week_start)
+            .count();
+        let unique_users_today = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| user.last_seen.date_naive() == today)
+            .count();
+        let unique_users_this_week = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| user.last_seen >= week_start)
+            .count();
+
+        let staff_online_now = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| {
+                (user.is_admin || user.is_moderator) && online_user_ids.contains(&user.user_id)
+            })
+            .count();
+        let staff_recently_active = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| {
+                (user.is_admin || user.is_moderator) && user.last_seen >= staff_recent_cutoff
+            })
+            .count();
+
+        let mut recent_rooms: Vec<&StaffRoomRecord> = self
+            .staff_rooms_snapshot
+            .iter()
+            .filter(|room| room.kind == "topic" && !room.permanent)
+            .filter(|room| {
+                room.last_message_at
+                    .is_some_and(|when| when >= recent_cutoff)
+            })
+            .collect();
+        recent_rooms.sort_by_key(|room| std::cmp::Reverse(room.last_message_at));
+        let recent_room_count = recent_rooms.len();
+        let recent_room_labels = recent_rooms
+            .iter()
+            .take(3)
+            .map(|room| control_center_room_label(room))
+            .collect();
+
+        let newest_room = self
+            .staff_rooms_snapshot
+            .iter()
+            .filter(|room| room.visibility != "dm")
+            .max_by_key(|room| room.created)
+            .map(control_center_room_label);
+
+        let public_rooms = self
+            .staff_rooms_snapshot
+            .iter()
+            .filter(|room| room.visibility == "public")
+            .count();
+        let private_rooms = self
+            .staff_rooms_snapshot
+            .iter()
+            .filter(|room| room.visibility == "private")
+            .count();
+        let active_server_bans = self
+            .staff_users_snapshot
+            .iter()
+            .filter(|user| user.active_server_ban.is_some())
+            .count();
+        let active_room_bans = self
+            .staff_rooms_snapshot
+            .iter()
+            .map(|room| room.active_ban_count)
+            .sum();
+
+        ControlCenterStatusSummary {
+            account_count: self.staff_users_snapshot.len(),
+            recent_room_count,
+            recent_room_labels,
+            new_users_today,
+            new_users_this_week,
+            unique_users_today,
+            unique_users_this_week,
+            idle_users,
+            active_users,
+            newest_room,
+            public_rooms,
+            private_rooms,
+            active_server_bans,
+            active_room_bans,
+            most_recent_ban: self
+                .audit_log_snapshot
+                .iter()
+                .find(|entry| entry.action.contains("ban"))
+                .map(format_audit_summary),
+            most_recent_kick: self
+                .audit_log_snapshot
+                .iter()
+                .find(|entry| entry.action.contains("kick"))
+                .map(format_audit_summary),
+            staff_online_now,
+            staff_recently_active,
+            last_staff_action: self.audit_log_snapshot.first().map(format_audit_summary),
+        }
+    }
+
     pub fn control_center_user_ids_filtered(&self, filter: &str) -> Vec<Uuid> {
         let filter = filter.trim().to_lowercase();
         self.staff_users_snapshot
             .iter()
             .filter(|user| filter.is_empty() || user.username.to_lowercase().contains(&filter))
             .map(|user| user.user_id)
+            .collect()
+    }
+
+    pub fn control_center_room_ids_filtered(&self, filter: &str) -> Vec<Uuid> {
+        let filter = filter.trim().to_lowercase();
+        self.staff_rooms_snapshot
+            .iter()
+            .filter(|room| room_matches_filter(room, &filter))
+            .map(|room| room.room_id)
             .collect()
     }
 
@@ -915,6 +1086,8 @@ impl ChatState {
             self.session_registry.as_ref(),
             selected_user_id,
             filter,
+            self.user_id,
+            self.permissions,
         )
     }
 
@@ -1024,18 +1197,28 @@ impl ChatState {
     }
 
     pub fn control_center_room_ids(&self) -> Vec<Uuid> {
-        self.staff_rooms_snapshot
-            .iter()
-            .map(|room| room.room_id)
-            .collect()
+        self.control_center_room_ids_filtered("")
     }
 
-    pub fn control_center_room_list_lines(&self, selected_room_id: Option<Uuid>) -> Vec<String> {
+    pub fn control_center_room_list_lines(
+        &self,
+        selected_room_id: Option<Uuid>,
+        filter: &str,
+    ) -> Vec<String> {
         format_control_center_room_list_lines(
             &self.staff_rooms_snapshot,
             control_center_selected_room(&self.staff_rooms_snapshot, selected_room_id)
                 .map(|room| room.room_id),
+            filter,
         )
+    }
+
+    pub fn control_center_room_list_rows(
+        &self,
+        selected_room_id: Option<Uuid>,
+        filter: &str,
+    ) -> Vec<RoomListRow> {
+        build_room_list_rows(&self.staff_rooms_snapshot, selected_room_id, filter)
     }
 
     pub fn control_center_room_detail_lines(&self, selected_room_id: Option<Uuid>) -> Vec<String> {
@@ -2728,8 +2911,21 @@ pub struct UserListRow {
 }
 
 #[derive(Clone, Debug)]
+pub struct RoomListRow {
+    pub selected: bool,
+    pub label: String,
+    pub kind: String,
+    pub visibility: String,
+    pub member_count: i64,
+    pub permanent: bool,
+    pub auto_join: bool,
+    pub active_ban_count: i64,
+}
+
+#[derive(Clone, Debug)]
 pub enum DetailValue {
     Placeholder,
+    Text(String),
     Count(usize),
     BanActive(String),
     BanNone,
@@ -2746,6 +2942,8 @@ fn build_user_list_rows(
     session_registry: Option<&SessionRegistry>,
     selected_user_id: Option<Uuid>,
     filter: &str,
+    current_user_id: Uuid,
+    permissions: Permissions,
 ) -> Vec<UserListRow> {
     if users.is_empty() {
         return Vec::new();
@@ -2766,14 +2964,41 @@ fn build_user_list_rows(
             let session_count = session_registry
                 .map(|r| r.sessions_for_user(user.user_id).len())
                 .unwrap_or(0);
+            let is_current_user = user.user_id == current_user_id;
             UserListRow {
                 selected: Some(user.user_id) == selected_user_id,
                 username: user.username.clone(),
                 banned: user.active_server_ban.is_some(),
                 session_count,
-                is_admin: user.is_admin,
-                is_moderator: user.is_moderator,
+                is_admin: user.is_admin || (is_current_user && permissions.is_admin()),
+                is_moderator: user.is_moderator || (is_current_user && permissions.is_moderator()),
             }
+        })
+        .collect()
+}
+
+fn build_room_list_rows(
+    rooms: &[StaffRoomRecord],
+    selected_room_id: Option<Uuid>,
+    filter: &str,
+) -> Vec<RoomListRow> {
+    if rooms.is_empty() {
+        return Vec::new();
+    }
+
+    let filter_lower = filter.trim().to_lowercase();
+    rooms
+        .iter()
+        .filter(|room| room_matches_filter(room, &filter_lower))
+        .map(|room| RoomListRow {
+            selected: Some(room.room_id) == selected_room_id,
+            label: control_center_room_label(room),
+            kind: room.kind.clone(),
+            visibility: room.visibility.clone(),
+            member_count: room.member_count,
+            permanent: room.permanent,
+            auto_join: room.auto_join,
+            active_ban_count: room.active_ban_count,
         })
         .collect()
 }
@@ -2801,19 +3026,19 @@ fn build_user_detail_rows(
     vec![
         UserDetailRow {
             label: "Account Created",
-            value: DetailValue::Placeholder,
+            value: DetailValue::Text(format_detail_timestamp(user.created)),
         },
         UserDetailRow {
             label: "Last Login",
-            value: DetailValue::Placeholder,
+            value: DetailValue::Text(format_detail_timestamp(user.last_seen)),
         },
         UserDetailRow {
             label: "Last Chat",
-            value: DetailValue::Placeholder,
+            value: optional_detail_timestamp(user.last_chat_at),
         },
         UserDetailRow {
             label: "Last Action",
-            value: DetailValue::Placeholder,
+            value: optional_detail_timestamp(user.last_action_at),
         },
         UserDetailRow {
             label: "# of Sessions",
@@ -2825,21 +3050,34 @@ fn build_user_detail_rows(
         },
         UserDetailRow {
             label: "Past bans",
-            value: DetailValue::Placeholder,
+            value: DetailValue::Count(user.past_ban_count),
         },
         UserDetailRow {
             label: "Past kicks",
-            value: DetailValue::Placeholder,
+            value: DetailValue::Count(user.past_kick_count),
         },
         UserDetailRow {
             label: "Past warnings",
-            value: DetailValue::Placeholder,
+            value: DetailValue::Count(user.past_warning_count),
         },
         UserDetailRow {
             label: "Past UGC deletes",
-            value: DetailValue::Placeholder,
+            value: DetailValue::Count(user.past_ugc_delete_count),
         },
     ]
+}
+
+fn optional_detail_timestamp(value: Option<chrono::DateTime<chrono::Utc>>) -> DetailValue {
+    value
+        .map(format_detail_timestamp)
+        .map(DetailValue::Text)
+        .unwrap_or(DetailValue::Placeholder)
+}
+
+fn format_detail_timestamp(value: chrono::DateTime<chrono::Utc>) -> String {
+    let relative = format_relative_time(value);
+    let absolute = value.format("%Y-%m-%d %H:%M UTC");
+    format!("{relative} ({absolute})")
 }
 
 fn format_control_center_user_list_lines(
@@ -2932,17 +3170,35 @@ fn format_control_center_user_detail_lines(
     };
 
     vec![
-        format!("Account Created : \u{2014}"),
-        format!("Last Login      : \u{2014}"),
-        format!("Last Chat       : \u{2014}"),
-        format!("Last Action     : \u{2014}"),
+        format!(
+            "Account Created : {}",
+            format_detail_timestamp(user.created)
+        ),
+        format!(
+            "Last Login     : {}",
+            format_detail_timestamp(user.last_seen)
+        ),
+        format!(
+            "Last Chat      : {}",
+            optional_detail_timestamp_text(user.last_chat_at)
+        ),
+        format!(
+            "Last Action    : {}",
+            optional_detail_timestamp_text(user.last_action_at)
+        ),
         format!("# of Sessions   : {live_session_count}"),
         format!("Currently banned: {banned_str}"),
-        format!("Past bans       : \u{2014}"),
-        format!("Past kicks      : \u{2014}"),
-        format!("Past warnings   : \u{2014}"),
-        format!("Past UGC deletes: \u{2014}"),
+        format!("Past bans      : {}", user.past_ban_count),
+        format!("Past kicks     : {}", user.past_kick_count),
+        format!("Past warnings  : {}", user.past_warning_count),
+        format!("Past UGC deletes: {}", user.past_ugc_delete_count),
     ]
+}
+
+fn optional_detail_timestamp_text(value: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    value
+        .map(format_detail_timestamp)
+        .unwrap_or_else(|| "\u{2014}".to_string())
 }
 
 fn format_relative_future(
@@ -3054,6 +3310,15 @@ fn format_audit_target(entry: &AuditLogEntry) -> String {
         (Some(_), Some(name)) => format!("@{name}"),
         (Some(_), None) => "@<unknown>".to_string(),
     }
+}
+
+fn format_audit_summary(entry: &AuditLogEntry) -> String {
+    format!(
+        "{} {} by {}",
+        entry.action,
+        format_audit_target(entry),
+        format_audit_actor(entry)
+    )
 }
 
 /// Parsed audit-log filter built from the Audit tab's text input.
@@ -3294,13 +3559,24 @@ fn control_center_selected_room(
 fn format_control_center_room_list_lines(
     rooms: &[StaffRoomRecord],
     selected_room_id: Option<Uuid>,
+    filter: &str,
 ) -> Vec<String> {
     if rooms.is_empty() {
         return vec!["Loading rooms...".to_string()];
     }
 
-    rooms
+    let filter_lower = filter.trim().to_lowercase();
+    let visible: Vec<&StaffRoomRecord> = rooms
         .iter()
+        .filter(|room| room_matches_filter(room, &filter_lower))
+        .collect();
+
+    if visible.is_empty() {
+        return vec!["No rooms match this filter".to_string()];
+    }
+
+    visible
+        .into_iter()
         .map(|room| {
             let marker = if Some(room.room_id) == selected_room_id {
                 ">"
@@ -3333,6 +3609,24 @@ fn format_control_center_room_list_lines(
             )
         })
         .collect()
+}
+
+fn room_matches_filter(room: &StaffRoomRecord, filter_lower: &str) -> bool {
+    if filter_lower.is_empty() {
+        return true;
+    }
+    let label = control_center_room_label(room);
+    label.to_lowercase().contains(filter_lower)
+        || room.kind.to_lowercase().contains(filter_lower)
+        || room.visibility.to_lowercase().contains(filter_lower)
+        || room
+            .slug
+            .as_deref()
+            .is_some_and(|slug| slug.to_lowercase().contains(filter_lower))
+        || room
+            .language_code
+            .as_deref()
+            .is_some_and(|code| code.to_lowercase().contains(filter_lower))
 }
 
 fn format_control_center_room_detail_lines(
@@ -3381,8 +3675,6 @@ fn format_control_center_room_detail_lines(
         lines.push(format!("language: {}", language_code));
     }
 
-    lines.push(String::new());
-    lines.push("Actions next: kick, ban, unban, rename, visibility, delete.".to_string());
     lines
 }
 

@@ -941,6 +941,13 @@ fn route_char_to_composer(app: &mut App, ctx: InputContext, ch: char) -> bool {
         app.control_center.user_filter_push(ch);
         return true;
     }
+    if ctx.screen == Screen::ControlCenter
+        && app.control_center.is_room_filter_focused()
+        && !ch.is_control()
+    {
+        app.control_center.room_filter_push(ch);
+        return true;
+    }
     if (ctx.screen == Screen::Chat || ctx.screen == Screen::Dashboard) && ctx.chat_composing {
         chat::input::handle_compose_char(app, ch);
         return true;
@@ -1425,6 +1432,29 @@ fn handle_modal_input(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         }
     }
 
+    if ctx.screen == Screen::ControlCenter && app.control_center.is_room_filter_focused() {
+        match byte {
+            0x1B => {
+                app.control_center.clear_room_filter();
+                app.control_center.unfocus();
+                return true;
+            }
+            0x7F => {
+                app.control_center.room_filter_backspace();
+                return true;
+            }
+            0x17 | 0x08 => {
+                app.control_center.room_filter_delete_word_left();
+                return true;
+            }
+            b'\r' | b'\n' => {
+                app.control_center.unfocus();
+                return true;
+            }
+            _ => {}
+        }
+    }
+
     if ctx.screen == Screen::ControlCenter && app.control_center.is_ban_prompt_open() {
         return match byte {
             0x1B => {
@@ -1763,6 +1793,11 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             {
                 app.control_center.focus_user_filter();
             }
+            0x06 if app.control_center.selected_tab()
+                == crate::app::control_center::state::Tab::Rooms =>
+            {
+                app.control_center.focus_room_filter();
+            }
             // ^R resets the Log filter when on the Log tab.
             0x12 if app.control_center.selected_tab()
                 == crate::app::control_center::state::Tab::Log =>
@@ -1777,6 +1812,12 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
             }
             b'k' | b'K' => {
                 let _ = control_center_move_active_selection(app, -1);
+            }
+            b'a' | b'A'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Users =>
+            {
+                control_center_view_selected_user_audit_trail(app);
             }
             b'x' | b'X' => match app.control_center.selected_tab() {
                 crate::app::control_center::state::Tab::Users => {
@@ -1830,27 +1871,25 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
                 }
                 _ => {}
             },
-            b'm' | b'M'
-                if app.control_center.selected_tab()
-                    == crate::app::control_center::state::Tab::Users =>
-            {
-                control_center_request_grant_moderator(app);
-            }
+            b'm' | b'M' => match app.control_center.selected_tab() {
+                crate::app::control_center::state::Tab::Users
+                | crate::app::control_center::state::Tab::Staff => {
+                    control_center_request_toggle_moderator(app);
+                }
+                _ => {}
+            },
             b'g' | b'G'
                 if app.control_center.selected_tab()
                     == crate::app::control_center::state::Tab::Staff =>
             {
                 control_center_request_grant_admin(app);
             }
-            b'r' | b'R' => match app.control_center.selected_tab() {
-                crate::app::control_center::state::Tab::Rooms => {
-                    control_center_begin_admin_rename(app)
-                }
-                crate::app::control_center::state::Tab::Staff => {
-                    control_center_request_revoke_moderator(app)
-                }
-                _ => {}
-            },
+            b'r' | b'R'
+                if app.control_center.selected_tab()
+                    == crate::app::control_center::state::Tab::Rooms =>
+            {
+                control_center_begin_admin_rename(app)
+            }
             b'p' | b'P'
                 if app.control_center.selected_tab()
                     == crate::app::control_center::state::Tab::Rooms =>
@@ -1917,6 +1956,10 @@ fn control_center_move_active_selection(app: &mut App, delta: isize) -> bool {
         app.control_center.unfocus();
         return control_center_move_user_selection(app, delta);
     }
+    if app.control_center.is_room_filter_focused() {
+        app.control_center.unfocus();
+        return control_center_move_room_selection(app, delta);
+    }
     if app.control_center.is_audit_filter_focused() {
         app.control_center.unfocus();
         return control_center_move_audit_selection(app, delta);
@@ -1951,7 +1994,8 @@ fn control_center_move_room_selection(app: &mut App, delta: isize) -> bool {
     if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Rooms {
         return false;
     }
-    let room_ids = app.chat.control_center_room_ids();
+    let filter = app.control_center.room_filter().to_string();
+    let room_ids = app.chat.control_center_room_ids_filtered(&filter);
     app.control_center.move_room_selection(&room_ids, delta)
 }
 
@@ -2181,17 +2225,24 @@ fn control_center_request_user_confirmation(
     );
 }
 
-fn control_center_request_grant_moderator(app: &mut App) {
-    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
-        return;
-    }
+fn control_center_request_toggle_moderator(app: &mut App) {
     if !app.permissions.can_access_admin_surface() {
         app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
         return;
     }
-    let Some(user_id) = app.control_center.selected_user_id() else {
+    let (user_id, empty_selection_message) = match app.control_center.selected_tab() {
+        crate::app::control_center::state::Tab::Users => {
+            (app.control_center.selected_user_id(), "No user selected")
+        }
+        crate::app::control_center::state::Tab::Staff => (
+            app.control_center.selected_staff_id(),
+            "No staffer selected",
+        ),
+        _ => return,
+    };
+    let Some(user_id) = user_id else {
         app.banner = Some(crate::app::common::primitives::Banner::error(
-            "No user selected",
+            empty_selection_message,
         ));
         return;
     };
@@ -2201,11 +2252,15 @@ fn control_center_request_grant_moderator(app: &mut App) {
         ));
         return;
     }
-    if let Some((is_admin, is_moderator)) = app.chat.control_center_user_tier_flags(user_id)
-        && (is_admin || is_moderator)
-    {
+    let Some((is_admin, is_moderator)) = app.chat.control_center_user_tier_flags(user_id) else {
         app.banner = Some(crate::app::common::primitives::Banner::error(
-            "Target is already staff",
+            "Target not found",
+        ));
+        return;
+    };
+    if is_admin {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Target is an admin; mod toggle is unavailable",
         ));
         return;
     }
@@ -2213,16 +2268,31 @@ fn control_center_request_grant_moderator(app: &mut App) {
         .chat
         .control_center_user_label(user_id)
         .unwrap_or_else(|| "@user".to_string());
-    let action =
-        crate::app::control_center::state::PendingConfirmAction::GrantModerator { user_id };
+    let (action, title, prompt, description, confirm_label) = if is_moderator {
+        (
+            crate::app::control_center::state::PendingConfirmAction::RevokeModerator { user_id },
+            "Remove Moderator",
+            format!("Type {} to confirm remove moderator", user_label),
+            "Demotes this moderator to regular user. Audit-logged.",
+            "remove moderator",
+        )
+    } else {
+        (
+            crate::app::control_center::state::PendingConfirmAction::GrantModerator { user_id },
+            "Give Moderator",
+            format!("Type {} to confirm give moderator", user_label),
+            "Promotes this user to moderator. Audit-logged.",
+            "give moderator",
+        )
+    };
     app.control_center.set_pending_confirm_action(action);
     app.confirm_dialog = Some(
         crate::app::confirm_dialog::state::ConfirmDialogState::typed(
-            "Grant Moderator",
-            format!("Type {} to confirm grant moderator", user_label),
-            "Promotes this user to moderator. Audit-logged.",
+            title,
+            prompt,
+            description,
             user_label,
-            "grant moderator",
+            confirm_label,
             "cancel",
         ),
     );
@@ -2278,61 +2348,35 @@ fn control_center_request_grant_admin(app: &mut App) {
     );
 }
 
-fn control_center_request_revoke_moderator(app: &mut App) {
-    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Staff {
+fn control_center_view_selected_user_audit_trail(app: &mut App) {
+    if app.control_center.selected_tab() != crate::app::control_center::state::Tab::Users {
         return;
     }
-    if !app.permissions.can_access_admin_surface() {
-        app.banner = Some(crate::app::common::primitives::Banner::error("Admin only"));
-        return;
-    }
-    let Some(user_id) = app.control_center.selected_staff_id() else {
+    if !app.permissions.can_access_mod_surface() {
         app.banner = Some(crate::app::common::primitives::Banner::error(
-            "No staffer selected",
+            "Moderator or admin only",
+        ));
+        return;
+    }
+    let Some(user_id) = app.control_center.selected_user_id() else {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "No user selected",
         ));
         return;
     };
-    if user_id == app.user_id {
-        app.banner = Some(crate::app::common::primitives::Banner::error(
-            "Cannot change your own tier",
-        ));
-        return;
-    }
-    let Some((is_admin, is_moderator)) = app.chat.control_center_user_tier_flags(user_id) else {
+    let Some(user_label) = app.chat.control_center_user_label(user_id) else {
         app.banner = Some(crate::app::common::primitives::Banner::error(
             "Target not found",
         ));
         return;
     };
-    if is_admin {
-        app.banner = Some(crate::app::common::primitives::Banner::error(
-            "Target is an admin; revoke admin is deferred",
-        ));
-        return;
-    }
-    if !is_moderator {
-        app.banner = Some(crate::app::common::primitives::Banner::error(
-            "Target is not a moderator",
-        ));
-        return;
-    }
-    let user_label = app
-        .chat
-        .control_center_user_label(user_id)
-        .unwrap_or_else(|| "@user".to_string());
-    let action =
-        crate::app::control_center::state::PendingConfirmAction::RevokeModerator { user_id };
-    app.control_center.set_pending_confirm_action(action);
-    app.confirm_dialog = Some(
-        crate::app::confirm_dialog::state::ConfirmDialogState::typed(
-            "Revoke Moderator",
-            format!("Type {} to confirm revoke moderator", user_label),
-            "Demotes this moderator to regular user. Audit-logged.",
-            user_label,
-            "revoke moderator",
-            "cancel",
-        ),
-    );
+    app.control_center
+        .set_audit_filter(format!("target:{}", user_label));
+    app.control_center.go_to_tab(4);
+    app.banner = Some(crate::app::common::primitives::Banner::success(&format!(
+        "Audit trail filtered for {}",
+        user_label
+    )));
 }
 
 fn control_center_begin_ban_prompt(app: &mut App) {

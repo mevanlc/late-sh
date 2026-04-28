@@ -1,10 +1,12 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use late_core::audio::VizFrame;
 
 use super::state::{App, GAME_SELECTION_TETRIS};
 use crate::app::common::primitives::{Banner, Screen};
 use crate::session::{BrowserVizFrame, SessionMessage};
+
+const CONTROL_CENTER_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 
 impl App {
     pub fn tick(&mut self) {
@@ -37,6 +39,15 @@ impl App {
         }
         if let Some(b) = self.vote.tick() {
             self.banner = Some(b);
+        }
+        if self.screen == Screen::ControlCenter {
+            let now = Instant::now();
+            if self
+                .control_center
+                .snapshot_refresh_due(now, CONTROL_CENTER_SNAPSHOT_REFRESH_INTERVAL)
+            {
+                self.refresh_control_center_snapshots();
+            }
         }
         // News state is ticked inside chat.tick()
         if let Some(b) = self.profile_state.tick() {
