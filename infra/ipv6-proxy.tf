@@ -132,7 +132,7 @@ resource "kubernetes_daemon_set_v1" "ipv6_proxy" {
       }
     }
 
-    update_strategy {
+    strategy {
       type = "RollingUpdate"
 
       rolling_update {
