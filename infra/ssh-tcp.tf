@@ -17,6 +17,11 @@ resource "kubernetes_manifest" "nginx_tcp_config" {
     }
     spec = {
       valuesContent = yamlencode({
+        controller = {
+          hostNetwork = true
+          dnsPolicy   = "ClusterFirstWithHostNet"
+        }
+
         tcp = {
           "22" = "default/service-ssh-sv:2222::PROXY"
         }
