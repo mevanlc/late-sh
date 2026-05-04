@@ -48,43 +48,60 @@
         50% { opacity: 1; }
     }
 
-    /* Markdown-rendered bio. Tailwind's typography plugin isn't loaded here,
-       so set the rhythm manually to match the rest of the page. */
-    .bio-prose > * + * { margin-top: 0.75rem; }
+    /* Markdown-rendered bio. Tailwind's preflight resets headings to inherit
+       font-size/weight, so set them explicitly here. */
+    .bio-prose { color: #9ca3af; }
+    .bio-prose > * + * { margin-top: 0.85rem; }
+
     .bio-prose h1,
     .bio-prose h2,
-    .bio-prose h3 {
-        color: #e5e7eb;
-        font-size: 0.95rem;
-        line-height: 1.4;
+    .bio-prose h3,
+    .bio-prose h4,
+    .bio-prose h5,
+    .bio-prose h6 {
+        color: #f3f4f6;
+        font-weight: 600;
+        line-height: 1.3;
         letter-spacing: -0.01em;
     }
-    .bio-prose h1 { font-size: 1.05rem; }
+    .bio-prose h1 { font-size: 1.15rem; }
+    .bio-prose h2 { font-size: 1.05rem; }
+    .bio-prose h3 { font-size: 0.95rem; }
+    .bio-prose h4,
+    .bio-prose h5,
+    .bio-prose h6 { font-size: 0.9rem; color: #d1d5db; }
     .bio-prose * + h1,
     .bio-prose * + h2,
-    .bio-prose * + h3 { margin-top: 1.25rem; }
+    .bio-prose * + h3,
+    .bio-prose * + h4 { margin-top: 1.5rem; }
+
     .bio-prose p { color: #9ca3af; }
+
     .bio-prose ul,
-    .bio-prose ol { padding-left: 1.1rem; color: #9ca3af; }
-    .bio-prose ul { list-style: none; padding-left: 0; }
-    .bio-prose ul > li { position: relative; padding-left: 1rem; }
+    .bio-prose ol { color: #9ca3af; padding-left: 0; }
+    .bio-prose ul { list-style: none; }
+    .bio-prose ul > li { position: relative; padding-left: 1.1rem; }
     .bio-prose ul > li::before {
         content: "→";
         position: absolute;
         left: 0;
         color: #4b5563;
     }
-    .bio-prose ol { list-style: decimal; }
+    .bio-prose ol { list-style: decimal; padding-left: 1.4rem; }
     .bio-prose li + li { margin-top: 0.35rem; }
+    .bio-prose li > p { display: inline; }
+
     .bio-prose a {
-        color: #16a34a;
+        color: #22c55e;
         text-decoration: none;
-        border-bottom: 1px dashed rgba(22, 163, 74, 0.4);
+        border-bottom: 1px dashed rgba(34, 197, 94, 0.45);
+        word-break: break-word;
     }
-    .bio-prose a:hover { color: #4ade80; border-bottom-color: rgba(74, 222, 128, 0.6); }
+    .bio-prose a:hover { color: #4ade80; border-bottom-color: rgba(74, 222, 128, 0.7); }
+
     .bio-prose code {
         background: rgba(31, 41, 55, 0.6);
-        padding: 0.05rem 0.3rem;
+        padding: 0.05rem 0.35rem;
         border-radius: 2px;
         color: #d1d5db;
         font-size: 0.85em;
@@ -102,10 +119,11 @@
         border-left: 2px solid #1f2937;
         padding-left: 0.75rem;
         color: #9ca3af;
+        font-style: italic;
     }
-    .bio-prose strong { color: #d1d5db; font-weight: 600; }
+    .bio-prose strong { color: #e5e7eb; font-weight: 600; }
     .bio-prose em { color: #d1d5db; font-style: italic; }
-    .bio-prose hr { border: 0; border-top: 1px solid #1f2937; margin: 1rem 0; }
+    .bio-prose hr { border: 0; border-top: 1px solid #1f2937; margin: 1.25rem 0; }
 </style>
 
 <div class="max-w-2xl mx-auto pt-8 sm:pt-14 pb-20" x-data="{ copied: null, copy(text){ navigator.clipboard.writeText(text); this.copied = text; setTimeout(()=>this.copied=null, 2000); } }">
