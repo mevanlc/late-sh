@@ -64,8 +64,8 @@ Local state:
     - `broadcast::Receiver<DartboardEvent>` for ack/reject/peer/connect events.
     - `submit_op(CanvasOp)` for local edits.
   - Stores rejected connections on `DartboardSnapshot.connect_rejected` because rejection can happen before subscribers exist.
-  - `ArtboardSnapshotService` and `ArtboardArchiveLoader` list daily/monthly archive snapshots asynchronously from DB.
-  - Archive rows decode into `ArtboardArchiveSnapshot { board_key, kind, label, canvas, provenance }`.
+  - `ArtboardSnapshotService` and `ArtboardArchiveLoader` list visible daily/monthly/curated archive snapshots asynchronously from DB.
+  - Archive rows decode into `ArtboardArchiveSnapshot { snapshot_number, board_key, kind, label, hidden, canvas, provenance }`.
 
 - `late-ssh/src/app/artboard/state.rs`
   - Main per-session Artboard state.
@@ -156,7 +156,7 @@ Artboard has two main interaction modes plus archive viewing:
 
 - `view`: inspect board, move cursor/viewport, keep global page switching (`1-4`, `Tab`, `Shift+Tab`) available.
 - `active`: edit board; single-key global shortcuts are suppressed so typing goes to the canvas/editor.
-- `snapshot`: read-only historical daily/monthly archive view. `g` opens the browser in view mode; selecting an archive replaces the local snapshot until returning live.
+- `snapshot`: read-only historical daily/monthly/curated archive view. `g` opens the browser in view mode; selecting an archive replaces the local snapshot until returning live.
 
 Important routing:
 - `Esc` closes transient Artboard overlays first, then clears floating brush / sampled brush / selection in active mode, then returns to view mode.

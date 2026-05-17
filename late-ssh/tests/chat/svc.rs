@@ -1540,7 +1540,7 @@ async fn mod_room_ban_command_bans_kicks_and_audits() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "room ban #mod-ban-room @mod_ban_target 1h test cleanup".to_string(),
+        "ban #mod-ban-room @mod_ban_target 1h test cleanup".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -1820,7 +1820,7 @@ async fn mod_server_kick_command_terminates_active_sessions_and_audits() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "server kick @server_kick_target cool off".to_string(),
+        "kick server @server_kick_target cool off".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -1902,7 +1902,7 @@ async fn mod_server_ban_command_bans_and_terminates_active_sessions() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "server ban @server_ban_target 1h test ban".to_string(),
+        "ban server @server_ban_target 1h test ban".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -2019,7 +2019,7 @@ async fn mod_artboard_ban_command_notifies_active_sessions() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "artboard ban @artboard_ban_target 1h paint cooldown".to_string(),
+        "ban artboard @artboard_ban_target 1h paint cooldown".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -2083,7 +2083,7 @@ async fn mod_artboard_restore_command_restores_daily_snapshot_and_audits() {
     )
     .await
     .expect("insert main snapshot");
-    ArtboardSnapshot::upsert(
+    let daily_snapshot = ArtboardSnapshot::upsert(
         &client,
         "daily:2026-05-06",
         serde_json::to_value(&daily_canvas).expect("serialize daily canvas"),
@@ -2123,7 +2123,10 @@ async fn mod_artboard_restore_command_restores_daily_snapshot_and_audits() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "artboard restore 2026-05-06 rollback vandalism".to_string(),
+        format!(
+            "artboard restore {} rollback vandalism",
+            daily_snapshot.snapshot_number
+        ),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -2139,7 +2142,13 @@ async fn mod_artboard_restore_command_restores_daily_snapshot_and_audits() {
         } => {
             assert_eq!(got_request, request_id);
             assert!(success, "unexpected mod command failure: {lines:?}");
-            assert_eq!(lines[0], "restored artboard from daily:2026-05-06");
+            assert_eq!(
+                lines[0],
+                format!(
+                    "restored artboard from #{} (daily:2026-05-06)",
+                    daily_snapshot.snapshot_number
+                )
+            );
             assert!(
                 lines
                     .get(1)
@@ -2210,6 +2219,7 @@ async fn mod_artboard_restore_command_restores_daily_snapshot_and_audits() {
                 && entry.action == "artboard_restore"
                 && entry.target_kind == "artboard"
                 && entry.metadata["source_key"] == "daily:2026-05-06"
+                && entry.metadata["source_number"] == daily_snapshot.snapshot_number
                 && entry.metadata["reason"] == "rollback vandalism"
         })
         .count();
@@ -2235,9 +2245,9 @@ async fn mod_bans_command_lists_active_bans() {
         .expect("create room");
 
     for command in [
-        "server ban @list_server_target 1h server reason",
-        "artboard ban @list_artboard_target 1h art reason",
-        "room ban #list-bans-room @list_room_target 1h room reason",
+        "ban server @list_server_target 1h server reason",
+        "ban artboard @list_artboard_target 1h art reason",
+        "ban #list-bans-room @list_room_target 1h room reason",
     ] {
         service.run_mod_command_task(
             actor.id,
@@ -2260,7 +2270,7 @@ async fn mod_bans_command_lists_active_bans() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "bans 10".to_string(),
+        "view bans".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -2314,6 +2324,116 @@ async fn mod_bans_command_lists_active_bans() {
 }
 
 #[tokio::test]
+async fn mod_artboard_curate_hide_and_view_use_snapshot_numbers() {
+    let test_db = new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let actor = create_test_user(&test_db.db, "artboard_curate_actor").await;
+    let canvas = serde_json::to_value(Canvas::with_size(
+        dartboard::CANVAS_WIDTH,
+        dartboard::CANVAS_HEIGHT,
+    ))
+    .expect("canvas json");
+    let provenance = serde_json::to_value(ArtboardProvenance::default()).expect("provenance json");
+    let daily = ArtboardSnapshot::upsert(
+        &client,
+        "daily:2026-05-07",
+        canvas.clone(),
+        provenance.clone(),
+    )
+    .await
+    .expect("insert daily snapshot");
+    ArtboardSnapshot::upsert(
+        &client,
+        ArtboardSnapshot::MAIN_BOARD_KEY,
+        canvas,
+        provenance,
+    )
+    .await
+    .expect("insert main snapshot");
+
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+
+    let curate_request = Uuid::now_v7();
+    service.run_mod_command_task(
+        actor.id,
+        Permissions::new(false, true),
+        curate_request,
+        format!("artboard curate {} preserve", daily.snapshot_number),
+    );
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("curate event timeout")
+        .expect("curate event");
+    let curated_number = match event {
+        ChatEvent::ModCommandOutput {
+            request_id,
+            lines,
+            success,
+            ..
+        } => {
+            assert_eq!(request_id, curate_request);
+            assert!(success, "unexpected curate failure: {lines:?}");
+            lines[0]
+                .strip_prefix("curated artboard snapshot #")
+                .expect("curate output prefix")
+                .parse::<i64>()
+                .expect("curated snapshot number")
+        }
+        other => panic!("expected ModCommandOutput, got {other:?}"),
+    };
+
+    let hide_request = Uuid::now_v7();
+    service.run_mod_command_task(
+        actor.id,
+        Permissions::new(false, true),
+        hide_request,
+        format!("artboard hide {curated_number} cleanup"),
+    );
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("hide event timeout")
+        .expect("hide event");
+    assert!(matches!(
+        event,
+        ChatEvent::ModCommandOutput { success: true, .. }
+    ));
+
+    let view_request = Uuid::now_v7();
+    service.run_mod_command_task(
+        actor.id,
+        Permissions::new(false, true),
+        view_request,
+        "view artboard".to_string(),
+    );
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("view event timeout")
+        .expect("view event");
+    match event {
+        ChatEvent::ModCommandOutput {
+            request_id,
+            lines,
+            success,
+            ..
+        } => {
+            assert_eq!(request_id, view_request);
+            assert!(success, "unexpected view failure: {lines:?}");
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains(&format!("#{curated_number}"))
+                        && line.contains("curated hidden"))
+            );
+        }
+        other => panic!("expected ModCommandOutput, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn mod_audit_command_lists_recent_audit_entries() {
     let test_db = new_test_db().await;
     let service = ChatService::new(
@@ -2329,7 +2449,7 @@ async fn mod_audit_command_lists_recent_audit_entries() {
         actor.id,
         Permissions::new(false, true),
         Uuid::now_v7(),
-        "server kick @list_audit_target audit reason".to_string(),
+        "kick server @list_audit_target audit reason".to_string(),
     );
     let event = timeout(Duration::from_secs(2), events.recv())
         .await
@@ -2345,7 +2465,7 @@ async fn mod_audit_command_lists_recent_audit_entries() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "audit 5".to_string(),
+        "view audit".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -2364,7 +2484,7 @@ async fn mod_audit_command_lists_recent_audit_entries() {
             assert!(
                 lines
                     .iter()
-                    .any(|line| line == "recent audit log entries (limit 5)")
+                    .any(|line| line == "recent audit log entries (page 1, 15 per page)")
             );
             assert!(lines.iter().any(|line| line.contains("@list_audit_actor")
                 && line.contains("server_kick")
@@ -2420,7 +2540,7 @@ async fn mod_room_ban_command_notifies_target_sessions_to_drop_room() {
         actor.id,
         Permissions::new(false, true),
         request_id,
-        "room ban #room-notify @room_notify_target 1h test".to_string(),
+        "ban #room-notify @room_notify_target 1h test".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -2488,7 +2608,7 @@ async fn grant_mod_command_updates_active_session_permissions() {
         actor.id,
         Permissions::new(true, false),
         request_id,
-        "grant mod @grant_mod_target".to_string(),
+        "admin grant mod @grant_mod_target".to_string(),
     );
 
     let event = timeout(Duration::from_secs(2), events.recv())

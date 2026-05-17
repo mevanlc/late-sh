@@ -57,6 +57,7 @@ pub enum DartboardEvent {
 pub enum ArtboardSnapshotKind {
     Daily,
     Monthly,
+    Curated,
 }
 
 impl ArtboardSnapshotKind {
@@ -64,15 +65,18 @@ impl ArtboardSnapshotKind {
         match self {
             Self::Daily => "daily",
             Self::Monthly => "monthly",
+            Self::Curated => "curated",
         }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct ArtboardArchiveSnapshot {
+    pub snapshot_number: i64,
     pub board_key: String,
     pub kind: ArtboardSnapshotKind,
     pub label: String,
+    pub hidden: bool,
     pub canvas: Canvas,
     pub provenance: ArtboardProvenance,
 }
@@ -146,25 +150,22 @@ async fn list_archive_snapshots(db: &Db) -> anyhow::Result<Vec<ArtboardArchiveSn
         .get()
         .await
         .context("failed to get db client for artboard snapshot list")?;
-    let mut snapshots = Vec::new();
-    for (prefix, kind) in [
-        ("daily:", ArtboardSnapshotKind::Daily),
-        ("monthly:", ArtboardSnapshotKind::Monthly),
-    ] {
-        let rows = Snapshot::list_by_board_key_prefix(&client, prefix)
-            .await
-            .with_context(|| format!("failed to list {prefix} artboard snapshots"))?;
-        for row in rows {
-            snapshots.push(decode_archive_snapshot(row, kind)?);
-        }
-    }
-    Ok(snapshots)
+    Snapshot::list_archives(&client, false, 100, 0)
+        .await
+        .context("failed to list artboard snapshots")?
+        .into_iter()
+        .map(decode_archive_snapshot)
+        .collect()
 }
 
-fn decode_archive_snapshot(
-    snapshot: Snapshot,
-    kind: ArtboardSnapshotKind,
-) -> anyhow::Result<ArtboardArchiveSnapshot> {
+fn decode_archive_snapshot(snapshot: Snapshot) -> anyhow::Result<ArtboardArchiveSnapshot> {
+    let kind = if snapshot.curated {
+        ArtboardSnapshotKind::Curated
+    } else if snapshot.board_key.starts_with("monthly:") {
+        ArtboardSnapshotKind::Monthly
+    } else {
+        ArtboardSnapshotKind::Daily
+    };
     let label = snapshot
         .board_key
         .split_once(':')
@@ -175,9 +176,11 @@ fn decode_archive_snapshot(
     let provenance = serde_json::from_value(snapshot.provenance)
         .context("failed to decode artboard provenance")?;
     Ok(ArtboardArchiveSnapshot {
+        snapshot_number: snapshot.snapshot_number,
         board_key: snapshot.board_key,
         kind,
         label,
+        hidden: snapshot.hidden,
         canvas,
         provenance,
     })
