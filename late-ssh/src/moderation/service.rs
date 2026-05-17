@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{NaiveDate, Utc};
+use chrono::Utc;
 use dartboard_core::Canvas;
 use late_core::{
     db::Db,
@@ -25,9 +25,9 @@ use crate::app::artboard::provenance::{ArtboardProvenance, SharedArtboardProvena
 use crate::authz::{Caps, Permissions, Tier};
 use crate::dartboard;
 use crate::moderation::command::{
-    ArtboardAction, AudioAction, BanListScope, LIST_PAGE_SIZE, ModCommand, RoleAction,
-    RoomModAction, ServerUserAction, mod_help_lines, normalize_mod_slug, parse_mod_command,
-    strip_user_prefix,
+    ArtboardAction, ArtboardSnapshotSource, AudioAction, BanListScope, LIST_PAGE_SIZE, ModCommand,
+    RoleAction, RoomModAction, ServerUserAction, mod_help_lines, normalize_mod_slug,
+    parse_mod_command, strip_user_prefix,
 };
 use crate::moderation::event::ModerationEvent;
 use crate::moderation::session_effects::ModerationSessionEffects;
@@ -184,8 +184,23 @@ impl ModerationService {
                 )
                 .await
             }
-            ModCommand::ArtboardRestore { date, reason } => {
-                self.artboard_restore(actor_user_id, permissions, date, reason)
+            ModCommand::ArtboardRestore {
+                snapshot_number,
+                reason,
+            } => {
+                self.artboard_restore(actor_user_id, permissions, snapshot_number, reason)
+                    .await
+            }
+            ModCommand::ArtboardCurate { source, reason } => {
+                self.artboard_curate(actor_user_id, permissions, source, reason)
+                    .await
+            }
+            ModCommand::ArtboardHide {
+                snapshot_number,
+                hidden,
+                reason,
+            } => {
+                self.artboard_hide(actor_user_id, permissions, snapshot_number, hidden, reason)
                     .await
             }
             ModCommand::Audio {
@@ -375,9 +390,13 @@ impl ModerationService {
     ) -> Result<Vec<String>> {
         ensure_mod_surface(permissions)?;
         let client = self.db.get().await?;
-        let items =
-            ArtboardSnapshot::list_archive_summaries(&client, LIST_PAGE_SIZE, page_offset(page))
-                .await?;
+        let items = ArtboardSnapshot::list_archive_summaries(
+            &client,
+            true,
+            LIST_PAGE_SIZE,
+            page_offset(page),
+        )
+        .await?;
         if items.is_empty() {
             return Ok(vec!["no artboard snapshots".to_string()]);
         }
@@ -828,7 +847,7 @@ impl ModerationService {
         &self,
         actor_user_id: Uuid,
         permissions: Permissions,
-        date: Option<NaiveDate>,
+        snapshot_number: i64,
         reason: String,
     ) -> Result<Vec<String>> {
         ensure_has(permissions, Caps::RESTORE_ARTBOARD)?;
@@ -836,8 +855,6 @@ impl ModerationService {
             .infra
             .artboard_handles()
             .ok_or_else(|| anyhow::anyhow!("artboard restore is unavailable"))?;
-        let date = date.unwrap_or_else(previous_utc_day);
-        let source_key = daily_artboard_key(date);
         let backup_key = format!(
             "restore-backup:main:{}:{}",
             Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
@@ -845,9 +862,10 @@ impl ModerationService {
         );
 
         let mut client = self.db.get().await?;
-        let source = ArtboardSnapshot::find_by_board_key(&client, &source_key)
+        let source = ArtboardSnapshot::find_by_snapshot_number(&client, snapshot_number)
             .await?
-            .ok_or_else(|| anyhow::anyhow!("artboard snapshot not found: {source_key}"))?;
+            .ok_or_else(|| anyhow::anyhow!("artboard snapshot not found: #{snapshot_number}"))?;
+        let source_key = source.board_key.clone();
         let canvas: Canvas = serde_json::from_value(source.canvas.clone())?;
         let provenance: ArtboardProvenance = serde_json::from_value(source.provenance.clone())?;
 
@@ -864,6 +882,7 @@ impl ModerationService {
             None,
             json!({
                 "source_key": source_key.clone(),
+                "source_number": snapshot_number,
                 "backup_key": backed_up.then_some(backup_key.clone()),
                 "reason": reason.clone(),
             }),
@@ -881,11 +900,109 @@ impl ModerationService {
             reason,
         });
 
-        let mut lines = vec![format!("restored artboard from {source_key}")];
+        let mut lines = vec![format!(
+            "restored artboard from #{snapshot_number} ({source_key})"
+        )];
         if backed_up {
             lines.push(format!("backup: {backup_key}"));
         }
         Ok(lines)
+    }
+
+    async fn artboard_curate(
+        &self,
+        actor_user_id: Uuid,
+        permissions: Permissions,
+        source: ArtboardSnapshotSource,
+        reason: String,
+    ) -> Result<Vec<String>> {
+        ensure_has(permissions, Caps::RESTORE_ARTBOARD)?;
+        let source_key = match source {
+            ArtboardSnapshotSource::Live => ArtboardSnapshot::MAIN_BOARD_KEY.to_string(),
+            ArtboardSnapshotSource::Snapshot(snapshot_number) => {
+                let client = self.db.get().await?;
+                ArtboardSnapshot::find_by_snapshot_number(&client, snapshot_number)
+                    .await?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!("artboard snapshot not found: #{snapshot_number}")
+                    })?
+                    .board_key
+            }
+        };
+        let target_key = format!(
+            "curated:{}:{}",
+            Utc::now().format("%Y%m%dT%H%M%S%.fZ"),
+            Uuid::now_v7()
+        );
+        let mut client = self.db.get().await?;
+        let tx = client.transaction().await?;
+        let curated =
+            ArtboardSnapshot::copy_board_key_with_flags(&tx, &source_key, &target_key, true, false)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("artboard snapshot not found: {source_key}"))?;
+        ModerationAuditLog::record(
+            &tx,
+            actor_user_id,
+            "artboard_curate",
+            "artboard",
+            None,
+            json!({
+                "source_key": source_key,
+                "snapshot_number": curated.snapshot_number,
+                "target_key": target_key,
+                "reason": reason,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(vec![format!(
+            "curated artboard snapshot #{}",
+            curated.snapshot_number
+        )])
+    }
+
+    async fn artboard_hide(
+        &self,
+        actor_user_id: Uuid,
+        permissions: Permissions,
+        snapshot_number: i64,
+        hidden: bool,
+        reason: String,
+    ) -> Result<Vec<String>> {
+        ensure_has(permissions, Caps::RESTORE_ARTBOARD)?;
+        let mut client = self.db.get().await?;
+        let tx = client.transaction().await?;
+        let snapshot =
+            ArtboardSnapshot::set_hidden_by_snapshot_number(&tx, snapshot_number, hidden)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("artboard snapshot not found: #{snapshot_number}")
+                })?;
+        let action = if hidden {
+            "artboard_hide"
+        } else {
+            "artboard_unhide"
+        };
+        ModerationAuditLog::record(
+            &tx,
+            actor_user_id,
+            action,
+            "artboard",
+            None,
+            json!({
+                "snapshot_number": snapshot.snapshot_number,
+                "board_key": snapshot.board_key,
+                "hidden": hidden,
+                "reason": reason,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+        let verb = if hidden { "hidden" } else { "unhidden" };
+        Ok(vec![format!(
+            "{verb} artboard snapshot #{}",
+            snapshot.snapshot_number
+        )])
     }
 
     async fn role(
@@ -1149,15 +1266,19 @@ fn format_audit_log_item(item: &ModerationAuditLogListItem) -> String {
 }
 
 fn format_artboard_snapshot_summary(item: &ArtboardSnapshotSummary) -> String {
-    let kind = if item.board_key.starts_with("monthly:") {
+    let kind = if item.curated {
+        "curated"
+    } else if item.board_key.starts_with("monthly:") {
         "monthly"
     } else if item.board_key.starts_with("daily:") {
         "daily"
     } else {
         "snapshot"
     };
+    let hidden = if item.hidden { " hidden" } else { "" };
     format!(
-        "- {kind} {} updated: {}",
+        "- #{} {kind}{hidden} {} updated: {}",
+        item.snapshot_number,
         item.board_key,
         item.updated.format("%Y-%m-%d %H:%M UTC")
     )
@@ -1179,17 +1300,6 @@ fn format_reason(reason: &str) -> &str {
 
 fn user_label(username: &str) -> String {
     format!("@{username}")
-}
-
-fn previous_utc_day() -> NaiveDate {
-    Utc::now()
-        .date_naive()
-        .pred_opt()
-        .expect("UTC date overflow")
-}
-
-fn daily_artboard_key(date: NaiveDate) -> String {
-    format!("daily:{date}")
 }
 
 fn page_offset(page: i64) -> i64 {

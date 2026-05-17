@@ -257,10 +257,12 @@ Moderation modal commands:
 - `rename-room <#oldname> <#newname>`
 - `rename-user <@oldname> <@newname>`
 - `view <@user|#room|bans|audit|artboard|help> [pagenumber]`
-- `artboard restore [YYYY-MM-DD] [reason...]`
 - `kick <server|#room> @name [reason...]`
-- `ban <server|#room|artboard> @name [duration] [reason...]`
-- `unban <server|#room|artboard> @name [reason...]`
+- `ban <server|#room|artboard|audio> @name [duration] [reason...]`
+- `unban <server|#room|artboard|audio> @name [reason...]`
+- `artboard restore <number> [reason...]`
+- `artboard curate <live|number> [reason...]`
+- `artboard [un]hide <number> [reason...]`
 - `admin`
 - `admin grant mod @name`
 - `admin revoke mod @name`

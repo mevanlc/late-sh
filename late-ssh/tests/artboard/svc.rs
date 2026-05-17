@@ -50,6 +50,83 @@ fn services_share_canvas_updates() {
     );
 }
 
+#[tokio::test]
+async fn archive_snapshots_have_numbers_and_hidden_filtering() {
+    let test_db = new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let canvas = serde_json::to_value(Canvas::with_size(4, 4)).expect("canvas json");
+    let provenance = serde_json::to_value(ArtboardProvenance::default()).expect("provenance json");
+
+    let main = Snapshot::upsert(
+        &client,
+        Snapshot::MAIN_BOARD_KEY,
+        canvas.clone(),
+        provenance.clone(),
+    )
+    .await
+    .expect("insert main snapshot");
+    let daily = Snapshot::upsert(
+        &client,
+        "daily:2026-05-01",
+        canvas.clone(),
+        provenance.clone(),
+    )
+    .await
+    .expect("insert daily snapshot");
+    let monthly = Snapshot::upsert(
+        &client,
+        "monthly:2026-05",
+        canvas.clone(),
+        provenance.clone(),
+    )
+    .await
+    .expect("insert monthly snapshot");
+    let curated = Snapshot::copy_board_key_with_flags(
+        &client,
+        Snapshot::MAIN_BOARD_KEY,
+        "curated:test",
+        true,
+        false,
+    )
+    .await
+    .expect("curate snapshot")
+    .expect("curated snapshot row");
+
+    assert!(main.snapshot_number < daily.snapshot_number);
+    assert!(daily.snapshot_number < monthly.snapshot_number);
+    assert!(monthly.snapshot_number < curated.snapshot_number);
+
+    Snapshot::set_hidden_by_snapshot_number(&client, daily.snapshot_number, true)
+        .await
+        .expect("hide daily snapshot")
+        .expect("hidden snapshot row");
+
+    let visible = Snapshot::list_archive_summaries(&client, false, 25, 0)
+        .await
+        .expect("list visible archives");
+    assert!(
+        visible
+            .iter()
+            .all(|snapshot| snapshot.snapshot_number != daily.snapshot_number),
+        "hidden daily snapshot should not be visible: {visible:?}"
+    );
+    assert!(
+        visible.iter().any(
+            |snapshot| snapshot.snapshot_number == curated.snapshot_number && snapshot.curated
+        ),
+        "curated snapshot should be visible: {visible:?}"
+    );
+
+    let all = Snapshot::list_archive_summaries(&client, true, 25, 0)
+        .await
+        .expect("list all archives");
+    assert!(
+        all.iter()
+            .any(|snapshot| snapshot.snapshot_number == daily.snapshot_number && snapshot.hidden),
+        "hidden snapshot should appear when requested: {all:?}"
+    );
+}
+
 #[test]
 fn service_emits_peer_join_and_left() {
     let server = dartboard::spawn_server();

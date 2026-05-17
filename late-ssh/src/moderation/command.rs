@@ -49,7 +49,16 @@ pub(crate) enum ModCommand {
         reason: String,
     },
     ArtboardRestore {
-        date: Option<chrono::NaiveDate>,
+        snapshot_number: i64,
+        reason: String,
+    },
+    ArtboardCurate {
+        source: ArtboardSnapshotSource,
+        reason: String,
+    },
+    ArtboardHide {
+        snapshot_number: i64,
+        hidden: bool,
         reason: String,
     },
     Audio {
@@ -127,6 +136,12 @@ impl ServerUserAction {
 pub enum ArtboardAction {
     Ban,
     Unban,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ArtboardSnapshotSource {
+    Live,
+    Snapshot(i64),
 }
 
 impl ArtboardAction {
@@ -455,12 +470,15 @@ fn parse_unban_mod_command(parts: &[&str]) -> Result<ModCommand> {
 
 fn parse_artboard_mod_command(parts: &[&str]) -> Result<ModCommand> {
     let Some(first) = parts.first().copied() else {
-        anyhow::bail!("usage: artboard restore [YYYY-MM-DD] [reason...]");
+        anyhow::bail!("usage: artboard <restore|curate|hide|unhide> ...");
     };
-    if first == "restore" {
-        return parse_artboard_restore_mod_command(&parts[1..]);
+    match first {
+        "restore" => parse_artboard_restore_mod_command(&parts[1..]),
+        "curate" => parse_artboard_curate_mod_command(&parts[1..]),
+        "hide" => parse_artboard_hide_mod_command(&parts[1..], true),
+        "unhide" => parse_artboard_hide_mod_command(&parts[1..], false),
+        _ => anyhow::bail!("usage: artboard <restore|curate|hide|unhide> ..."),
     }
-    anyhow::bail!("usage: artboard restore [YYYY-MM-DD] [reason...]")
 }
 
 fn required_room_target(value: &str, usage: &str) -> Result<String> {
@@ -471,15 +489,46 @@ fn required_room_target(value: &str, usage: &str) -> Result<String> {
 }
 
 fn parse_artboard_restore_mod_command(parts: &[&str]) -> Result<ModCommand> {
-    let (date, reason_start) = match parts.first().copied() {
-        Some(value) => match chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-            Ok(date) => (Some(date), 1),
-            Err(_) => (None, 0),
-        },
-        None => (None, 0),
+    let snapshot_number = required_snapshot_number(
+        parts.first().copied(),
+        "usage: artboard restore <number> [reason...]",
+    )?;
+    let reason = parts.get(1..).unwrap_or_default().join(" ");
+    Ok(ModCommand::ArtboardRestore {
+        snapshot_number,
+        reason,
+    })
+}
+
+fn parse_artboard_curate_mod_command(parts: &[&str]) -> Result<ModCommand> {
+    let Some(source) = parts.first().copied() else {
+        anyhow::bail!("usage: artboard curate <live|number> [reason...]");
     };
-    let reason = parts.get(reason_start..).unwrap_or_default().join(" ");
-    Ok(ModCommand::ArtboardRestore { date, reason })
+    let source = if source == "live" {
+        ArtboardSnapshotSource::Live
+    } else {
+        ArtboardSnapshotSource::Snapshot(required_snapshot_number(
+            Some(source),
+            "usage: artboard curate <live|number> [reason...]",
+        )?)
+    };
+    let reason = parts.get(1..).unwrap_or_default().join(" ");
+    Ok(ModCommand::ArtboardCurate { source, reason })
+}
+
+fn parse_artboard_hide_mod_command(parts: &[&str], hidden: bool) -> Result<ModCommand> {
+    let usage = if hidden {
+        "usage: artboard hide <number> [reason...]"
+    } else {
+        "usage: artboard unhide <number> [reason...]"
+    };
+    let snapshot_number = required_snapshot_number(parts.first().copied(), usage)?;
+    let reason = parts.get(1..).unwrap_or_default().join(" ");
+    Ok(ModCommand::ArtboardHide {
+        snapshot_number,
+        hidden,
+        reason,
+    })
 }
 
 fn parse_admin_mod_command(parts: &[&str]) -> Result<ModCommand> {
@@ -572,6 +621,19 @@ fn parse_page(value: &str) -> Result<Option<i64>> {
     Ok(Some(page.min(MAX_PAGE)))
 }
 
+fn required_snapshot_number(value: Option<&str>, usage: &str) -> Result<i64> {
+    let Some(value) = value else {
+        anyhow::bail!("{usage}");
+    };
+    let Ok(number) = value.parse::<i64>() else {
+        anyhow::bail!("{usage}");
+    };
+    if number <= 0 {
+        anyhow::bail!("snapshot number must be positive");
+    }
+    Ok(number)
+}
+
 fn nonempty(value: String) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -648,12 +710,16 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "rename-room <#oldname> <#newname>",
             "rename-user <@oldname> <@newname>",
             "view   <@user|#room|bans|audit|artboard|help> [pagenumber]",
-            "artboard restore [YYYY-MM-DD] [reason...]",
             "",
             "--- bans, etc. ---",
             "kick   <server|#room> @name [reason...]",
             "ban    <server|#room|artboard|audio> @name [duration] [reason...]",
             "unban  <server|#room|artboard|audio> @name [reason...]",
+            "",
+            "--- artboard ---",
+            "artboard restore  <number> [reason...]",
+            "artboard curate   <live|number> [reason...]",
+            "artboard [un]hide <number> [reason...]",
             "",
             "--- help & admin ---",
             "admin           - show admin commands",
@@ -728,8 +794,8 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
         ],
         "view artboard" => &[
             "view artboard [pagenumber]",
-            "Lists daily and monthly Artboard snapshots.",
-            "pagenumber: optional positive page number; 15 rows per page.",
+            "Lists numbered daily, monthly, and curated Artboard snapshots.",
+            "Hidden snapshots are marked hidden in the moderation view.",
         ],
         "kick" => &[
             "kick <server|#room> @name [reason...]",
@@ -795,16 +861,27 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "Removes the active audio ban for one user.",
         ],
         "artboard" => &[
-            "artboard restore [YYYY-MM-DD] [reason...]",
-            "Restores Artboard snapshots.",
-            "Subtopics: help artboard restore.",
+            "artboard restore  <number> [reason...]",
+            "artboard curate   <live|number> [reason...]",
+            "artboard [un]hide <number> [reason...]",
+            "Subtopics: help artboard restore, help artboard curate, help artboard hide, help artboard unhide.",
         ],
         "artboard restore" => &[
-            "artboard restore [YYYY-MM-DD] [reason...]",
-            "Restores live Artboard from a daily UTC snapshot.",
-            "date: optional daily snapshot date; defaults to previous UTC day.",
-            "reason: optional audit text.",
+            "artboard restore <number> [reason...]",
+            "Restores live Artboard from a numbered snapshot.",
             "Moderator or admin only. Writes a moderation audit entry and backs up the previous main row.",
+        ],
+        "artboard curate" => &[
+            "artboard curate <live|number> [reason...]",
+            "Preserves live Artboard or a numbered snapshot as a curated snapshot.",
+        ],
+        "artboard hide" => &[
+            "artboard hide <number> [reason...]",
+            "Hides a numbered snapshot from the public archive browser.",
+        ],
+        "artboard unhide" => &[
+            "artboard unhide <number> [reason...]",
+            "Returns a numbered snapshot to the public archive browser.",
         ],
         "admin" => &[
             "admin <grant|revoke> mod @name",
@@ -934,6 +1011,12 @@ mod tests {
                 .any(|line| line
                     == "ban    <server|#room|artboard|audio> @name [duration] [reason...]"),
             "top-level help should show verb-primary ban form: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "artboard curate   <live|number> [reason...]"),
+            "top-level help should show artboard curate command: {lines:?}"
         );
     }
 
@@ -1151,33 +1234,37 @@ mod tests {
     #[test]
     fn parses_artboard_restore_command() {
         assert_eq!(
-            parse_mod_command("artboard restore 2026-05-06 rollback vandalism").unwrap(),
+            parse_mod_command("artboard restore 42 rollback vandalism").unwrap(),
             ModCommand::ArtboardRestore {
-                date: Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 6).unwrap()),
+                snapshot_number: 42,
                 reason: "rollback vandalism".to_string(),
             }
         );
         assert_eq!(
-            parse_mod_command("artboard restore rollback latest").unwrap(),
-            ModCommand::ArtboardRestore {
-                date: None,
-                reason: "rollback latest".to_string(),
+            parse_mod_command("artboard curate live preserve").unwrap(),
+            ModCommand::ArtboardCurate {
+                source: ArtboardSnapshotSource::Live,
+                reason: "preserve".to_string(),
             }
         );
         assert_eq!(
-            parse_mod_command("artboard restore").unwrap(),
-            ModCommand::ArtboardRestore {
-                date: None,
-                reason: String::new(),
+            parse_mod_command("artboard hide 42 reason").unwrap(),
+            ModCommand::ArtboardHide {
+                snapshot_number: 42,
+                hidden: true,
+                reason: "reason".to_string(),
             }
         );
         assert_eq!(
-            parse_mod_command("artboard restore 2026-05-06").unwrap(),
-            ModCommand::ArtboardRestore {
-                date: Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 6).unwrap()),
+            parse_mod_command("artboard unhide 42").unwrap(),
+            ModCommand::ArtboardHide {
+                snapshot_number: 42,
+                hidden: false,
                 reason: String::new(),
             }
         );
+        assert!(parse_mod_command("artboard restore").is_err());
+        assert!(parse_mod_command("artboard restore tomorrow").is_err());
     }
 
     #[test]
@@ -1201,7 +1288,9 @@ mod tests {
             | ModCommand::Audit { .. }
             | ModCommand::ArtboardSnapshots { .. }
             | ModCommand::RenameRoom { .. }
-            | ModCommand::ArtboardRestore { .. } => {
+            | ModCommand::ArtboardRestore { .. }
+            | ModCommand::ArtboardCurate { .. }
+            | ModCommand::ArtboardHide { .. } => {
                 panic!("command does not have a primary username: {command:?}")
             }
         }
