@@ -9,6 +9,7 @@ use chrono::{DateTime, Utc};
 use late_core::{
     db::Db,
     models::{
+        audio_ban::AudioBan,
         media_queue_item::MediaQueueItem,
         media_queue_vote::{CastVoteOutcome, MediaQueueVote},
         media_source::MediaSource,
@@ -26,9 +27,10 @@ const QUEUE_SNAPSHOT_LIMIT: i64 = 50;
 const MAX_SUBMISSIONS_PER_WINDOW: i64 = 3;
 const SUBMISSION_WINDOW: chrono::Duration = chrono::Duration::minutes(5);
 const FALLBACK_DEBOUNCE: Duration = Duration::from_secs(10);
-const PLAYBACK_SYNC_INTERVAL: Duration = Duration::from_secs(10);
-const PLAYBACK_END_GRACE: Duration = Duration::from_secs(5);
+const PLAYBACK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const STREAM_CAP: Duration = Duration::from_secs(60 * 60);
+const SKIP_VOTE_PERCENT: usize = 30;
+const SKIP_VOTE_MIN: u32 = 2;
 
 #[derive(Clone)]
 pub struct AudioService {
@@ -74,12 +76,7 @@ pub enum AudioWsMessage {
     LoadVideo {
         item_id: Uuid,
         video_id: String,
-        started_at_ms: i64,
-        offset_ms: u64,
         is_stream: bool,
-    },
-    Seek {
-        offset_ms: u64,
     },
     SourceChanged {
         audio_mode: AudioMode,
@@ -115,6 +112,13 @@ pub enum AudioEvent {
         user_id: Uuid,
         message: String,
     },
+    TrustedSkipFired {
+        user_id: Uuid,
+    },
+    TrustedSkipFailed {
+        user_id: Uuid,
+        message: String,
+    },
     BoothSubmitQueued {
         user_id: Uuid,
         position: i64,
@@ -134,6 +138,21 @@ pub enum AudioEvent {
     },
     BoothSkipFired {
         user_id: Uuid,
+    },
+    BoothItemDeleted {
+        user_id: Uuid,
+    },
+    BoothItemDeleteFailed {
+        user_id: Uuid,
+        message: String,
+    },
+    BoothItemUnskippableToggled {
+        user_id: Uuid,
+        unskippable: bool,
+    },
+    BoothItemUnskippableFailed {
+        user_id: Uuid,
+        message: String,
     },
     BoothSkipProgress {
         user_id: Uuid,
@@ -183,6 +202,8 @@ pub struct QueueItemView {
     pub submitter_id: Uuid,
     #[serde(default)]
     pub vote_score: i32,
+    #[serde(default)]
+    pub unskippable: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -332,6 +353,9 @@ impl AudioService {
 
         let item = {
             let client = self.db.get().await?;
+            if AudioBan::is_active_for_user(&client, user_id).await? {
+                anyhow::bail!("audio ban: submitting blocked");
+            }
             if enforce_rate_limit {
                 let since = Utc::now() - SUBMISSION_WINDOW;
                 let recent =
@@ -492,7 +516,23 @@ impl AudioService {
         source: late_core::models::user::AudioSource,
     ) -> Result<()> {
         let client = self.db.get().await?;
-        late_core::models::user::User::set_audio_source(&client, user_id, source).await
+        late_core::models::user::User::set_audio_source(&client, user_id, source).await?;
+        drop(client);
+        // Mirror the new value into the paired-client registry so
+        // `total_youtube_listeners` / `has_youtube_listener` stay in sync.
+        let left_youtube = self.paired_clients.set_audio_source(user_id, source);
+        if left_youtube {
+            // The user is no longer hearing YouTube — strip any pending
+            // skip-vote they cast, then re-evaluate in case the threshold
+            // dropped to meet remaining votes.
+            let mut state = self.state.lock().await;
+            let was_present = state.skip_votes.remove(&user_id);
+            drop(state);
+            if was_present {
+                self.reevaluate_skip_threshold().await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn read_audio_source(
@@ -501,6 +541,19 @@ impl AudioService {
     ) -> Result<late_core::models::user::AudioSource> {
         let client = self.db.get().await?;
         late_core::models::user::User::audio_source(&client, user_id).await
+    }
+
+    /// Live count of paired browsers currently pinned to YouTube. Drives the
+    /// sidebar's youtube-block listener tag.
+    pub fn youtube_listener_count(&self) -> usize {
+        self.paired_clients.total_youtube_listeners()
+    }
+
+    /// Live count of paired browsers currently pinned to Icecast. CLI is
+    /// excluded by design — only counts browsers that are actively rendering
+    /// the radio.
+    pub fn icecast_listener_count(&self) -> usize {
+        self.paired_clients.total_icecast_listeners()
     }
 
     /// Spawn a background persist for the user's audio-source preference.
@@ -562,17 +615,23 @@ impl AudioService {
     /// Cast a skip-vote for the currently-playing track. Returns the new
     /// progress; if the threshold has been hit, advances the queue.
     ///
-    /// Gated on the caller's session having at least one paired client. An
-    /// SSH-only user can't influence what paired listeners hear, otherwise a
-    /// coordinated unpaired group could grief the threshold (which is
-    /// computed against `paired_clients.total_pairings()`).
+    /// Gated on the caller having at least one paired browser actively pinned
+    /// to the YouTube source — only listeners hearing the track can vote to
+    /// skip it. Threshold denominator is also restricted to YouTube
+    /// listeners across all tokens.
     pub async fn cast_skip_vote(
         &self,
         user_id: Uuid,
         session_token: &str,
     ) -> Result<CastSkipResult> {
-        if !self.paired_clients.is_paired(session_token) {
-            anyhow::bail!("pair a client to skip-vote");
+        if !self.paired_clients.has_youtube_listener(session_token) {
+            anyhow::bail!("switch to youtube to skip-vote");
+        }
+        {
+            let client = self.db.get().await?;
+            if AudioBan::is_active_for_user(&client, user_id).await? {
+                anyhow::bail!("audio ban: skip-vote blocked");
+            }
         }
 
         let mut state = self.state.lock().await;
@@ -580,9 +639,18 @@ impl AudioService {
             anyhow::bail!("nothing is playing");
         };
 
+        {
+            let client = self.db.get().await?;
+            if let Some(item) = MediaQueueItem::find_by_id(&client, current_id).await?
+                && item.unskippable
+            {
+                anyhow::bail!("track is unskippable");
+            }
+        }
+
         state.skip_votes.insert(user_id);
         let votes = state.skip_votes.len() as u32;
-        let threshold = skip_threshold(self.paired_clients.total_pairings());
+        let threshold = skip_threshold(self.paired_clients.total_youtube_listeners());
         let fired = votes >= threshold;
 
         if fired {
@@ -606,8 +674,9 @@ impl AudioService {
     }
 
     /// Re-evaluate whether the pending skip-votes already meet the threshold.
-    /// Called from the disconnect path when the paired-client total drops; if
-    /// the threshold fell to or below the existing vote count, fire a skip.
+    /// Called from the disconnect path AND from `set_audio_source` when a
+    /// user flips away from YouTube (their vote is dropped first). If the
+    /// threshold fell to or below the existing vote count, fire a skip.
     pub async fn reevaluate_skip_threshold(&self) -> Result<()> {
         let mut state = self.state.lock().await;
         let Some(current_id) = state.current_item_id else {
@@ -617,12 +686,18 @@ impl AudioService {
             return Ok(());
         }
         let votes = state.skip_votes.len() as u32;
-        let threshold = skip_threshold(self.paired_clients.total_pairings());
+        let threshold = skip_threshold(self.paired_clients.total_youtube_listeners());
         if votes < threshold {
             self.publish_queue_update_with_guard(&mut state).await?;
             return Ok(());
         }
         let client = self.db.get().await?;
+        if let Some(item) = MediaQueueItem::find_by_id(&client, current_id).await?
+            && item.unskippable
+        {
+            self.publish_queue_update_with_guard(&mut state).await?;
+            return Ok(());
+        }
         let _ = MediaQueueItem::update_status(&client, current_id, MediaQueueItem::STATUS_SKIPPED)
             .await?;
         drop(client);
@@ -693,6 +768,136 @@ impl AudioService {
                     service.publish_event(AudioEvent::BoothVoteFailed {
                         user_id,
                         message: booth_vote_error_message(&err),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Unconditionally skip the currently-playing track. Staff-only entry
+    /// point: bypasses the vote threshold and clears any pending skip-votes
+    /// so the next track starts with a clean slate.
+    pub async fn force_skip(&self) -> Result<()> {
+        let mut state = self.state.lock().await;
+        let Some(current_id) = state.current_item_id else {
+            anyhow::bail!("nothing is playing");
+        };
+        let client = self.db.get().await?;
+        let _ = MediaQueueItem::update_status(&client, current_id, MediaQueueItem::STATUS_SKIPPED)
+            .await?;
+        drop(client);
+        state.current_item_id = None;
+        state.skip_votes.clear();
+        self.cancel_playback(&mut state);
+        self.advance_to_next_with_guard(&mut state).await
+    }
+
+    pub fn force_skip_task(&self, user_id: Uuid) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            match service.force_skip().await {
+                Ok(()) => {
+                    service.publish_event(AudioEvent::TrustedSkipFired { user_id });
+                }
+                Err(err) => {
+                    let message = if format!("{err:#}")
+                        .to_ascii_lowercase()
+                        .contains("nothing is playing")
+                    {
+                        "Nothing is playing".to_string()
+                    } else {
+                        "Failed to skip audio".to_string()
+                    };
+                    service.publish_event(AudioEvent::TrustedSkipFailed { user_id, message });
+                }
+            }
+        });
+    }
+
+    /// Delete a queued track. Permission gate: staff (admin or moderator) can
+    /// delete anyone's submission; non-staff can only delete their own. The
+    /// currently-playing track is never deletable here — `delete_queued`
+    /// restricts the DB write to `status = 'queued'`, and the booth UI only
+    /// selects from the queue list anyway. Use `/audio skip` to remove the
+    /// playing item.
+    pub async fn delete_queue_item(&self, user_id: Uuid, item_id: Uuid) -> Result<()> {
+        let client = self.db.get().await?;
+        let item = MediaQueueItem::find_by_id(&client, item_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("queue item not found"))?;
+        if item.status != MediaQueueItem::STATUS_QUEUED {
+            anyhow::bail!("track is no longer queued");
+        }
+        let is_owner = item.submitter_id == user_id;
+        if !is_owner && !user_is_staff(&client, user_id).await? {
+            anyhow::bail!("not allowed");
+        }
+        let deleted = MediaQueueItem::delete_queued(&client, item_id).await?;
+        drop(client);
+        if deleted == 0 {
+            anyhow::bail!("track is no longer queued");
+        }
+        let mut state = self.state.lock().await;
+        self.publish_queue_update_with_guard(&mut state).await?;
+        Ok(())
+    }
+
+    /// Toggle `unskippable` on a queued item. Staff-only: regular users never
+    /// get to lock a track. The DB write also restricts to `status = 'queued'`,
+    /// so a track already promoted to playing keeps whatever value it carried
+    /// when it left the queue.
+    pub async fn toggle_unskippable(&self, user_id: Uuid, item_id: Uuid) -> Result<bool> {
+        let client = self.db.get().await?;
+        if !user_is_staff(&client, user_id).await? {
+            anyhow::bail!("not allowed");
+        }
+        let updated = MediaQueueItem::toggle_unskippable_queued(&client, item_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("track is no longer queued"))?;
+        drop(client);
+        let new_value = updated.unskippable;
+        let mut state = self.state.lock().await;
+        self.publish_queue_update_with_guard(&mut state).await?;
+        tracing::debug!(
+            %user_id,
+            %item_id,
+            unskippable = new_value,
+            "unskippable toggled"
+        );
+        Ok(new_value)
+    }
+
+    pub fn toggle_unskippable_task(&self, user_id: Uuid, item_id: Uuid) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            match service.toggle_unskippable(user_id, item_id).await {
+                Ok(unskippable) => {
+                    service.publish_event(AudioEvent::BoothItemUnskippableToggled {
+                        user_id,
+                        unskippable,
+                    });
+                }
+                Err(err) => {
+                    service.publish_event(AudioEvent::BoothItemUnskippableFailed {
+                        user_id,
+                        message: booth_unskippable_error_message(&err),
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn delete_queue_item_task(&self, user_id: Uuid, item_id: Uuid) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            match service.delete_queue_item(user_id, item_id).await {
+                Ok(()) => {
+                    service.publish_event(AudioEvent::BoothItemDeleted { user_id });
+                }
+                Err(err) => {
+                    service.publish_event(AudioEvent::BoothItemDeleteFailed {
+                        user_id,
+                        message: booth_delete_error_message(&err),
                     });
                 }
             }
@@ -773,14 +978,10 @@ impl AudioService {
                 skip_progress,
             },
         ];
-        if let Some(current) = &snapshot.current
-            && let Some(started_at_ms) = current.started_at_ms
-        {
+        if let Some(current) = &snapshot.current {
             events.push(AudioWsMessage::LoadVideo {
                 item_id: current.id,
                 video_id: current.video_id.clone(),
-                started_at_ms,
-                offset_ms: offset_from_started_at_ms(started_at_ms),
                 is_stream: current.is_stream,
             });
         } else if snapshot.audio_mode == AudioMode::Youtube {
@@ -839,47 +1040,13 @@ impl AudioService {
         self.record_browser_duration(report.item_id, report.duration_ms)
             .await?;
 
-        let state = self.state.lock().await;
-        if state.current_item_id != Some(report.item_id) {
-            return Ok(());
+        {
+            let state = self.state.lock().await;
+            if state.current_item_id != Some(report.item_id) {
+                return Ok(());
+            }
         }
 
-        let client = self.db.get().await?;
-        let Some(item) = MediaQueueItem::find_by_id(&client, report.item_id).await? else {
-            return Ok(());
-        };
-        let Some(started_at) = item.started_at else {
-            return Ok(());
-        };
-
-        let elapsed = Utc::now()
-            .signed_duration_since(started_at)
-            .to_std()
-            .unwrap_or_default();
-        let Some(duration) = playback_known_duration(&item) else {
-            tracing::debug!(
-                item_id = %report.item_id,
-                elapsed_ms = elapsed.as_millis() as u64,
-                offset_ms = ?report.offset_ms,
-                "ignoring browser ended report; server-known duration missing - server timer is authoritative"
-            );
-            self.publish_seek_for_started_at(started_at);
-            return Ok(());
-        };
-
-        if elapsed.saturating_add(PLAYBACK_END_GRACE) < duration {
-            tracing::debug!(
-                item_id = %report.item_id,
-                elapsed_ms = elapsed.as_millis() as u64,
-                duration_ms = duration.as_millis() as u64,
-                offset_ms = ?report.offset_ms,
-                "ignoring early browser ended report"
-            );
-            self.publish_seek_for_started_at(started_at);
-            return Ok(());
-        }
-
-        drop(state);
         self.finish_item(report.item_id).await
     }
 
@@ -976,7 +1143,7 @@ impl AudioService {
             return None;
         }
         let votes = state.skip_votes.len() as u32;
-        let threshold = skip_threshold(self.paired_clients.total_pairings());
+        let threshold = skip_threshold(self.paired_clients.total_youtube_listeners());
         Some(SkipProgress { votes, threshold })
     }
 
@@ -1015,26 +1182,15 @@ impl AudioService {
     }
 
     fn publish_load_video(&self, item: &MediaQueueItem) {
-        let Some(started_at) = item.started_at else {
-            return;
-        };
         let _ = self.ws_tx.send(AudioWsMessage::LoadVideo {
             item_id: item.id,
             video_id: item.external_id.clone(),
-            started_at_ms: started_at.timestamp_millis(),
-            offset_ms: offset_for_started_at(started_at),
             is_stream: item.is_stream,
         });
     }
 
     fn publish_load_fallback(&self, source: &MediaSource) {
         let _ = self.ws_tx.send(fallback_load_event(source));
-    }
-
-    fn publish_seek_for_started_at(&self, started_at: DateTime<Utc>) {
-        let _ = self.ws_tx.send(AudioWsMessage::Seek {
-            offset_ms: offset_for_started_at(started_at),
-        });
     }
 
     async fn publish_youtube_fallback_with_guard(&self, state: &mut QueueState) -> Result<bool> {
@@ -1069,12 +1225,13 @@ impl AudioService {
             .unwrap_or_default();
         let sleep_for = duration.saturating_sub(elapsed);
         let item_id = item.id;
+        let item_for_heartbeat = item.clone();
         let service = self.clone();
         let (tx, rx) = oneshot::channel();
         state.playback_cancel = Some(tx);
         tokio::spawn(async move {
-            let mut sync = tokio::time::interval(PLAYBACK_SYNC_INTERVAL);
-            sync.tick().await;
+            let mut heartbeat = tokio::time::interval(PLAYBACK_HEARTBEAT_INTERVAL);
+            heartbeat.tick().await;
             tokio::select! {
                 _ = tokio::time::sleep(sleep_for) => {
                     if let Err(err) = service.finish_item_due_to_timer(item_id).await {
@@ -1086,10 +1243,14 @@ impl AudioService {
                         );
                     }
                 }
+                // Safety-net heartbeat: re-broadcast `LoadVideo` for the
+                // current item. Browsers already showing the right item
+                // no-op; browsers that missed an event or got stuck on the
+                // wrong track force-swap.
                 _ = async {
                     loop {
-                        sync.tick().await;
-                        service.publish_seek_for_started_at(started_at);
+                        heartbeat.tick().await;
+                        service.publish_load_video(&item_for_heartbeat);
                     }
                 } => {}
                 _ = rx => {}
@@ -1199,7 +1360,9 @@ fn playback_duration(item: &MediaQueueItem) -> Duration {
         return STREAM_CAP;
     }
 
-    playback_known_duration(item).unwrap_or(STREAM_CAP)
+    playback_known_duration(item)
+        .map(|d| d.min(STREAM_CAP))
+        .unwrap_or(STREAM_CAP)
 }
 
 fn playback_known_duration(item: &MediaQueueItem) -> Option<Duration> {
@@ -1209,32 +1372,17 @@ fn playback_known_duration(item: &MediaQueueItem) -> Option<Duration> {
         .filter(|duration| !duration.is_zero())
 }
 
-fn offset_for_started_at(started_at: DateTime<Utc>) -> u64 {
-    Utc::now()
-        .signed_duration_since(started_at)
-        .to_std()
-        .unwrap_or_default()
-        .as_millis()
-        .min(u128::from(u64::MAX)) as u64
-}
-
-fn offset_from_started_at_ms(started_at_ms: i64) -> u64 {
-    Utc::now()
-        .timestamp_millis()
-        .saturating_sub(started_at_ms)
-        .try_into()
-        .unwrap_or_default()
-}
-
 fn skip_threshold(paired_total: usize) -> u32 {
-    let total = paired_total as f32;
-    let value = (total * 0.1).ceil() as u32;
-    value.max(1)
+    let value = paired_total.saturating_mul(SKIP_VOTE_PERCENT).div_ceil(100) as u32;
+    value.max(SKIP_VOTE_MIN)
 }
 
 fn booth_submit_error_message(err: &anyhow::Error) -> String {
     let text = format!("{err:#}").to_ascii_lowercase();
-    if text.contains("invalid url") || text.contains("youtube") && text.contains("not found") {
+    if text.contains("audio ban") {
+        "Banned from submitting audio".to_string()
+    } else if text.contains("invalid url") || text.contains("youtube") && text.contains("not found")
+    {
         "Invalid YouTube URL".to_string()
     } else if text.contains("rate limit") || text.contains("submission rate limit") {
         "Slow down - too many submissions".to_string()
@@ -1251,7 +1399,9 @@ fn booth_submit_error_message(err: &anyhow::Error) -> String {
 
 fn booth_vote_error_message(err: &anyhow::Error) -> String {
     let text = format!("{err:#}").to_ascii_lowercase();
-    if text.contains("voting closed") {
+    if text.contains("audio ban") {
+        "Banned from voting".to_string()
+    } else if text.contains("voting closed") {
         "Voting closed - track started".to_string()
     } else if text.contains("pair a client") {
         "Pair a client to skip-vote".to_string()
@@ -1266,15 +1416,39 @@ fn booth_vote_error_message(err: &anyhow::Error) -> String {
     }
 }
 
+fn booth_unskippable_error_message(err: &anyhow::Error) -> String {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    if text.contains("not allowed") {
+        "Only staff can lock tracks".to_string()
+    } else if text.contains("no longer queued") || text.contains("not found") {
+        "Track is no longer in the queue".to_string()
+    } else {
+        "Failed to update track".to_string()
+    }
+}
+
+fn booth_delete_error_message(err: &anyhow::Error) -> String {
+    let text = format!("{err:#}").to_ascii_lowercase();
+    if text.contains("not allowed") {
+        "Only the submitter or staff can delete this track".to_string()
+    } else if text.contains("queue item not found") || text.contains("no longer queued") {
+        "Track is no longer in the queue".to_string()
+    } else {
+        "Failed to delete track".to_string()
+    }
+}
+
 fn trusted_submit_error_message(err: &anyhow::Error) -> String {
     let text = format!("{err:#}").to_ascii_lowercase();
-    if text.contains("invalid url")
+    if text.contains("audio ban") {
+        "Banned from submitting audio".to_string()
+    } else if text.contains("invalid url")
         || text.contains("unsupported youtube url")
         || text.contains("invalid youtube video id")
     {
         "Invalid YouTube URL".to_string()
     } else if text.contains("rate limit") {
-        "Slow down — too many submissions".to_string()
+        "Slow down - too many submissions".to_string()
     } else {
         "Failed to queue audio".to_string()
     }
@@ -1284,10 +1458,17 @@ fn fallback_load_event(source: &MediaSource) -> AudioWsMessage {
     AudioWsMessage::LoadVideo {
         item_id: source.id,
         video_id: source.external_id.clone(),
-        started_at_ms: Utc::now().timestamp_millis(),
-        offset_ms: 0,
         is_stream: source.is_stream,
     }
+}
+
+/// Resolve staff status from the database. Used by booth actions that gate
+/// on admin/moderator role — caller-supplied booleans aren't trusted.
+async fn user_is_staff(client: &tokio_postgres::Client, user_id: Uuid) -> Result<bool> {
+    let user = User::get(client, user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+    Ok(user.is_admin || user.is_moderator)
 }
 
 fn queue_item_view(
@@ -1309,6 +1490,7 @@ fn queue_item_view(
             .unwrap_or_default(),
         submitter_id: item.submitter_id,
         vote_score,
+        unskippable: item.unskippable,
     }
 }
 
@@ -1317,22 +1499,20 @@ mod tests {
     use super::skip_threshold;
 
     #[test]
-    fn skip_threshold_floors_at_one_and_uses_ten_percent_ceil() {
-        // No pairings → still need one vote to skip (avoids divide-by-zero
-        // making the threshold trivially satisfiable).
-        assert_eq!(skip_threshold(0), 1);
-        // Small rooms collapse to threshold 1: any paired listener can skip.
-        assert_eq!(skip_threshold(1), 1);
-        assert_eq!(skip_threshold(5), 1);
-        assert_eq!(skip_threshold(9), 1);
-        assert_eq!(skip_threshold(10), 1);
-        // 10% ceil kicks in above 10 paired clients.
-        assert_eq!(skip_threshold(11), 2);
-        assert_eq!(skip_threshold(20), 2);
-        assert_eq!(skip_threshold(21), 3);
-        assert_eq!(skip_threshold(25), 3);
-        assert_eq!(skip_threshold(91), 10);
-        assert_eq!(skip_threshold(100), 10);
-        assert_eq!(skip_threshold(101), 11);
+    fn skip_threshold_floors_at_two_and_uses_thirty_percent_ceil() {
+        // Small rooms collapse to the floor: at least two paired listeners
+        // must agree before a skip fires.
+        assert_eq!(skip_threshold(0), 2);
+        assert_eq!(skip_threshold(1), 2);
+        assert_eq!(skip_threshold(5), 2);
+        assert_eq!(skip_threshold(6), 2);
+        // 30% ceil kicks in above 6 paired clients.
+        assert_eq!(skip_threshold(7), 3);
+        assert_eq!(skip_threshold(10), 3);
+        assert_eq!(skip_threshold(11), 4);
+        assert_eq!(skip_threshold(20), 6);
+        assert_eq!(skip_threshold(21), 7);
+        assert_eq!(skip_threshold(100), 30);
+        assert_eq!(skip_threshold(101), 31);
     }
 }

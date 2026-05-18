@@ -30,6 +30,14 @@ impl AudioState {
         self.snapshot_rx.borrow().clone()
     }
 
+    pub fn youtube_listener_count(&self) -> usize {
+        self.service.youtube_listener_count()
+    }
+
+    pub fn icecast_listener_count(&self) -> usize {
+        self.service.icecast_listener_count()
+    }
+
     pub fn user_id(&self) -> Uuid {
         self.user_id
     }
@@ -45,6 +53,10 @@ impl AudioState {
     pub fn set_youtube_fallback(&self, url: String) {
         self.service
             .set_trusted_youtube_fallback_task(self.user_id, url);
+    }
+
+    pub fn skip_trusted(&self) {
+        self.service.force_skip_task(self.user_id);
     }
 
     pub fn booth_submit_enabled(&self) -> bool {
@@ -66,6 +78,14 @@ impl AudioState {
     pub fn booth_skip_vote(&self) {
         self.service
             .cast_skip_vote_task(self.user_id, self.session_token.clone());
+    }
+
+    pub fn booth_delete(&self, item_id: Uuid) {
+        self.service.delete_queue_item_task(self.user_id, item_id);
+    }
+
+    pub fn booth_toggle_unskippable(&self, item_id: Uuid) {
+        self.service.toggle_unskippable_task(self.user_id, item_id);
     }
 
     /// Spawn an audio-source persist task that surfaces failures as banners
@@ -99,6 +119,12 @@ impl AudioState {
                 {
                     banner = Some(Banner::error(&message));
                 }
+                AudioEvent::TrustedSkipFired { user_id } if user_id == self.user_id => {
+                    banner = Some(Banner::success("Skipped audio"));
+                }
+                AudioEvent::TrustedSkipFailed { user_id, message } if user_id == self.user_id => {
+                    banner = Some(Banner::error(&message));
+                }
                 AudioEvent::BoothSubmitQueued { user_id, position } if user_id == self.user_id => {
                     banner = Some(if position == 0 {
                         Banner::success("Submitted - up next")
@@ -117,6 +143,29 @@ impl AudioState {
                 }
                 AudioEvent::BoothSkipFired { user_id } if user_id == self.user_id => {
                     banner = Some(Banner::success("Skip threshold reached"));
+                }
+                AudioEvent::BoothItemDeleted { user_id } if user_id == self.user_id => {
+                    banner = Some(Banner::success("Deleted track"));
+                }
+                AudioEvent::BoothItemDeleteFailed { user_id, message }
+                    if user_id == self.user_id =>
+                {
+                    banner = Some(Banner::error(&message));
+                }
+                AudioEvent::BoothItemUnskippableToggled {
+                    user_id,
+                    unskippable,
+                } if user_id == self.user_id => {
+                    banner = Some(Banner::success(if unskippable {
+                        "Locked - skip-vote disabled"
+                    } else {
+                        "Unlocked - skip-vote enabled"
+                    }));
+                }
+                AudioEvent::BoothItemUnskippableFailed { user_id, message }
+                    if user_id == self.user_id =>
+                {
+                    banner = Some(Banner::error(&message));
                 }
                 AudioEvent::BoothSkipProgress {
                     user_id,

@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: late.sh audio — Icecast house radio, global YouTube queue, browser/CLI source arbitration, Icecast visualizer, now-playing poller
 - Primary audience: LLM agents working in `late-ssh/src/app/audio` and the touchpoints it owns in `late-cli` and `late-web/src/pages/connect`
-- Last updated: 2026-05-17 (music-stage sidebar widget rebuilt — both surfaces always visible, see §12)
+- Last updated: 2026-05-18 (skip-vote eligibility narrowed to YouTube listeners only — paired browsers with `audio_source = Youtube`. CLI-only and Icecast-pinned browsers don't count toward numerator or denominator. Flipping away from YouTube drops your pending vote. `SessionRegistry` and `PairedClientRegistry` now track `user_id` + cached `audio_source` per entry. Sidebar title-bar tags now show live listener counts on both blocks ("youtube ── 5" / "icecast ── 12"), browsers-only, lowercase labels. See §4 constants + §6 + §12.)
 - Status: Active
 - Parent context: `../../../../CONTEXT.md`
 
@@ -13,7 +13,7 @@
 
 Owned by this domain:
 - Always-on Icecast house radio playback (the `<audio>` and CLI symphonia path).
-- Global, DB-backed YouTube queue: submission, persistence, single-playing invariant, server-authoritative timeline, sync seeks, fallback debounce.
+- Global, DB-backed YouTube queue: submission, persistence, single-playing invariant, server-driven track switching (per-browser playback timeline), fallback debounce.
 - The singleton "YouTube fallback" stream that plays when the queue is empty.
 - Audio source arbitration between paired CLI and paired browser clients on the same SSH token (`force_mute`).
 - Icecast visualizer driven by browser-side Web Audio analysis.
@@ -33,7 +33,7 @@ Out of scope here (lives elsewhere):
 ```text
 late-ssh/src/app/audio/
 ├── mod.rs                  # declarations only (booth, client_state, liquidsoap, now_playing, state, svc, viz, youtube)
-├── svc.rs                  # AudioService: queue state machine, WS broadcast, resume, fallback debounce, sync seek, votes/skip-vote
+├── svc.rs                  # AudioService: queue state machine, WS broadcast, resume, fallback debounce, periodic LoadVideo heartbeat, votes/skip-vote
 ├── state.rs                # AudioState: per-session UI shim — proxies submits/votes and turns AudioEvent into Banners
 ├── client_state.rs         # ClientAudioState + ClientKind/SshMode/Platform enums (the client_state WS payload)
 ├── liquidsoap.rs           # LiquidsoapController telnet client (NOT used by AudioService — only by app/vote/svc.rs)
@@ -60,13 +60,13 @@ Cross-crate touchpoints:
 - `late-ssh/src/api.rs` — `/api/ws/pair` multiplexes `AudioWsMessage` + `PairControlMessage`; `/api/now-playing`.
 - `late-ssh/src/app/chat/{state,input}.rs` — `/audio` and `/audio fallback` chat commands.
 - `late-cli/src/ws.rs`, `late-cli/src/main.rs`, `late-cli/src/audio/output.rs` — CLI tolerates unknown audio events, applies `force_mute` to the shared mute atomic.
-- `late-web/src/pages/connect/page.html` + `connect/mod.rs` — browser IFrame player, drift correction, per-user v+x source toggle.
+- `late-web/src/pages/connect/page.html` + `connect/mod.rs` — browser IFrame player, force-switch on heartbeat, per-user v+x source toggle.
 
 ---
 
 ## 3. Ownership Split
 
-- `svc.rs` is the async boundary. It owns the DB, both broadcast channels, the queue state mutex, the playback timer, the fallback debounce timer, the periodic sync-seek task, and all transitions. **Nothing else in the codebase mutates `media_queue_items.status` or `media_sources`.**
+- `svc.rs` is the async boundary. It owns the DB, both broadcast channels, the queue state mutex, the playback timer (which also drives the periodic `LoadVideo` heartbeat for the current item), the fallback debounce timer, and all transitions. **Nothing else in the codebase mutates `media_queue_items.status` or `media_sources`.**
 - `state.rs` is the per-session UI shim (62 lines). It clones the service, holds a per-user `AudioEvent` receiver, exposes `submit_trusted` / `set_youtube_fallback` for chat dispatch, and turns user-scoped events into banners during `tick()`.
 - `client_state.rs` is type-only: the JSON shape clients send over `client_state` WS messages. No behavior.
 - `youtube.rs` is pure URL/HTTP — no DB, no channels, no service state.
@@ -89,9 +89,9 @@ Keep `mod.rs` declaration-only — no `pub use` re-exports.
 - `QUEUE_SNAPSHOT_LIMIT = 50`
 - `MAX_SUBMISSIONS_PER_WINDOW = 3` over `SUBMISSION_WINDOW = 5 minutes` — applies only to un-trusted `submit_url` (currently nothing reaches it).
 - `FALLBACK_DEBOUNCE = 10s`
-- `PLAYBACK_SYNC_INTERVAL = 10s` — periodic `Seek` to re-anchor browsers.
-- `PLAYBACK_END_GRACE = 5s` — tolerance when validating a browser-reported `ended`.
+- `PLAYBACK_HEARTBEAT_INTERVAL = 10s` — periodic `LoadVideo` re-broadcast for the current item. Safety net: browsers already showing the right item no-op; stuck/disconnected/wrong-item browsers force-swap. Replaces the old `Seek`-based sync.
 - `STREAM_CAP = 1h` — hard cap on any single playing row's wall-clock lifetime.
+- `SKIP_VOTE_FRACTION = 0.3` + `SKIP_VOTE_MIN = 2` — `skip_threshold(youtube_total) = max(ceil(0.3 * youtube_total), 2)`. **Denominator is YouTube listeners only** (`PairedClientRegistry::total_youtube_listeners()`) — paired browsers whose user has `audio_source = Youtube`. CLI-only or Icecast-pinned browsers don't count in either numerator or denominator. Floor of 2 means a lone listener can't solo-skip; the 30% ceil kicks in above 6 YouTube listeners.
 
 ### Public API
 - `new(db, youtube_api_key)` — `main.rs:123`.
@@ -121,29 +121,31 @@ All transitions go through `svc.rs`:
 `advance_to_next_with_guard` (`svc.rs:547-577`) is the *only* advancer. It picks `MediaQueueItem::first_queued()`, tries to flip it, on success broadcasts `SourceChanged: youtube` + `LoadVideo` + `QueueUpdate`. If the queue is empty it tries `publish_youtube_fallback_with_guard`; if no fallback row exists, `schedule_fallback` arms the 10s debounce, after which `finish_fallback_debounce` flips `mode = Icecast` (and re-checks `current_item_id.is_none()` to avoid races).
 
 ### Timers
-- **Playback timer** (`schedule_playback_timer`, `svc.rs:661-704`): one `tokio::select!` task per playing item. Sleeps `duration - elapsed` then calls `finish_item_due_to_timer`. Also runs the periodic `Seek` broadcast every `PLAYBACK_SYNC_INTERVAL = 10s` from inside the same task.
-- **Fallback debounce** (`svc.rs:729-745`): one task armed when the queue drains. Cancelled by any new submission via `cancel_fallback` (`svc.rs:253`).
+- **Playback timer** (`schedule_playback_timer`): one `tokio::select!` task per playing item. Sleeps `duration - elapsed` then calls `finish_item_due_to_timer`. Also re-broadcasts `LoadVideo` for the current item every `PLAYBACK_HEARTBEAT_INTERVAL = 10s` from inside the same task — the safety-net heartbeat. Browsers ignore the heartbeat when they're already showing the right item; otherwise they force-swap.
+- **Fallback debounce**: one task armed when the queue drains. Cancelled by any new submission via `cancel_fallback`.
 - Both are owned via `oneshot` cancel handles on `QueueState`; dropping the sender cancels the task.
 
-### `playback_duration` rules (`svc.rs:803-809`)
+### `playback_duration` rules (`svc.rs:1197-1205`)
 - `is_stream = true` → always `STREAM_CAP` (1h).
-- Non-stream with known `duration_ms` → use it.
-- Non-stream with unknown duration → `STREAM_CAP` (1h fallback cap).
-- `record_browser_duration` (`svc.rs:706-727`) is the only path that backfills `duration_ms` from the browser, conditionally on the current playing item and only when the DB value is NULL. After write, it reschedules the playback timer to the now-known end time.
+- Non-stream with known `duration_ms` → `min(duration_ms, STREAM_CAP)` — **1h is a hard cap on every item, not a fallback.** A 2h video plays its first hour, server timer fires, queue advances.
+- Non-stream with unknown duration → `STREAM_CAP` (1h).
+- `record_browser_duration` (`svc.rs:1100-1121`) is the only path that backfills `duration_ms` from the browser, conditionally on the current playing item and only when the DB value is NULL. After write, it reschedules the playback timer to `min(real_duration, STREAM_CAP)`.
+- `playback_known_duration` (uncapped) is still used by `finish_item_from_player` (`svc.rs:859`) to reject premature browser `ended` reports — a 2h video that the browser claims ended at 30min is rebutted with a `Seek`, regardless of the 1h playback cap.
 
-### `player_state` ingress (`svc.rs:347-373`)
+### `player_state` ingress
 Routed by report `state` field:
-- `ended` → `finish_item_from_player` (`svc.rs:467-513`). Drops the report if `current_item_id != report.item_id`. If duration is unknown, refuses to advance and broadcasts a `Seek` to re-anchor. If `elapsed + 5s grace < known duration`, treats `ended` as premature and broadcasts a `Seek`. Only when both gates pass does it call `finish_item`.
+- `ended` → `finish_item_from_player`. Drops the report if `current_item_id != report.item_id`. Otherwise trusts it and calls `finish_item` — no duration check, no grace gate, no seek rebuttal. Server's own playback timer is the redundant safety net for browsers that never report `ended`.
 - `error` → `fail_item`.
 - `playing` / `paused` / `buffering` → may carry `duration_ms` for `record_browser_duration`; otherwise logged. `autoplay_blocked = true` logs at `warn!`.
 
 ### Invariants
 1. **Singleton playing row.** Enforced both by the partial unique index `idx_media_queue_single_playing` and by conditional `mark_playing` updates. Two racing advancers cannot both succeed.
-2. **Server-authoritative timeline.** `started_at` in the DB is the truth. Browser offsets are never trusted as state — only as observations that can trigger a corrective `Seek`.
-3. **Server validates `ended`.** A premature browser `ended` is rebutted with an authoritative seek, not honored.
-4. **Mode is server-managed.** Browser/CLI never write `mode`; they only receive `SourceChanged`.
-5. **Sequence monotonicity.** `state.sequence` is bumped before every `QueueUpdate` so clients can drop stale ones.
-6. **Banners are user-scoped.** `AudioEvent` carries `user_id` and `AudioState::tick` filters on it; one user's submission failure does not leak to others.
+2. **Server owns track *changes*, not playback positions.** Server picks which item is `playing` and broadcasts `LoadVideo` on changes + every 10s as a heartbeat. Each browser plays its own timeline from wherever YT happens to start. No more wall-clock-offset sync — slow networks no longer audibly skip mid-track.
+3. **Force-switch on heartbeat.** A browser receiving `LoadVideo` for a different `item_id` than what it's currently playing MUST swap, regardless of pause/buffer/error state. Same-`item_id` heartbeat with the right `video_id` loaded → no-op (respect a manual pause).
+4. **`ended` is trusted.** Server advances unconditionally when the playing item's browser reports `ended`. The own-timer is the backup for browsers that never report.
+5. **Mode is server-managed.** Browser/CLI never write `mode`; they only receive `SourceChanged`.
+6. **Sequence monotonicity.** `state.sequence` is bumped before every `QueueUpdate` so clients can drop stale ones.
+7. **Banners are user-scoped.** `AudioEvent` carries `user_id` and `AudioState::tick` filters on it; one user's submission failure does not leak to others.
 
 ---
 
@@ -156,9 +158,8 @@ Routed by report `state` field:
 
 On connect, `audio_service.initial_ws_messages()` emits the catch-up burst.
 
-### Server → client `AudioWsMessage` (`svc.rs:58-79`, tagged enum, snake_case)
-- `load_video { item_id, video_id, started_at_ms, offset_ms, is_stream }`
-- `seek { offset_ms }`
+### Server → client `AudioWsMessage` (tagged enum, snake_case)
+- `load_video { item_id, video_id, is_stream }` — sent on track changes AND every 10s as a heartbeat. Browsers swap when `item_id` differs from what they're playing; same-item heartbeat is a no-op.
 - `source_changed { audio_mode: "icecast" | "youtube" }`
 - `queue_update { current, queue, sequence }`
 
@@ -172,7 +173,7 @@ On connect, `audio_service.initial_ws_messages()` emits the catch-up burst.
 - `clipboard_image { … }`, `clipboard_image_failed { … }`
 - `player_state(PlayerStateReport)` — `{ item_id, state, offset_ms?, duration_ms?, autoplay_blocked, error? }` (`svc.rs:126-138`)
 
-There is **one global broadcast**, no room scoping. Every paired browser on every token receives the same `load_video` / `seek` / `source_changed` / `queue_update`.
+There is **one global broadcast**, no room scoping. Every paired browser on every token receives the same `load_video` / `source_changed` / `queue_update`.
 
 ---
 
@@ -198,17 +199,39 @@ Both decisions run under the same `PairedClientRegistry` lock to close the TOCTO
 
 CLI side: `late-cli/src/ws.rs:155-171` swaps the shared mute atomic — `Arc::clone(&audio.muted)` (`late-cli/src/main.rs:148`) — the same atomic used by the local mute keybind (`late-cli/src/audio/output.rs:166-193`). After applying it, the CLI re-sends `client_state` so the server sees the new `muted` value.
 
+### Skip-vote eligibility — only YouTube listeners
+
+Each `PairControlEntry` carries `user_id: Uuid` (resolved from `SessionRegistry::user_for(token)` during the pair-WS upgrade) and `audio_source: AudioSource` (cached from `users.settings.audio_source`, read at registration time).
+
+Helpers used by the skip-vote path:
+- `has_youtube_listener(token) -> bool` — any browser on this token with `audio_source == Youtube`.
+- `total_youtube_listeners() -> usize` — count of such entries across all tokens.
+- `set_audio_source(user_id, source) -> bool` — updates every entry for the user; returns `true` when at least one entry transitioned **away from** `Youtube`. Called from `AudioService::persist_audio_source` after the DB write succeeds.
+
+Vote-strip on flip-away: when `set_audio_source` returns `true`, `AudioService::persist_audio_source` removes the user from `state.skip_votes` and runs `reevaluate_skip_threshold` (which may fire a skip if the threshold dropped to meet remaining votes).
+
+Eligibility table:
+
+| Has paired browser | Browser's `audio_source` | Can skip-vote? | Counts toward threshold? |
+|--------------------|--------------------------|----------------|--------------------------|
+| no                 | n/a                      | no             | no                       |
+| yes                | Icecast                  | no             | no                       |
+| yes                | Youtube                  | yes            | yes                      |
+
+A user with multiple browser tabs in YouTube mode counts each tab toward the denominator but still only contributes one vote (HashSet on `user_id`). Staff `/audio skip` (`force_skip`) bypasses the threshold entirely.
+
 ---
 
-## 7. Chat Commands (`/audio`, `/audio fallback`)
+## 7. Chat Commands (`/audio`, `/audio fallback`, `/audio skip`)
 
-Parsing: `late-ssh/src/app/chat/state.rs:1356-1380`.
-- Longer prefix `/audio fallback ` is matched first.
+Parsing: `late-ssh/src/app/chat/state.rs` around the `/audio` block.
+- Exact match `/audio skip` is checked first (otherwise `strip_prefix("/audio ")` would treat `skip` as a URL).
+- Longer prefix `/audio fallback ` is matched next.
 - Staff gate: `is_admin || is_moderator`. Non-staff get banner `"/audio is staff-only"`.
 - Empty arg → `"Usage: /audio <youtube-url>"` or `"Usage: /audio fallback <youtube-url>"`.
-- Valid requests stash URLs into `requested_audio_url` / `requested_audio_fallback_url`.
+- Valid requests stash into `requested_audio_url` / `requested_audio_fallback_url` / `requested_audio_skip`.
 
-Dispatch: `late-ssh/src/app/chat/input.rs:131-136` calls `app.audio.submit_trusted(url)` or `app.audio.set_youtube_fallback(url)`, which proxy through `AudioState` to `AudioService::{submit_trusted_url_task, set_trusted_youtube_fallback_task}`.
+Dispatch: `late-ssh/src/app/chat/input.rs` `handle_post_submit_requests` calls `app.audio.submit_trusted(url)`, `app.audio.set_youtube_fallback(url)`, or `app.audio.skip_trusted()`, which proxy through `AudioState` to `AudioService::{submit_trusted_url_task, set_trusted_youtube_fallback_task, force_skip_task}`.
 
 The unrelated bare `/music` command (`state.rs:1325`) opens a help topic, not a submission. Don't confuse the two — `/music` ≠ submit.
 
@@ -224,13 +247,18 @@ The unrelated bare `/music` command (`state.rs:1325`) opens a help topic, not a 
 3. If the queue is empty *and* no item is playing, immediately broadcasts `SourceChanged: youtube` + `LoadVideo` for the fallback so paired browsers start it without waiting.
 4. On success, banner via `AudioEvent::YoutubeFallbackSet` — "Set YouTube fallback". On failure, banner via `AudioEvent::YoutubeFallbackFailed` carrying the classified message from `trusted_submit_error_message`.
 
+`/audio skip` flow:
+1. Routes through `AudioService::force_skip` — unconditional, bypasses the vote threshold (the threshold is a *listener* signal; staff can skip directly).
+2. Marks the current playing row `skipped` via `MediaQueueItem::update_status`, clears `current_item_id` and any pending `skip_votes`, cancels the playback timer, and runs `advance_to_next_with_guard` to bring up the next queued item (or arm the fallback debounce).
+3. On success, banner via `AudioEvent::TrustedSkipFired` — "Skipped audio". On failure (nothing playing, DB error), banner via `AudioEvent::TrustedSkipFailed` — "Nothing is playing" or "Failed to skip audio".
+
 ---
 
 ## 8. CLI Integration
 
 Goal: the CLI tolerates everything new the audio domain added, plays Icecast unchanged, and obeys server force-mute.
 
-- **Unknown audio events ignored** (`late-cli/src/ws.rs:140-147`). Inbound text is parsed only as `PairControlMessage`. `load_video`, `source_changed`, `queue_update`, `seek` fail to deserialize, the CLI logs `warn!("ignoring unsupported pair websocket event")`, and the select loop continues. **The CLI does not disconnect on audio events.**
+- **Unknown audio events ignored** (`late-cli/src/ws.rs`). Inbound text is parsed only as `PairControlMessage`. `load_video`, `source_changed`, `queue_update` fail to deserialize, the CLI logs `warn!("ignoring unsupported pair websocket event")`, and the select loop continues. **The CLI does not disconnect on audio events.** Note: each playing track now also produces a 10s `load_video` heartbeat — the CLI log noise budget should account for that.
 - **`force_mute` applied to shared atomic** (`late-cli/src/ws.rs:155-171` → `apply_force_mute` → `muted.swap(mute, Relaxed)`). Same atomic as the local mute keybind, so the server's force-mute and the user's manual mute coexist on one piece of state. After applying, CLI re-sends `client_state` so the server observes the new value.
 - **No YouTube decoding in the CLI.** The CLI never receives audio frames for YouTube — only metadata it ignores. Icecast path: `late-cli/src/audio/decoder_thread.rs` runs a symphonia HTTP stream decoder with 2s reconnect retry.
 - **CLI identifies itself.** First `client_state` emitted by `late-cli/src/ws.rs:113-131` carries `"client_kind": "cli"`. That tag is what lets the registry decide who to force-mute.
@@ -243,11 +271,11 @@ File: `late-web/src/pages/connect/page.html`. The IFrame API and `<div id="yt-pl
 
 - **Per-user audio source (server-authoritative).** The choice is persisted in `users.settings.audio_source` (`icecast` | `youtube`, default `icecast`). TUI `v+x` flips the value via `App::toggle_paired_playback_source`: writes to DB through `AudioService::persist_audio_source`, updates the local mirror `App::paired_browser_source`, and broadcasts `PairControlMessage::SetPlaybackSource { source }` to every paired browser. On every browser pair-up (`api.rs:298` detects `previous_kind != Browser && new_kind == Browser`), the SSH session is notified via `SessionMessage::BrowserPaired` and `App::replay_paired_browser_source` re-pushes the current value, so a refreshed page lands in the right mode. The browser is a follower: `applyUserPlaybackSource(source)` stores `userOverrideMode` and applies. While the user is pinned to icecast, `loadYoutubeVideo` and `seekYoutube` early-return so server queue events do not flip the iframe back on (the current item is still stashed as `pendingYoutubeItem` so a toggle to youtube starts playing immediately).
 - **IFrame API load.** `<script src="https://www.youtube.com/iframe_api">` is always included. Global `window.lateYoutubeApiReady` and `onYouTubeIframeAPIReady` hooks resolve a promise that the Alpine component awaits in `init()`.
-- **`source_changed` swap** (`applySourceMode`, lines 487-528). Into `youtube`: pause `<audio>`, ensure player exists, kick playback of pending item. Into `icecast`: `ytPlayer.stopVideo()`, restart `startPlayback()` for the `<audio>` if audio is enabled. The `modeChanged` guard prevents repeated `source_changed: youtube` broadcasts during queue transitions from resetting the iframe.
-- **`load_video` → `loadVideoById`** (lines 597-619). Calls `loadVideoById({ videoId, startSeconds: offsetMs/1000 })` with `expectedYoutubeOffsetMs` compensated for time since the message was received. `verifyYoutubeLoad` re-checks after 1s and reloads if the video id mismatches.
-- **Drift correction** (`correctYoutubeDriftTo`, lines 770-791). Periodic loop fires every 10s; `|drift| < 2500ms` → ignore; otherwise hard `seekTo` with a 5s cooldown. Live streams (`item.isStream`) skip drift entirely; the server's 1h cap governs.
-- **`player_state` reports** (`sendYoutubeState`, lines 793-821). Emits `{ event: 'player_state', item_id, state, offset_ms, duration_ms, autoplay_blocked, error }`. Triggered by YT state transitions and the 10s periodic loop.
-- **Autoplay-blocked** (lines 621-638). 1.5s after `loadVideoById`, if the YT state is still `CUED`/`UNSTARTED`, sets `autoplayBlocked = true`, emits `player_state: buffering` with the flag, and the UI swaps to `[ tap to play ]`. Tap routes through `startPlayback` → `ytPlayer.playVideo()`.
+- **`source_changed` swap** (`applySourceMode`). Into `youtube`: pause `<audio>`, ensure player exists, kick playback of pending item. Into `icecast`: `ytPlayer.pauseVideo()`, restart `startPlayback()` for the `<audio>` if audio is enabled. The `modeChanged` guard prevents repeated `source_changed: youtube` broadcasts during queue transitions from resetting the iframe.
+- **`load_video` → force-switch or no-op** (`loadYoutubeVideo`). New shape: payload is `{ item_id, video_id, is_stream }` — no offset, no started_at. Same `item_id` AND iframe is already showing the right `video_id` → no-op (this is the safety-net heartbeat path; a manual pause stays paused). Otherwise → `loadVideoById({ videoId })` from 0, swap `currentYoutubeItem`. `verifyYoutubeLoad` re-checks after 1s and reloads if the video id still mismatches.
+- **No drift correction.** Each browser plays its own timeline. Slow networks just lag behind — no `seekTo` jumps. The "everyone hears the same offset" invariant is dropped on purpose.
+- **`player_state` reports** (`sendYoutubeState`). Emits `{ event: 'player_state', item_id, state, offset_ms, duration_ms, autoplay_blocked, error }` on YT state transitions (PLAYING/PAUSED/BUFFERING/ENDED). No periodic loop. Server reads `duration_ms` for backfill via `record_browser_duration`; the rest is informational.
+- **Autoplay-blocked**. 1.5s after `loadVideoById`, if the YT state is still `CUED`/`UNSTARTED`, sets `autoplayBlocked = true`, emits `player_state: buffering` with the flag, and the UI swaps to `[ tap to play ]`. Tap routes through `startPlayback` → `ytPlayer.playVideo()`.
 - **`queue_update` is currently a no-op** in the browser (no UI to show it). The event ships so a future surface can use it.
 
 ---
@@ -271,13 +299,13 @@ Data flow: browser Web Audio analyzer → `WsPayload::Viz` → `api.rs:293` conv
 - Shared `watch::Sender<Option<NowPlaying>>` reflects the current Icecast track title.
 - `start_poll_task` spawns a blocking thread that calls `late_core::icecast::fetch_track` every 10s (split into 1s sleeps to shut down quickly). Only emits when the title string changes.
 - Independent of `AudioService` — does not subscribe to its channels.
-- Consumers: `GET /api/now-playing` (`api.rs:131`). Still plumbed into `App.now_playing_rx` and on through `SidebarProps`, but the music-stage widget *explicitly ignores it* (the icecast block renders genre vibe + vote rows, not the radio track title — see §12). The plumbing is kept in case another sidebar surface wants it; remove if no caller picks it up.
+- Consumers: `GET /api/now-playing` (`api.rs:131`), and the sidebar music-stage widget (`app/common/sidebar.rs::draw_icecast_block`) which renders `Artist - Title` plus a progress/elapsed line under the icecast title. When the watch hasn't ticked yet, the block shows `no signal` and the progress row stays blank.
 
 ---
 
 ## 12. Sidebar music-stage widget (`common/sidebar.rs`)
 
-Renders the audio domain into the right rail. Both surfaces (YouTube + Icecast) are always visible; the active source the user is hearing gets bold amber chrome, the other gets dim italic. Entry point: `app/common/sidebar.rs:draw_music_stage`, allocated `MUSIC_STAGE_HEIGHT = 16` rows.
+Renders the audio domain into the right rail. Both surfaces (YouTube + Icecast) are always visible; the active source the user is hearing gets bold amber chrome, the other gets dim italic. Entry point: `app/common/sidebar.rs:draw_music_stage`, allocated `MUSIC_STAGE_HEIGHT = 17` rows. Both blocks share the same row shape — title, track (combined on one line), progress, then surface-specific tail — so the active/inactive comparison reads naturally.
 
 ### Layout
 
@@ -285,9 +313,9 @@ Renders the audio domain into the right rail. Both surfaces (YouTube + Icecast) 
 |--------|---------|
 | 0      | Volume bar: `vol  ▰▰▰▰▰▱▱▱▱▱  60%`. Renders `muted` (italic faint) when muted, `—` when no client is paired. |
 | 1      | Volume keybind hints: `m mute  -= vol`. |
-| 2-8    | YouTube block: title bar, track title, channel, progress, skip meter (with trailing `v+s` hint when active), `next ⌄` header, queue items (`Min(2)`, absorbs spare space). |
-| 9      | Booth/swap keybind hints: `v+v queue  v+x swap`. |
-| 10-12  | Icecast block: title bar, `vibe → next · ends` one-liner, then a 3-row vote area delegated to `app/vote/ui.rs::draw_vote_inline`. |
+| 2-7    | YouTube block: title bar, track (`Channel - Title` combined on one row; falls back to `by <submitter> - Title` when channel is unknown, then to bare title), progress, skip meter (with trailing `v+s` hint when active), `next ⌄` header, queue items (`Min(2)`, absorbs spare space). |
+| 8      | Booth/swap keybind hints: `v+v queue  v+x swap`. |
+| 9-13   | Icecast block: title bar, track (`Artist - Title` combined on one row), progress/elapsed line (uses `draw_progress_line` when `duration_seconds` is known, `draw_elapsed_line` otherwise), `vibe → next · ends` one-liner, then a 3-row vote area delegated to `app/vote/ui.rs::draw_vote_inline`. Track + progress fall back to `no signal` and a blank row when the `now_playing` watch hasn't emitted yet. |
 
 ### Active-source rule
 
@@ -299,10 +327,14 @@ Pure preference-based. Does **not** gate on `is_browser`. The saved preference (
 
 The volume row stays honest about pairing (`vol  —` when nothing paired), so users aren't misled about whether their preference is currently audible.
 
+### Title-bar listener tags
+
+Both blocks always show their live listener count in the title-bar tag slot — `youtube  ────  5` / `icecast  ────  12`. Active vs inactive is communicated by color/weight (amber bold vs italic faint), not by case (label is always lowercase) and not by tag presence. The counts are sourced live from `PairedClientRegistry::total_youtube_listeners()` / `total_icecast_listeners()` via `AudioService` accessors; both filter to paired browsers — CLI is intentionally excluded.
+
 ### Fallback-not-empty semantics
 
 The widget treats "no submitted track" and "fallback playing" as the same state. When `queue.current.is_none()`:
-- Title tag is `loop` (was `fallback` — didn't fit on narrow rails after dropping `▶ ` prefix).
+- Title tag still shows the YouTube listener count (no separate "loop"/"fallback" badge anymore — the body row carries that information).
 - Body renders `fallback stream` / `YouTube · 24/7` plus a `queue with v+v` hint.
 - When a track is playing but queue is otherwise empty, the trailing "next" row says `· fallback next`, not "queue ends".
 
@@ -312,13 +344,14 @@ No copy anywhere reads "queue empty". The user has pushed back on that wording m
 
 - `queue_snapshot: &QueueSnapshot` — from `AudioState::queue_snapshot()` watch channel.
 - `vote: VoteCardView<'_>` — from the genre vote state.
-- `paired_client: Option<&ClientAudioState>` — for `volume_percent` and `muted` (vol row).
+- `paired_client: Option<&ClientAudioState>` — for `volume_percent` and `muted` (vol row only).
 - `paired_browser_source: AudioSource` — App's per-user mirror.
-- `now_playing` — plumbed but ignored, see §11.
+- `youtube_listener_count: usize` / `icecast_listener_count: usize` — live counts from the registry via `AudioService::{youtube,icecast}_listener_count()`. Browsers only; refreshed every render tick.
+- `now_playing: Option<&NowPlaying>` — Icecast title + duration source, from `NowPlayingService` (§11). Drives the icecast track and progress rows.
 
 ### Internal helpers (all in `sidebar.rs`)
 
-- `stage_title_line(area_w, label, tag, active)` — shared title-bar renderer. Active → uppercase amber bold + amber tag; inactive → lowercase italic faint + dropped tag. No `▶ ` glyph prefix on the tag (color + position read as a state badge; the prefix was eating cells on narrow rails).
+- `stage_title_line(area_w, label, tag, active)` — shared title-bar renderer. Label is always lowercase. Active → amber bold label + amber-dim tag; inactive → italic faint label + tag. No `▶ ` glyph prefix on the tag (color + position read as a state badge; the prefix was eating cells on narrow rails).
 - `draw_volume_row` — the vol bar.
 - `draw_keybind_row(frame, area, &[(key, label), ...])` — adaptive hint renderer; drops trailing groups when the rail is too narrow rather than mid-word truncating.
 - `draw_youtube_block` / `draw_icecast_block` — fixed-size block renderers.
@@ -387,7 +420,7 @@ Open work that's been deliberately punted past v1. Each line is a "we know it's 
 - **Public `POST /api/queue/submit` HTTP route.** Booth submit goes through the in-process service. Revive when there's a non-SSH submitter (web form, third-party). YouTube Data API validation path is already in code (un-trusted route in `AudioService::submit_url_task`).
 - **`GET /api/queue` HTTP route.** Snapshot exists in-process (`QueueSnapshot`); no external consumer today. See §14 first bullet.
 - **TUI sidebar widget on Home for queue visibility.** Booth modal is the only surface today.
-- **Drift correction tuning.** Current thresholds (2.5s drift, 5s seek cooldown) work but were picked by feel.
+- **Heartbeat cadence tuning.** 10s `LoadVideo` re-broadcast was carried over from the old `PLAYBACK_SYNC_INTERVAL`. Could be slower (30s) once we have confidence stuck browsers don't accumulate.
 - **Multi-tab dedupe.** Two browser tabs on the same token both play. Needs a "primary tab" election or a single-tab-per-token enforcement.
 - **Region-lock partial failure UX.** Staff `/audio` skips the Data API; region-locked items fail at the browser via `error` → server marks `failed` → queue advances. Pre-validation would catch it at submit time.
 - **Better admin feedback** when DB insert fails after local URL validation succeeds.

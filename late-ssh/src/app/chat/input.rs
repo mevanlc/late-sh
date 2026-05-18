@@ -134,6 +134,9 @@ pub(crate) fn handle_post_submit_requests(app: &mut App) {
     if let Some(url) = app.chat.take_requested_audio_fallback_url() {
         app.audio.set_youtube_fallback(url);
     }
+    if app.chat.take_requested_audio_skip() {
+        app.audio.skip_trusted();
+    }
     if let Some(topic) = app.chat.take_requested_help_topic() {
         open_help_modal(app, topic);
     }
@@ -142,6 +145,9 @@ pub(crate) fn handle_post_submit_requests(app: &mut App) {
     }
     if app.chat.take_requested_mod_modal() {
         open_mod_modal(app);
+    }
+    if app.chat.take_requested_icon_picker() {
+        crate::app::input::try_open_icon_picker(app);
     }
     if let Some(upload) = app.chat.take_requested_url_upload() {
         crate::app::input::trigger_url_image_upload(app, upload.url, upload.room_id);

@@ -14,8 +14,8 @@ use crate::app::{
 
 use super::state::{BoothFocus, BoothModalState};
 
-const MODAL_WIDTH: u16 = 90;
-const MODAL_HEIGHT: u16 = 30;
+const MODAL_WIDTH: u16 = 120;
+const MODAL_HEIGHT: u16 = 40;
 
 pub(crate) fn draw(
     frame: &mut Frame,
@@ -23,6 +23,7 @@ pub(crate) fn draw(
     state: &BoothModalState,
     snapshot: &QueueSnapshot,
     submit_enabled: bool,
+    is_staff: bool,
 ) {
     let popup = centered_rect(
         area,
@@ -82,7 +83,7 @@ pub(crate) fn draw(
     frame.render_widget(Paragraph::new(section_heading("Queue")), layout[9]);
     draw_queue(frame, layout[11], state, &snapshot.queue);
 
-    draw_footer(frame, layout[12], submit_enabled);
+    draw_footer(frame, layout[12], submit_enabled, is_staff);
 }
 
 fn draw_submit(
@@ -302,10 +303,15 @@ fn queue_line(item: &QueueItemView, active: bool, width: usize) -> Line<'static>
         meta_style
     };
 
-    let label = item
+    let title = item
         .title
         .clone()
         .unwrap_or_else(|| format!("yt:{}", item.video_id));
+    let label = if item.unskippable {
+        format!("🔒 {title}")
+    } else {
+        title
+    };
     let prefix = format!(" {marker} ");
     let prefix_w = prefix.chars().count();
     let score_width = 5usize.min(width.saturating_sub(prefix_w + 4));
@@ -334,20 +340,27 @@ fn queue_line(item: &QueueItemView, active: bool, width: usize) -> Line<'static>
     ])
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, submit_enabled: bool) {
+fn draw_footer(frame: &mut Frame, area: Rect, submit_enabled: bool, is_staff: bool) {
     let mut spans = vec![
         Span::raw("  "),
         Span::styled("Tab", Style::default().fg(theme::AMBER_DIM())),
         Span::styled(" focus  ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled("↑↓ Ctrl+J/K", Style::default().fg(theme::AMBER_DIM())),
         Span::styled(" select  ", Style::default().fg(theme::TEXT_DIM())),
-        Span::styled("+/-", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled("+/-/0", Style::default().fg(theme::AMBER_DIM())),
         Span::styled(" vote  ", Style::default().fg(theme::TEXT_DIM())),
-        Span::styled("0", Style::default().fg(theme::AMBER_DIM())),
-        Span::styled(" clear  ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled("s", Style::default().fg(theme::AMBER_DIM())),
         Span::styled(" skip  ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("d", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" delete  ", Style::default().fg(theme::TEXT_DIM())),
     ];
+    if is_staff {
+        spans.push(Span::styled("u", Style::default().fg(theme::AMBER_DIM())));
+        spans.push(Span::styled(
+            " lock  ",
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+    }
     if submit_enabled {
         spans.push(Span::styled("↵", Style::default().fg(theme::AMBER_DIM())));
         spans.push(Span::styled(
