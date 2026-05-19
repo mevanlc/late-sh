@@ -248,8 +248,8 @@ pub struct App {
     pub(super) terminal: Terminal<CrosstermBackend<SharedBuffer>>,
     pub(super) shared: SharedBuffer,
     pub(super) visualizer: Visualizer,
-    pub(super) browser_viz_buffer: VecDeque<VizFrame>,
-    pub(super) last_browser_viz_at: Option<Instant>,
+    pub(super) viz_frame_buffer: VecDeque<VizFrame>,
+    pub(super) last_viz_frame_at: Option<Instant>,
 
     /// Session / connection
     pub(super) connect_url: String,
@@ -614,8 +614,8 @@ impl App {
             terminal,
             shared,
             visualizer: Visualizer::new(),
-            browser_viz_buffer: VecDeque::new(),
-            last_browser_viz_at: None,
+            viz_frame_buffer: VecDeque::new(),
+            last_viz_frame_at: None,
             connect_url: format!("{}/{}", config.web_url, config.session_token),
             session_registry: config.session_registry,
             paired_client_registry: config.paired_client_registry,
