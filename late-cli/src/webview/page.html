@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="utf-8">
-    <meta name="referrer" content="origin">
+    <meta name="referrer" content="strict-origin-when-cross-origin">
     <title>late.sh — YouTube</title>
     <style>
       html, body { margin: 0; padding: 0; height: 100%; background: #000; color: #fff; font-family: monospace; }
@@ -31,6 +31,7 @@
         playerReady: false,
         currentItem: null,   // { itemId, videoId, isStream }
         pendingItem: null,   // queued while api/player loads
+        currentItemStarted: false,
         autoplayBlocked: false,
         userMuted: false,
         volumePercent: 100,
@@ -66,10 +67,10 @@
         state.player = new window.YT.Player("player", {
           playerVars: {
             enablejsapi: 1,
+            origin: window.location.origin,
             playsinline: 1,
             modestbranding: 1,
-            rel: 0,
-            origin: window.location.origin
+            rel: 0
           },
           events: {
             onReady: function () {
@@ -87,17 +88,20 @@
               } catch (e) {}
               if (label === "playing") {
                 state.autoplayBlocked = false;
+                state.currentItemStarted = true;
                 applyAudioSettings();
               }
               setStatus(label);
-              send({
-                type: "state",
-                item_id: state.currentItem ? state.currentItem.itemId : null,
-                state: label,
-                position_ms: positionMs,
-                duration_ms: durationMs,
-                autoplay_blocked: state.autoplayBlocked
-              });
+              if (shouldReportPlayerState(label)) {
+                send({
+                  type: "state",
+                  item_id: state.currentItem ? state.currentItem.itemId : null,
+                  state: label,
+                  position_ms: positionMs,
+                  duration_ms: durationMs,
+                  autoplay_blocked: state.autoplayBlocked
+                });
+              }
             },
             onError: function (event) {
               const code = String(event.data || "unknown");
@@ -105,6 +109,7 @@
               send({
                 type: "error",
                 item_id: state.currentItem ? state.currentItem.itemId : null,
+                video_id: state.currentItem ? state.currentItem.videoId : null,
                 code: code
               });
             }
@@ -132,6 +137,19 @@
         } catch (e) {}
       }
 
+      function shouldReportPlayerState(label) {
+        if (label === "unstarted" || label === "cued" || label === "unknown") {
+          return false;
+        }
+        if (label !== "ended") {
+          return true;
+        }
+        if (state.currentItemStarted) {
+          return true;
+        }
+        return false;
+      }
+
       function playItem(item) {
         if (!state.player || !state.playerReady || !state.player.loadVideoById) return;
         const switching = state.currentItem && !isSameItem(state.currentItem, item);
@@ -139,6 +157,7 @@
         const alreadyLoaded = !switching && loadedVideoId() === item.videoId;
         state.currentItem = item;
         state.pendingItem = null;
+        state.currentItemStarted = false;
         state.autoplayBlocked = false;
         applyAudioSettings();
         if (alreadyLoaded && state.player.playVideo) {
