@@ -466,6 +466,7 @@ impl App {
             message_reactions,
             inline_images: &self.chat.inline_image_cache,
             unread_counts: &self.chat.unread_counts,
+            room_last_message_at: &self.chat.room_last_message_at,
             favorite_room_ids: &self.profile_state.profile().favorite_room_ids,
             selected_room_id: self.chat.selected_room_id,
             room_jump_active: self.chat.room_jump_active,

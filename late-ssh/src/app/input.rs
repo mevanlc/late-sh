@@ -1504,6 +1504,7 @@ fn chat_room_list_view(app: &App) -> crate::app::chat::ui::ChatRoomListView<'_> 
         chat_rooms: &app.chat.rooms,
         usernames: app.chat.usernames(),
         unread_counts: &app.chat.unread_counts,
+        room_last_message_at: &app.chat.room_last_message_at,
         favorite_room_ids: &app.profile_state.profile().favorite_room_ids,
         selected_room_id: app.chat.selected_room_id,
         room_jump_active: app.chat.room_jump_active,
