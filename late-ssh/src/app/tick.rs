@@ -258,7 +258,7 @@ impl App {
                     tokio::spawn(async move {
                         match db {
                             Some(db) => {
-                                let res = crate::app::pinstar::browser::delete_diagram_for_owner(
+                                let res = crate::app::pinstar::browser::delete_diagram_for_user(
                                     &db, user_id, id,
                                 )
                                 .await

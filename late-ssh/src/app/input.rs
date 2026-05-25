@@ -2716,12 +2716,16 @@ fn handle_pinstar_browser_input(app: &mut App, event: &ParsedInput) -> bool {
             }
             ParsedInput::Byte(b'd') | ParsedInput::Char('d') => {
                 if let Some(entry) = app.pinstar_browser.selected_entry() {
-                    if entry.is_owner {
+                    if entry.is_owner
+                        || app
+                            .permissions
+                            .has(crate::moderation::policy::Caps::DELETE_PINSTAR_GRAPH)
+                    {
                         app.pinstar_browser.delete_target_id = Some(entry.id);
                         app.pinstar_browser.mode = BrowserMode::ConfirmDelete;
                     } else {
                         app.pinstar_browser.error =
-                            Some("Only owner can delete diagrams".to_string());
+                            Some("Only owner or staff can delete diagrams".to_string());
                     }
                 }
                 true
