@@ -14,6 +14,7 @@ use crate::app::common::theme;
 
 use super::data::lines_for;
 use super::state::{BrushMode, HelpTab, PAINT_PALETTE, PRIMARY_SWATCH_IDX, State};
+use super::svc::ArtboardSnapshotKind;
 
 const INFO_WIDTH: u16 = 21;
 const SWATCH_BOX_WIDTH: u16 = 8;
@@ -1079,32 +1080,11 @@ fn snapshot_browser_lines(
     visible_height: usize,
     width: usize,
 ) -> Vec<Line<'static>> {
-    let total = state.snapshot_browser_items().len() + 1;
+    let all_lines = snapshot_browser_all_lines(state, width);
+    let total = all_lines.len();
     let start = state.snapshot_browser_scroll_offset().min(total);
     let end = (start + visible_height).min(total);
-    let mut lines = Vec::new();
-
-    for option_idx in start..end {
-        let selected = option_idx == state.snapshot_browser_selected_index();
-        if option_idx == 0 {
-            lines.push(snapshot_browser_row(
-                selected,
-                "live",
-                "Current artboard",
-                "editable after closing",
-                width,
-            ));
-            continue;
-        }
-        let snapshot = &state.snapshot_browser_items()[option_idx - 1];
-        lines.push(snapshot_browser_row(
-            selected,
-            snapshot.kind.label(),
-            &snapshot.label,
-            &snapshot.board_key,
-            width,
-        ));
-    }
+    let mut lines = all_lines[start..end].to_vec();
 
     if state.snapshot_browser_loading() {
         lines.push(Line::from(Span::styled(
@@ -1116,14 +1096,48 @@ fn snapshot_browser_lines(
             format!("  {error}"),
             Style::default().fg(theme::AMBER_DIM()),
         )));
-    } else if total == 1 {
+    } else if state.snapshot_browser_items().is_empty() {
         lines.push(Line::from(Span::styled(
-            "  no daily or monthly snapshots yet",
+            "  no curated, daily, or monthly snapshots yet",
             Style::default().fg(theme::TEXT_DIM()),
         )));
     }
 
     lines
+}
+
+fn snapshot_browser_all_lines(state: &State, width: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![snapshot_browser_row(
+        state.snapshot_browser_selected_index() == 0,
+        "live",
+        "Current artboard",
+        "editable after closing",
+        width,
+    )];
+    let mut current_kind = None;
+    for (idx, snapshot) in state.snapshot_browser_items().iter().enumerate() {
+        if current_kind != Some(snapshot.kind) {
+            lines.push(snapshot_browser_section(snapshot.kind));
+            current_kind = Some(snapshot.kind);
+        }
+        lines.push(snapshot_browser_row(
+            state.snapshot_browser_selected_index() == idx + 1,
+            snapshot.kind.label(),
+            &snapshot.label,
+            &snapshot.board_key,
+            width,
+        ));
+    }
+    lines
+}
+
+fn snapshot_browser_section(kind: ArtboardSnapshotKind) -> Line<'static> {
+    Line::from(Span::styled(
+        format!("  {}", kind.label()),
+        Style::default()
+            .fg(theme::TEXT_DIM())
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn snapshot_browser_row(

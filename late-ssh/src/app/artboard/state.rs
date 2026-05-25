@@ -1049,14 +1049,32 @@ impl State {
 
     fn ensure_snapshot_browser_selection_visible(&mut self) {
         let visible = self.snapshot_browser.visible_height.get().max(1);
-        if self.snapshot_browser.selected_index < self.snapshot_browser.scroll_offset {
-            self.snapshot_browser.scroll_offset = self.snapshot_browser.selected_index;
-        } else if self.snapshot_browser.selected_index
-            >= self.snapshot_browser.scroll_offset + visible
-        {
-            self.snapshot_browser.scroll_offset =
-                self.snapshot_browser.selected_index + 1 - visible;
+        let selected_row = self.snapshot_browser_selected_display_index();
+        if selected_row < self.snapshot_browser.scroll_offset {
+            self.snapshot_browser.scroll_offset = selected_row;
+        } else if selected_row >= self.snapshot_browser.scroll_offset + visible {
+            self.snapshot_browser.scroll_offset = selected_row + 1 - visible;
         }
+    }
+
+    fn snapshot_browser_selected_display_index(&self) -> usize {
+        if self.snapshot_browser.selected_index == 0 {
+            return 0;
+        }
+        let selected_item_idx = self.snapshot_browser.selected_index - 1;
+        let mut display_idx = 1;
+        let mut current_kind = None;
+        for (idx, item) in self.snapshot_browser.items.iter().enumerate() {
+            if current_kind != Some(item.kind) {
+                display_idx += 1;
+                current_kind = Some(item.kind);
+            }
+            if idx == selected_item_idx {
+                return display_idx;
+            }
+            display_idx += 1;
+        }
+        display_idx
     }
 
     fn activate_archive_snapshot(&mut self, item: ArtboardArchiveSnapshot) {

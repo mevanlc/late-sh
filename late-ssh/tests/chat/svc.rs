@@ -2316,6 +2316,95 @@ async fn mod_artboard_restore_command_restores_daily_snapshot_and_audits() {
 }
 
 #[tokio::test]
+async fn mod_artboard_curate_command_copies_daily_snapshot_and_disambiguates_keys() {
+    let test_db = new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let actor = create_test_user(&test_db.db, "artboard_curate_actor").await;
+
+    let mut daily_canvas = Canvas::with_size(dartboard::CANVAS_WIDTH, dartboard::CANVAS_HEIGHT);
+    let _ = daily_canvas.put_glyph(Pos { x: 0, y: 0 }, 'C');
+    let mut daily_provenance = ArtboardProvenance::default();
+    daily_provenance.set_username(Pos { x: 0, y: 0 }, "curator");
+    ArtboardSnapshot::upsert(
+        &client,
+        "daily:2026-05-06",
+        serde_json::to_value(&daily_canvas).expect("serialize daily canvas"),
+        serde_json::to_value(&daily_provenance).expect("serialize daily provenance"),
+    )
+    .await
+    .expect("insert daily snapshot");
+    ArtboardSnapshot::upsert(
+        &client,
+        "curated:2026-05-06",
+        serde_json::to_value(Canvas::with_size(
+            dartboard::CANVAS_WIDTH,
+            dartboard::CANVAS_HEIGHT,
+        ))
+        .expect("serialize existing curated canvas"),
+        serde_json::to_value(ArtboardProvenance::default())
+            .expect("serialize existing curated provenance"),
+    )
+    .await
+    .expect("insert existing curated snapshot");
+
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+
+    let request_id = Uuid::now_v7();
+    service.run_mod_command_task(
+        actor.id,
+        Permissions::new(false, true),
+        request_id,
+        "artboard curate 2026-05-06 preserve".to_string(),
+    );
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::ModCommandOutput {
+            request_id: got_request,
+            lines,
+            success,
+            ..
+        } => {
+            assert_eq!(got_request, request_id);
+            assert!(success, "unexpected mod command failure: {lines:?}");
+            assert_eq!(
+                lines,
+                vec![
+                    "curated artboard snapshot curated:2026-05-06-2 from daily:2026-05-06"
+                        .to_string()
+                ]
+            );
+        }
+        other => panic!("expected ModCommandOutput, got {other:?}"),
+    }
+
+    let curated = ArtboardSnapshot::find_by_board_key(&client, "curated:2026-05-06-2")
+        .await
+        .expect("load curated snapshot")
+        .expect("curated snapshot exists");
+    let curated_canvas: Canvas =
+        serde_json::from_value(curated.canvas).expect("decode curated canvas");
+    assert_eq!(curated_canvas.get(Pos { x: 0, y: 0 }), 'C');
+
+    let audit = ModerationAuditLog::all(&client).await.expect("audit log");
+    assert!(audit.iter().any(|entry| {
+        entry.actor_user_id == actor.id
+            && entry.action == "artboard_curate"
+            && entry.target_kind == "artboard"
+            && entry.metadata["source_key"] == "daily:2026-05-06"
+            && entry.metadata["target_key"] == "curated:2026-05-06-2"
+            && entry.metadata["reason"] == "preserve"
+    }));
+}
+
+#[tokio::test]
 async fn mod_bans_command_lists_active_bans() {
     let test_db = new_test_db().await;
     let client = test_db.db.get().await.expect("db client");

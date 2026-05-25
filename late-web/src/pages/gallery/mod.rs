@@ -16,6 +16,7 @@ use crate::{AppState, error::AppError, metrics};
 
 const DAILY_PREFIX: &str = "daily:";
 const MONTHLY_PREFIX: &str = "monthly:";
+const CURATED_PREFIX: &str = "curated:";
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/gallery", get(handler))
@@ -30,9 +31,11 @@ struct GalleryQuery {
 #[template(path = "pages/gallery/page.html")]
 struct Page {
     live_items: Vec<SnapshotNavItem>,
+    curated_items: Vec<SnapshotNavItem>,
     daily_items: Vec<SnapshotNavItem>,
     monthly_items: Vec<SnapshotNavItem>,
     show_live_empty: bool,
+    show_curated_empty: bool,
     show_daily_empty: bool,
     show_monthly_empty: bool,
     has_selected: bool,
@@ -83,6 +86,9 @@ async fn handler(
     let live = Snapshot::find_summary_by_board_key(&client, Snapshot::MAIN_BOARD_KEY)
         .await
         .context("failed to load live artboard snapshot")?;
+    let curated = Snapshot::list_summaries_by_board_key_prefix(&client, CURATED_PREFIX)
+        .await
+        .context("failed to load curated artboard snapshots")?;
     let daily = Snapshot::list_summaries_by_board_key_prefix(&client, DAILY_PREFIX)
         .await
         .context("failed to load daily artboard snapshots")?;
@@ -94,6 +100,7 @@ async fn handler(
     let default_key = live
         .as_ref()
         .map(|snapshot| snapshot.board_key.clone())
+        .or_else(|| curated.first().map(|snapshot| snapshot.board_key.clone()))
         .or_else(|| daily.first().map(|snapshot| snapshot.board_key.clone()))
         .or_else(|| monthly.first().map(|snapshot| snapshot.board_key.clone()));
     let selected_key = requested_key.or(default_key);
@@ -108,6 +115,10 @@ async fn handler(
         .iter()
         .map(|snapshot| nav_item(snapshot, selected_key.as_deref()))
         .collect();
+    let curated_items: Vec<SnapshotNavItem> = curated
+        .iter()
+        .map(|snapshot| nav_item(snapshot, selected_key.as_deref()))
+        .collect();
     let daily_items: Vec<SnapshotNavItem> = daily
         .iter()
         .map(|snapshot| nav_item(snapshot, selected_key.as_deref()))
@@ -118,13 +129,16 @@ async fn handler(
         .collect();
 
     let show_live_empty = live_items.is_empty();
+    let show_curated_empty = curated_items.is_empty();
     let show_daily_empty = daily_items.is_empty();
     let show_monthly_empty = monthly_items.is_empty();
     let mut page = Page {
         live_items,
+        curated_items,
         daily_items,
         monthly_items,
         show_live_empty,
+        show_curated_empty,
         show_daily_empty,
         show_monthly_empty,
         has_selected: false,
@@ -248,6 +262,9 @@ fn snapshot_title(key: &str) -> String {
         _ if key.starts_with(MONTHLY_PREFIX) => {
             format!("Monthly {}", key.trim_start_matches(MONTHLY_PREFIX))
         }
+        _ if key.starts_with(CURATED_PREFIX) => {
+            format!("Curated {}", key.trim_start_matches(CURATED_PREFIX))
+        }
         _ => key.to_string(),
     }
 }
@@ -257,6 +274,7 @@ fn snapshot_label(key: &str) -> String {
         Snapshot::MAIN_BOARD_KEY => "Live".to_string(),
         _ if key.starts_with(DAILY_PREFIX) => key.trim_start_matches(DAILY_PREFIX).to_string(),
         _ if key.starts_with(MONTHLY_PREFIX) => key.trim_start_matches(MONTHLY_PREFIX).to_string(),
+        _ if key.starts_with(CURATED_PREFIX) => key.trim_start_matches(CURATED_PREFIX).to_string(),
         _ => key.to_string(),
     }
 }
@@ -272,6 +290,8 @@ mod tests {
     #[test]
     fn snapshot_labels_are_human_readable() {
         assert_eq!(snapshot_label("main"), "Live");
+        assert_eq!(snapshot_label("curated:2026-04-24"), "2026-04-24");
+        assert_eq!(snapshot_label("curated:2026-04-24-2"), "2026-04-24-2");
         assert_eq!(snapshot_label("daily:2026-04-24"), "2026-04-24");
         assert_eq!(snapshot_label("monthly:2026-04"), "2026-04");
     }
@@ -279,6 +299,7 @@ mod tests {
     #[test]
     fn snapshot_titles_include_kind() {
         assert_eq!(snapshot_title("main"), "Live / latest saved");
+        assert_eq!(snapshot_title("curated:2026-04-24"), "Curated 2026-04-24");
         assert_eq!(snapshot_title("daily:2026-04-24"), "Daily 2026-04-24");
         assert_eq!(snapshot_title("monthly:2026-04"), "Monthly 2026-04");
     }

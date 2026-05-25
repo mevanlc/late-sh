@@ -97,6 +97,17 @@ async fn artboard_snapshot_prefix_listing_and_delete_by_board_key_work() {
     Snapshot::upsert(&client, "monthly:2026-04", canvas, provenance)
         .await
         .expect("insert monthly snapshot");
+    let copied =
+        Snapshot::copy_board_key_if_absent(&client, "daily:2026-04-22", "curated:2026-04-22")
+            .await
+            .expect("copy curated snapshot")
+            .expect("curated snapshot copied");
+    assert_eq!(copied.board_key, "curated:2026-04-22");
+    let duplicate =
+        Snapshot::copy_board_key_if_absent(&client, "daily:2026-04-22", "curated:2026-04-22")
+            .await
+            .expect("copy duplicate curated snapshot");
+    assert!(duplicate.is_none());
 
     let daily = Snapshot::list_by_board_key_prefix(&client, "daily:")
         .await
@@ -106,6 +117,15 @@ async fn artboard_snapshot_prefix_listing_and_delete_by_board_key_work() {
         .map(|snapshot| snapshot.board_key.as_str())
         .collect();
     assert_eq!(keys, vec!["daily:2026-04-22", "daily:2026-04-21"]);
+
+    let archives = Snapshot::list_archive_summaries(&client, 10, 0)
+        .await
+        .expect("list archive snapshots");
+    let archive_keys: Vec<_> = archives
+        .iter()
+        .map(|snapshot| snapshot.board_key.as_str())
+        .collect();
+    assert!(archive_keys.contains(&"curated:2026-04-22"));
 
     let deleted = Snapshot::delete_by_board_key(&client, "daily:2026-04-21")
         .await

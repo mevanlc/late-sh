@@ -52,6 +52,10 @@ pub(crate) enum ModCommand {
         date: Option<chrono::NaiveDate>,
         reason: String,
     },
+    ArtboardCurate {
+        date: Option<chrono::NaiveDate>,
+        reason: String,
+    },
     Audio {
         action: AudioAction,
         username: String,
@@ -455,12 +459,13 @@ fn parse_unban_mod_command(parts: &[&str]) -> Result<ModCommand> {
 
 fn parse_artboard_mod_command(parts: &[&str]) -> Result<ModCommand> {
     let Some(first) = parts.first().copied() else {
-        anyhow::bail!("usage: artboard restore [YYYY-MM-DD] [reason...]");
+        anyhow::bail!("usage: artboard <restore|curate> [YYYY-MM-DD] [reason...]");
     };
-    if first == "restore" {
-        return parse_artboard_restore_mod_command(&parts[1..]);
+    match first {
+        "restore" => parse_artboard_restore_mod_command(&parts[1..]),
+        "curate" => parse_artboard_curate_mod_command(&parts[1..]),
+        _ => anyhow::bail!("usage: artboard <restore|curate> [YYYY-MM-DD] [reason...]"),
     }
-    anyhow::bail!("usage: artboard restore [YYYY-MM-DD] [reason...]")
 }
 
 fn required_room_target(value: &str, usage: &str) -> Result<String> {
@@ -480,6 +485,18 @@ fn parse_artboard_restore_mod_command(parts: &[&str]) -> Result<ModCommand> {
     };
     let reason = parts.get(reason_start..).unwrap_or_default().join(" ");
     Ok(ModCommand::ArtboardRestore { date, reason })
+}
+
+fn parse_artboard_curate_mod_command(parts: &[&str]) -> Result<ModCommand> {
+    let (date, reason_start) = match parts.first().copied() {
+        Some(value) => match chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
+            Ok(date) => (Some(date), 1),
+            Err(_) => (None, 0),
+        },
+        None => (None, 0),
+    };
+    let reason = parts.get(reason_start..).unwrap_or_default().join(" ");
+    Ok(ModCommand::ArtboardCurate { date, reason })
 }
 
 fn parse_admin_mod_command(parts: &[&str]) -> Result<ModCommand> {
@@ -649,6 +666,7 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "rename-user <@oldname> <@newname>",
             "view   <@user|#room|bans|audit|artboard|help> [pagenumber]",
             "artboard restore [YYYY-MM-DD] [reason...]",
+            "artboard curate [YYYY-MM-DD] [reason...]",
             "",
             "--- bans, etc. ---",
             "kick   <server|#room> @name [reason...]",
@@ -728,7 +746,7 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
         ],
         "view artboard" => &[
             "view artboard [pagenumber]",
-            "Lists daily and monthly Artboard snapshots.",
+            "Lists daily, monthly, and curated Artboard snapshots.",
             "pagenumber: optional positive page number; 15 rows per page.",
         ],
         "kick" => &[
@@ -796,8 +814,9 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
         ],
         "artboard" => &[
             "artboard restore [YYYY-MM-DD] [reason...]",
+            "artboard curate [YYYY-MM-DD] [reason...]",
             "Restores Artboard snapshots.",
-            "Subtopics: help artboard restore.",
+            "Subtopics: help artboard restore, help artboard curate.",
         ],
         "artboard restore" => &[
             "artboard restore [YYYY-MM-DD] [reason...]",
@@ -805,6 +824,13 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "date: optional daily snapshot date; defaults to previous UTC day.",
             "reason: optional audit text.",
             "Moderator or admin only. Writes a moderation audit entry and backs up the previous main row.",
+        ],
+        "artboard curate" => &[
+            "artboard curate [YYYY-MM-DD] [reason...]",
+            "Copies a daily UTC snapshot to a curated snapshot key.",
+            "date: optional daily snapshot date; defaults to previous UTC day.",
+            "reason: optional audit text.",
+            "Moderator or admin only. Writes a moderation audit entry.",
         ],
         "admin" => &[
             "admin <grant|revoke> mod @name",
@@ -1178,6 +1204,20 @@ mod tests {
                 reason: String::new(),
             }
         );
+        assert_eq!(
+            parse_mod_command("artboard curate 2026-05-06 preserve").unwrap(),
+            ModCommand::ArtboardCurate {
+                date: Some(chrono::NaiveDate::from_ymd_opt(2026, 5, 6).unwrap()),
+                reason: "preserve".to_string(),
+            }
+        );
+        assert_eq!(
+            parse_mod_command("artboard curate preserve latest").unwrap(),
+            ModCommand::ArtboardCurate {
+                date: None,
+                reason: "preserve latest".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1201,7 +1241,8 @@ mod tests {
             | ModCommand::Audit { .. }
             | ModCommand::ArtboardSnapshots { .. }
             | ModCommand::RenameRoom { .. }
-            | ModCommand::ArtboardRestore { .. } => {
+            | ModCommand::ArtboardRestore { .. }
+            | ModCommand::ArtboardCurate { .. } => {
                 panic!("command does not have a primary username: {command:?}")
             }
         }

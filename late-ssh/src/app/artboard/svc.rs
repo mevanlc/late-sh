@@ -55,6 +55,7 @@ pub enum DartboardEvent {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum ArtboardSnapshotKind {
+    Curated,
     Daily,
     Monthly,
 }
@@ -62,6 +63,7 @@ pub enum ArtboardSnapshotKind {
 impl ArtboardSnapshotKind {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Curated => "curated",
             Self::Daily => "daily",
             Self::Monthly => "monthly",
         }
@@ -148,6 +150,7 @@ async fn list_archive_snapshots(db: &Db) -> anyhow::Result<Vec<ArtboardArchiveSn
         .context("failed to get db client for artboard snapshot list")?;
     let mut snapshots = Vec::new();
     for (prefix, kind) in [
+        ("curated:", ArtboardSnapshotKind::Curated),
         ("daily:", ArtboardSnapshotKind::Daily),
         ("monthly:", ArtboardSnapshotKind::Monthly),
     ] {

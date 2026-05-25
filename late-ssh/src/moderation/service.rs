@@ -188,6 +188,10 @@ impl ModerationService {
                 self.artboard_restore(actor_user_id, permissions, date, reason)
                     .await
             }
+            ModCommand::ArtboardCurate { date, reason } => {
+                self.artboard_curate(actor_user_id, permissions, date, reason)
+                    .await
+            }
             ModCommand::Audio {
                 action,
                 username,
@@ -888,6 +892,56 @@ impl ModerationService {
         Ok(lines)
     }
 
+    async fn artboard_curate(
+        &self,
+        actor_user_id: Uuid,
+        permissions: Permissions,
+        date: Option<NaiveDate>,
+        reason: String,
+    ) -> Result<Vec<String>> {
+        ensure_has(permissions, Caps::RESTORE_ARTBOARD)?;
+        let date = date.unwrap_or_else(previous_utc_day);
+        let source_key = daily_artboard_key(date);
+
+        let mut client = self.db.get().await?;
+        ArtboardSnapshot::find_by_board_key(&client, &source_key)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("artboard snapshot not found: {source_key}"))?;
+
+        let tx = client.transaction().await?;
+        let mut curated = None;
+        for suffix in 0..=999 {
+            let target_key = curated_artboard_key(date, suffix);
+            if let Some(snapshot) =
+                ArtboardSnapshot::copy_board_key_if_absent(&tx, &source_key, &target_key).await?
+            {
+                curated = Some(snapshot);
+                break;
+            }
+        }
+        let curated = curated
+            .ok_or_else(|| anyhow::anyhow!("no available curated artboard key for {source_key}"))?;
+        let target_key = curated.board_key.clone();
+        ModerationAuditLog::record(
+            &tx,
+            actor_user_id,
+            "artboard_curate",
+            "artboard",
+            None,
+            json!({
+                "source_key": source_key.clone(),
+                "target_key": target_key.clone(),
+                "reason": reason,
+            }),
+        )
+        .await?;
+        tx.commit().await?;
+
+        Ok(vec![format!(
+            "curated artboard snapshot {target_key} from {source_key}"
+        )])
+    }
+
     async fn role(
         &self,
         actor_user_id: Uuid,
@@ -1149,7 +1203,9 @@ fn format_audit_log_item(item: &ModerationAuditLogListItem) -> String {
 }
 
 fn format_artboard_snapshot_summary(item: &ArtboardSnapshotSummary) -> String {
-    let kind = if item.board_key.starts_with("monthly:") {
+    let kind = if item.board_key.starts_with("curated:") {
+        "curated"
+    } else if item.board_key.starts_with("monthly:") {
         "monthly"
     } else if item.board_key.starts_with("daily:") {
         "daily"
@@ -1190,6 +1246,14 @@ fn previous_utc_day() -> NaiveDate {
 
 fn daily_artboard_key(date: NaiveDate) -> String {
     format!("daily:{date}")
+}
+
+fn curated_artboard_key(date: NaiveDate, suffix: usize) -> String {
+    if suffix == 0 {
+        format!("curated:{date}")
+    } else {
+        format!("curated:{date}-{}", suffix + 1)
+    }
 }
 
 fn page_offset(page: i64) -> i64 {
