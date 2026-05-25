@@ -1613,11 +1613,7 @@ fn handle_bracketed_paste(app: &mut App, pasted: &[u8]) {
         }
         PasteTarget::Pinstar => {
             if let Some(state) = &mut app.pinstar_state {
-                if state.editor_focus {
-                    insert_pasted_text(pasted, |ch| {
-                        state.raw_editor.insert_char(ch);
-                    });
-                } else if let Some(textarea) = &mut state.rename_popup {
+                if let Some(textarea) = &mut state.rename_popup {
                     insert_pasted_text(pasted, |ch| {
                         textarea.insert_char(ch);
                     });
@@ -1626,6 +1622,12 @@ fn handle_bracketed_paste(app: &mut App, pasted: &[u8]) {
                         textarea.insert_char(ch);
                     });
                 }
+            } else if app.pinstar_browser.mode
+                == crate::app::pinstar::browser::BrowserMode::ImportCanvas
+            {
+                insert_pasted_text(pasted, |ch| {
+                    app.pinstar_browser.import_input.push(ch);
+                });
             } else if app.pinstar_browser.mode
                 == crate::app::pinstar::browser::BrowserMode::AcceptInvite
             {
@@ -1788,6 +1790,7 @@ fn chat_room_list_view(app: &App) -> crate::app::chat::ui::ChatRoomListView<'_> 
         collapsed_sections: &app.chat.collapsed_sections,
         selected_room_id: app.chat.selected_room_id,
         room_jump_active: app.chat.room_jump_active,
+        room_section_prefix_armed: app.room_section_prefix_armed,
         current_user_id: app.user_id,
         feeds_available: app.chat.feeds.has_feeds(),
         feeds_selected: app.chat.feeds_selected,
@@ -2054,7 +2057,7 @@ fn is_room_search_shortcut(event: &ParsedInput) -> bool {
 
 fn clear_prefix_arms(app: &mut App) {
     app.vote_prefix_armed = false;
-    app.hot_room_prefix_armed = false;
+    app.room_join_prefix_armed = false;
     app.room_section_prefix_armed = false;
 }
 
@@ -2194,7 +2197,7 @@ fn open_terminal_help_modal_globally(app: &mut App) {
     app.show_terminal_help = true;
 }
 
-fn hot_room_suffix_index(byte: u8) -> Option<usize> {
+fn room_join_suffix_index(byte: u8) -> Option<usize> {
     match byte {
         b'1' => Some(0),
         b'2' => Some(1),
@@ -2215,17 +2218,18 @@ fn room_section_suffix(byte: u8) -> Option<RoomSection> {
     }
 }
 
-fn enter_hot_room(app: &mut App, index: usize) -> bool {
-    let Some(room) = crate::app::dashboard::ui::top_dashboard_rooms(
+fn enter_recent_join_room(app: &mut App, index: usize) -> bool {
+    let Some(room) = crate::app::dashboard::ui::recent_dashboard_rooms(
         &app.rooms_snapshot,
         &app.room_game_registry,
+        &app.dashboard_room_joins,
         4,
     )
     .into_iter()
     .nth(index)
     .map(|card| card.room) else {
         app.banner = Some(crate::app::common::primitives::Banner::error(&format!(
-            "No hot room in slot {}.",
+            "No recent room join in slot {}.",
             index + 1
         )));
         return true;
@@ -2341,10 +2345,10 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return true;
     }
 
-    if app.hot_room_prefix_armed {
-        app.hot_room_prefix_armed = false;
-        if let Some(index) = hot_room_suffix_index(byte) {
-            return enter_hot_room(app, index);
+    if app.room_join_prefix_armed {
+        app.room_join_prefix_armed = false;
+        if let Some(index) = room_join_suffix_index(byte) {
+            return enter_recent_join_room(app, index);
         }
     }
 
@@ -2425,7 +2429,7 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
                 && !ctx.showcase_composing
                 && !ctx.work_composing =>
         {
-            app.hot_room_prefix_armed = true;
+            app.room_join_prefix_armed = true;
             true
         }
         b'v' | b'V'
@@ -2703,14 +2707,25 @@ fn handle_pinstar_browser_input(app: &mut App, event: &ParsedInput) -> bool {
                 app.pinstar_browser.error = None;
                 true
             }
+            ParsedInput::Byte(b'I') | ParsedInput::Char('I') => {
+                app.pinstar_browser.import_input.clear();
+                app.pinstar_browser.import_name = String::from("Imported Diagram");
+                app.pinstar_browser.error = None;
+                app.pinstar_browser.mode = BrowserMode::ImportCanvas;
+                true
+            }
             ParsedInput::Byte(b'd') | ParsedInput::Char('d') => {
                 if let Some(entry) = app.pinstar_browser.selected_entry() {
-                    if entry.is_owner {
+                    if entry.is_owner
+                        || app
+                            .permissions
+                            .has(crate::moderation::policy::Caps::DELETE_PINSTAR_GRAPH)
+                    {
                         app.pinstar_browser.delete_target_id = Some(entry.id);
                         app.pinstar_browser.mode = BrowserMode::ConfirmDelete;
                     } else {
                         app.pinstar_browser.error =
-                            Some("Only owner can delete diagrams".to_string());
+                            Some("Only owner or staff can delete diagrams".to_string());
                     }
                 }
                 true
@@ -2724,6 +2739,17 @@ fn handle_pinstar_browser_input(app: &mut App, event: &ParsedInput) -> bool {
                         app.pinstar_browser.error =
                             Some("Only owner can rename diagrams".to_string());
                     }
+                }
+                true
+            }
+            ParsedInput::Byte(b'c')
+            | ParsedInput::Char('c')
+            | ParsedInput::Byte(b'C')
+            | ParsedInput::Char('C') => {
+                if let Some(entry) = app.pinstar_browser.selected_entry() {
+                    app.pinstar_browser.pending_action = Some(
+                        crate::app::pinstar::browser::BrowserAction::CopySource(entry.id),
+                    );
                 }
                 true
             }
@@ -2807,6 +2833,55 @@ fn handle_pinstar_browser_input(app: &mut App, event: &ParsedInput) -> bool {
             }
             ParsedInput::Byte(byte) if !byte.is_ascii_control() && *byte != 0x7f => {
                 let _ = app.pinstar_browser.push_invite_token_char(*byte as char);
+                true
+            }
+            _ => false,
+        },
+        BrowserMode::ImportCanvas => match event {
+            ParsedInput::Byte(0x1b) | ParsedInput::Char('\x1b') => {
+                app.pinstar_browser.mode = BrowserMode::List;
+                true
+            }
+            ParsedInput::Byte(b'\r')
+            | ParsedInput::Byte(b'\n')
+            | ParsedInput::Char('\r')
+            | ParsedInput::Char('\n') => {
+                let raw = app.pinstar_browser.import_input.trim().to_string();
+                let name = if app.pinstar_browser.import_name.trim().is_empty() {
+                    "Imported Diagram".to_string()
+                } else {
+                    app.pinstar_browser.import_name.trim().to_string()
+                };
+                match serde_json::from_str::<crate::app::pinstar::data::CanvasData>(&raw) {
+                    Ok(data) => {
+                        app.pinstar_browser.pending_action =
+                            Some(crate::app::pinstar::browser::BrowserAction::Import {
+                                title: name,
+                                data,
+                            });
+                        app.pinstar_browser.mode = BrowserMode::List;
+                        app.pinstar_browser.error = None;
+                    }
+                    Err(e) => {
+                        app.pinstar_browser.error = Some(format!("Invalid canvas JSON: {}", e));
+                    }
+                }
+                true
+            }
+            ParsedInput::Byte(0x7f)
+            | ParsedInput::Byte(0x08)
+            | ParsedInput::Char('\x08')
+            | ParsedInput::Char('\x7f')
+            | ParsedInput::Delete => {
+                app.pinstar_browser.import_input.pop();
+                true
+            }
+            ParsedInput::Char(c) => {
+                app.pinstar_browser.import_input.push(*c);
+                true
+            }
+            ParsedInput::Byte(byte) if !byte.is_ascii_control() && *byte != 0x7f => {
+                app.pinstar_browser.import_input.push(*byte as char);
                 true
             }
             _ => false,
@@ -3748,12 +3823,12 @@ mod tests {
     }
 
     #[test]
-    fn hot_room_suffixes_are_one_based_digits() {
-        assert_eq!(hot_room_suffix_index(b'1'), Some(0));
-        assert_eq!(hot_room_suffix_index(b'2'), Some(1));
-        assert_eq!(hot_room_suffix_index(b'3'), Some(2));
-        assert_eq!(hot_room_suffix_index(b'4'), Some(3));
-        assert_eq!(hot_room_suffix_index(b'b'), None);
+    fn room_join_suffixes_are_one_based_digits() {
+        assert_eq!(room_join_suffix_index(b'1'), Some(0));
+        assert_eq!(room_join_suffix_index(b'2'), Some(1));
+        assert_eq!(room_join_suffix_index(b'3'), Some(2));
+        assert_eq!(room_join_suffix_index(b'4'), Some(3));
+        assert_eq!(room_join_suffix_index(b'b'), None);
     }
 
     #[test]

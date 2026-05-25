@@ -1,9 +1,15 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use late_core::db::Db;
-use late_core::models::pinstar_diagram::PinstarDiagram;
+use late_core::models::{
+    moderation_audit_log::ModerationAuditLog, pinstar_diagram::PinstarDiagram, user::User,
+};
+use serde_json::json;
 use tokio_postgres::Client;
 use uuid::Uuid;
+
+use crate::app::pinstar::data::CanvasData;
+use crate::moderation::policy::{Permissions, Tier};
 
 pub const INVITE_TOKEN_MAX_LEN: usize = 128;
 
@@ -36,6 +42,8 @@ pub enum BrowserMode {
     GenerateInvite,
     /// Showing Pinstar keyboard help over the browser
     Help,
+    /// Importing a canvas from pasted JSON
+    ImportCanvas,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -74,9 +82,11 @@ impl DiagramFormat {
 #[derive(Debug, Clone)]
 pub enum BrowserAction {
     Create { title: String },
+    Import { title: String, data: CanvasData },
     Open(Uuid, String), // id, role
     AcceptInvite(String),
     GenerateInvite(Uuid),
+    CopySource(Uuid),
     Delete(Uuid),
     Rename(Uuid, String),
 }
@@ -85,6 +95,7 @@ pub enum BrowserAction {
 pub enum BrowserActionResult {
     Open { id: Uuid, role: String },
     InviteCreated { token: String },
+    CopiedSource { source: String },
     Deleted { id: Uuid },
     Renamed,
 }
@@ -104,6 +115,8 @@ pub struct DiagramBrowser {
     pub error: Option<String>,
     pub last_click: Option<(u16, u16, std::time::Instant)>,
     pub generated_invite_token: Option<String>,
+    pub import_input: String,
+    pub import_name: String,
 }
 
 impl Default for DiagramBrowser {
@@ -123,6 +136,8 @@ impl Default for DiagramBrowser {
             error: None,
             last_click: None,
             generated_invite_token: None,
+            import_input: String::new(),
+            import_name: String::from("Imported Diagram"),
         }
     }
 }
@@ -308,12 +323,57 @@ pub async fn create_invite_for_owner(
     anyhow::bail!("failed to generate a unique invite token")
 }
 
-pub async fn delete_diagram_for_owner(db: &Db, owner_id: Uuid, diagram_id: Uuid) -> Result<()> {
+pub async fn copy_diagram_source_for_member(
+    db: &Db,
+    user_id: Uuid,
+    diagram_id: Uuid,
+) -> Result<String> {
     let client = db.get().await?;
-    let deleted = PinstarDiagram::delete_by_owner(&client, diagram_id, owner_id).await?;
-    if deleted == 0 {
-        anyhow::bail!("only the owner can delete this diagram");
+    let Some((diagram, _role)) =
+        PinstarDiagram::get_with_member_role(&client, diagram_id, user_id).await?
+    else {
+        anyhow::bail!("diagram not found");
+    };
+    Ok(serde_json::to_string_pretty(&diagram.diagram_data)?)
+}
+
+pub async fn delete_diagram_for_user(db: &Db, user_id: Uuid, diagram_id: Uuid) -> Result<()> {
+    let mut client = db.get().await?;
+    let Some(diagram) = PinstarDiagram::get(&client, diagram_id).await? else {
+        anyhow::bail!("diagram not found");
+    };
+    let actor = User::get(&client, user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+    let owner = User::get(&client, diagram.owner_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("diagram owner not found"))?;
+    let permissions = Permissions::new(actor.is_admin, actor.is_moderator);
+    let is_owner = diagram.owner_id == user_id;
+    let owner_tier = Tier::from_user_flags(owner.is_admin, owner.is_moderator);
+
+    if !permissions.can_delete_pinstar_graph(is_owner, owner_tier) {
+        anyhow::bail!("not allowed to delete this diagram");
     }
+
+    let tx = client.transaction().await?;
+    let deleted = tx
+        .execute("DELETE FROM pinstar_diagrams WHERE id = $1", &[&diagram_id])
+        .await?;
+    if deleted == 0 {
+        anyhow::bail!("diagram already deleted");
+    }
+    ModerationAuditLog::record_if(
+        &tx,
+        permissions.should_audit(is_owner),
+        user_id,
+        "pinstar_graph_delete",
+        "pinstar_graph",
+        Some(diagram_id),
+        json!({ "owner_id": diagram.owner_id, "title": diagram.title }),
+    )
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

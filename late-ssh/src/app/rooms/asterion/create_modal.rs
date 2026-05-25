@@ -6,6 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
+use asterion_core::MAX_MAZE_ID;
 use late_core::models::asterion::ASTERION_DAILY_ESCAPE_PAYOUT;
 
 use crate::app::{
@@ -88,7 +89,7 @@ impl CreateRoomModal for AsterionCreateModal {
                 Span::raw("  "),
                 Span::styled(
                     format!(
-                        "Escape maze 10 for {ASTERION_DAILY_ESCAPE_PAYOUT} chips once per day."
+                        "Escape maze {MAX_MAZE_ID} for {ASTERION_DAILY_ESCAPE_PAYOUT} chips once per day."
                     ),
                     Style::default().fg(theme::TEXT_DIM()),
                 ),

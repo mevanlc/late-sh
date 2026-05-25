@@ -348,8 +348,12 @@ impl App {
                 }),
                 terminal_image_protocol: self.terminal_image_protocol,
             });
-        let top_rooms =
-            dashboard::ui::top_dashboard_rooms(&self.rooms_snapshot, &self.room_game_registry, 4);
+        let multiplayer_rooms = dashboard::ui::recent_dashboard_rooms(
+            &self.rooms_snapshot,
+            &self.room_game_registry,
+            &self.dashboard_room_joins,
+            4,
+        );
         let online_count = self
             .active_users
             .as_ref()
@@ -372,7 +376,7 @@ impl App {
             activity: &self.activity,
             online_count,
             active_friend_names: &active_friend_names,
-            top_rooms: &top_rooms,
+            multiplayer_rooms: &multiplayer_rooms,
             wire_news_articles: dashboard_wire_articles,
             dashboard_cycle_secs,
             show_room_top_boxes,
@@ -492,6 +496,7 @@ impl App {
             collapsed_sections: &self.chat.collapsed_sections,
             selected_room_id: self.chat.selected_room_id,
             room_jump_active: self.chat.room_jump_active,
+            room_section_prefix_armed: self.room_section_prefix_armed,
             selected_message_id: self.chat.selected_message_id,
             selected_image_message,
             selected_news_message,
@@ -1200,7 +1205,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
 
     if screen == Screen::Pinstar {
         spans.push(Span::styled(
-            "by github.com/ricott1 ",
+            "by github.com/reekta92 ",
             Style::default().fg(theme::TEXT_DIM()),
         ));
         let hints: &[(&str, &str)] = if ctx.pinstar_state.is_some() {

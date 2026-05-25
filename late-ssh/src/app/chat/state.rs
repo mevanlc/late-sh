@@ -32,7 +32,7 @@ use super::{
     notifications::svc::NotificationService,
     showcase,
     svc::{ChatEvent, ChatService, ChatSnapshot},
-    ui_text::{NewsPayload, parse_news_payload, parse_room_seat_payload, reaction_label},
+    ui_text::{NewsPayload, parse_news_payload, reaction_label},
     work,
 };
 
@@ -167,6 +167,16 @@ impl RoomSection {
             RoomSection::Channels => "channels",
             RoomSection::Updates => "updates",
             RoomSection::Dms => "dms",
+        }
+    }
+
+    pub(crate) fn shortcut(self) -> u8 {
+        match self {
+            RoomSection::Favorites => b'f',
+            RoomSection::Core => b'o',
+            RoomSection::Channels => b'c',
+            RoomSection::Updates => b'u',
+            RoomSection::Dms => b'd',
         }
     }
 
@@ -1203,16 +1213,16 @@ impl ChatState {
     /// Order matches the cozy rail exactly: favorites, core/mentions/news/rss,
     /// channels, updates, DMs.
     pub(crate) fn visual_order(&self) -> Vec<RoomSlot> {
-        visual_order_for_rooms(
-            &self.rooms,
-            self.user_id,
-            &self.usernames,
-            &self.unread_counts,
-            &self.room_last_message_at,
-            self.feeds.has_feeds(),
-            &self.favorite_room_ids,
-            &self.collapsed_sections,
-        )
+        visual_order_for_rooms(RoomVisualOrderInput {
+            rooms: &self.rooms,
+            user_id: self.user_id,
+            usernames: &self.usernames,
+            unread_counts: &self.unread_counts,
+            room_last_message_at: &self.room_last_message_at,
+            feeds_available: self.feeds.has_feeds(),
+            favorite_room_ids: &self.favorite_room_ids,
+            collapsed_sections: &self.collapsed_sections,
+        })
     }
 
     pub(crate) fn room_jump_targets(&self) -> Vec<(u8, RoomSlot)> {
@@ -3351,17 +3361,29 @@ fn inline_image_retry_delay(attempts: u8) -> Duration {
     Duration::from_secs((1_u64 << exp).min(30))
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn visual_order_for_rooms(
-    rooms: &[(ChatRoom, Vec<ChatMessage>)],
-    user_id: Uuid,
-    usernames: &HashMap<Uuid, String>,
-    unread_counts: &HashMap<Uuid, i64>,
-    room_last_message_at: &HashMap<Uuid, Option<DateTime<Utc>>>,
-    feeds_available: bool,
-    favorite_room_ids: &[Uuid],
-    collapsed_sections: &HashSet<RoomSection>,
-) -> Vec<RoomSlot> {
+pub(crate) struct RoomVisualOrderInput<'a> {
+    pub rooms: &'a [(ChatRoom, Vec<ChatMessage>)],
+    pub user_id: Uuid,
+    pub usernames: &'a HashMap<Uuid, String>,
+    pub unread_counts: &'a HashMap<Uuid, i64>,
+    pub room_last_message_at: &'a HashMap<Uuid, Option<DateTime<Utc>>>,
+    pub feeds_available: bool,
+    pub favorite_room_ids: &'a [Uuid],
+    pub collapsed_sections: &'a HashSet<RoomSection>,
+}
+
+pub(crate) fn visual_order_for_rooms(input: RoomVisualOrderInput<'_>) -> Vec<RoomSlot> {
+    let RoomVisualOrderInput {
+        rooms,
+        user_id,
+        usernames,
+        unread_counts,
+        room_last_message_at,
+        feeds_available,
+        favorite_room_ids,
+        collapsed_sections,
+    } = input;
+
     let mut order = Vec::new();
     let mut pushed_rooms = HashSet::new();
 
@@ -3921,9 +3943,6 @@ fn reply_preview_text(body: &str) -> String {
     if let Some(title) = news_reply_preview_text(body) {
         return title;
     }
-    if let Some(title) = room_seat_reply_preview_text(body) {
-        return title;
-    }
 
     let body_without_reply_quote = match body.split_once('\n') {
         Some((first_line, rest))
@@ -3969,13 +3988,6 @@ fn news_reply_preview_text(body: &str) -> Option<String> {
         .unwrap_or("news update");
 
     Some(truncate_reply_preview(title))
-}
-
-fn room_seat_reply_preview_text(body: &str) -> Option<String> {
-    let payload = parse_room_seat_payload(body)?;
-    let title = payload.title.trim();
-    let preview = if title.is_empty() { "game room" } else { title };
-    Some(truncate_reply_preview(preview))
 }
 
 fn truncate_reply_preview(text: &str) -> String {
@@ -4250,14 +4262,6 @@ mod tests {
     }
 
     #[test]
-    fn reply_preview_text_uses_room_seat_title_for_game_messages() {
-        let preview = reply_preview_text(
-            "---ROOM-SEAT--- Poker · Night Table || 50/100 blinds || ╭───╮\\n╰───╯",
-        );
-        assert_eq!(preview, "Poker · Night Table");
-    }
-
-    #[test]
     fn news_modal_source_uses_full_article_snapshot_payload() {
         use late_core::models::article::{Article, ArticleFeedItem};
 
@@ -4314,12 +4318,6 @@ mod tests {
     fn news_marker_detection_matches_announcement_messages() {
         assert!(news_reply_preview_text("---NEWS--- title || summary || url || ascii").is_some());
         assert!(news_reply_preview_text("regular chat message").is_none());
-    }
-
-    #[test]
-    fn room_seat_marker_detection_matches_game_messages() {
-        assert!(room_seat_reply_preview_text("---ROOM-SEAT--- table || meta || ascii").is_some());
-        assert!(room_seat_reply_preview_text("regular chat message").is_none());
     }
 
     #[test]
@@ -4523,16 +4521,16 @@ mod tests {
         ];
 
         assert_eq!(
-            visual_order_for_rooms(
-                &rooms,
-                me,
-                &usernames,
-                &HashMap::new(),
-                &HashMap::new(),
-                true,
-                &[],
-                &HashSet::new(),
-            ),
+            visual_order_for_rooms(RoomVisualOrderInput {
+                rooms: &rooms,
+                user_id: me,
+                usernames: &usernames,
+                unread_counts: &HashMap::new(),
+                room_last_message_at: &HashMap::new(),
+                feeds_available: true,
+                favorite_room_ids: &[],
+                collapsed_sections: &HashSet::new(),
+            }),
             vec![
                 RoomSlot::Room(general),
                 RoomSlot::Room(announcements),
@@ -4588,16 +4586,16 @@ mod tests {
             (dm_bob.clone(), Vec::new()),
         ];
         let order = |collapsed: &HashSet<RoomSection>| {
-            visual_order_for_rooms(
-                &rooms,
-                me,
-                &usernames,
-                &HashMap::new(),
-                &HashMap::new(),
-                false,
-                &[],
-                collapsed,
-            )
+            visual_order_for_rooms(RoomVisualOrderInput {
+                rooms: &rooms,
+                user_id: me,
+                usernames: &usernames,
+                unread_counts: &HashMap::new(),
+                room_last_message_at: &HashMap::new(),
+                feeds_available: false,
+                favorite_room_ids: &[],
+                collapsed_sections: collapsed,
+            })
         };
 
         // Nothing collapsed: every section's rooms are present.
@@ -4670,16 +4668,16 @@ mod tests {
         room_last_message_at.insert(dm_alice.id, Some(older));
         room_last_message_at.insert(dm_bob.id, Some(newer));
 
-        let order = visual_order_for_rooms(
-            &rooms,
-            me,
-            &usernames,
-            &HashMap::new(),
-            &room_last_message_at,
-            false,
-            &[],
-            &HashSet::new(),
-        );
+        let order = visual_order_for_rooms(RoomVisualOrderInput {
+            rooms: &rooms,
+            user_id: me,
+            usernames: &usernames,
+            unread_counts: &HashMap::new(),
+            room_last_message_at: &room_last_message_at,
+            feeds_available: false,
+            favorite_room_ids: &[],
+            collapsed_sections: &HashSet::new(),
+        });
         let dm_order: Vec<_> = order
             .into_iter()
             .filter_map(|slot| match slot {
