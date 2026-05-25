@@ -1036,11 +1036,11 @@ impl PinstarState {
     }
 
     pub fn toggle_editor(&mut self) {
-        if self.floating_editor.is_some() {
+        if let Some(editor) = self.floating_editor.as_ref() {
             if let Some(node_id) = self.selected_node_id.clone()
                 && self.check_mutation_permission()
             {
-                let text = self.floating_editor.as_ref().unwrap().lines().join("\n");
+                let text = editor.lines().join("\n");
                 for node in &mut self.data.nodes {
                     if node.id() == node_id {
                         if matches!(node, CanvasNode::Group(_)) {
@@ -1619,14 +1619,18 @@ impl PinstarState {
 
         let (ax, ay) = if is_horiz {
             if dx > 0.0 { (fx + fw, scy) } else { (fx, scy) }
+        } else if dy > 0.0 {
+            (scx, fy + fh)
         } else {
-            if dy > 0.0 { (scx, fy + fh) } else { (scx, fy) }
+            (scx, fy)
         };
 
         let (bx, by) = if is_horiz {
             if dx > 0.0 { (tx, tcy) } else { (tx + tw, tcy) }
+        } else if dy > 0.0 {
+            (tcx, ty)
         } else {
-            if dy > 0.0 { (tcx, ty) } else { (tcx, ty + th) }
+            (tcx, ty + th)
         };
 
         let use_orthogonal = self.orthogonal_connections;
