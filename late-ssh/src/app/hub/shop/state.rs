@@ -93,8 +93,16 @@ impl ShopState {
         self.snapshot
             .items
             .iter()
-            .filter(|item| category.matches_kind(&item.item_kind))
+            .filter(|item| category.matches_item(item))
             .collect()
+    }
+
+    pub fn equipped_chat_badge(&self) -> Option<&str> {
+        self.snapshot
+            .items
+            .iter()
+            .find(|item| item.is_chat_badge() && item.equipped)
+            .and_then(|item| item.badge_emoji.as_deref())
     }
 
     pub fn selected_index(&self) -> usize {
@@ -129,6 +137,17 @@ impl ShopState {
     pub fn activate_selected(&mut self) -> Option<Banner> {
         let item = self.selected_item()?.clone();
         if item.owned {
+            if item.equipped {
+                if let Some(slot) = item.slot {
+                    self.service.unequip_slot_task(self.user_id, slot);
+                    return Some(Banner::success("Clearing displayed badge"));
+                }
+                return Some(Banner::success(&format!("{} already unlocked", item.name)));
+            }
+            if item.slot.is_some() {
+                self.service.equip_item_task(self.user_id, item.sku);
+                return Some(Banner::success(&format!("Displaying {}", item.name)));
+            }
             return Some(Banner::success(&format!("{} already unlocked", item.name)));
         }
 

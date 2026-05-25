@@ -197,6 +197,10 @@ impl App {
         if let Some(banner) = shop_tick.banner {
             self.banner = Some(banner);
         }
+        if shop_tick.snapshot_changed && self.shop_state.is_loaded() {
+            self.chat
+                .set_chat_badge(self.user_id, self.shop_state.equipped_chat_badge());
+        }
         if shop_tick.snapshot_changed
             && self.shop_state.is_loaded()
             && self

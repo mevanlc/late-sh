@@ -425,7 +425,7 @@ fn overview_lines() -> Vec<String> {
         "  Ctrl+G            open Leaderboard, Dailies, Shop, Events, Guide",
         "  Tab / Shift+Tab   switch Hub tabs",
         "  1-5               jump to Hub tab",
-        "  Shop              j/k select, [/] category, Enter buy with Late Chips",
+        "  Shop              j/k select, ] or [ subtab, Enter buy with Late Chips",
         "  Guide             chips, payouts, leaderboards, Arcade, room games",
         "",
         "Jump search",

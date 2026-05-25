@@ -7,6 +7,8 @@ use std::collections::{BTreeSet, HashMap};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
+use super::marketplace::CHAT_BADGE_SLOT;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioSource {
@@ -217,13 +219,19 @@ impl User {
         let rows = client
             .query(
                 "SELECT u.id,
-                        u.username,
-                        t.is_alive,
-                        t.growth_points
-                 FROM users u
-                 LEFT JOIN bonsai_trees t ON t.user_id = u.id
-                 WHERE u.id = ANY($1)",
-                &[&user_ids],
+	                        u.username,
+	                        t.is_alive,
+	                        t.growth_points,
+	                        badge.payload->>'emoji' AS chat_badge
+	                 FROM users u
+	                 LEFT JOIN bonsai_trees t ON t.user_id = u.id
+	                 LEFT JOIN user_purchases up
+	                   ON up.user_id = u.id
+	                  AND up.equipped_slot = $2
+	                 LEFT JOIN marketplace_items badge
+	                   ON badge.id = up.item_id
+	                 WHERE u.id = ANY($1)",
+                &[&user_ids, &CHAT_BADGE_SLOT],
             )
             .await?;
 
@@ -234,6 +242,7 @@ impl User {
                 username: row.get("username"),
                 bonsai_is_alive: row.get("is_alive"),
                 bonsai_growth_points: row.get("growth_points"),
+                chat_badge: row.get("chat_badge"),
             })
             .collect())
     }
@@ -502,6 +511,7 @@ pub struct ChatAuthorMetadata {
     pub username: String,
     pub bonsai_is_alive: Option<bool>,
     pub bonsai_growth_points: Option<i32>,
+    pub chat_badge: Option<String>,
 }
 
 fn extract_uuid_ids(settings: &Value, key: &str) -> Vec<Uuid> {

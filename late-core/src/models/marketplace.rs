@@ -7,6 +7,7 @@ use uuid::Uuid;
 use super::chips::INITIAL_CHIP_BALANCE;
 
 pub const CAT_COMPANION_SKU: &str = "cat_companion";
+pub const CHAT_BADGE_SLOT: &str = "chat_badge";
 pub const SHOP_PURCHASE_REASON: &str = "shop_purchase";
 pub const MARKETPLACE_SOURCE_KIND: &str = "marketplace_item";
 pub const SHOP_USER_CHANGED_CHANNEL: &str = "shop_user_changed";
@@ -112,6 +113,20 @@ impl UserPurchase {
             .await?;
         Ok(rows.into_iter().map(Self::from).collect())
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EquipStatus {
+    Equipped,
+    AlreadyEquipped,
+    NotOwned,
+    NotEquippable,
+}
+
+#[derive(Debug, Clone)]
+pub struct EquipResult {
+    pub status: EquipStatus,
+    pub item: MarketplaceItem,
 }
 
 pub async fn listen_for_shop_changes(client: &Client) -> Result<()> {
@@ -235,10 +250,14 @@ pub async fn purchase_durable_item_by_sku(
     tx.execute(
         "INSERT INTO user_purchases
             (user_id, item_id, quantity, remaining_uses, equipped_slot, purchased_price_chips)
-         VALUES ($1, $2, 1, NULL, $3, $4)",
-        &[&user_id, &item.id, &item.slot, &item.price_chips],
+         VALUES ($1, $2, 1, NULL, NULL, $3)",
+        &[&user_id, &item.id, &item.price_chips],
     )
     .await?;
+
+    if let Some(slot) = &item.slot {
+        equip_purchase_in_tx(&tx, user_id, item.id, slot).await?;
+    }
 
     let payload = user_id.to_string();
     tx.execute(
@@ -253,4 +272,126 @@ pub async fn purchase_durable_item_by_sku(
         item,
         balance: new_balance,
     }))
+}
+
+pub async fn equip_owned_item_by_sku(
+    client: &mut Client,
+    user_id: Uuid,
+    sku: &str,
+) -> Result<Option<EquipResult>> {
+    let tx = client.transaction().await?;
+    let Some(row) = tx
+        .query_opt(
+            "SELECT i.*
+             FROM marketplace_items i
+             WHERE i.sku = $1",
+            &[&sku],
+        )
+        .await?
+    else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let item = MarketplaceItem::from(row);
+
+    let Some(slot) = item.slot.clone() else {
+        tx.commit().await?;
+        return Ok(Some(EquipResult {
+            status: EquipStatus::NotEquippable,
+            item,
+        }));
+    };
+
+    let Some(purchase_row) = tx
+        .query_opt(
+            "SELECT equipped_slot
+             FROM user_purchases
+             WHERE user_id = $1 AND item_id = $2
+             FOR UPDATE",
+            &[&user_id, &item.id],
+        )
+        .await?
+    else {
+        tx.commit().await?;
+        return Ok(Some(EquipResult {
+            status: EquipStatus::NotOwned,
+            item,
+        }));
+    };
+
+    let already_equipped = purchase_row
+        .get::<_, Option<String>>("equipped_slot")
+        .as_deref()
+        == Some(slot.as_str());
+    if already_equipped {
+        tx.commit().await?;
+        return Ok(Some(EquipResult {
+            status: EquipStatus::AlreadyEquipped,
+            item,
+        }));
+    }
+
+    equip_purchase_in_tx(&tx, user_id, item.id, &slot).await?;
+    let payload = user_id.to_string();
+    tx.execute(
+        "SELECT pg_notify($1, $2)",
+        &[&SHOP_USER_CHANGED_CHANNEL, &payload],
+    )
+    .await?;
+
+    tx.commit().await?;
+    Ok(Some(EquipResult {
+        status: EquipStatus::Equipped,
+        item,
+    }))
+}
+
+pub async fn unequip_slot(client: &mut Client, user_id: Uuid, slot: &str) -> Result<bool> {
+    let tx = client.transaction().await?;
+    let updated = tx
+        .execute(
+            "UPDATE user_purchases
+             SET equipped_slot = NULL, updated = current_timestamp
+             WHERE user_id = $1 AND equipped_slot = $2",
+            &[&user_id, &slot],
+        )
+        .await?;
+
+    if updated > 0 {
+        let payload = user_id.to_string();
+        tx.execute(
+            "SELECT pg_notify($1, $2)",
+            &[&SHOP_USER_CHANGED_CHANNEL, &payload],
+        )
+        .await?;
+    }
+
+    tx.commit().await?;
+    Ok(updated > 0)
+}
+
+async fn equip_purchase_in_tx(
+    tx: &tokio_postgres::Transaction<'_>,
+    user_id: Uuid,
+    item_id: Uuid,
+    slot: &str,
+) -> Result<()> {
+    tx.execute(
+        "UPDATE user_purchases p
+         SET equipped_slot = NULL, updated = current_timestamp
+         FROM marketplace_items i
+         WHERE p.item_id = i.id
+           AND p.user_id = $1
+           AND i.slot = $2",
+        &[&user_id, &slot],
+    )
+    .await?;
+    tx.execute(
+        "UPDATE user_purchases
+         SET equipped_slot = $3, equipped_at = current_timestamp, updated = current_timestamp
+         WHERE user_id = $1 AND item_id = $2",
+        &[&user_id, &item_id, &slot],
+    )
+    .await?;
+    Ok(())
 }

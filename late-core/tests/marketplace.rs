@@ -2,14 +2,16 @@ use late_core::{
     models::{
         chips::UserChips,
         marketplace::{
-            CAT_COMPANION_SKU, MARKETPLACE_SOURCE_KIND, MarketplaceItem, PurchaseStatus,
-            SHOP_PURCHASE_REASON, UserPurchase, purchase_durable_item_by_sku,
+            CAT_COMPANION_SKU, CHAT_BADGE_SLOT, MARKETPLACE_SOURCE_KIND, MarketplaceItem,
+            PurchaseStatus, SHOP_PURCHASE_REASON, UserPurchase, equip_owned_item_by_sku,
+            purchase_durable_item_by_sku, unequip_slot,
         },
     },
     test_utils::{create_test_user, test_db},
 };
 
 const CAT_COMPANION_PRICE: i64 = 3_000;
+const BASIC_BADGE_PRICE: i64 = 1_000;
 
 #[tokio::test]
 async fn seeded_catalog_contains_cat_companion_unlock() {
@@ -28,6 +30,48 @@ async fn seeded_catalog_contains_cat_companion_unlock() {
     assert_eq!(cat.name, "Cat Companion");
     assert_eq!(cat.price_chips, CAT_COMPANION_PRICE);
     assert!(cat.active);
+}
+
+#[tokio::test]
+async fn seeded_catalog_contains_badge_shop_items() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+
+    let items = MarketplaceItem::list_visible(&client)
+        .await
+        .expect("list items");
+    let cat_badge = items
+        .iter()
+        .find(|item| item.sku == "badge_cat")
+        .expect("cat badge");
+    let gem_badge = items
+        .iter()
+        .find(|item| item.sku == "badge_gem")
+        .expect("gem badge");
+
+    assert_eq!(cat_badge.item_kind, "badge");
+    assert_eq!(cat_badge.slot.as_deref(), Some(CHAT_BADGE_SLOT));
+    assert_eq!(cat_badge.price_chips, BASIC_BADGE_PRICE);
+    assert_eq!(cat_badge.payload["emoji"], "🐱");
+    assert_eq!(cat_badge.payload["tier"], "basic");
+    assert!(
+        items
+            .iter()
+            .any(|item| item.sku == "badge_lightning" && item.payload["emoji"] == "⚡")
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.sku == "badge_droplet" && item.payload["emoji"] == "💧")
+    );
+    assert!(
+        items
+            .iter()
+            .any(|item| item.sku == "badge_snowflake" && item.payload["emoji"] == "❄️")
+    );
+    assert!(!items.iter().any(|item| item.sku == "badge_elements"));
+    assert_eq!(gem_badge.price_chips, 5_000);
+    assert_eq!(gem_badge.payload["tier"], "premium");
 }
 
 #[tokio::test]
@@ -83,6 +127,80 @@ async fn durable_purchase_debits_chips_and_records_entitlement() {
         row.get::<_, Option<String>>("source_ref"),
         Some(CAT_COMPANION_SKU.to_string())
     );
+}
+
+#[tokio::test]
+async fn badge_purchase_equips_one_chat_badge_per_user() {
+    let test_db = test_db().await;
+    let user = create_test_user(&test_db.db, "badge-equip").await;
+    let mut client = test_db.db.get().await.expect("db client");
+    UserChips::add_bonus(&client, user.id, BASIC_BADGE_PRICE * 2)
+        .await
+        .expect("fund chips");
+
+    let first = purchase_durable_item_by_sku(&mut client, user.id, "badge_cat")
+        .await
+        .expect("first purchase")
+        .expect("first badge");
+    let second = purchase_durable_item_by_sku(&mut client, user.id, "badge_dog")
+        .await
+        .expect("second purchase")
+        .expect("second badge");
+
+    assert_eq!(first.status, PurchaseStatus::Purchased);
+    assert_eq!(second.status, PurchaseStatus::Purchased);
+
+    let equipped = client
+        .query(
+            "SELECT i.sku
+             FROM user_purchases p
+             JOIN marketplace_items i ON i.id = p.item_id
+             WHERE p.user_id = $1 AND p.equipped_slot = $2
+             ORDER BY i.sku",
+            &[&user.id, &CHAT_BADGE_SLOT],
+        )
+        .await
+        .expect("equipped rows");
+    assert_eq!(equipped.len(), 1);
+    assert_eq!(equipped[0].get::<_, String>("sku"), "badge_dog");
+
+    let equip_first = equip_owned_item_by_sku(&mut client, user.id, "badge_cat")
+        .await
+        .expect("equip first")
+        .expect("badge cat exists");
+    assert_eq!(
+        equip_first.status,
+        late_core::models::marketplace::EquipStatus::Equipped
+    );
+
+    let equipped = client
+        .query_one(
+            "SELECT i.sku
+             FROM user_purchases p
+             JOIN marketplace_items i ON i.id = p.item_id
+             WHERE p.user_id = $1 AND p.equipped_slot = $2",
+            &[&user.id, &CHAT_BADGE_SLOT],
+        )
+        .await
+        .expect("equipped row");
+    assert_eq!(equipped.get::<_, String>("sku"), "badge_cat");
+
+    let changed = unequip_slot(&mut client, user.id, CHAT_BADGE_SLOT)
+        .await
+        .expect("unequip badge");
+    assert!(changed);
+
+    let equipped_count = client
+        .query_one(
+            "SELECT count(*)::bigint AS count
+             FROM user_purchases
+             WHERE user_id = $1 AND equipped_slot = $2",
+            &[&user.id, &CHAT_BADGE_SLOT],
+        )
+        .await
+        .expect("equipped count")
+        .get::<_, i64>("count");
+    assert_eq!(equipped_count, 0);
 }
 
 #[tokio::test]

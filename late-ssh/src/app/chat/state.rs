@@ -245,6 +245,7 @@ pub struct ChatState {
     pub(crate) mention_ac: MentionAutocomplete,
     pub(crate) all_usernames: Arc<Vec<String>>,
     pub(crate) bonsai_glyphs: HashMap<Uuid, String>,
+    pub(crate) chat_badges: HashMap<Uuid, String>,
     pub(crate) message_reactions: HashMap<Uuid, Vec<ChatMessageReactionSummary>>,
     pub(crate) selected_message_id: Option<Uuid>,
     pub(crate) reaction_leader_active: bool,
@@ -396,6 +397,7 @@ impl ChatState {
             mention_ac: MentionAutocomplete::default(),
             all_usernames: Arc::new(Vec::new()),
             bonsai_glyphs: HashMap::new(),
+            chat_badges: HashMap::new(),
             message_reactions: HashMap::new(),
             selected_message_id: None,
             reaction_leader_active: false,
@@ -2415,6 +2417,18 @@ impl ChatState {
         &self.bonsai_glyphs
     }
 
+    pub fn chat_badges(&self) -> &HashMap<Uuid, String> {
+        &self.chat_badges
+    }
+
+    pub fn set_chat_badge(&mut self, user_id: Uuid, badge: Option<&str>) {
+        if let Some(badge) = badge.filter(|badge| !badge.trim().is_empty()) {
+            self.chat_badges.insert(user_id, badge.to_string());
+        } else {
+            self.chat_badges.remove(&user_id);
+        }
+    }
+
     pub fn friend_user_ids(&self) -> &HashSet<Uuid> {
         &self.friend_user_ids
     }
@@ -2477,6 +2491,7 @@ impl ChatState {
         self.general_room_id = snapshot.general_room_id;
         self.unread_counts = self.merge_unread_counts(snapshot.unread_counts);
         self.bonsai_glyphs.extend(snapshot.bonsai_glyphs);
+        self.chat_badges.extend(snapshot.chat_badges);
         self.message_reactions = self.merge_message_reactions(snapshot.message_reactions);
         self.sync_selection();
     }
@@ -2514,6 +2529,7 @@ impl ChatState {
                     target_user_ids,
                     author_username,
                     author_bonsai_glyph,
+                    author_chat_badge,
                 } => {
                     let is_targeted = target_user_ids.is_some();
                     if let Some(targets) = target_user_ids
@@ -2572,6 +2588,9 @@ impl ChatState {
                     if let Some(glyph) = author_bonsai_glyph {
                         self.bonsai_glyphs.insert(message.user_id, glyph);
                     }
+                    if let Some(badge) = author_chat_badge {
+                        self.chat_badges.insert(message.user_id, badge);
+                    }
                     self.push_message(message);
                 }
                 ChatEvent::SendSucceeded {
@@ -2599,10 +2618,12 @@ impl ChatState {
                     message_reactions,
                     usernames,
                     bonsai_glyphs,
+                    chat_badges,
                 } if self.user_id == user_id => {
                     self.loading_tail_rooms.remove(&room_id);
                     self.usernames.extend(usernames);
                     self.bonsai_glyphs.extend(bonsai_glyphs);
+                    self.chat_badges.extend(chat_badges);
                     self.merge_room_tail(room_id, messages);
                     for (message_id, reactions) in message_reactions {
                         self.message_reactions.insert(message_id, reactions);
@@ -2730,6 +2751,7 @@ impl ChatState {
                     target_user_ids,
                     author_username,
                     author_bonsai_glyph,
+                    author_chat_badge,
                 } => {
                     if let Some(targets) = target_user_ids
                         && !targets.contains(&self.user_id)
@@ -2741,6 +2763,9 @@ impl ChatState {
                     }
                     if let Some(glyph) = author_bonsai_glyph {
                         self.bonsai_glyphs.insert(message.user_id, glyph);
+                    }
+                    if let Some(badge) = author_chat_badge {
+                        self.chat_badges.insert(message.user_id, badge);
                     }
                     self.replace_message(message);
                 }
