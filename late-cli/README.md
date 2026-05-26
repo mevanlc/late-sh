@@ -67,6 +67,7 @@ use your normal `~/.ssh/config`, agent, and default identity discovery.
 --ssh-mode <mode>          SSH transport: native (default), openssh, or old
 --ssh-bin <command>        SSH client command for openssh/old modes (default: ssh)
 --audio-base-url <url>     Audio stream URL
+--audio-output-device <n>  Audio output device name (default: system default)
 --api-base-url <url>       API URL for WebSocket pairing
 -v, --verbose              Debug logging to stderr
 ```
@@ -89,6 +90,8 @@ does not require OpenSSH on `$PATH`. Native mode intentionally does not fall bac
 `LATE_SESSION_TOKEN=` banner protocol, so it will fail fast against an older server.
 
 If your audio device does not support the stream's native `44.1 kHz` output rate, the CLI now falls back to a supported device rate such as `48 kHz` and resamples locally. Native `44.1 kHz` playback is still preferred when available.
+
+By default, the CLI uses the system default output device. If CPAL resolves that to the wrong sink, pass `--audio-output-device "<device name>"` or set `LATE_AUDIO_OUTPUT_DEVICE`.
 
 On WSL, audio startup failures now include a targeted hint covering `DISPLAY`, `WAYLAND_DISPLAY`, and `PULSE_SERVER` so users get an actionable fix path instead of only raw ALSA errors.
 

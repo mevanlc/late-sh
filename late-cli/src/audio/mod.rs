@@ -59,7 +59,10 @@ pub(super) enum AudioBackendProfile {
 }
 
 impl AudioRuntime {
-    pub(super) async fn start(audio_base_url: String) -> Result<Self> {
+    pub(super) async fn start(
+        audio_base_url: String,
+        audio_output_device: Option<String>,
+    ) -> Result<Self> {
         if local_audio_disabled_on_this_platform() {
             return Ok(Self::disabled());
         }
@@ -70,7 +73,7 @@ impl AudioRuntime {
             AudioBackendProfile::Default
         };
 
-        match Self::start_enabled(audio_base_url, profile).await {
+        match Self::start_enabled(audio_base_url, audio_output_device, profile).await {
             Ok(runtime) => Ok(runtime),
             Err(err) if profile == AudioBackendProfile::Wsl => {
                 let hint = audio_startup_hint();
@@ -86,12 +89,17 @@ impl AudioRuntime {
         }
     }
 
-    async fn start_enabled(audio_base_url: String, profile: AudioBackendProfile) -> Result<Self> {
+    async fn start_enabled(
+        audio_base_url: String,
+        audio_output_device: Option<String>,
+        profile: AudioBackendProfile,
+    ) -> Result<Self> {
         let probe_url = audio_base_url.clone();
         let source_spec = tokio::task::spawn_blocking(move || probe_stream_spec(&probe_url))
             .await
             .context("audio stream probe task failed")??;
-        let output_sample_rate = output_sample_rate_for(source_spec)?;
+        let output_sample_rate =
+            output_sample_rate_for(source_spec, audio_output_device.as_deref())?;
         let queue_capacity = output_sample_rate as usize * source_spec.channels * 2;
         let (queue_tx, queue_rx) = HeapRb::<f32>::new(queue_capacity).split();
         let (played_tx, played_rx) = HeapRb::<f32>::new(4096).split();
@@ -114,6 +122,7 @@ impl AudioRuntime {
             Arc::clone(&muted),
             Arc::clone(&volume_percent),
             Arc::clone(&source_is_icecast),
+            audio_output_device.as_deref(),
             profile,
         )?;
         let output_sample_rate = stream.sample_rate;

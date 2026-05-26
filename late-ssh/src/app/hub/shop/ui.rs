@@ -94,7 +94,10 @@ fn draw_item_list(frame: &mut Frame, area: Rect, state: &ShopState) {
 
 enum ItemListRow<'a> {
     Section(&'static str),
-    Item { index: usize, item: &'a ShopCatalogItem },
+    Item {
+        index: usize,
+        item: &'a ShopCatalogItem,
+    },
 }
 
 fn item_list_rows<'a>(

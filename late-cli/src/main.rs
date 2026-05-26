@@ -65,12 +65,15 @@ async fn main() -> Result<()> {
     let ssh_identity = ssh_identity.context("embedded SSH modes require a resolved identity")?;
 
     info!("starting audio runtime");
-    let audio = AudioRuntime::start(config.audio_base_url.clone())
-        .await
-        .map_err(|err| {
-            let hint = audio_startup_hint();
-            anyhow::anyhow!("failed to start local audio: {err:#}\n\n{hint}")
-        })?;
+    let audio = AudioRuntime::start(
+        config.audio_base_url.clone(),
+        config.audio_output_device.clone(),
+    )
+    .await
+    .map_err(|err| {
+        let hint = audio_startup_hint();
+        anyhow::anyhow!("failed to start local audio: {err:#}\n\n{hint}")
+    })?;
     if audio.enabled {
         info!(sample_rate = audio.sample_rate, "audio runtime ready");
     } else {
@@ -171,12 +174,15 @@ async fn run_openssh_mode(config: Config, ssh_identity: Option<std::path::PathBu
     let token = session.token().to_string();
 
     info!("starting audio runtime");
-    let audio = AudioRuntime::start(config.audio_base_url.clone())
-        .await
-        .map_err(|err| {
-            let hint = audio_startup_hint();
-            anyhow::anyhow!("failed to start local audio: {err:#}\n\n{hint}")
-        })?;
+    let audio = AudioRuntime::start(
+        config.audio_base_url.clone(),
+        config.audio_output_device.clone(),
+    )
+    .await
+    .map_err(|err| {
+        let hint = audio_startup_hint();
+        anyhow::anyhow!("failed to start local audio: {err:#}\n\n{hint}")
+    })?;
     if audio.enabled {
         info!(sample_rate = audio.sample_rate, "audio runtime ready");
     } else {

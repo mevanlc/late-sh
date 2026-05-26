@@ -23,6 +23,7 @@ pub(super) struct Config {
     pub(super) ssh_mode: SshMode,
     pub(super) ssh_bin: Vec<String>,
     pub(super) audio_base_url: String,
+    pub(super) audio_output_device: Option<String>,
     pub(super) api_base_url: String,
     pub(super) verbose: bool,
 }
@@ -52,6 +53,10 @@ impl Config {
             parse_ssh_bin_spec(&env::var("LATE_SSH_BIN").unwrap_or_else(|_| "ssh".to_string()))?;
         let mut audio_base_url =
             env::var("LATE_AUDIO_BASE_URL").unwrap_or_else(|_| DEFAULT_AUDIO_BASE_URL.to_string());
+        let mut audio_output_device = env::var("LATE_AUDIO_OUTPUT_DEVICE")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
         let mut api_base_url =
             env::var("LATE_API_BASE_URL").unwrap_or_else(|_| DEFAULT_API_BASE_URL.to_string());
         let mut verbose = false;
@@ -86,6 +91,13 @@ impl Config {
                 }
                 "--ssh-bin" => ssh_bin = parse_ssh_bin_spec(&next_value(&mut args, "--ssh-bin")?)?,
                 "--audio-base-url" => audio_base_url = next_value(&mut args, "--audio-base-url")?,
+                "--audio-output-device" => {
+                    let value = next_value(&mut args, "--audio-output-device")?;
+                    if value.trim().is_empty() {
+                        anyhow::bail!("--audio-output-device cannot be blank");
+                    }
+                    audio_output_device = Some(value);
+                }
                 "--api-base-url" => api_base_url = next_value(&mut args, "--api-base-url")?,
                 "--verbose" | "-v" => verbose = true,
                 "--help" | "-h" => {
@@ -104,6 +116,7 @@ impl Config {
             ssh_mode,
             ssh_bin,
             audio_base_url,
+            audio_output_device,
             api_base_url,
             verbose,
         })
@@ -145,6 +158,7 @@ fn print_help() {
            --ssh-mode <mode>          SSH transport: native (default), openssh, or old\n\
            --ssh-bin <command>        SSH client command, including optional args (default: ssh)\n\
            --audio-base-url <url>     Audio base URL, without or with /stream\n\
+           --audio-output-device <n>  Audio output device name (default: system default)\n\
            --api-base-url <url>       API base URL used for /api/ws/pair\n\
            -v, --verbose              Enable debug logging to stderr\n\
          \n\
@@ -194,6 +208,19 @@ mod tests {
     fn from_args_accepts_identity_file_override() {
         let config = Config::from_args(["--key".to_string(), "/tmp/late-key".to_string()]).unwrap();
         assert_eq!(config.key_file, Some(PathBuf::from("/tmp/late-key")));
+    }
+
+    #[test]
+    fn from_args_accepts_audio_output_device_override() {
+        let config = Config::from_args([
+            "--audio-output-device".to_string(),
+            "Built-in Audio".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            config.audio_output_device,
+            Some("Built-in Audio".to_string())
+        );
     }
 
     #[test]

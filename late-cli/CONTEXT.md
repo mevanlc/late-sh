@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: `late-cli` - companion CLI for late.sh
 - Primary audience: LLM agents working on the CLI, human contributors
-- Last updated: 2026-05-22
+- Last updated: 2026-05-26
 - Status: Active
 - Stability note: Sections marked `[STABLE]` should change rarely. Sections marked `[VOLATILE]` are expected to change often.
 
@@ -105,6 +105,7 @@ Defaults in `src/config.rs`:
 - `--ssh-mode` / `LATE_SSH_MODE`: `native` default; also `openssh` or `old`
 - `--ssh-bin` / `LATE_SSH_BIN`: default `ssh`; parsed with shell-like quoting for OpenSSH/old modes
 - `--audio-base-url` / `LATE_AUDIO_BASE_URL`: default `https://audio.late.sh`
+- `--audio-output-device` / `LATE_AUDIO_OUTPUT_DEVICE`: optional exact CPAL output device name. When unset, the CLI uses the system default output device.
 - `--api-base-url` / `LATE_API_BASE_URL`: default `https://api.late.sh`
 - `LATE_WEBVIEW_LOG`: optional embedded YouTube helper stderr log path override. Default is `$XDG_STATE_HOME/late/webview.log`, `~/.local/state/late/webview.log`, or platform temp fallback.
 - `LATE_WEBVIEW_DEBUG_STDERR=1`: inherit the embedded YouTube helper's stderr instead of redirecting it to the helper log file. Useful with `late -v 2>late-debug.log` when diagnosing GTK/WebKit/GStreamer startup.
@@ -289,7 +290,7 @@ Embedded YouTube helper window:
 
 Audio path:
 1. Probe the MP3 stream with `SymphoniaStreamDecoder`.
-2. Choose the output sample rate from the default `cpal` output device.
+2. Choose the output sample rate from the configured `cpal` output device, or the system default when no device name is configured.
 3. Prefer the stream's native `44.1 kHz` when supported.
 4. If the device requires another rate, such as `48 kHz`, resample locally with streaming linear resampling.
 5. Decode frames into a lock-free SPSC playback ring buffer.
@@ -306,7 +307,7 @@ Platform notes:
 - WSL uses a dedicated audio profile: fixed 2048-frame CPAL buffer where possible, a short prebuffer before `stream.play()`, and fail-open startup. If local WSL audio cannot start, the CLI continues into SSH with audio disabled and points users to browser pairing or Windows-native `late.exe`.
 - On non-WSL, non-Android platforms, audio startup failure aborts the CLI before the interactive SSH session proceeds.
 - WSL startup failures include a targeted hint that checks `DISPLAY`, `WAYLAND_DISPLAY`, and `PULSE_SERVER`.
-- A working default local audio output device is required for full desktop CLI startup.
+- A working configured or default local audio output device is required for full desktop CLI startup.
 - MP3 is the only enabled stream format.
 - Stream URL normalization trims `/stream` and appends `/stream`.
 - Stream probing scans up to 64 KiB for MP3 sync/ID3 before probing.
@@ -414,13 +415,13 @@ Local end-to-end pairing needs:
 - `late-ssh` SSH reachable, usually `localhost:2222`
 - `late-web` stream proxy reachable, usually `localhost:3000/stream`
 - Icecast/Liquidsoap stack serving `/stream`
-- A usable default audio output device unless running on Android
+- A usable configured or default audio output device unless running on Android
 
 Troubleshooting:
 - SSH will not connect: check `--ssh-target`, `--ssh-port`, selected SSH mode, key path, known-host trust, and whether `ssh late.sh` works directly.
 - Native/OpenSSH token failure: verify the server supports `late-cli-token-v1`; native and OpenSSH modes intentionally do not fall back to the legacy banner.
 - Old mode token failure: verify the server emits `LATE_SESSION_TOKEN=...` when `LATE_CLI_MODE=1` is sent.
-- No audio: check local output device, stream URL, Icecast/Liquidsoap health, and WSL audio env (`DISPLAY`, `WAYLAND_DISPLAY`, `PULSE_SERVER`).
+- No audio: check local output device, `--audio-output-device` / `LATE_AUDIO_OUTPUT_DEVICE`, stream URL, Icecast/Liquidsoap health, and WSL audio env (`DISPLAY`, `WAYLAND_DISPLAY`, `PULSE_SERVER`).
 - Visualizer not updating: check token match, `/api/ws/pair` reachability, WebSocket scheme rewriting, and whether analyzer frames are being produced from post-output samples.
 - TUI volume keys do nothing: ensure the CLI is the latest paired client for that session token and is sending `client_state`.
 
@@ -434,7 +435,7 @@ Relevant TUI controls:
 
 ## 12. Current Known Gaps [VOLATILE]
 
-- CLI startup still depends on a working local audio output device for full desktop audio.
+- CLI startup still depends on a working configured or default local audio output device for full desktop audio.
 - On non-WSL, non-Android platforms, audio startup failure prevents the interactive SSH session from proceeding.
 - OpenSSH mode is Unix-only; Windows users should use native mode.
 - Old mode remains as a compatibility path and still depends on system OpenSSH plus PTY behavior.
