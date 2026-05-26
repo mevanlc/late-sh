@@ -2148,8 +2148,7 @@ fn open_hub_modal_globally(app: &mut App) {
     app.chat.close_overlay();
     app.chat.close_news_modal();
     app.chat.cancel_room_jump();
-    app.hub_state
-        .open(crate::app::hub::state::HubTab::Leaderboard);
+    app.hub_state.open(crate::app::hub::state::HubTab::Shop);
     app.show_hub_modal = true;
 }
 

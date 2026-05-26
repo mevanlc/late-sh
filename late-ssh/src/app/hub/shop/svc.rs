@@ -271,8 +271,13 @@ impl ShopService {
                 if owned {
                     owned_skus.insert(item.sku.clone());
                 }
-                let equipped = purchase.and_then(|purchase| purchase.equipped_slot.as_deref())
-                    == item.slot.as_deref();
+                let equipped = match (
+                    purchase.and_then(|purchase| purchase.equipped_slot.as_deref()),
+                    item.slot.as_deref(),
+                ) {
+                    (Some(equipped_slot), Some(item_slot)) => equipped_slot == item_slot,
+                    _ => false,
+                };
                 let badge_emoji = item
                     .payload
                     .get("emoji")

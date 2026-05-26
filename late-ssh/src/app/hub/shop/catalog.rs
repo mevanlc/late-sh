@@ -5,30 +5,23 @@ use super::svc::ShopCatalogItem;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShopCategory {
     Companions,
-    BasicBadges,
-    PremiumBadges,
+    Badges,
 }
 
 impl ShopCategory {
-    pub const ALL: [Self; 3] = [Self::Companions, Self::BasicBadges, Self::PremiumBadges];
+    pub const ALL: [Self; 2] = [Self::Companions, Self::Badges];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Companions => "Companions",
-            Self::BasicBadges => "Basic Badges",
-            Self::PremiumBadges => "Premium Badges",
+            Self::Badges => "Badges",
         }
     }
 
     pub fn matches_item(self, item: &ShopCatalogItem) -> bool {
         match self {
             Self::Companions => item.item_kind == "feature_unlock",
-            Self::BasicBadges => {
-                item.is_chat_badge() && item.badge_tier.as_deref() == Some("basic")
-            }
-            Self::PremiumBadges => {
-                item.is_chat_badge() && item.badge_tier.as_deref() == Some("premium")
-            }
+            Self::Badges => item.is_chat_badge(),
         }
     }
 }

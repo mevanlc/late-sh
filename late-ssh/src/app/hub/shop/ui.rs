@@ -71,16 +71,63 @@ fn draw_item_list(frame: &mut Frame, area: Rect, state: &ShopState) {
         return;
     }
 
-    let height = area.height.max(1) as usize;
-    let start = visible_window_start(state.selected_index(), items.len(), height);
-    let lines = items
+    let rows = item_list_rows(state.selected_category(), &items);
+    let selected_row = rows
         .iter()
-        .enumerate()
+        .position(
+            |row| matches!(row, ItemListRow::Item { index, .. } if *index == state.selected_index()),
+        )
+        .unwrap_or(state.selected_index());
+    let height = area.height.max(1) as usize;
+    let start = visible_window_start(selected_row, rows.len(), height);
+    let lines = rows
+        .iter()
         .skip(start)
         .take(height)
-        .map(|(index, item)| item_row(index == state.selected_index(), item))
+        .map(|row| match row {
+            ItemListRow::Section(label) => section_row(label),
+            ItemListRow::Item { index, item } => item_row(*index == state.selected_index(), item),
+        })
         .collect::<Vec<_>>();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+enum ItemListRow<'a> {
+    Section(&'static str),
+    Item { index: usize, item: &'a ShopCatalogItem },
+}
+
+fn item_list_rows<'a>(
+    category: ShopCategory,
+    items: &[&'a ShopCatalogItem],
+) -> Vec<ItemListRow<'a>> {
+    if category != ShopCategory::Badges {
+        return items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| ItemListRow::Item { index, item: *item })
+            .collect();
+    }
+
+    let mut rows = Vec::with_capacity(items.len() + 2);
+    let mut current_section = None;
+    for (index, item) in items.iter().enumerate() {
+        let section = badge_section_label(item);
+        if current_section != Some(section) {
+            rows.push(ItemListRow::Section(section));
+            current_section = Some(section);
+        }
+        rows.push(ItemListRow::Item { index, item: *item });
+    }
+    rows
+}
+
+fn badge_section_label(item: &ShopCatalogItem) -> &'static str {
+    match item.badge_tier.as_deref() {
+        Some("premium") => "Premium",
+        Some("basic") => "Basic",
+        _ => "Other",
+    }
 }
 
 fn visible_window_start(selected_index: usize, item_count: usize, height: usize) -> usize {
@@ -193,7 +240,7 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ShopState) {
         Span::raw("  "),
         Span::styled("j/k", key),
         Span::styled(" select  ", text),
-        Span::styled("] or [", key),
+        Span::styled("[/]", key),
         Span::styled(" subtab  ", text),
         Span::styled("Enter", key),
         Span::styled(format!(" {enter_label}"), text),
@@ -241,6 +288,18 @@ fn item_row(selected: bool, item: &ShopCatalogItem) -> Line<'static> {
         ),
         Span::styled(pad_display_width(&display_name, 22), name_style),
         Span::styled(status, status_style),
+    ])
+}
+
+fn section_row(label: &'static str) -> Line<'static> {
+    Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            label,
+            Style::default()
+                .fg(theme::TEXT_DIM())
+                .add_modifier(Modifier::BOLD),
+        ),
     ])
 }
 

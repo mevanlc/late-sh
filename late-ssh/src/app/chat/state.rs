@@ -2607,6 +2607,12 @@ impl ChatState {
             return;
         }
 
+        for user_id in snapshot.usernames.keys() {
+            if !snapshot.chat_badges.contains_key(user_id) {
+                self.chat_badges.remove(user_id);
+            }
+        }
+
         self.usernames.extend(snapshot.usernames);
         self.countries = snapshot.countries;
         self.ignored_user_ids = snapshot.ignored_user_ids.into_iter().collect();
@@ -2713,9 +2719,7 @@ impl ChatState {
                     if let Some(glyph) = author_bonsai_glyph {
                         self.bonsai_glyphs.insert(message.user_id, glyph);
                     }
-                    if let Some(badge) = author_chat_badge {
-                        self.chat_badges.insert(message.user_id, badge);
-                    }
+                    self.set_chat_badge(message.user_id, author_chat_badge.as_deref());
                     self.push_message(message);
                 }
                 ChatEvent::SendSucceeded {
@@ -2748,6 +2752,11 @@ impl ChatState {
                     self.loading_tail_rooms.remove(&room_id);
                     self.usernames.extend(usernames);
                     self.bonsai_glyphs.extend(bonsai_glyphs);
+                    for message in &messages {
+                        if !chat_badges.contains_key(&message.user_id) {
+                            self.chat_badges.remove(&message.user_id);
+                        }
+                    }
                     self.chat_badges.extend(chat_badges);
                     self.merge_room_tail(room_id, messages);
                     for (message_id, reactions) in message_reactions {
@@ -2889,9 +2898,7 @@ impl ChatState {
                     if let Some(glyph) = author_bonsai_glyph {
                         self.bonsai_glyphs.insert(message.user_id, glyph);
                     }
-                    if let Some(badge) = author_chat_badge {
-                        self.chat_badges.insert(message.user_id, badge);
-                    }
+                    self.set_chat_badge(message.user_id, author_chat_badge.as_deref());
                     self.replace_message(message);
                 }
                 ChatEvent::DiscoverRoomsLoaded { user_id, rooms } if self.user_id == user_id => {
