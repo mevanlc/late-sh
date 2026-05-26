@@ -7,6 +7,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicU64},
         mpsc,
     },
+    time::Duration,
 };
 use tokio::sync::broadcast;
 
@@ -52,6 +53,9 @@ mod output;
 use output::{PlaybackQueue, PlayedRing, build_output_stream, output_sample_rate_for};
 use ringbuf::{HeapRb, traits::Split};
 
+const AUDIO_STARTUP_RETRIES: usize = 3;
+const AUDIO_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(750);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AudioBackendProfile {
     Default,
@@ -95,9 +99,11 @@ impl AudioRuntime {
         profile: AudioBackendProfile,
     ) -> Result<Self> {
         let probe_url = audio_base_url.clone();
-        let source_spec = tokio::task::spawn_blocking(move || probe_stream_spec(&probe_url))
-            .await
-            .context("audio stream probe task failed")??;
+        let source_spec = tokio::task::spawn_blocking(move || {
+            probe_stream_spec_with_retries(&probe_url, AUDIO_STARTUP_RETRIES)
+        })
+        .await
+        .context("audio stream probe task failed")??;
         let output_sample_rate =
             output_sample_rate_for(source_spec, audio_output_device.as_deref())?;
         let queue_capacity = output_sample_rate as usize * source_spec.channels * 2;
@@ -185,6 +191,26 @@ fn prebuffer_samples(profile: AudioBackendProfile, sample_rate: u32, channels: u
         // short half-second runway there without increasing native-platform
         // latency.
         AudioBackendProfile::Wsl => (sample_rate as usize * channels) / 2,
+    }
+}
+
+fn probe_stream_spec_with_retries(audio_base_url: &str, max_retries: usize) -> Result<AudioSpec> {
+    let mut attempt = 0;
+    loop {
+        match probe_stream_spec(audio_base_url) {
+            Ok(spec) => return Ok(spec),
+            Err(err) if attempt < max_retries => {
+                attempt += 1;
+                tracing::warn!(
+                    error = ?err,
+                    attempt,
+                    max_retries,
+                    "audio stream probe failed during startup; retrying"
+                );
+                std::thread::sleep(AUDIO_STARTUP_RETRY_DELAY);
+            }
+            Err(err) => return Err(err),
+        }
     }
 }
 
