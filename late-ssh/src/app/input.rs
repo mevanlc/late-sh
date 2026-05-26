@@ -751,18 +751,13 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         return;
     }
 
-    // Ctrl+A opens the admin/mod aquarium preview. Artboard keeps Ctrl+A for
-    // swatch slot 1.
-    if matches!(event, ParsedInput::Byte(0x01))
-        && app.screen != Screen::Artboard
-        && (app.is_admin || app.is_moderator)
-    {
-        open_aquarium_modal_globally(app);
+    if matches!(event, ParsedInput::Byte(0x11)) {
+        toggle_aquarium_tray_globally(app);
         return;
     }
 
-    // Reserved global chords and the admin preview shortcut have already had
-    // first claim. Otherwise the existing modal stack owns input.
+    // Reserved global chords and tray shortcuts have already had first claim.
+    // Otherwise the existing modal stack owns input.
     if app.show_help {
         help_modal::input::handle_input(app, event);
         return;
@@ -780,11 +775,6 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
 
     if app.show_hub_modal {
         hub::input::handle_input(app, event);
-        return;
-    }
-
-    if app.show_aquarium_modal {
-        crate::app::hub::aquarium::input::handle_input(app, event);
         return;
     }
 
@@ -1451,10 +1441,6 @@ fn dispatch_escape(app: &mut App) {
         hub::input::handle_escape(app);
         return;
     }
-    if app.show_aquarium_modal {
-        crate::app::hub::aquarium::input::handle_escape(app);
-        return;
-    }
     if app.show_settings {
         settings_modal::input::handle_escape(app);
         return;
@@ -2082,7 +2068,6 @@ fn open_room_search_modal_globally(app: &mut App) {
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
-    app.show_aquarium_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
     app.cat_state.cancel_play();
@@ -2105,7 +2090,6 @@ fn open_settings_modal_globally(app: &mut App) {
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
-    app.show_aquarium_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
     app.cat_state.cancel_play();
@@ -2128,7 +2112,6 @@ fn open_pair_modal_globally(app: &mut App) {
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
-    app.show_aquarium_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
     app.cat_state.cancel_play();
@@ -2149,7 +2132,6 @@ fn open_hub_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
     app.show_help = false;
     app.show_mod_modal = false;
-    app.show_aquarium_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
     app.cat_state.cancel_play();
@@ -2168,26 +2150,16 @@ fn open_hub_modal_globally(app: &mut App) {
     app.show_hub_modal = true;
 }
 
-fn open_aquarium_modal_globally(app: &mut App) {
+fn toggle_aquarium_tray_globally(app: &mut App) {
     clear_prefix_arms(app);
-    app.show_help = false;
-    app.show_mod_modal = false;
-    app.show_hub_modal = false;
-    app.show_profile_modal = false;
-    app.show_bonsai_modal = false;
-    app.cat_state.cancel_play();
-    app.show_cat_modal = false;
-    app.show_settings = false;
-    app.show_terminal_help = false;
-    app.show_web_chat_qr = false;
-    app.web_chat_qr_url = None;
-    app.show_pair_modal = false;
-    app.show_quit_confirm = false;
-    app.icon_picker_open = false;
-    app.chat.close_overlay();
-    app.chat.close_news_modal();
-    app.chat.cancel_room_jump();
-    app.show_aquarium_modal = true;
+    if !app.shop_state.entitlements().has_aquarium() {
+        app.banner = Some(crate::app::common::primitives::Banner::error(
+            "Unlock Aquarium in Hub Shop",
+        ));
+        open_hub_modal_globally(app);
+        return;
+    }
+    app.show_aquarium_tray = !app.show_aquarium_tray;
 }
 
 fn open_terminal_help_modal_globally(app: &mut App) {
@@ -2195,7 +2167,6 @@ fn open_terminal_help_modal_globally(app: &mut App) {
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
-    app.show_aquarium_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
     app.cat_state.cancel_play();
@@ -2480,37 +2451,23 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             app.show_profile_modal = false;
             app.show_settings = false;
             app.show_hub_modal = false;
-            app.show_aquarium_modal = false;
             app.show_quit_confirm = false;
             app.show_bonsai_modal = true;
             true
         }
-        b'c' | b'C' if cat_launcher_available(app, ctx) => {
-            if !app.shop_state.entitlements().has_cat_companion() {
-                app.banner = Some(crate::app::common::primitives::Banner::error(
-                    "Unlock Cat Companion in Hub Shop",
-                ));
-                app.show_help = false;
-                app.show_profile_modal = false;
-                app.show_settings = false;
-                app.show_quit_confirm = false;
-                app.show_aquarium_modal = false;
-                app.show_bonsai_modal = false;
-                app.cat_state.cancel_play();
-                app.show_cat_modal = false;
-                app.hub_state.open(crate::app::hub::state::HubTab::Shop);
-                app.show_hub_modal = true;
-                return true;
-            }
+        b'c' | b'C'
+            if cat_launcher_available(app, ctx)
+                && app.shop_state.entitlements().has_cat_companion() =>
+        {
             app.show_help = false;
             app.show_profile_modal = false;
             app.show_settings = false;
             app.show_hub_modal = false;
-            app.show_aquarium_modal = false;
             app.show_quit_confirm = false;
             app.show_cat_modal = true;
             true
         }
+        b'c' | b'C' if cat_launcher_available(app, ctx) => true,
         b'1' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);
             app.set_screen(Screen::Dashboard);
