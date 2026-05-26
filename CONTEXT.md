@@ -365,6 +365,8 @@ There are no live upstream radio sources in `radio.liq`.
 
 Music binaries live in Cloudflare R2 (bucket configured via `MUSIC_BUCKET` GitHub var), synced to the Liquidsoap PVC at `/music/` during infra deploys by the `sync_music` job in `deploy_infra.yml`. Playlists are `.m3u` files in `infra/liquidsoap/` using Liquidsoap `annotate:` format and remain in git.
 
+Deploy workflows (`deploy.yml`, `deploy_web.yml`, `deploy_infra.yml`, `deploy_cli.yml`) trigger on published GitHub Releases and also support manual `workflow_dispatch` with explicit `release_tag` and `environment` inputs. Shared `ci`, `build`, and `terraform` workflow calls accept `source_ref`, so manual deploys check out the requested tag instead of the UI-selected branch. Use this as the recovery path when GitHub misses a release event.
+
 #### Music library [VOLATILE]
 
 All music is CC0 or CC-BY licensed. CC-BY tracks require attribution — handled automatically via `annotate:` metadata in `.m3u` files flowing through ICY metadata to the sidebar "now playing" display.
