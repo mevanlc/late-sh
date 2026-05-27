@@ -78,8 +78,15 @@ impl UltimateState {
             .and_then(|item| UltimateKind::from_sku(&item.sku))
     }
 
+    pub fn has_active_effect(&self) -> bool {
+        self.active_effects
+            .values()
+            .any(|effect| effect.started_at.elapsed() < effect.duration)
+    }
+
     pub fn apply_cast(&mut self, cast: &UltimateCast) -> Option<UltimateKind> {
         let kind = UltimateKind::from_id(&cast.ultimate_id)?;
+        self.active_effects.clear();
         self.active_effects.insert(
             kind,
             ActiveUltimateEffect {

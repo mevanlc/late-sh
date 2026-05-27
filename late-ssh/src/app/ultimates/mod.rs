@@ -62,6 +62,10 @@ impl App {
     }
 
     pub(crate) fn cast_ultimate(&mut self, kind: UltimateKind) {
+        if self.ultimate_state.has_active_effect() {
+            self.banner = Some(Banner::error("An ultimate is already active"));
+            return;
+        }
         if let Some(remaining) = self.ultimate_state.cooldown_remaining(kind) {
             self.banner = Some(Banner::error(&format!(
                 "{} is cooling down ({})",
@@ -228,7 +232,7 @@ mod tests {
     }
 
     #[test]
-    fn active_theme_effects_can_include_multiple_ultimates() {
+    fn new_cast_replaces_active_ultimate_effect() {
         let mut state = UltimateState::default();
 
         state.apply_cast(&UltimateCast {
@@ -244,11 +248,9 @@ mod tests {
 
         let effects = state.active_theme_effects();
 
-        assert_eq!(effects.len(), 2);
-        assert_eq!(effects[0].kind, effects::UltimateEffectKind::Wonderland);
-        assert_eq!(effects[1].kind, effects::UltimateEffectKind::Thematrix);
-        assert_eq!(effects[0].seed, 1);
-        assert_eq!(effects[1].seed, 2);
+        assert_eq!(effects.len(), 1);
+        assert_eq!(effects[0].kind, effects::UltimateEffectKind::Thematrix);
+        assert_eq!(effects[0].seed, 2);
     }
 
     fn item(sku: &str, item_kind: &str, owned: bool) -> ShopCatalogItem {
