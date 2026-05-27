@@ -262,9 +262,12 @@ mod tests {
             owned,
             equipped: false,
             quantity: 0,
+            active_quantity: 0,
             remaining_uses: None,
             badge_emoji: None,
             badge_tier: None,
+            aquarium_creature: None,
+            aquarium_size: None,
         }
     }
 }
