@@ -2101,25 +2101,6 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
         view.discover_selected,
     );
 
-    push_row(Line::from(""), None, false);
-    push_row(section_divider("Mobile"), None, false);
-    push_row(
-        Line::from(vec![
-            Span::styled(" C", Style::default().fg(theme::AMBER_DIM())),
-            Span::styled(" open web chat", Style::default().fg(theme::TEXT_DIM())),
-        ]),
-        None,
-        false,
-    );
-    push_row(
-        Line::from(Span::styled(
-            " 24h link, scan QR",
-            Style::default().fg(theme::TEXT_FAINT()),
-        )),
-        None,
-        false,
-    );
-
     RoomListRows {
         lines,
         hit_slots,

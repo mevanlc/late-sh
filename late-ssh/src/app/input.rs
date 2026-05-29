@@ -716,14 +716,6 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
         return;
     }
 
-    if app.show_web_chat_qr {
-        if input_dismisses_key_modal(&event) {
-            app.show_web_chat_qr = false;
-            app.web_chat_qr_url = None;
-        }
-        return;
-    }
-
     if is_room_search_shortcut(&event) {
         if app.room_search_modal_state.is_open() {
             app.room_search_modal_state.close();
@@ -800,7 +792,7 @@ fn handle_parsed_input(app: &mut App, event: ParsedInput) {
     }
 
     if app.show_cat_modal {
-        crate::app::cat::modal_input::handle_input(app, event);
+        crate::app::pet::modal_input::handle_input(app, event);
         return;
     }
 
@@ -1630,7 +1622,7 @@ fn dispatch_escape(app: &mut App) {
         return;
     }
     if app.show_cat_modal {
-        app.cat_state.cancel_play();
+        app.pet_state.cancel_play();
         app.show_cat_modal = false;
         return;
     }
@@ -1640,11 +1632,6 @@ fn dispatch_escape(app: &mut App) {
     }
     if app.show_pair_modal {
         app.show_pair_modal = false;
-        return;
-    }
-    if app.show_web_chat_qr {
-        app.show_web_chat_qr = false;
-        app.web_chat_qr_url = None;
         return;
     }
     if app.room_search_modal_state.is_open() {
@@ -2526,12 +2513,10 @@ fn open_room_search_modal_globally(app: &mut App) {
     app.show_hub_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
-    app.cat_state.cancel_play();
+    app.pet_state.cancel_play();
     app.show_cat_modal = false;
     app.show_settings = false;
     app.show_terminal_help = false;
-    app.show_web_chat_qr = false;
-    app.web_chat_qr_url = None;
     app.show_pair_modal = false;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
@@ -2548,10 +2533,9 @@ fn open_settings_modal_globally(app: &mut App) {
     app.show_hub_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
-    app.cat_state.cancel_play();
+    app.pet_state.cancel_play();
     app.show_cat_modal = false;
     app.show_terminal_help = false;
-    app.show_web_chat_qr = false;
     app.show_pair_modal = false;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
@@ -2570,12 +2554,10 @@ fn open_pair_modal_globally(app: &mut App) {
     app.show_hub_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
-    app.cat_state.cancel_play();
+    app.pet_state.cancel_play();
     app.show_cat_modal = false;
     app.show_settings = false;
     app.show_terminal_help = false;
-    app.show_web_chat_qr = false;
-    app.web_chat_qr_url = None;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
     app.chat.close_overlay();
@@ -2590,12 +2572,10 @@ fn open_hub_modal_globally(app: &mut App) {
     app.show_mod_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
-    app.cat_state.cancel_play();
+    app.pet_state.cancel_play();
     app.show_cat_modal = false;
     app.show_settings = false;
     app.show_terminal_help = false;
-    app.show_web_chat_qr = false;
-    app.web_chat_qr_url = None;
     app.show_pair_modal = false;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
@@ -2625,10 +2605,9 @@ fn open_terminal_help_modal_globally(app: &mut App) {
     app.show_hub_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
-    app.cat_state.cancel_play();
+    app.pet_state.cancel_play();
     app.show_cat_modal = false;
     app.show_settings = false;
-    app.show_web_chat_qr = false;
     app.show_pair_modal = false;
     app.show_quit_confirm = false;
     app.icon_picker_open = false;
@@ -2913,7 +2892,7 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         }
         b'c' | b'C'
             if cat_launcher_available(app, ctx)
-                && app.shop_state.entitlements().has_cat_companion() =>
+                && app.shop_state.entitlements().has_pet_companion() =>
         {
             app.show_help = false;
             app.show_profile_modal = false;
