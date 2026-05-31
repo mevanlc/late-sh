@@ -9,7 +9,7 @@ use ratatui::{
     text::{Line, Span},
 };
 
-const ALPHA_THRESHOLD: u8 = 127;
+const ALPHA_THRESHOLD: u8 = 128;
 const MAX_DECODED_IMAGE_PIXELS: u64 = 25_000_000;
 
 pub type InlineImagePreview = Vec<Line<'static>>;
@@ -265,6 +265,20 @@ mod tests {
         let span = cell_span(&CellOut {
             c: '┈' as u32,
             fg: 0x01ff_ffff,
+            bg: 0x0000_0000,
+        })
+        .expect("cell converts");
+
+        assert_eq!(span.content.as_ref(), " ");
+        assert_eq!(span.style.fg, None);
+        assert_eq!(span.style.bg, None);
+    }
+
+    #[test]
+    fn alpha_at_chafa_threshold_edge_renders_as_transparent() {
+        let span = cell_span(&CellOut {
+            c: '┈' as u32,
+            fg: 0x7fff_ffff,
             bg: 0x0000_0000,
         })
         .expect("cell converts");
