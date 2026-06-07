@@ -125,7 +125,10 @@ fn handle_active_lateania_key(app: &mut App, byte: u8) -> bool {
     let Some(state) = app.lateania_state.as_mut() else {
         return true;
     };
-    let _ = super::lateania::input::handle_key(state, byte);
+    if super::lateania::input::handle_key(state, byte) == super::lateania::input::InputAction::Leave
+    {
+        app.leave_lateania();
+    }
     true
 }
 

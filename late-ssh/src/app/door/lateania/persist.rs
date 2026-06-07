@@ -13,9 +13,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::classes::Class;
+use super::stats::AbilityScores;
 use super::world::RoomId;
 
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 3;
 const WORLD_SCHEMA_VERSION: u32 = 1;
 
 pub struct SavedCharacterInit {
@@ -25,8 +26,11 @@ pub struct SavedCharacterInit {
     pub gold: i64,
     pub hp: i32,
     pub room: RoomId,
+    pub visited: Vec<RoomId>,
     pub inventory: Vec<u32>,
     pub equipped: Vec<(String, u32)>,
+    pub scores: AbilityScores,
+    pub titles: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,11 +52,21 @@ pub struct SavedCharacter {
     /// Room the character logged out in; reloaded here if it still exists.
     #[serde(default = "start_room")]
     pub room: RoomId,
+    /// Rooms the character has visited, for the overhead map. Empty for pre-v3
+    /// saves, which simply start the map from wherever they reload.
+    #[serde(default)]
+    pub visited: Vec<RoomId>,
     #[serde(default)]
     pub inventory: Vec<u32>,
     /// Equipped items as (slot-key, item-id) pairs.
     #[serde(default)]
     pub equipped: Vec<(String, u32)>,
+    /// Rolled D&D ability scores; default (all 10s) for pre-v2 saves.
+    #[serde(default)]
+    pub scores: AbilityScores,
+    /// Titles earned by slaying notable foes (most recent last).
+    #[serde(default)]
+    pub titles: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -112,8 +126,11 @@ impl SavedCharacter {
             gold: init.gold,
             hp: init.hp,
             room: init.room,
+            visited: init.visited,
             inventory: init.inventory,
             equipped: init.equipped,
+            scores: init.scores,
+            titles: init.titles,
         }
     }
 
@@ -168,6 +185,8 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
+        let mut scores = AbilityScores::default();
+        scores.dexterity = 16;
         let c = SavedCharacter::new_for(SavedCharacterInit {
             class: Some(Class::Rogue),
             xp: 1234,
@@ -175,8 +194,11 @@ mod tests {
             gold: 560,
             hp: 42,
             room: 18,
+            visited: vec![1, 5, 18],
             inventory: vec![1300, 1301],
             equipped: vec![("weapon".to_string(), 1004)],
+            scores,
+            titles: vec!["Wyrmbane".to_string()],
         });
         let json = c.to_json();
         let back = SavedCharacter::from_json(&json).expect("parses");
@@ -184,8 +206,11 @@ mod tests {
         assert_eq!(back.xp, 1234);
         assert_eq!(back.level, 7);
         assert_eq!(back.gold, 560);
+        assert_eq!(back.visited, vec![1, 5, 18]);
         assert_eq!(back.inventory, vec![1300, 1301]);
         assert_eq!(back.equipped, vec![("weapon".to_string(), 1004)]);
+        assert_eq!(back.scores.dexterity, 16);
+        assert_eq!(back.titles, vec!["Wyrmbane".to_string()]);
     }
 
     #[test]
@@ -202,6 +227,7 @@ mod tests {
         assert_eq!(c.class(), Some(Class::Mage));
         assert_eq!(c.level, 1);
         assert_eq!(c.room, 1);
+        assert!(c.visited.is_empty());
         assert!(c.inventory.is_empty());
     }
 

@@ -1618,7 +1618,7 @@ impl ChatService {
 
     async fn ensure_room_scoped_command_access(
         &self,
-        client: &Client,
+        client: &tokio_postgres::Client,
         user_id: Uuid,
         room_id: Uuid,
         command: RoomScopedCommand,

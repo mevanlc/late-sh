@@ -19,6 +19,7 @@ use super::{
     classes::Class,
     state::{Panel, State},
     svc::{LogKind, PlayerView},
+    world::{Dir, MapCell, MiniMap},
 };
 
 const SIDE_WIDE: u16 = 34;
@@ -91,7 +92,7 @@ pub fn draw_page(frame: &mut Frame, area: Rect, state: &State, usernames: &Usern
     draw_game(frame, rows[1], state, usernames);
 }
 
-fn draw_class_select(frame: &mut Frame, area: Rect, _view: &PlayerView) {
+fn draw_class_select(frame: &mut Frame, area: Rect, view: &PlayerView) {
     let mut lines = vec![
         Line::from(Span::styled(
             "~ LATEANIA ~",
@@ -101,6 +102,16 @@ fn draw_class_select(frame: &mut Frame, area: Rect, _view: &PlayerView) {
         )),
         Line::from(Span::styled(
             "Choose your calling. Press its number.",
+            Style::default().fg(theme::TEXT_DIM()),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "Your rolled fate (4d6, drop lowest):",
+            Style::default().fg(theme::AMBER()),
+        )),
+        score_row(view),
+        Line::from(Span::styled(
+            "Press r to reroll - your scores lock the moment you choose a class.",
             Style::default().fg(theme::TEXT_DIM()),
         )),
         Line::raw(""),
@@ -181,6 +192,7 @@ fn draw_side(
         Panel::Abilities => abilities_panel(view),
         Panel::Inventory => inventory_panel(view, state.cursor()),
         Panel::Shop => shop_panel(view, state.cursor()),
+        Panel::Examine => examine_panel(view, state.cursor()),
     };
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -280,7 +292,62 @@ fn room_panel(view: &PlayerView, usernames: &UsernameLookup<'_>) -> Vec<Line<'st
     }
     lines.push(Line::raw(""));
     lines.extend(footer_hints(view));
+    lines.push(Line::raw(""));
+    lines.extend(minimap_lines(&view.minimap));
     lines
+}
+
+/// The overhead minimap section: a small map of the explored neighbourhood,
+/// painted in the bottom corner of the Room panel.
+fn minimap_lines(map: &MiniMap) -> Vec<Line<'static>> {
+    if map.grid.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![section("Map")];
+    for row in &map.grid {
+        let mut spans = vec![Span::raw("  ")];
+        spans.extend(row.iter().map(|cell| map_cell_span(*cell)));
+        lines.push(Line::from(spans));
+    }
+    // Vertical exits can't sit on a flat map; note them in words instead.
+    let mut stairs = Vec::new();
+    if map.up {
+        stairs.push("up");
+    }
+    if map.down {
+        stairs.push("down");
+    }
+    if !stairs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("  stairs: {}", stairs.join(", ")),
+            Style::default().fg(theme::TEXT_DIM()),
+        )));
+    }
+    lines.push(Line::from(Span::styled(
+        "  @=you o=seen .=new",
+        Style::default().fg(theme::TEXT_FAINT()),
+    )));
+    lines
+}
+
+/// One char-cell of the minimap, styled by what it represents.
+fn map_cell_span(cell: MapCell) -> Span<'static> {
+    let (glyph, color) = match cell {
+        MapCell::Empty => (' ', theme::TEXT_FAINT()),
+        MapCell::Current => ('@', theme::AMBER_GLOW()),
+        MapCell::Visited => ('o', theme::AMBER_DIM()),
+        MapCell::Frontier => ('.', theme::TEXT_FAINT()),
+        MapCell::ConnH => ('-', theme::BORDER()),
+        MapCell::ConnV => ('|', theme::BORDER()),
+        MapCell::ConnSlash => ('/', theme::BORDER()),
+        MapCell::ConnBack => ('\\', theme::BORDER()),
+        MapCell::ConnCross => ('X', theme::BORDER()),
+    };
+    let mut style = Style::default().fg(color);
+    if cell == MapCell::Current {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    Span::styled(glyph.to_string(), style)
 }
 
 fn character_panel(view: &PlayerView) -> Vec<Line<'static>> {
@@ -290,6 +357,15 @@ fn character_panel(view: &PlayerView) -> Vec<Line<'static>> {
     lines.push(stat("attack", view.attack.to_string()));
     lines.push(stat("armor", view.armor.to_string()));
     lines.push(Line::raw(""));
+    lines.push(section("Scores"));
+    lines.push(score_row(view));
+    if view.resurrection_cap > 0 {
+        lines.push(stat(
+            "revives",
+            format!("{}/{}", view.resurrections_left, view.resurrection_cap),
+        ));
+    }
+    lines.push(Line::raw(""));
     lines.push(section("Trait"));
     lines.push(Line::from(Span::styled(
         format!("  {}", view.trait_name),
@@ -298,6 +374,16 @@ fn character_panel(view: &PlayerView) -> Vec<Line<'static>> {
             .add_modifier(Modifier::BOLD),
     )));
     lines.extend(wrap(&view.trait_desc, 30));
+    if !view.titles.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(section("Titles"));
+        for title in &view.titles {
+            lines.push(Line::from(Span::styled(
+                format!("  {title}"),
+                Style::default().fg(theme::BADGE_GOLD()),
+            )));
+        }
+    }
     lines.push(Line::raw(""));
     lines.push(section("Experience"));
     if view.xp_for_next > 0 {
@@ -314,6 +400,59 @@ fn character_panel(view: &PlayerView) -> Vec<Line<'static>> {
     lines.push(Line::raw(""));
     lines.push(hint("c", "close  v abilities  t bag"));
     lines
+}
+
+/// Examine panel: the lookable things in the current room.
+fn examine_panel(view: &PlayerView, cursor: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![section("Look at")];
+    if view.features.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  nothing of note here",
+            Style::default().fg(theme::TEXT_DIM()),
+        )));
+    }
+    for (i, feat) in view.features.iter().enumerate() {
+        let selected = i == cursor;
+        let marker = if selected { ">" } else { " " };
+        let tag = if feat.kind.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", feat.kind)
+        };
+        let style = if selected {
+            Style::default()
+                .fg(theme::TEXT_BRIGHT())
+                .bg(theme::BG_SELECTION())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::TEXT())
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} {}{}", feat.name, tag),
+            style,
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(hint("w/s", "select  Enter look"));
+    lines.push(hint("o", "close"));
+    lines
+}
+
+/// One compact line of the six ability scores with their modifiers.
+fn score_row(view: &PlayerView) -> Line<'static> {
+    let mut spans = vec![Span::raw("  ")];
+    for (label, value, modifier) in view.scores.rows() {
+        let sign = if modifier >= 0 { "+" } else { "" };
+        spans.push(Span::styled(
+            format!("{label} "),
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+        spans.push(Span::styled(
+            format!("{value}({sign}{modifier}) "),
+            Style::default().fg(theme::TEXT_BRIGHT()),
+        ));
+    }
+    Line::from(spans)
 }
 
 fn abilities_panel(view: &PlayerView) -> Vec<Line<'static>> {
@@ -461,13 +600,24 @@ fn footer_hints(view: &PlayerView) -> Vec<Line<'static>> {
     } else {
         lines.push(hint("wasd/arrows", "move"));
         lines.push(hint("yunm", "diagonals"));
-        lines.push(hint("space", "attack  o look"));
+        // Vertical exits aren't on the wasd/diagonal keys, so spell out the
+        // stair keys - but only when this room actually has a way up or down,
+        // so the hint appears exactly when the player needs it.
+        let has_up = view.exits.iter().any(|(dir, _)| *dir == Dir::Up);
+        let has_down = view.exits.iter().any(|(dir, _)| *dir == Dir::Down);
+        match (has_up, has_down) {
+            (true, true) => lines.push(hint("< >", "climb up / go down")),
+            (true, false) => lines.push(hint("<", "climb up")),
+            (false, true) => lines.push(hint(">", "go down")),
+            (false, false) => {}
+        }
+        lines.push(hint("space", "attack  o look at things"));
     }
     lines.push(hint("c v t", "sheet abilities bag"));
     if view.shop.is_some() {
         lines.push(hint("b", "shop"));
     }
-    lines.push(hint("q", "leave"));
+    lines.push(hint("Esc", "leave"));
     lines
 }
 

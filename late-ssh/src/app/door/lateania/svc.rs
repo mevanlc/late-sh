@@ -17,10 +17,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Utc;
 use late_core::{
     MutexRecover,
     db::Db,
-    models::{mud_character::MudCharacter, mud_world_state::MudWorldState},
+    models::{mud_character::MudCharacter, mud_world_state::MudWorldState, user::User},
 };
 use rand::Rng;
 use tokio::sync::{Mutex, watch};
@@ -35,7 +36,8 @@ use super::items::{ItemKind, Slot, item, shop_at};
 use super::persist::{
     SavedCharacter, SavedCharacterInit, SavedMob, SavedMobDot, SavedMobStun, SavedWorld,
 };
-use super::world::{Dir, MobSpawn, RoomId, World, seed_world};
+use super::stats::AbilityScores;
+use super::world::{Dir, FeatureKind, MiniMap, MobSpawn, RoomId, World, features_at, seed_world};
 
 /// World heartbeat. One combat round resolves per tick.
 const TICK_SECS: u64 = 2;
@@ -51,6 +53,13 @@ const AUTOSAVE_SECS: u64 = 60;
 /// How often the shared world runtime snapshot is persisted.
 const WORLD_AUTOSAVE_SECS: u64 = 15;
 const LATEANIA_WORLD_KEY: &str = "lateania";
+
+/// Account age (in days) at which an adventurer is a "citizen" of Lateania and
+/// earns extra resurrections.
+const VETERAN_DAYS: i64 = 20;
+/// In-place resurrections a veteran gets per adventure (refreshed at a capital
+/// fountain). Newer accounts get none and respawn at the temple as before.
+const VETERAN_RESURRECTIONS: u8 = 2;
 
 #[derive(Clone)]
 pub struct LateaniaService {
@@ -96,6 +105,14 @@ pub struct OccupantView {
     pub hp: i32,
     pub max_hp: i32,
     pub in_combat: bool,
+}
+
+/// One lookable thing in the current room, as shown in the Examine panel.
+#[derive(Clone, Debug)]
+pub struct FeatureView {
+    pub name: String,
+    /// Short kind tag ("fountain", "plaque", "vista", or "" for plain scenery).
+    pub kind: String,
 }
 
 /// One known ability as shown on the action bar.
@@ -179,6 +196,17 @@ pub struct PlayerView {
     pub shop: Option<ShopView>,
     pub log: Vec<LogLine>,
     pub respawning: bool,
+    /// Rolled D&D ability scores (shown on the select screen and sheet).
+    pub scores: AbilityScores,
+    /// Titles earned by slaying notable foes.
+    pub titles: Vec<String>,
+    /// Veteran in-place resurrections remaining / total this adventure.
+    pub resurrections_left: u8,
+    pub resurrection_cap: u8,
+    /// Lookable things in the current room (Examine panel).
+    pub features: Vec<FeatureView>,
+    /// Overhead map of the explored neighbourhood around the player.
+    pub minimap: MiniMap,
 }
 
 impl PlayerView {
@@ -215,6 +243,12 @@ impl PlayerView {
             shop: None,
             log: Vec::new(),
             respawning: false,
+            scores: AbilityScores::default(),
+            titles: Vec::new(),
+            resurrections_left: 0,
+            resurrection_cap: 0,
+            features: Vec::new(),
+            minimap: MiniMap::default(),
         }
     }
 }
@@ -319,6 +353,16 @@ impl LateaniaService {
                 }
             };
 
+            // Accounts older than VETERAN_DAYS earn extra resurrections. Best
+            // effort: any DB failure simply means "not a veteran".
+            let veteran = match svc.db.get().await {
+                Ok(client) => match User::get(&client, user_id).await {
+                    Ok(Some(user)) => (Utc::now() - user.created).num_days() >= VETERAN_DAYS,
+                    _ => false,
+                },
+                Err(_) => false,
+            };
+
             let mut state = svc.state.lock().await;
             if !svc.has_active_session(user_id) {
                 return;
@@ -333,6 +377,7 @@ impl LateaniaService {
             };
             if !state.players.contains_key(&user_id) {
                 state.join(user_id);
+                state.set_veteran(user_id, veteran);
                 if let Some(saved) = saved {
                     state.hydrate(user_id, &saved);
                 }
@@ -611,6 +656,42 @@ impl LateaniaService {
         }
     }
 
+    /// Persist every present character right now. Called on graceful server
+    /// shutdown so an adventure in progress is not lost to the gap between
+    /// autosaves; mirrors the artboard/pinstar shutdown flushes in main. Saves
+    /// are best-effort (each logs on failure), so this always returns Ok.
+    pub async fn flush_all(&self) -> anyhow::Result<()> {
+        let (saves, world_save): (Vec<PendingSave>, Option<SavedWorld>) = {
+            let mut state = self.state.lock().await;
+            let saves = state
+                .export_all_saved()
+                .into_iter()
+                .filter_map(|(user_id, saved)| self.prepare_persist(user_id, saved))
+                .collect();
+            let world_save = if state.world_dirty {
+                state.world_dirty = false;
+                Some(state.export_world_saved())
+            } else {
+                None
+            };
+            (saves, world_save)
+        };
+        let count = saves.len();
+        for save in saves {
+            self.persist(save).await;
+        }
+        let mut world_flushed = false;
+        if let Some(saved) = world_save {
+            world_flushed = true;
+            if !self.persist_world(saved).await {
+                let mut state = self.state.lock().await;
+                state.world_dirty = true;
+            }
+        }
+        tracing::info!(count, world_flushed, "flushed lateania during shutdown");
+        Ok(())
+    }
+
     pub fn choose_class_task(&self, user_id: Uuid, class: Class) {
         self.mutate(user_id, move |s| s.choose_class(user_id, class));
     }
@@ -621,6 +702,17 @@ impl LateaniaService {
 
     pub fn look_task(&self, user_id: Uuid) {
         self.mutate(user_id, move |s| s.look(user_id));
+    }
+
+    /// Re-roll ability scores on the selection screen (before a class is chosen).
+    pub fn reroll_task(&self, user_id: Uuid) {
+        self.mutate(user_id, move |s| s.reroll(user_id));
+    }
+
+    /// Examine the indexed lookable feature in the current room (and use it,
+    /// for fountains).
+    pub fn interact_task(&self, user_id: Uuid, idx: usize) {
+        self.mutate(user_id, move |s| s.interact(user_id, idx));
     }
 
     pub fn attack_task(&self, user_id: Uuid) {
@@ -770,6 +862,8 @@ struct PlayerState {
     level: i32,
     gold: i64,
     room: RoomId,
+    /// Every room this character has stood in, for the overhead map.
+    visited: HashSet<RoomId>,
     target: Option<u32>,
     /// True from engaging until the first auto-attack lands (Rogue opening crit).
     opening_strike: bool,
@@ -789,6 +883,13 @@ struct PlayerState {
     equipped: HashMap<Slot, u32>,
     /// True once the class trait's death-save has been spent this life (Warrior).
     death_save_used: bool,
+    /// Rolled D&D ability scores; feed bonus HP (CON) and attack (class key).
+    scores: AbilityScores,
+    /// Titles earned by slaying notable foes.
+    titles: Vec<String>,
+    /// Veteran in-place resurrections: total this adventure and how many remain.
+    resurrection_cap: u8,
+    resurrections_left: u8,
     last_activity: Instant,
     respawn_at: Option<Instant>,
     log: Vec<LogLine>,
@@ -811,12 +912,13 @@ impl PlayerState {
 
     fn max_hp(&self) -> i32 {
         let (_, hp, _) = self.equipment_mods();
-        self.base_max_hp + hp
+        (self.base_max_hp + hp + self.scores.hp_bonus(self.level)).max(1)
     }
 
     fn attack(&self) -> i32 {
         let (atk, _, _) = self.equipment_mods();
-        self.base_attack + atk + self.empower
+        let stat = self.class.map(|c| self.scores.attack_bonus(c)).unwrap_or(0);
+        (self.base_attack + atk + self.empower + stat).max(1)
     }
 
     fn armor(&self) -> i32 {
@@ -907,6 +1009,7 @@ impl WorldState {
             level: 1,
             gold: STARTING_GOLD,
             room: start,
+            visited: HashSet::from([start]),
             target: None,
             opening_strike: false,
             empower: 0,
@@ -919,6 +1022,10 @@ impl WorldState {
             inventory: vec![1000, 1300, 1300], // a rusty sword and two minor draughts
             equipped: HashMap::new(),
             death_save_used: false,
+            scores: AbilityScores::roll(),
+            titles: Vec::new(),
+            resurrection_cap: 0,
+            resurrections_left: 0,
             last_activity: Instant::now(),
             respawn_at: None,
             log: Vec::new(),
@@ -926,7 +1033,8 @@ impl WorldState {
         push_log(
             &mut player.log,
             LogKind::System,
-            "Welcome to Lateania. Choose your calling to begin.".to_string(),
+            "Welcome to Lateania. Your fate is rolled - reroll it (r) if you dare, then choose your calling."
+                .to_string(),
         );
         self.players.insert(user_id, player);
         true
@@ -959,6 +1067,47 @@ impl WorldState {
             format!("You are now a {name}. Your trait: {trait_name}."),
         );
         self.describe_room(user_id);
+    }
+
+    /// Grant (or clear) the veteran resurrection allowance for this adventure.
+    /// Called once on join from the account-age check; a fresh adventure starts
+    /// with a full set of charges.
+    fn set_veteran(&mut self, user_id: Uuid, veteran: bool) {
+        let cap = if veteran { VETERAN_RESURRECTIONS } else { 0 };
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.resurrection_cap = cap;
+            p.resurrections_left = cap;
+        }
+        if veteran {
+            self.log_to(
+                user_id,
+                LogKind::System,
+                format!(
+                    "Twenty days a citizen of Lateania - the world grants you {cap} resurrections this adventure."
+                ),
+            );
+        }
+    }
+
+    /// Re-roll ability scores. Only allowed before a class is chosen, so a build
+    /// is locked the moment you commit to a calling.
+    fn reroll(&mut self, user_id: Uuid) {
+        let unclassed = self
+            .players
+            .get(&user_id)
+            .map(|p| p.class.is_none())
+            .unwrap_or(false);
+        if !unclassed {
+            return;
+        }
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.scores = AbilityScores::roll();
+        }
+        self.log_to(
+            user_id,
+            LogKind::System,
+            "You cast the bones of fate anew. Fresh scores settle into place.".to_string(),
+        );
     }
 
     fn leave(&mut self, user_id: Uuid) {
@@ -1005,6 +1154,8 @@ impl WorldState {
             p.resource_regen = stats.resource_regen;
             p.base_attack = stats.attack;
             p.room = room;
+            p.visited = saved.visited.iter().copied().collect();
+            p.visited.insert(room);
             p.inventory = saved
                 .inventory
                 .iter()
@@ -1020,7 +1171,10 @@ impl WorldState {
                     p.equipped.insert(slot, *id);
                 }
             }
-            // Restore vitals last so equipment max-hp is already in effect.
+            // Rolled scores and earned titles persist across sessions.
+            p.scores = saved.scores;
+            p.titles = saved.titles.clone();
+            // Restore vitals last so equipment and CON max-hp are already in effect.
             let max = p.max_hp();
             p.hp = if saved.hp > 0 { saved.hp.min(max) } else { max };
         }
@@ -1050,8 +1204,15 @@ impl WorldState {
             gold: p.gold,
             hp: p.hp.max(1),
             room: p.room,
+            visited: {
+                let mut rooms: Vec<RoomId> = p.visited.iter().copied().collect();
+                rooms.sort_unstable();
+                rooms
+            },
             inventory: p.inventory.clone(),
             equipped,
+            scores: p.scores,
+            titles: p.titles.clone(),
         }))
     }
 
@@ -1200,6 +1361,7 @@ impl WorldState {
         };
         if let Some(player) = self.players.get_mut(&user_id) {
             player.room = dest;
+            player.visited.insert(dest);
         }
         self.describe_room(user_id);
     }
@@ -1248,6 +1410,58 @@ impl WorldState {
         for mob in mob_names {
             self.log_to(user_id, LogKind::Combat, format!("{mob} is here."));
         }
+        // Note lookable things without revealing them - you must look (o) to see
+        // their description.
+        let features = features_at(room_id);
+        if !features.is_empty() {
+            let names: Vec<&str> = features.iter().map(|f| f.name).collect();
+            self.log_to(
+                user_id,
+                LogKind::System,
+                format!(
+                    "You notice {} here. Press o to look closer.",
+                    join_with_and(&names)
+                ),
+            );
+        }
+    }
+
+    /// Examine the indexed lookable feature in the current room. The feature's
+    /// description is revealed only here (the "look at things" rule); fountains
+    /// in a safe capital also restore vitals and refresh resurrection charges.
+    fn interact(&mut self, user_id: Uuid, idx: usize) {
+        let room_id = match self.players.get(&user_id) {
+            Some(p) => p.room,
+            None => return,
+        };
+        let features = features_at(room_id);
+        let Some(feat) = features.get(idx) else {
+            return;
+        };
+        self.log_to(
+            user_id,
+            LogKind::Normal,
+            format!("You look at {}.", feat.name),
+        );
+        self.log_to(user_id, LogKind::Normal, feat.desc.to_string());
+        if feat.kind == FeatureKind::Fountain {
+            let safe = self.world.room(room_id).is_some_and(|r| r.safe);
+            if safe {
+                if let Some(p) = self.players.get_mut(&user_id) {
+                    let max = p.max_hp();
+                    p.hp = max;
+                    p.resource = p.max_resource;
+                    p.resurrections_left = p.resurrection_cap;
+                }
+                self.log_to(
+                    user_id,
+                    LogKind::Loot,
+                    "The fountain's clear waters wash through you. Health and power are restored, and your strength to rise again renews."
+                        .to_string(),
+                );
+            }
+        }
+        self.dirty = true;
     }
 
     fn engage(&mut self, user_id: Uuid) {
@@ -1582,10 +1796,33 @@ impl WorldState {
             p.gold += gold as i64;
         }
         self.roll_loot(user_id, &mob_name, loot, boss);
+        self.grant_title(user_id, &mob_name, boss);
         self.check_level_up(user_id);
         self.pending_kills.push(KillOutcome { user_id, mob_name });
         self.dirty = true;
         self.mark_world_dirty();
+    }
+
+    /// Award a title themed on a slain foe, the first time that foe is felled.
+    /// Bosses confer a "Bane of ..." honorific; lesser foes a "...bane" epithet.
+    fn grant_title(&mut self, user_id: Uuid, mob_name: &str, boss: bool) {
+        let title = title_for(mob_name, boss);
+        let is_new = self
+            .players
+            .get(&user_id)
+            .map(|p| !p.titles.contains(&title))
+            .unwrap_or(false);
+        if !is_new {
+            return;
+        }
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.titles.push(title.clone());
+        }
+        self.log_to(
+            user_id,
+            LogKind::Loot,
+            format!("A new title is yours: {title}."),
+        );
     }
 
     /// Award loot from a slain mob. Bosses always drop one item from their table;
@@ -1684,6 +1921,7 @@ impl WorldState {
             Some((dir, dest)) => {
                 if let Some(player) = self.players.get_mut(&user_id) {
                     player.room = dest;
+                    player.visited.insert(dest);
                 }
                 self.log_to(
                     user_id,
@@ -2127,6 +2365,28 @@ impl WorldState {
                 );
                 return;
             }
+            // Veteran resurrection: a citizen of twenty days rises where they fell
+            // instead of waking back at the temple. Refreshes at a capital fountain.
+            if p.resurrections_left > 0 {
+                p.resurrections_left -= 1;
+                let left = p.resurrections_left;
+                let max = p.max_hp();
+                p.hp = max;
+                p.resource = p.max_resource;
+                p.target = None;
+                p.shield = 0;
+                p.empower = 0;
+                p.death_save_used = false;
+                let plural = if left == 1 { "" } else { "s" };
+                self.log_to(
+                    user_id,
+                    LogKind::System,
+                    format!(
+                        "{mob_name} {verb} you down - but Lateania will not have you yet. You rise where you stand. ({left} resurrection{plural} left this adventure.)"
+                    ),
+                );
+                return;
+            }
             p.hp = 0;
             p.target = None;
             p.respawn_at = Some(now + Duration::from_secs(PLAYER_RESPAWN_SECS));
@@ -2293,6 +2553,16 @@ impl WorldState {
                 xp_for_level(player.level + 1) - xp_for_level(player.level)
             };
 
+            let features: Vec<FeatureView> = features_at(player.room)
+                .iter()
+                .map(|f| FeatureView {
+                    name: f.name.to_string(),
+                    kind: f.kind.tag().to_string(),
+                })
+                .collect();
+
+            let minimap = self.world.minimap(player.room, &player.visited, 3, 2);
+
             players.insert(
                 *user_id,
                 PlayerView {
@@ -2327,6 +2597,12 @@ impl WorldState {
                     shop,
                     log: player.log.clone(),
                     respawning: player.respawn_at.is_some(),
+                    scores: player.scores,
+                    titles: player.titles.clone(),
+                    resurrections_left: player.resurrections_left,
+                    resurrection_cap: player.resurrection_cap,
+                    features,
+                    minimap,
                 },
             );
         }
@@ -2344,6 +2620,41 @@ fn defense_tag(defense: Defense, _dtype: DamageType) -> &'static str {
         Defense::Weak => " - it's weak to this!",
         Defense::Resist => " - resisted",
         Defense::Normal => "",
+    }
+}
+
+/// Derive a title from a slain foe. Bosses already read as proper names ("the
+/// Barrow King") and become "Bane of ..."; lesser foes ("a frost-bound wretch")
+/// lend their creature word to a "...bane" epithet ("Wretchbane").
+fn title_for(mob_name: &str, boss: bool) -> String {
+    let trimmed = mob_name.trim();
+    let core = trimmed
+        .strip_prefix("a ")
+        .or_else(|| trimmed.strip_prefix("an "))
+        .unwrap_or(trimmed);
+    if boss {
+        return format!("Bane of {core}");
+    }
+    let last = core
+        .rsplit([' ', '-'])
+        .find(|w| !w.is_empty())
+        .unwrap_or("Foe");
+    let mut chars = last.chars();
+    let capitalized = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => "Foe".to_string(),
+    };
+    format!("{capitalized}bane")
+}
+
+/// Join a short list into prose: "the fountain", "the fountain and the plaque",
+/// "the fountain, the plaque, and the vista".
+fn join_with_and(items: &[&str]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.to_string(),
+        [a, b] => format!("{a} and {b}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
     }
 }
 
@@ -2458,5 +2769,87 @@ mod tests {
         );
         s.strike_player(uid(1), 9999, DamageType::Physical, "a test foe");
         assert!(s.players[&uid(1)].respawn_at.is_some(), "second blow falls");
+    }
+
+    #[test]
+    fn slaying_a_foe_grants_a_themed_title() {
+        let mut s = world();
+        s.join(uid(1));
+        s.choose_class(uid(1), Class::Mage);
+        s.grant_title(uid(1), "a frost-bound wretch", false);
+        s.grant_title(uid(1), "the Barrow King", true);
+        // Re-slaying the same foe must not duplicate its title.
+        s.grant_title(uid(1), "a frost-bound wretch", false);
+        let titles = s.players[&uid(1)].titles.clone();
+        assert!(
+            titles.iter().any(|t| t == "Wretchbane"),
+            "lesser foe -> ...bane"
+        );
+        assert!(
+            titles.iter().any(|t| t == "Bane of the Barrow King"),
+            "boss -> Bane of ..."
+        );
+        assert_eq!(titles.iter().filter(|t| *t == "Wretchbane").count(), 1);
+    }
+
+    #[test]
+    fn veteran_resurrects_in_place_then_falls_when_spent() {
+        let mut s = world();
+        s.join(uid(1));
+        s.set_veteran(uid(1), true);
+        s.choose_class(uid(1), Class::Mage); // mage has no Warrior death-save
+        assert_eq!(s.players[&uid(1)].resurrection_cap, VETERAN_RESURRECTIONS);
+        for expected_left in (0..VETERAN_RESURRECTIONS).rev() {
+            s.strike_player(uid(1), 9999, DamageType::Physical, "a test foe");
+            let p = &s.players[&uid(1)];
+            assert!(p.respawn_at.is_none(), "veteran rises where they fall");
+            assert_eq!(p.hp, p.max_hp(), "revived at full health");
+            assert_eq!(p.resurrections_left, expected_left);
+        }
+        s.strike_player(uid(1), 9999, DamageType::Physical, "a test foe");
+        assert!(
+            s.players[&uid(1)].respawn_at.is_some(),
+            "out of charges, falls"
+        );
+    }
+
+    #[test]
+    fn a_capital_fountain_restores_vitals_and_revives() {
+        let mut s = world();
+        s.join(uid(1));
+        s.set_veteran(uid(1), true);
+        s.choose_class(uid(1), Class::Mage);
+        if let Some(p) = s.players.get_mut(&uid(1)) {
+            p.room = 620; // Tasmania's Harborgate Square (safe capital)
+            p.hp = 1;
+            p.resource = 0;
+            p.resurrections_left = 0;
+        }
+        s.interact(uid(1), 0); // feature 0 in the square is the fountain
+        let p = &s.players[&uid(1)];
+        assert_eq!(p.hp, p.max_hp(), "fountain heals to full");
+        assert_eq!(p.resource, p.max_resource, "fountain restores resource");
+        assert_eq!(
+            p.resurrections_left, p.resurrection_cap,
+            "fountain refreshes resurrection charges"
+        );
+    }
+
+    #[test]
+    fn ability_scores_change_derived_stats() {
+        let mut s = world();
+        s.join(uid(1));
+        s.choose_class(uid(1), Class::Warrior); // STR is the warrior's key score
+        let base_attack = s.players[&uid(1)].attack();
+        let base_hp = s.players[&uid(1)].max_hp();
+        if let Some(p) = s.players.get_mut(&uid(1)) {
+            p.scores.strength = 18; // +4
+            p.scores.constitution = 18; // +4
+        }
+        assert!(
+            s.players[&uid(1)].attack() > base_attack,
+            "STR raises attack"
+        );
+        assert!(s.players[&uid(1)].max_hp() > base_hp, "CON raises max HP");
     }
 }

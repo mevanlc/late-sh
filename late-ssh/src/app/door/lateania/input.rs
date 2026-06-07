@@ -2,12 +2,13 @@
 //
 // Key scheme:
 //   - Before choosing a class: 1-5 pick Warrior/Mage/Cleric/Rogue/Ranger.
-//   - Movement: w/a/s/d and arrows (N/S/E/W); y/u/b/n diagonals; < > up/down.
+//   - Movement: w/a/s/d and arrows (N/S/E/W); y/u/n/m diagonals; < or , up and
+//     > or . down (also shown as a hint in-game when a room has a vertical exit).
 //   - Combat: space/x attack; 1-9 use the ability in that action-bar slot; z flee.
 //   - Panels: c character, v abilities, o look, b shop, t inventory ("things").
 //     In a list panel, 1-9 select a row, Enter activates (equip/use/buy),
 //     w/s move the cursor, x sells (inventory).
-//   - Esc leaves the world and returns to the Door Games list.
+//   - Esc leaves the world for the Door Games lobby.
 //
 // A full typed command prompt needs an input-capture mode; deferred.
 
@@ -25,7 +26,7 @@ pub enum InputAction {
 }
 
 pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
-    // Esc is reserved by the Door Games shell for returning to the lobby.
+    // Active Door games reserve Esc for returning to the Door Games lobby.
     if byte == 0x1B {
         return InputAction::Leave;
     }
@@ -36,7 +37,8 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
         return InputAction::Handled;
     }
 
-    // Class selection gate: until a class is chosen, 1-5 pick it and nothing else acts.
+    // Class selection gate: until a class is chosen, 1-5 pick it, r rerolls the
+    // ability scores, and nothing else acts.
     if !view.classed {
         match byte {
             b'1' => state.choose_class(Class::Warrior),
@@ -44,13 +46,14 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
             b'3' => state.choose_class(Class::Cleric),
             b'4' => state.choose_class(Class::Rogue),
             b'5' => state.choose_class(Class::Ranger),
+            b'r' | b'R' => state.reroll(),
             _ => return InputAction::Ignored,
         }
         return InputAction::Handled;
     }
 
     let panel = state.panel();
-    let in_list = matches!(panel, Panel::Inventory | Panel::Shop);
+    let in_list = matches!(panel, Panel::Inventory | Panel::Shop | Panel::Examine);
 
     // Number keys: select a list row when a list panel is open, else use an ability.
     if (b'1'..=b'9').contains(&byte) {
@@ -88,7 +91,9 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
             InputAction::Handled
         }
         b'o' | b'O' => {
-            state.set_panel(Panel::Room);
+            // Open the Examine list (the "look at things" panel) and refresh the
+            // room description in the log.
+            state.toggle_panel(Panel::Examine);
             state.look();
             InputAction::Handled
         }
@@ -188,7 +193,10 @@ fn select_row(state: &mut State, target: usize) {
 }
 
 pub fn handle_arrow(state: &mut State, key: u8) -> bool {
-    let in_list = matches!(state.panel(), Panel::Inventory | Panel::Shop);
+    let in_list = matches!(
+        state.panel(),
+        Panel::Inventory | Panel::Shop | Panel::Examine
+    );
     match key {
         b'A' => {
             if in_list {
