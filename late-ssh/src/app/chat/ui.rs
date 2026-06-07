@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use late_core::models::chat_message_reaction::ChatMessageReactionSummary;
+use late_core::models::chat_poll::{ActiveChatPoll, ChatPollOptionSummary};
 use late_core::models::{chat_message::ChatMessage, chat_room::ChatRoom};
 use ratatui::{
     Frame,
@@ -81,6 +82,7 @@ pub struct DashboardChatView<'a> {
     pub chat_badges: &'a HashMap<Uuid, String>,
     pub bot_username_color_active: bool,
     pub active_room_effects: &'a [ActiveChatRoomEffect],
+    pub active_poll: Option<&'a ActiveChatPoll>,
     pub inline_images: &'a HashMap<Uuid, InlineImagePreview>,
     pub keep_composer_focused: bool,
     /// Cell that, when present, receives the composer block rect so mouse
@@ -564,6 +566,278 @@ fn room_sparkle_color(seed: u64) -> Color {
     }
 }
 
+fn split_poll_and_messages(area: Rect, poll: Option<&ActiveChatPoll>) -> (Option<Rect>, Rect) {
+    let Some(poll) = poll else {
+        return (None, area);
+    };
+    if area.width < 24 {
+        return (None, area);
+    }
+    // One row per option, plus the top and bottom borders.
+    let poll_height = poll.options.len().max(1) as u16 + 2;
+    // Keep at least a few rows for the conversation itself.
+    if area.height < poll_height + 3 {
+        return (None, area);
+    }
+    let split = Layout::vertical([Constraint::Length(poll_height), Constraint::Min(1)]).split(area);
+    (Some(split[0]), split[1])
+}
+
+fn draw_poll_strip(frame: &mut Frame, area: Rect, poll: &ActiveChatPoll) {
+    let bg = Style::default().bg(theme::BG_CANVAS());
+    let inner_width = area.width.saturating_sub(2) as usize;
+
+    let total_votes = poll
+        .options
+        .iter()
+        .map(|option| option.vote_count.max(0))
+        .sum::<i64>();
+
+    // Top border: question on the left, countdown + tally on the right.
+    let remaining_secs = (poll.poll.ends_at - Utc::now()).num_seconds();
+    let meta_spans = poll_meta_spans(remaining_secs, total_votes);
+    let meta_width: usize = meta_spans
+        .iter()
+        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+        .sum();
+    // Reserve the meta title, the " Poll · " + trailing-space chrome (9
+    // cells), and a 1-cell gap so a long question never collides with the
+    // right-aligned countdown.
+    let question_budget = inner_width.saturating_sub(meta_width + 10).max(4);
+    let question = truncate_cells(poll.poll.question.as_str(), question_budget);
+    let title_left = Line::from(vec![Span::styled(
+        format!(" Poll · {question} "),
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .add_modifier(Modifier::BOLD),
+    )]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_ACTIVE()))
+        .style(bg)
+        .title_top(title_left)
+        .title_top(Line::from(meta_spans).right_aligned());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if poll.options.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                " No options yet ",
+                Style::default().fg(theme::TEXT_DIM()),
+            )))
+            .style(bg),
+            inner,
+        );
+        return;
+    }
+
+    // Shared column widths so every row's slider starts and ends in the
+    // same place regardless of label length or vote tally.
+    let max_label = poll
+        .options
+        .iter()
+        .map(|option| UnicodeWidthStr::width(option.label.as_str()))
+        .max()
+        .unwrap_or(4);
+    let stats: Vec<String> = poll
+        .options
+        .iter()
+        .map(|option| poll_stat_text(option.vote_count.max(0), total_votes))
+        .collect();
+    let stats_width = stats
+        .iter()
+        .map(|stat| UnicodeWidthStr::width(stat.as_str()))
+        .max()
+        .unwrap_or(0);
+
+    // pad(1) marker(1) key(2) sp(1) label sp(1) bar sp(1) stats pad(1).
+    const FIXED: usize = 8;
+    const MIN_BAR: usize = 6;
+    let mut label_width = max_label.clamp(4, 18);
+    if label_width + stats_width + FIXED + MIN_BAR > inner_width {
+        let over = label_width + stats_width + FIXED + MIN_BAR - inner_width;
+        label_width = label_width.saturating_sub(over).max(3);
+    }
+    let bar_width = inner_width
+        .saturating_sub(label_width + stats_width + FIXED)
+        .max(1);
+
+    let lines: Vec<Line<'static>> = poll
+        .options
+        .iter()
+        .zip(stats.iter())
+        .map(|(option, stat)| {
+            poll_option_row(
+                option,
+                stat,
+                poll.my_vote_option_id == Some(option.id),
+                total_votes,
+                label_width,
+                bar_width,
+                stats_width,
+            )
+        })
+        .collect();
+
+    frame.render_widget(Paragraph::new(lines).style(bg), inner);
+}
+
+/// Right-aligned border meta: "ends in 9m · 2 votes".
+fn poll_meta_spans(remaining_secs: i64, total_votes: i64) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let faint = Style::default().fg(theme::TEXT_FAINT());
+    let mut spans = vec![Span::styled(" ", dim)];
+    if remaining_secs <= 0 {
+        spans.push(Span::styled("ended", faint));
+    } else {
+        spans.push(Span::styled("ends in ", dim));
+        spans.push(Span::styled(
+            format_poll_remaining(remaining_secs),
+            Style::default().fg(theme::AMBER()),
+        ));
+    }
+    spans.push(Span::styled(" · ", faint));
+    spans.push(Span::styled(
+        format!(
+            "{total_votes} vote{}",
+            if total_votes == 1 { "" } else { "s" }
+        ),
+        dim,
+    ));
+    spans.push(Span::styled(" ", dim));
+    spans
+}
+
+fn format_poll_remaining(secs: i64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m", (secs + 59) / 60)
+    } else {
+        format!("{}h", (secs + 3599) / 3600)
+    }
+}
+
+fn poll_stat_text(count: i64, total: i64) -> String {
+    let pct = if total > 0 {
+        ((count * 100 + total / 2) / total).clamp(0, 100)
+    } else {
+        0
+    };
+    format!("{count} · {pct}%")
+}
+
+/// A single option as a labelled horizontal slider:
+/// `▸ v1 yes        ███████░░░░░░░  2 · 100%`
+fn poll_option_row(
+    option: &ChatPollOptionSummary,
+    stat: &str,
+    selected: bool,
+    total: i64,
+    label_width: usize,
+    bar_width: usize,
+    stats_width: usize,
+) -> Line<'static> {
+    let count = option.vote_count.max(0);
+    let filled = if total > 0 {
+        (((count * bar_width as i64) + total / 2) / total).clamp(0, bar_width as i64) as usize
+    } else {
+        0
+    };
+
+    let accent = if selected {
+        theme::SUCCESS()
+    } else {
+        theme::AMBER()
+    };
+    let fill_style = Style::default().fg(if selected {
+        theme::SUCCESS()
+    } else {
+        theme::AMBER_GLOW()
+    });
+    let empty_style = Style::default().fg(theme::TEXT_FAINT());
+    let label_style = if selected {
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::TEXT())
+    };
+
+    let marker = if selected {
+        Span::styled(
+            "▸",
+            Style::default()
+                .fg(theme::SUCCESS())
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw(" ")
+    };
+
+    let label = pad_to_width(&truncate_cells(&option.label, label_width), label_width);
+    let stat_cell = pad_left_to_width(stat, stats_width);
+
+    Line::from(vec![
+        Span::raw(" "),
+        marker,
+        Span::styled(
+            format!("v{}", option.position),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(label, label_style),
+        Span::raw(" "),
+        Span::styled("█".repeat(filled), fill_style),
+        Span::styled("░".repeat(bar_width.saturating_sub(filled)), empty_style),
+        Span::raw(" "),
+        Span::styled(stat_cell, Style::default().fg(theme::TEXT_DIM())),
+        Span::raw(" "),
+    ])
+}
+
+fn pad_to_width(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(width - used))
+    }
+}
+
+fn pad_left_to_width(text: &str, width: usize) -> String {
+    let used = UnicodeWidthStr::width(text);
+    if used >= width {
+        text.to_string()
+    } else {
+        format!("{}{text}", " ".repeat(width - used))
+    }
+}
+
+fn truncate_cells(text: &str, max_width: usize) -> String {
+    if UnicodeWidthStr::width(text) <= max_width {
+        return text.to_string();
+    }
+    if max_width <= 1 {
+        return "…".to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    let ellipsis_width = UnicodeWidthStr::width("…");
+    for ch in text.chars() {
+        let width = UnicodeWidthStr::width(ch.to_string().as_str());
+        if used + width + ellipsis_width > max_width {
+            break;
+        }
+        out.push(ch);
+        used += width;
+    }
+    out.push('…');
+    out
+}
+
 pub fn draw_dashboard_chat_card(
     frame: &mut Frame,
     area: Rect,
@@ -592,6 +866,7 @@ pub fn draw_dashboard_chat_card(
     let visible_composer_lines = total_composer_lines.min(5);
     let composer_height = visible_composer_lines as u16 + 2;
     let (messages_area, composer_area) = split_chat_and_composer(area, composer_height);
+    let (poll_area, messages_area) = split_poll_and_messages(messages_area, view.active_poll);
 
     let lines: Vec<Line<'static>>;
     let mut chat_hits: Option<Vec<ChatRowHit>> = None;
@@ -631,6 +906,11 @@ pub fn draw_dashboard_chat_card(
         chat_hits = Some(visible.hits);
     }
 
+    if let Some(poll) = view.active_poll
+        && let Some(poll_area) = poll_area
+    {
+        draw_poll_strip(frame, poll_area, poll);
+    }
     frame.render_widget(Paragraph::new(lines), messages_area);
     draw_room_page_effects(frame, messages_area, view.active_room_effects);
     // Only publish the chat-scroll hit layout when nothing is painted on
@@ -1753,6 +2033,7 @@ pub struct ChatRenderInput<'a> {
     pub room_last_message_at: &'a HashMap<Uuid, Option<DateTime<Utc>>>,
     pub favorite_room_ids: &'a [Uuid],
     pub active_room_effects: &'a HashMap<Uuid, Vec<ActiveChatRoomEffect>>,
+    pub active_poll: Option<&'a ActiveChatPoll>,
     pub collapsed_sections: &'a HashSet<RoomSection>,
     pub selected_room_id: Option<Uuid>,
     pub selected_bumped_join_room_id: Option<Uuid>,
@@ -3242,7 +3523,13 @@ fn draw_selected_content(
         };
 
         let mut chat_hits: Option<Vec<ChatRowHit>> = None;
-        let message_render_area = messages_area;
+        let (poll_area, message_render_area) =
+            split_poll_and_messages(messages_area, view.active_poll);
+        if let Some(poll) = view.active_poll
+            && let Some(poll_area) = poll_area
+        {
+            draw_poll_strip(frame, poll_area, poll);
+        }
         let mut selected_room_effects: &[ActiveChatRoomEffect] = &[];
         let message_lines: Vec<Line> = if let Some((room, messages)) = selected_room {
             let active_effects = view
@@ -3714,6 +4001,7 @@ mod tests {
             room_last_message_at: ROOM_LAST_MESSAGE_AT.get_or_init(HashMap::new),
             favorite_room_ids: &[],
             active_room_effects: ACTIVE_ROOM_EFFECTS.get_or_init(HashMap::new),
+            active_poll: None,
             collapsed_sections: COLLAPSED_SECTIONS.get_or_init(HashSet::new),
             selected_room_id,
             selected_bumped_join_room_id: None,
