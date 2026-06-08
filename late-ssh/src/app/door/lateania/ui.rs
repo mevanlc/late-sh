@@ -193,8 +193,83 @@ fn draw_side(
         Panel::Inventory => inventory_panel(view, state.cursor()),
         Panel::Shop => shop_panel(view, state.cursor()),
         Panel::Examine => examine_panel(view, state.cursor()),
+        Panel::Titles => titles_panel(view, state.cursor()),
+        Panel::Quests => quests_panel(view),
     };
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// Titles panel: a selectable list of earned titles with their levels. Enter
+/// sets the highlighted one as your displayed title (or clears it).
+fn titles_panel(view: &PlayerView, cursor: usize) -> Vec<Line<'static>> {
+    let mut lines = vec![section("Titles")];
+    if view.titles.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  none earned yet - slay notable foes",
+            Style::default().fg(theme::TEXT_DIM()),
+        )));
+    }
+    for (i, title) in view.titles.iter().enumerate() {
+        let selected = i == cursor;
+        let active = view.active_title == Some(i);
+        let level = view.title_levels.get(i).copied().unwrap_or(1);
+        let marker = if selected { ">" } else { " " };
+        let active_tag = if active { " *" } else { "" };
+        let style = if selected {
+            Style::default()
+                .fg(theme::TEXT_BRIGHT())
+                .bg(theme::BG_SELECTION())
+                .add_modifier(Modifier::BOLD)
+        } else if active {
+            Style::default()
+                .fg(theme::BADGE_GOLD())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::BADGE_GOLD())
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{marker} Lv{level} {title}{active_tag}"),
+            style,
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(hint("w/s", "select  Enter display"));
+    lines.push(hint("k", "close  (* = shown by your name)"));
+    lines
+}
+
+/// Quest journal: the Frontier zone quests and whether each has been cleared.
+fn quests_panel(view: &PlayerView) -> Vec<Line<'static>> {
+    let mut lines = vec![section("Quest Journal")];
+    let done = view.quests.iter().filter(|q| q.done).count();
+    lines.push(Line::from(Span::styled(
+        format!("  {done}/{} zones cleared", view.quests.len()),
+        Style::default().fg(theme::TEXT_DIM()),
+    )));
+    lines.push(Line::raw(""));
+    for q in &view.quests {
+        let (mark, color) = if q.done {
+            ("[x]", theme::SUCCESS())
+        } else {
+            ("[ ]", theme::AMBER())
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{mark} {}", q.name),
+            Style::default().fg(color),
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  reward: the \"Champion of ...\"",
+        Style::default().fg(theme::TEXT_DIM()),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  title (Lv = boss) + a bounty",
+        Style::default().fg(theme::TEXT_DIM()),
+    )));
+    lines.push(Line::raw(""));
+    lines.push(hint("j", "close"));
+    lines
 }
 
 fn vitals(view: &PlayerView) -> Vec<Line<'static>> {
@@ -209,6 +284,13 @@ fn vitals(view: &PlayerView) -> Vec<Line<'static>> {
             Span::styled(
                 format!("lvl {}", view.level),
                 Style::default().fg(theme::TEXT_BRIGHT()),
+            ),
+            Span::styled(
+                match view.active_title.and_then(|i| view.titles.get(i)) {
+                    Some(title) => format!("  {title}"),
+                    None => String::new(),
+                },
+                Style::default().fg(theme::BADGE_GOLD()),
             ),
         ]),
         Line::from(vec![
@@ -261,14 +343,28 @@ fn room_panel(view: &PlayerView, usernames: &UsernameLookup<'_>) -> Vec<Line<'st
         Span::styled("  exits ", Style::default().fg(theme::TEXT_DIM())),
         Span::styled(exits, Style::default().fg(theme::AMBER_DIM())),
     ]));
+    if !view.features.is_empty() {
+        lines.push(section("Of note"));
+        for feat in &view.features {
+            lines.push(Line::from(Span::styled(
+                format!("  {}", feat.name),
+                Style::default().fg(interactable_color(&feat.kind)),
+            )));
+        }
+        lines.push(hint("o", "look / interact"));
+    }
     if !view.mobs.is_empty() {
         lines.push(section("Foes"));
         for mob in &view.mobs {
+            let mut name_style = Style::default().fg(rarity_color(&mob.rank));
+            let marker = if mob.boss {
+                name_style = name_style.add_modifier(Modifier::BOLD);
+                "‡ "
+            } else {
+                "  "
+            };
             lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {} ", mob.name),
-                    Style::default().fg(theme::ERROR()),
-                ),
+                Span::styled(format!("{marker}Lv{} {} ", mob.level, mob.name), name_style),
                 Span::styled(
                     format!("{}/{}", mob.hp, mob.max_hp),
                     Style::default().fg(theme::TEXT_DIM()),
@@ -283,10 +379,22 @@ fn room_panel(view: &PlayerView, usernames: &UsernameLookup<'_>) -> Vec<Line<'st
                 .get(&occ.user_id)
                 .cloned()
                 .unwrap_or_else(|| "adventurer".to_string());
-            let tag = if occ.in_combat { " (fighting)" } else { "" };
+            let following = view.following == Some(occ.user_id);
+            let tag = if following {
+                " (following)"
+            } else if occ.in_combat {
+                " (fighting)"
+            } else {
+                ""
+            };
+            let color = if following {
+                theme::MENTION()
+            } else {
+                theme::SUCCESS()
+            };
             lines.push(Line::from(Span::styled(
                 format!("  {name}{tag}"),
-                Style::default().fg(theme::SUCCESS()),
+                Style::default().fg(color),
             )));
         }
     }
@@ -425,7 +533,7 @@ fn examine_panel(view: &PlayerView, cursor: usize) -> Vec<Line<'static>> {
                 .bg(theme::BG_SELECTION())
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(theme::TEXT())
+            Style::default().fg(interactable_color(&feat.kind))
         };
         lines.push(Line::from(Span::styled(
             format!("{marker} {}{}", feat.name, tag),
@@ -526,10 +634,14 @@ fn inventory_panel(view: &PlayerView, cursor: usize) -> Vec<Line<'static>> {
         } else {
             Style::default().fg(rarity_color(&it.rarity))
         };
-        lines.push(Line::from(Span::styled(
-            format!("{marker} {}{}", it.name, tag),
-            style,
-        )));
+        let mut spans = vec![Span::styled(format!("{marker} {}{}", it.name, tag), style)];
+        if !it.stats.is_empty() {
+            spans.push(Span::styled(
+                format!("  {}", it.stats),
+                Style::default().fg(theme::TEXT_DIM()),
+            ));
+        }
+        lines.push(Line::from(spans));
     }
     lines.push(Line::raw(""));
     lines.push(hint("w/s", "select  Enter equip/use"));
@@ -573,10 +685,18 @@ fn shop_panel(view: &PlayerView, cursor: usize) -> Vec<Line<'static>> {
         } else {
             Style::default().fg(rarity_color(&e.rarity))
         };
-        lines.push(Line::from(vec![
-            Span::styled(format!("{marker} {}", e.name), name_style),
-            Span::styled(format!("  {}g", e.price), Style::default().fg(price_color)),
-        ]));
+        let mut spans = vec![Span::styled(format!("{marker} {}", e.name), name_style)];
+        if !e.stats.is_empty() {
+            spans.push(Span::styled(
+                format!("  {}", e.stats),
+                Style::default().fg(theme::TEXT_DIM()),
+            ));
+        }
+        spans.push(Span::styled(
+            format!("  {}g", e.price),
+            Style::default().fg(price_color),
+        ));
+        lines.push(Line::from(spans));
     }
     lines.push(Line::raw(""));
     lines.push(hint("w/s", "select  Enter buy"));
@@ -614,6 +734,8 @@ fn footer_hints(view: &PlayerView) -> Vec<Line<'static>> {
         lines.push(hint("space", "attack  o look at things"));
     }
     lines.push(hint("c v t", "sheet abilities bag"));
+    lines.push(hint("j k", "quests titles"));
+    lines.push(hint("r f", "recall follow"));
     if view.shop.is_some() {
         lines.push(hint("b", "shop"));
     }
@@ -786,5 +908,15 @@ fn rarity_color(rarity: &str) -> ratatui::style::Color {
         "epic" => theme::AMBER_GLOW(),
         "legendary" => theme::BADGE_GOLD(),
         _ => theme::TEXT(),
+    }
+}
+
+/// Colour for an interactable room feature, so things you can act on stand out
+/// from plain room text: usable things (a fountain you can drink from) read
+/// green; everything else you can examine reads cyan.
+fn interactable_color(kind: &str) -> ratatui::style::Color {
+    match kind {
+        "fountain" => theme::SUCCESS(),
+        _ => theme::MENTION(),
     }
 }

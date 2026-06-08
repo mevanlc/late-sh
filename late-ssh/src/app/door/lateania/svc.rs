@@ -97,6 +97,18 @@ pub struct MobView {
     pub name: String,
     pub hp: i32,
     pub max_hp: i32,
+    pub level: i32,
+    /// Rarity rank for colouring the name: common/uncommon/rare/epic/legendary.
+    pub rank: String,
+    pub boss: bool,
+}
+
+/// One Frontier zone quest and whether the player has cleared it.
+#[derive(Clone, Debug)]
+pub struct QuestView {
+    pub name: String,
+    pub done: bool,
+    pub reward: String,
 }
 
 #[derive(Clone, Debug)]
@@ -134,6 +146,8 @@ pub struct InvView {
     pub slot: Option<String>,
     pub equipped: bool,
     pub sell_price: i64,
+    /// Compact stat summary for the panel, e.g. "+8 atk" or "heal 30".
+    pub stats: String,
 }
 
 /// One shop listing.
@@ -144,6 +158,8 @@ pub struct ShopEntryView {
     pub rarity: String,
     pub price: i64,
     pub affordable: bool,
+    /// Compact stat summary for the panel, e.g. "+8 atk".
+    pub stats: String,
 }
 
 #[derive(Clone, Debug)]
@@ -190,6 +206,8 @@ pub struct PlayerView {
     pub exits: Vec<(Dir, String)>,
     pub mobs: Vec<MobView>,
     pub occupants: Vec<OccupantView>,
+    /// The companion this player is auto-following, if any (for the UI tag).
+    pub following: Option<Uuid>,
     pub in_combat_with: Option<String>,
     pub abilities: Vec<AbilityView>,
     pub inventory: Vec<InvView>,
@@ -200,6 +218,12 @@ pub struct PlayerView {
     pub scores: AbilityScores,
     /// Titles earned by slaying notable foes.
     pub titles: Vec<String>,
+    /// Level for each title (parallel to `titles`).
+    pub title_levels: Vec<i32>,
+    /// Index of the displayed title, if one is chosen.
+    pub active_title: Option<usize>,
+    /// The Frontier zone quests and their completion state.
+    pub quests: Vec<QuestView>,
     /// Veteran in-place resurrections remaining / total this adventure.
     pub resurrections_left: u8,
     pub resurrection_cap: u8,
@@ -237,6 +261,7 @@ impl PlayerView {
             exits: Vec::new(),
             mobs: Vec::new(),
             occupants: Vec::new(),
+            following: None,
             in_combat_with: None,
             abilities: Vec::new(),
             inventory: Vec::new(),
@@ -245,6 +270,9 @@ impl PlayerView {
             respawning: false,
             scores: AbilityScores::default(),
             titles: Vec::new(),
+            title_levels: Vec::new(),
+            active_title: None,
+            quests: Vec::new(),
             resurrections_left: 0,
             resurrection_cap: 0,
             features: Vec::new(),
@@ -700,6 +728,14 @@ impl LateaniaService {
         self.mutate(user_id, move |s| s.move_player(user_id, dir));
     }
 
+    pub fn recall_task(&self, user_id: Uuid) {
+        self.mutate(user_id, move |s| s.recall(user_id));
+    }
+
+    pub fn follow_task(&self, user_id: Uuid) {
+        self.mutate(user_id, move |s| s.follow_toggle(user_id));
+    }
+
     pub fn look_task(&self, user_id: Uuid) {
         self.mutate(user_id, move |s| s.look(user_id));
     }
@@ -713,6 +749,10 @@ impl LateaniaService {
     /// for fountains).
     pub fn interact_task(&self, user_id: Uuid, idx: usize) {
         self.mutate(user_id, move |s| s.interact(user_id, idx));
+    }
+
+    pub fn set_active_title_task(&self, user_id: Uuid, idx: usize) {
+        self.mutate(user_id, move |s| s.set_active_title(user_id, idx));
     }
 
     pub fn attack_task(&self, user_id: Uuid) {
@@ -865,6 +905,8 @@ struct PlayerState {
     /// Every room this character has stood in, for the overhead map.
     visited: HashSet<RoomId>,
     target: Option<u32>,
+    /// Another player this character auto-follows when they move (set with `f`).
+    following: Option<Uuid>,
     /// True from engaging until the first auto-attack lands (Rogue opening crit).
     opening_strike: bool,
     /// Outgoing-damage buff remaining ticks and magnitude.
@@ -887,6 +929,12 @@ struct PlayerState {
     scores: AbilityScores,
     /// Titles earned by slaying notable foes.
     titles: Vec<String>,
+    /// Level for each title, parallel to `titles`.
+    title_levels: Vec<i32>,
+    /// Index into `titles` of the player's chosen display title.
+    active_title: Option<usize>,
+    /// Frontier zone indices whose quest (slay the boss) the player has cleared.
+    completed_quests: Vec<usize>,
     /// Veteran in-place resurrections: total this adventure and how many remain.
     resurrection_cap: u8,
     resurrections_left: u8,
@@ -1011,6 +1059,7 @@ impl WorldState {
             room: start,
             visited: HashSet::from([start]),
             target: None,
+            following: None,
             opening_strike: false,
             empower: 0,
             empower_ticks: 0,
@@ -1024,6 +1073,9 @@ impl WorldState {
             death_save_used: false,
             scores: AbilityScores::roll(),
             titles: Vec::new(),
+            title_levels: Vec::new(),
+            active_title: None,
+            completed_quests: Vec::new(),
             resurrection_cap: 0,
             resurrections_left: 0,
             last_activity: Instant::now(),
@@ -1174,6 +1226,10 @@ impl WorldState {
             // Rolled scores and earned titles persist across sessions.
             p.scores = saved.scores;
             p.titles = saved.titles.clone();
+            p.title_levels = saved.title_levels.clone();
+            p.title_levels.resize(p.titles.len(), 1);
+            p.active_title = saved.active_title.filter(|&i| i < p.titles.len());
+            p.completed_quests = saved.completed_quests.clone();
             // Restore vitals last so equipment and CON max-hp are already in effect.
             let max = p.max_hp();
             p.hp = if saved.hp > 0 { saved.hp.min(max) } else { max };
@@ -1213,6 +1269,9 @@ impl WorldState {
             equipped,
             scores: p.scores,
             titles: p.titles.clone(),
+            title_levels: p.title_levels.clone(),
+            active_title: p.active_title,
+            completed_quests: p.completed_quests.clone(),
         }))
     }
 
@@ -1359,11 +1418,140 @@ impl WorldState {
             );
             return;
         };
+        let from = self.players.get(&user_id).map(|p| p.room).unwrap_or(dest);
         if let Some(player) = self.players.get_mut(&user_id) {
             player.room = dest;
             player.visited.insert(dest);
         }
         self.describe_room(user_id);
+        self.move_followers(user_id, from, dest, dir);
+    }
+
+    /// Drag everyone following the mover from `from` into `dest`, walking the
+    /// whole follow-chain. Followers who are mid-combat or downed stay put.
+    fn move_followers(&mut self, leader: Uuid, from: RoomId, dest: RoomId, dir: Dir) {
+        if from == dest {
+            return;
+        }
+        let mut queue = vec![leader];
+        while let Some(lead) = queue.pop() {
+            let followers: Vec<Uuid> = self
+                .players
+                .values()
+                .filter(|p| {
+                    p.following == Some(lead)
+                        && p.room == from
+                        && p.target.is_none()
+                        && p.respawn_at.is_none()
+                })
+                .map(|p| p.user_id)
+                .collect();
+            for f in followers {
+                if let Some(p) = self.players.get_mut(&f) {
+                    p.room = dest;
+                    p.visited.insert(dest);
+                }
+                self.log_to(
+                    f,
+                    LogKind::Normal,
+                    format!("You follow along, heading {}.", dir.label()),
+                );
+                self.describe_room(f);
+                queue.push(f);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Speak the word of recall: return to Embergate's Town Square from anywhere,
+    /// so long as you are not in combat. A universal escape, not a class spell.
+    fn recall(&mut self, user_id: Uuid) {
+        if !self.is_classed(user_id) {
+            return;
+        }
+        let Some(player) = self.players.get(&user_id) else {
+            return;
+        };
+        if player.respawn_at.is_some() {
+            self.log_to(user_id, LogKind::System, "You are recovering.".to_string());
+            return;
+        }
+        if player.target.is_some() {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                "You can't recall in the thick of combat - flee (z) first.".to_string(),
+            );
+            return;
+        }
+        let home = self.world.start_room;
+        if player.room == home {
+            self.log_to(
+                user_id,
+                LogKind::Normal,
+                "You speak the word of recall, but Embergate's lanterns already stand around you."
+                    .to_string(),
+            );
+            return;
+        }
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.room = home;
+            p.visited.insert(home);
+        }
+        self.log_to(
+            user_id,
+            LogKind::Loot,
+            "You speak the word of recall. The world folds soft as cloth, and the lanternlight of Embergate's Town Square rises around you."
+                .to_string(),
+        );
+        self.describe_room(user_id);
+        self.dirty = true;
+    }
+
+    /// Toggle auto-following: with no companion set, begin following another
+    /// adventurer in this room; otherwise stop following.
+    fn follow_toggle(&mut self, user_id: Uuid) {
+        if !self.is_classed(user_id) {
+            return;
+        }
+        let Some(player) = self.players.get(&user_id) else {
+            return;
+        };
+        if player.following.is_some() {
+            if let Some(p) = self.players.get_mut(&user_id) {
+                p.following = None;
+            }
+            self.log_to(user_id, LogKind::Normal, "You stop following.".to_string());
+            self.dirty = true;
+            return;
+        }
+        let room = player.room;
+        let target = self
+            .players
+            .values()
+            .find(|other| other.user_id != user_id && other.room == room && other.class.is_some())
+            .map(|other| other.user_id);
+        match target {
+            Some(t) => {
+                if let Some(p) = self.players.get_mut(&user_id) {
+                    p.following = Some(t);
+                }
+                self.log_to(
+                    user_id,
+                    LogKind::Normal,
+                    "You fall into step behind a companion - you move with them now (f to stop)."
+                        .to_string(),
+                );
+            }
+            None => {
+                self.log_to(
+                    user_id,
+                    LogKind::Normal,
+                    "There's no one here to follow.".to_string(),
+                );
+            }
+        }
+        self.dirty = true;
     }
 
     fn look(&mut self, user_id: Uuid) {
@@ -1769,7 +1957,7 @@ impl WorldState {
     }
 
     fn kill_mob(&mut self, user_id: Uuid, mob_id: u32) {
-        let (mob_name, xp, loot, boss) = match self.mobs.get_mut(&mob_id) {
+        let (mob_name, xp, loot, boss, mob_level) = match self.mobs.get_mut(&mob_id) {
             Some(mob) => {
                 mob.alive = false;
                 mob.hp = 0;
@@ -1780,6 +1968,7 @@ impl WorldState {
                     mob.spawn.xp,
                     mob.spawn.loot,
                     mob.spawn.boss,
+                    mob.spawn.level(),
                 )
             }
             None => return,
@@ -1796,33 +1985,91 @@ impl WorldState {
             p.gold += gold as i64;
         }
         self.roll_loot(user_id, &mob_name, loot, boss);
-        self.grant_title(user_id, &mob_name, boss);
+        self.grant_title(user_id, &mob_name, boss, mob_level);
+        if boss {
+            if let Some(zone) = super::world::frontier_zone_of_boss(&mob_name) {
+                self.complete_quest(user_id, zone, mob_level);
+            }
+        }
         self.check_level_up(user_id);
         self.pending_kills.push(KillOutcome { user_id, mob_name });
         self.dirty = true;
         self.mark_world_dirty();
     }
 
-    /// Award a title themed on a slain foe, the first time that foe is felled.
-    /// Bosses confer a "Bane of ..." honorific; lesser foes a "...bane" epithet.
-    fn grant_title(&mut self, user_id: Uuid, mob_name: &str, boss: bool) {
-        let title = title_for(mob_name, boss);
+    /// Set the displayed title to the one at `idx`; selecting the active title
+    /// again (or an out-of-range index) clears it.
+    fn set_active_title(&mut self, user_id: Uuid, idx: usize) {
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.active_title = if p.active_title == Some(idx) || idx >= p.titles.len() {
+                None
+            } else {
+                Some(idx)
+            };
+            self.dirty = true;
+        }
+    }
+
+    /// Add a title with its level the first time it is earned, and announce it.
+    /// Returns whether it was newly granted.
+    fn award_title(&mut self, user_id: Uuid, title: String, level: i32) -> bool {
         let is_new = self
             .players
             .get(&user_id)
             .map(|p| !p.titles.contains(&title))
             .unwrap_or(false);
         if !is_new {
-            return;
+            return false;
         }
         if let Some(p) = self.players.get_mut(&user_id) {
             p.titles.push(title.clone());
+            p.title_levels.push(level.max(1));
         }
         self.log_to(
             user_id,
             LogKind::Loot,
-            format!("A new title is yours: {title}."),
+            format!("A new title is yours: {title} (Lv {}).", level.max(1)),
         );
+        true
+    }
+
+    /// Award a title themed on a slain foe, the first time that foe is felled.
+    /// Bosses confer a "Bane of ..." honorific; lesser foes a "...bane" epithet.
+    fn grant_title(&mut self, user_id: Uuid, mob_name: &str, boss: bool, level: i32) {
+        let title = title_for(mob_name, boss);
+        self.award_title(user_id, title, level);
+    }
+
+    /// Complete the Frontier quest for `zone` (slaying its boss) the first time:
+    /// award the "Champion of the ..." title plus an xp/gold bounty.
+    fn complete_quest(&mut self, user_id: Uuid, zone: usize, boss_level: i32) {
+        let already = self
+            .players
+            .get(&user_id)
+            .map(|p| p.completed_quests.contains(&zone))
+            .unwrap_or(true);
+        if already {
+            return;
+        }
+        let Some((zname, _boss)) = super::world::frontier_zone_info(zone) else {
+            return;
+        };
+        let bonus_xp = (100 + boss_level * 40) as i64;
+        let bonus_gold = (50 + boss_level * 10) as i64;
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.completed_quests.push(zone);
+            p.xp += bonus_xp;
+            p.gold += bonus_gold;
+        }
+        self.log_to(
+            user_id,
+            LogKind::Loot,
+            format!(
+                "Quest complete - the {zname} is cleared! (+{bonus_xp} xp, +{bonus_gold} gold)"
+            ),
+        );
+        self.award_title(user_id, format!("Champion of the {zname}"), boss_level);
+        self.dirty = true;
     }
 
     /// Award loot from a slain mob. Bosses always drop one item from their table;
@@ -2447,6 +2694,9 @@ impl WorldState {
                     name: m.spawn.name.to_string(),
                     hp: m.hp,
                     max_hp: m.spawn.max_hp,
+                    level: m.spawn.level(),
+                    rank: m.spawn.rank().to_string(),
+                    boss: m.spawn.boss,
                 })
                 .collect();
             let occupants: Vec<OccupantView> = self
@@ -2511,6 +2761,7 @@ impl WorldState {
                     slot: it.slot().map(|s| s.label().to_string()),
                     equipped: false,
                     sell_price: it.sell_price(),
+                    stats: it.stat_summary(),
                 })
                 .chain(
                     player
@@ -2524,6 +2775,7 @@ impl WorldState {
                             slot: it.slot().map(|s| s.label().to_string()),
                             equipped: true,
                             sell_price: it.sell_price(),
+                            stats: it.stat_summary(),
                         }),
                 )
                 .collect();
@@ -2542,6 +2794,7 @@ impl WorldState {
                         rarity: it.rarity.label().to_string(),
                         price: it.price,
                         affordable: player.gold >= it.price,
+                        stats: it.stat_summary(),
                     })
                     .collect(),
             });
@@ -2562,6 +2815,15 @@ impl WorldState {
                 .collect();
 
             let minimap = self.world.minimap(player.room, &player.visited, 3, 2);
+            let quests: Vec<QuestView> = (0..super::world::frontier_zone_count())
+                .filter_map(|z| {
+                    super::world::frontier_zone_info(z).map(|(zname, boss)| QuestView {
+                        name: format!("{zname} - slay {boss}"),
+                        done: player.completed_quests.contains(&z),
+                        reward: format!("title: Champion of the {zname}"),
+                    })
+                })
+                .collect();
 
             players.insert(
                 *user_id,
@@ -2591,6 +2853,7 @@ impl WorldState {
                     exits,
                     mobs,
                     occupants,
+                    following: player.following,
                     in_combat_with,
                     abilities,
                     inventory,
@@ -2599,6 +2862,9 @@ impl WorldState {
                     respawning: player.respawn_at.is_some(),
                     scores: player.scores,
                     titles: player.titles.clone(),
+                    title_levels: player.title_levels.clone(),
+                    active_title: player.active_title,
+                    quests,
                     resurrections_left: player.resurrections_left,
                     resurrection_cap: player.resurrection_cap,
                     features,
@@ -2692,6 +2958,41 @@ mod tests {
     }
 
     #[test]
+    fn recall_returns_to_the_town_square() {
+        let mut s = world();
+        s.join(uid(1));
+        s.choose_class(uid(1), Class::Warrior);
+        let home = s.world.start_room;
+        s.move_player(uid(1), Dir::North); // 1 -> 2, off the square
+        assert_ne!(s.players[&uid(1)].room, home, "should have left the square");
+        s.recall(uid(1));
+        assert_eq!(
+            s.players[&uid(1)].room,
+            home,
+            "recall returns to the square"
+        );
+    }
+
+    #[test]
+    fn following_pulls_a_companion_along() {
+        let mut s = world();
+        s.join(uid(1));
+        s.choose_class(uid(1), Class::Warrior);
+        s.join(uid(2));
+        s.choose_class(uid(2), Class::Mage);
+        // uid(1) follows the only other adventurer in the square.
+        s.follow_toggle(uid(1));
+        assert_eq!(s.players[&uid(1)].following, Some(uid(2)));
+        // When uid(2) walks north, uid(1) is dragged along to the same room.
+        s.move_player(uid(2), Dir::North);
+        let dest = s.players[&uid(2)].room;
+        assert_eq!(s.players[&uid(1)].room, dest);
+        // Toggling again stops the follow.
+        s.follow_toggle(uid(1));
+        assert_eq!(s.players[&uid(1)].following, None);
+    }
+
+    #[test]
     fn unclassed_player_cannot_move_or_fight() {
         let mut s = world();
         s.join(uid(1));
@@ -2776,10 +3077,10 @@ mod tests {
         let mut s = world();
         s.join(uid(1));
         s.choose_class(uid(1), Class::Mage);
-        s.grant_title(uid(1), "a frost-bound wretch", false);
-        s.grant_title(uid(1), "the Barrow King", true);
+        s.grant_title(uid(1), "a frost-bound wretch", false, 4);
+        s.grant_title(uid(1), "the Barrow King", true, 21);
         // Re-slaying the same foe must not duplicate its title.
-        s.grant_title(uid(1), "a frost-bound wretch", false);
+        s.grant_title(uid(1), "a frost-bound wretch", false, 4);
         let titles = s.players[&uid(1)].titles.clone();
         assert!(
             titles.iter().any(|t| t == "Wretchbane"),

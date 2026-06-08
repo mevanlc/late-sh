@@ -72,16 +72,20 @@ fn sidebar_enabled(show_settings: bool, draft_enabled: bool, profile_enabled: bo
     }
 }
 
-/// Map a top-level screen to its 1-based slot in `right_sidebar_screens`.
+/// Map a top-level screen to its 1-based page number.
 pub(crate) fn screen_number(screen: Screen) -> u8 {
     match screen {
         Screen::Dashboard => 1,
         Screen::Arcade => 2,
         Screen::Rooms => 3,
-        Screen::DoorGames => 4,
+        Screen::Lateania => 4,
         Screen::Artboard => 5,
         Screen::Pinstar => 6,
     }
+}
+
+fn right_sidebar_allowed_on_screen(screen: Screen) -> bool {
+    matches!(screen, Screen::Dashboard | Screen::Arcade | Screen::Rooms)
 }
 
 /// Resolve whether the right sidebar should render on `screen` given a profile
@@ -91,6 +95,10 @@ pub(crate) fn resolve_right_sidebar_enabled(
     screens: &[u8],
     screen: Screen,
 ) -> bool {
+    if !right_sidebar_allowed_on_screen(screen) {
+        return false;
+    }
+
     match mode {
         RightSidebarMode::On => true,
         RightSidebarMode::Off => false,
@@ -1093,7 +1101,7 @@ impl App {
                     artboard::ui::draw_game(frame, content_area, state, ctx.artboard_interacting);
                 }
             }
-            Screen::DoorGames => {
+            Screen::Lateania => {
                 crate::app::door::ui::draw_door_hub(
                     frame,
                     content_area,
@@ -1102,7 +1110,9 @@ impl App {
                         delete_confirm: ctx.door_delete_confirm,
                         lateania_state: ctx.lateania_state,
                         usernames: ctx.rooms_usernames,
+                        terminal_image_protocol: ctx.terminal_image_protocol,
                     },
+                    terminal_images,
                 );
             }
             Screen::Pinstar => {
@@ -1387,7 +1397,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         (Screen::Dashboard, "1"),
         (Screen::Arcade, "2"),
         (Screen::Rooms, "3"),
-        (Screen::DoorGames, "4"),
+        (Screen::Lateania, "4"),
         (Screen::Artboard, "5"),
         (Screen::Pinstar, "6"),
     ];
@@ -1408,7 +1418,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
 
     let page_title = match screen {
         Screen::Dashboard => "Home",
-        Screen::DoorGames => "Door Games",
+        Screen::Lateania => "Lateania",
         Screen::Arcade => "The Arcade",
         Screen::Artboard => "Artboard",
         Screen::Rooms => "Tables",
@@ -1793,29 +1803,60 @@ mod tests {
     }
 
     #[test]
-    fn right_sidebar_custom_slots_follow_page_order() {
-        assert_eq!(screen_number(Screen::DoorGames), 4);
-        assert_eq!(screen_number(Screen::Artboard), 5);
+    fn right_sidebar_is_only_available_on_first_three_pages() {
+        assert!(resolve_right_sidebar_enabled(
+            RightSidebarMode::On,
+            &[],
+            Screen::Dashboard,
+        ));
+        assert!(resolve_right_sidebar_enabled(
+            RightSidebarMode::On,
+            &[],
+            Screen::Arcade,
+        ));
+        assert!(resolve_right_sidebar_enabled(
+            RightSidebarMode::On,
+            &[],
+            Screen::Rooms,
+        ));
+        assert!(!resolve_right_sidebar_enabled(
+            RightSidebarMode::On,
+            &[],
+            Screen::Lateania,
+        ));
+        assert!(!resolve_right_sidebar_enabled(
+            RightSidebarMode::On,
+            &[],
+            Screen::Artboard,
+        ));
+        assert!(!resolve_right_sidebar_enabled(
+            RightSidebarMode::On,
+            &[],
+            Screen::Pinstar,
+        ));
+    }
+
+    #[test]
+    fn right_sidebar_custom_slots_follow_available_page_order() {
+        assert_eq!(screen_number(Screen::Dashboard), 1);
+        assert_eq!(screen_number(Screen::Arcade), 2);
+        assert_eq!(screen_number(Screen::Rooms), 3);
+        assert_eq!(screen_number(Screen::Lateania), 4);
 
         assert!(resolve_right_sidebar_enabled(
             RightSidebarMode::Custom,
-            &[4],
-            Screen::DoorGames,
+            &[1, 3],
+            Screen::Dashboard,
         ));
         assert!(!resolve_right_sidebar_enabled(
             RightSidebarMode::Custom,
-            &[4],
-            Screen::Artboard,
+            &[1, 3],
+            Screen::Arcade,
         ));
         assert!(resolve_right_sidebar_enabled(
             RightSidebarMode::Custom,
-            &[5],
-            Screen::Artboard,
-        ));
-        assert!(!resolve_right_sidebar_enabled(
-            RightSidebarMode::Custom,
-            &[5],
-            Screen::Pinstar,
+            &[1, 3],
+            Screen::Rooms,
         ));
     }
 

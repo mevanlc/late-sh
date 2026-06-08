@@ -26,6 +26,10 @@ pub enum Panel {
     /// Lookable things in the room: select one and press Enter to examine it
     /// (and use it, for a fountain).
     Examine,
+    /// Earned titles: select one and press Enter to display it (or clear it).
+    Titles,
+    /// The quest journal: the Frontier zone quests and their status (read-only).
+    Quests,
 }
 
 pub struct State {
@@ -137,6 +141,7 @@ impl State {
             Panel::Inventory => self.view().inventory.len(),
             Panel::Shop => self.view().shop.map(|s| s.entries.len()).unwrap_or(0),
             Panel::Examine => self.view().features.len(),
+            Panel::Titles => self.view().titles.len(),
             _ => 0,
         }
     }
@@ -169,6 +174,20 @@ impl State {
     pub fn look(&mut self) {
         if self.ensure_player_present() {
             self.svc.look_task(self.user_id);
+        }
+    }
+
+    /// Speak the word of recall: warp back to Embergate's Town Square.
+    pub fn recall(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.recall_task(self.user_id);
+        }
+    }
+
+    /// Toggle auto-following another adventurer in the room.
+    pub fn follow(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.follow_task(self.user_id);
         }
     }
 
@@ -239,6 +258,7 @@ impl State {
                 }
             }
             Panel::Examine => self.svc.interact_task(self.user_id, self.cursor),
+            Panel::Titles => self.svc.set_active_title_task(self.user_id, self.cursor),
             _ => {}
         }
     }
