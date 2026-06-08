@@ -1090,6 +1090,14 @@ Get audio paired
 
     Open the Pair tab in this guide for install hints plus a QR / link. The browser plays whichever source you have selected, including YouTube.
 
+  Option 3: direct Icecast stream
+
+    To listen without pairing or opening a browser:
+      vlc https://late.sh/stream
+      mpv https://late.sh/stream
+
+    This plays the 24/7 Icecast radio only. Pair the CLI or browser if you want source switching, mute/volume keys, visualizer sync, or the shared YouTube queue.
+
 Global keys (work anywhere)
   ?                open this guide, including Pair and terminal-specific tabs
   m                 mute paired client

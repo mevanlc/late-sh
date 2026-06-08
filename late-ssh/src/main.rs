@@ -179,6 +179,7 @@ async fn main() -> anyhow::Result<()> {
     .with_username_directory(username_directory.clone())
     .with_session_registry(session_registry.clone())
     .with_force_admin(config.force_admin);
+    let _poll_finalizer_recovery_task = chat_service.start_poll_finalizer_recovery_task();
     let ai_service = AiService::new(
         config.ai.enabled,
         config.ai.api_key.clone(),

@@ -1,7 +1,8 @@
 use anyhow::{Result, bail, ensure};
 use chrono::{DateTime, Duration, Utc};
+use deadpool_postgres::GenericClient as DeadpoolGenericClient;
 use std::collections::HashMap;
-use tokio_postgres::{Client, GenericClient};
+use tokio_postgres::{Client, GenericClient as TokioGenericClient};
 use uuid::Uuid;
 
 pub const POLL_QUESTION_MAX_CHARS: usize = 200;
@@ -68,7 +69,7 @@ pub async fn ensure_can_start_poll(client: &Client, user_id: Uuid, room_id: Uuid
 }
 
 async fn ensure_can_start_poll_with_client(
-    client: &impl GenericClient,
+    client: &impl TokioGenericClient,
     user_id: Uuid,
     room_id: Uuid,
 ) -> Result<()> {
@@ -307,6 +308,54 @@ pub async fn list_active_polls_for_rooms(
         .collect())
 }
 
+pub async fn list_expired_active_poll_ids(client: &Client, limit: i64) -> Result<Vec<Uuid>> {
+    let rows = client
+        .query(
+            "SELECT id
+             FROM chat_polls
+             WHERE active = true
+               AND ends_at <= current_timestamp
+             ORDER BY ends_at ASC, id ASC
+             LIMIT $1",
+            &[&limit],
+        )
+        .await?;
+
+    Ok(rows.into_iter().map(|row| row.get("id")).collect())
+}
+
+pub async fn claim_expired_poll(
+    client: &impl DeadpoolGenericClient,
+    poll_id: Uuid,
+) -> Result<Option<ActiveChatPoll>> {
+    let row = client
+        .query_opt(
+            "UPDATE chat_polls
+             SET active = false, updated = current_timestamp
+             WHERE id = $1
+               AND active = true
+               AND ends_at <= current_timestamp
+             RETURNING *",
+            &[&poll_id],
+        )
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let poll = ChatPoll::from(row);
+    let options = poll_option_summaries(client, &[poll.id])
+        .await?
+        .remove(&poll.id)
+        .unwrap_or_default();
+
+    Ok(Some(ActiveChatPoll {
+        poll,
+        options,
+        my_vote_option_id: None,
+    }))
+}
+
 fn normalize_question(question: &str) -> Result<String> {
     let question = question.trim();
     ensure!(!question.is_empty(), "poll question is required");
@@ -338,6 +387,46 @@ fn normalize_options(options: Vec<String>) -> Result<Vec<String>> {
         );
     }
     Ok(options)
+}
+
+async fn poll_option_summaries(
+    client: &impl DeadpoolGenericClient,
+    poll_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<ChatPollOptionSummary>>> {
+    if poll_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let option_rows = client
+        .query(
+            "SELECT
+                o.poll_id,
+                o.id,
+                o.position,
+                o.label,
+                COUNT(v.user_id)::bigint AS vote_count
+             FROM chat_poll_options o
+             LEFT JOIN chat_poll_votes v ON v.option_id = o.id
+             WHERE o.poll_id = ANY($1)
+             GROUP BY o.poll_id, o.id, o.position, o.label
+             ORDER BY o.poll_id, o.position",
+            &[&poll_ids],
+        )
+        .await?;
+    let mut options_by_poll: HashMap<Uuid, Vec<ChatPollOptionSummary>> = HashMap::new();
+    for row in option_rows {
+        options_by_poll
+            .entry(row.get("poll_id"))
+            .or_default()
+            .push(ChatPollOptionSummary {
+                id: row.get("id"),
+                position: row.get("position"),
+                label: row.get("label"),
+                vote_count: row.get("vote_count"),
+            });
+    }
+
+    Ok(options_by_poll)
 }
 
 fn format_poll_wait(duration: Duration) -> String {

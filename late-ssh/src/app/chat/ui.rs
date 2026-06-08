@@ -653,17 +653,7 @@ fn draw_poll_strip(frame: &mut Frame, area: Rect, poll: &ActiveChatPoll) {
         .max()
         .unwrap_or(0);
 
-    // pad(1) marker(1) key(2) sp(1) label sp(1) bar sp(1) stats pad(1).
-    const FIXED: usize = 8;
-    const MIN_BAR: usize = 6;
-    let mut label_width = max_label.clamp(4, 18);
-    if label_width + stats_width + FIXED + MIN_BAR > inner_width {
-        let over = label_width + stats_width + FIXED + MIN_BAR - inner_width;
-        label_width = label_width.saturating_sub(over).max(3);
-    }
-    let bar_width = inner_width
-        .saturating_sub(label_width + stats_width + FIXED)
-        .max(1);
+    let (label_width, bar_width) = poll_row_widths(max_label, stats_width, inner_width);
 
     let lines: Vec<Line<'static>> = poll
         .options
@@ -728,6 +718,27 @@ fn poll_stat_text(count: i64, total: i64) -> String {
         0
     };
     format!("{count} · {pct}%")
+}
+
+fn poll_row_widths(
+    max_label_width: usize,
+    stats_width: usize,
+    inner_width: usize,
+) -> (usize, usize) {
+    // pad(1) marker(1) key(2) sp(1) label sp(1) bar sp(1) stats pad(1).
+    const FIXED: usize = 8;
+    const MIN_LABEL: usize = 3;
+    const MIN_BAR: usize = 1;
+
+    let label_capacity = inner_width.saturating_sub(stats_width + FIXED + MIN_BAR);
+    let label_width = max_label_width
+        .max(MIN_LABEL)
+        .min(label_capacity.max(MIN_LABEL));
+    let bar_width = inner_width
+        .saturating_sub(label_width + stats_width + FIXED)
+        .max(MIN_BAR);
+
+    (label_width, bar_width)
 }
 
 /// A single option as a labelled horizontal slider:
@@ -3791,6 +3802,30 @@ mod tests {
         assert!(is_bot_author("dealer"));
         assert!(is_bot_author(" Dealer "));
         assert!(!is_bot_author("mat"));
+    }
+
+    #[test]
+    fn poll_row_widths_uses_full_label_when_space_allows() {
+        let (label_width, bar_width) = poll_row_widths(64, 7, 100);
+
+        assert_eq!(label_width, 64);
+        assert_eq!(bar_width, 21);
+    }
+
+    #[test]
+    fn poll_row_widths_keeps_long_labels_beyond_old_cap() {
+        let (label_width, bar_width) = poll_row_widths(80, 7, 100);
+
+        assert_eq!(label_width, 80);
+        assert_eq!(bar_width, 5);
+    }
+
+    #[test]
+    fn poll_row_widths_shrinks_labels_only_when_row_is_full() {
+        let (label_width, bar_width) = poll_row_widths(80, 7, 60);
+
+        assert_eq!(label_width, 44);
+        assert_eq!(bar_width, 1);
     }
 
     #[test]
