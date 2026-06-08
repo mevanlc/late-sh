@@ -36,6 +36,10 @@ impl LoginAnnouncements {
         self.messages.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.messages.is_empty()
+    }
+
     pub fn scroll(&mut self, delta: i16) {
         if delta.is_negative() {
             self.scroll_offset = self.scroll_offset.saturating_sub(delta.unsigned_abs());
