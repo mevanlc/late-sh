@@ -882,6 +882,11 @@ impl App {
         self.pinstar_state = pinstar_state_taken;
         draw_result?;
 
+        // Feed the modal's image capacity (recorded during draw) back into
+        // chat state so the next frame's Sixel fetch encodes to fit.
+        self.chat
+            .set_image_modal_capacity(terminal_image_frame.modal_capacity());
+
         let image_commands = self.terminal_image_render_state.build_commands(
             self.terminal_image_protocol,
             &terminal_image_frame,
@@ -917,7 +922,7 @@ impl App {
                     .iter()
                     .find(|n| n.kind == "friends" || enabled_kinds.iter().any(|k| k == n.kind))
             {
-                tracing::info!(
+                tracing::debug!(
                     kind = notif.kind,
                     title = notif.title,
                     body = notif.body,
