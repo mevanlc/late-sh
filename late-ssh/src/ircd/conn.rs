@@ -832,6 +832,18 @@ impl Session {
             tracing::warn!("ircd: no lounge room found; skipping forced join");
             return Ok(());
         };
+        let name = proj::channel_name(&lounge).unwrap_or_else(|| "#lounge".to_string());
+        if let Err(err) = ChatRoomMember::join(&client, lounge.id, self.user_id).await {
+            tracing::debug!(error = %err, "ircd: forced lounge join refused");
+            framed
+                .send(replies::numeric(
+                    &self.nick,
+                    Response::ERR_BANNEDFROMCHAN,
+                    vec![name, "Cannot join channel".to_string()],
+                ))
+                .await?;
+            return Ok(());
+        }
         drop(client);
         self.join_room(framed, &lounge).await
     }
