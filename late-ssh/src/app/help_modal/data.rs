@@ -1133,7 +1133,7 @@ Music Booth (v then v)
     d               delete selected track (staff)
 
   The queue is ordered by score, so upvotes pull tracks toward the front. You can't vote on the track that's already playing, but you can skip-vote it.
-  History keeps up to 30 unique played tracks, ranked by separate history votes. Requeued history tracks start with 0 live queue votes.
+  History keeps up to 50 unique played tracks, ranked by separate history votes. Requeued history tracks start with 0 live queue votes.
 
 Skip the current track
   v then s          add your vote to skip. The track skips once enough active YouTube-source users agree.
