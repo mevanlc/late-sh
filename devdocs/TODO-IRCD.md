@@ -34,7 +34,7 @@ client. We write the "d".
 
 ## Current build state
 
-`cargo check --workspace` passes as of Task #9 docs/unit-coverage polish.
+`cargo check --workspace` passes as of the forced IRC lounge membership fix.
 LLM agents still must not run `cargo test`, `cargo nextest`, or `cargo clippy`
 for this handoff; leave the broader integration suite to the human owner.
 
@@ -126,6 +126,11 @@ Spec: FRD-IRCD.md §5.2 / §7. Implemented as a single listener:
 - Done: splash tip pools now mention IRC token setup from Settings > Account.
 - Done: pure unit coverage exists for IRC `MODE +b/-b` nick-mask parsing in
   `late-ssh/src/ircd/conn.rs`.
+- Done: manual Docker/tmux/`nc` smoke on 2026-06-11 using Docker Postgres and
+  local `late-ssh` with `LATE_IRC_ENABLED=1`, `LATE_IRC_PORT=16667`. Covered
+  good-token registration/welcome/MOTD, forced `#lounge` join, NAMES self-entry,
+  LIST, sticky `PART #lounge` refusal/rejoin, bad-token `464` rejection, and
+  `PRIVMSG #lounge` persistence to `chat_messages`.
 - Pending: ircd integration tests under `late-ssh/tests/ircd/` using testcontainers
   (mirror existing `tests/` patterns). Cover: auth (good/bad/revoked/banned
   token), nick-lock, forced #lounge join + sticky PART refusal, PRIVMSG
