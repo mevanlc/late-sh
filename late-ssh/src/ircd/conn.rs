@@ -11,10 +11,12 @@ use std::{
 
 use anyhow::Result;
 use futures_util::{SinkExt, StreamExt};
-use irc_proto::{CapSubCommand, Command, IrcCodec, Message, Response};
+use irc_proto::{CapSubCommand, ChannelMode, Command, IrcCodec, Message, Mode, Response};
 use late_core::{
     MutexRecover,
-    models::{chat_room::ChatRoom, chat_room_member::ChatRoomMember, user::User},
+    models::{
+        chat_room::ChatRoom, chat_room_member::ChatRoomMember, room_ban::RoomBan, user::User,
+    },
     rate_limit::IpRateLimiter,
 };
 use tokio::{
@@ -31,7 +33,16 @@ use super::{
     registry::IrcControl,
     replies::{self, NETWORK_NAME, SERVER_NAME, VERSION_STRING},
 };
-use crate::{app::chat::svc::ChatEvent, state::State, usernames};
+use crate::{
+    app::chat::svc::ChatEvent,
+    authz::Permissions,
+    moderation::{
+        command::{RoleAction, RoomModAction},
+        event::ModerationEvent,
+    },
+    state::State,
+    usernames,
+};
 
 const REGISTRATION_TIMEOUT: Duration = Duration::from_secs(60);
 const PING_INTERVAL: Duration = Duration::from_secs(60);
@@ -366,6 +377,7 @@ impl Session {
         mut control_rx: mpsc::UnboundedReceiver<IrcControl>,
     ) -> Result<()> {
         let mut chat_events = self.state.chat_service.subscribe_events();
+        let mut moderation_events = self.state.chat_service.subscribe_moderation_events();
         let mut ping_timer = tokio::time::interval(PING_INTERVAL);
         ping_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ping_timer.tick().await; // consume the immediate first tick
@@ -398,6 +410,15 @@ impl Session {
                         Ok(event) => self.project_chat_event(framed, event).await?,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "ircd: chat event receiver lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
+                    }
+                }
+                event = moderation_events.recv() => {
+                    match event {
+                        Ok(event) => self.project_moderation_event(framed, event).await?,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(skipped, "ircd: moderation event receiver lagged");
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return Ok(()),
                     }
@@ -540,11 +561,11 @@ impl Session {
                 .await?;
             }
             Command::ChannelMODE(channel, modes) => {
-                self.handle_channel_mode(framed, &channel, modes.is_empty())
-                    .await?;
+                self.handle_channel_mode(framed, &channel, modes).await?;
             }
             Command::UserMODE(_, modes) => {
-                // User self-modes do nothing here (FRD §7.2); answer queries.
+                // User self-modes do nothing here (FRD §7.2); answer queries and
+                // silently accept +i/-i.
                 if modes.is_empty() {
                     framed
                         .send(replies::numeric(
@@ -659,25 +680,12 @@ impl Session {
                     ))
                     .await?;
             }
-            // TODO(task: moderation mapping): KICK → room kick, MODE ±b →
-            // room ban, KILL (ircop) → server kick.
-            Command::KICK(channel, _, _) => {
-                framed
-                    .send(replies::numeric(
-                        &self.nick,
-                        Response::ERR_CHANOPRIVSNEEDED,
-                        vec![channel, "Kicks from IRC are not wired up yet".to_string()],
-                    ))
+            Command::KICK(channel, users, reason) => {
+                self.handle_kick(framed, &channel, &users, reason.as_deref())
                     .await?;
             }
-            Command::KILL(_, _) => {
-                framed
-                    .send(replies::numeric(
-                        &self.nick,
-                        Response::ERR_NOPRIVILEGES,
-                        vec!["KILL is not wired up yet".to_string()],
-                    ))
-                    .await?;
+            Command::KILL(nick, reason) => {
+                self.handle_kill(framed, &nick, &reason).await?;
             }
             Command::CAP(_, CapSubCommand::LS, _, _)
             | Command::CAP(_, CapSubCommand::LIST, _, _) => {
@@ -1193,12 +1201,10 @@ impl Session {
         &mut self,
         framed: &mut IrcStream,
         channel: &str,
-        is_query: bool,
+        modes: Vec<Mode<ChannelMode>>,
     ) -> Result<()> {
-        let known = self
-            .channels
-            .contains_key(&proj::normalize_channel(channel));
-        if !known {
+        let normalized = proj::normalize_channel(channel);
+        let Some(room_id) = self.channels.get(&normalized).copied() else {
             framed
                 .send(replies::numeric(
                     &self.nick,
@@ -1207,8 +1213,8 @@ impl Session {
                 ))
                 .await?;
             return Ok(());
-        }
-        if is_query {
+        };
+        if modes.is_empty() {
             framed
                 .send(replies::numeric(
                     &self.nick,
@@ -1218,20 +1224,322 @@ impl Session {
                 .await?;
             return Ok(());
         }
-        // TODO(task: moderation mapping): MODE +b/-b ↔ room bans; banlist
-        // queries return the live room-ban list. Everything else stays
-        // refused — ops are lock-tied to the late.sh staff tier (FRD §9.1).
-        framed
-            .send(replies::numeric(
-                &self.nick,
-                Response::ERR_CHANOPRIVSNEEDED,
-                vec![
-                    channel.to_string(),
-                    "Channel modes are managed by late.sh".to_string(),
-                ],
-            ))
-            .await?;
+
+        let mut refused = false;
+        for mode in modes {
+            match mode {
+                Mode::NoPrefix(ChannelMode::Ban) => {
+                    self.send_banlist(framed, channel, room_id).await?;
+                }
+                Mode::Plus(ChannelMode::Ban, Some(mask)) => {
+                    self.handle_ban_mode(framed, channel, &mask, true).await?;
+                }
+                Mode::Minus(ChannelMode::Ban, Some(mask)) => {
+                    self.handle_ban_mode(framed, channel, &mask, false).await?;
+                }
+                Mode::Plus(ChannelMode::InviteOnly, _)
+                | Mode::Minus(ChannelMode::InviteOnly, _)
+                | Mode::Plus(ChannelMode::Unknown('i'), _)
+                | Mode::Minus(ChannelMode::Unknown('i'), _) => {}
+                _ => refused = true,
+            }
+        }
+
+        if refused {
+            framed
+                .send(replies::numeric(
+                    &self.nick,
+                    Response::ERR_CHANOPRIVSNEEDED,
+                    vec![
+                        channel.to_string(),
+                        "Channel modes are tied to late.sh moderation tiers".to_string(),
+                    ],
+                ))
+                .await?;
+        }
         Ok(())
+    }
+
+    async fn handle_kick(
+        &mut self,
+        framed: &mut IrcStream,
+        channel: &str,
+        users: &str,
+        reason: Option<&str>,
+    ) -> Result<()> {
+        if !self.is_channel_op() {
+            framed
+                .send(replies::numeric(
+                    &self.nick,
+                    Response::ERR_CHANOPRIVSNEEDED,
+                    vec![
+                        channel.to_string(),
+                        "You're not channel operator".to_string(),
+                    ],
+                ))
+                .await?;
+            return Ok(());
+        }
+        if !self
+            .channels
+            .contains_key(&proj::normalize_channel(channel))
+        {
+            framed
+                .send(replies::numeric(
+                    &self.nick,
+                    Response::ERR_NOSUCHCHANNEL,
+                    vec![channel.to_string(), "No such channel".to_string()],
+                ))
+                .await?;
+            return Ok(());
+        }
+        let reason = reason.unwrap_or("IRC KICK");
+        for nick in users.split(',').filter(|nick| !nick.trim().is_empty()) {
+            let command = format!("kick {channel} @{} {reason}", nick.trim());
+            self.run_moderation_command(framed, channel, &command)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_kill(
+        &mut self,
+        framed: &mut IrcStream,
+        nick: &str,
+        reason: &str,
+    ) -> Result<()> {
+        if !self.is_admin {
+            framed
+                .send(replies::numeric(
+                    &self.nick,
+                    Response::ERR_NOPRIVILEGES,
+                    vec!["Permission Denied- You're not an IRC operator".to_string()],
+                ))
+                .await?;
+            return Ok(());
+        }
+        let command = format!("kick server @{nick} {reason}");
+        self.run_moderation_command(framed, nick, &command).await
+    }
+
+    async fn handle_ban_mode(
+        &mut self,
+        framed: &mut IrcStream,
+        channel: &str,
+        mask: &str,
+        add: bool,
+    ) -> Result<()> {
+        if !self.is_channel_op() {
+            framed
+                .send(replies::numeric(
+                    &self.nick,
+                    Response::ERR_CHANOPRIVSNEEDED,
+                    vec![
+                        channel.to_string(),
+                        "You're not channel operator".to_string(),
+                    ],
+                ))
+                .await?;
+            return Ok(());
+        }
+        let Some(nick) = nick_from_ban_mask(mask) else {
+            framed
+                .send(replies::server_notice(
+                    &self.nick,
+                    "Only nick!*@* ban masks are supported by late.sh",
+                ))
+                .await?;
+            return Ok(());
+        };
+        let command = if add {
+            format!("ban {channel} @{nick} IRC MODE +b")
+        } else {
+            format!("unban {channel} @{nick} IRC MODE -b")
+        };
+        self.run_moderation_command(framed, channel, &command).await
+    }
+
+    async fn send_banlist(
+        &mut self,
+        framed: &mut IrcStream,
+        channel: &str,
+        room_id: Uuid,
+    ) -> Result<()> {
+        let client = self.state.db.get().await?;
+        let bans = RoomBan::active_for_room_with_usernames(&client, room_id, 200).await?;
+        drop(client);
+        let mut out = Vec::new();
+        for item in bans {
+            let target = item
+                .target_username
+                .unwrap_or_else(|| item.ban.target_user_id.to_string());
+            let actor = item
+                .actor_username
+                .unwrap_or_else(|| SERVER_NAME.to_string());
+            out.push(replies::numeric(
+                &self.nick,
+                Response::RPL_BANLIST,
+                vec![channel.to_string(), format!("{target}!*@*"), actor],
+            ));
+        }
+        out.push(replies::numeric(
+            &self.nick,
+            Response::RPL_ENDOFBANLIST,
+            vec![channel.to_string(), "End of channel ban list".to_string()],
+        ));
+        send_all(framed, out).await
+    }
+
+    async fn run_moderation_command(
+        &mut self,
+        framed: &mut IrcStream,
+        context: &str,
+        command: &str,
+    ) -> Result<()> {
+        match self
+            .state
+            .chat_service
+            .run_mod_command(self.user_id, self.permissions(), command)
+            .await
+        {
+            Ok(lines) => {
+                for line in lines {
+                    framed
+                        .send(replies::server_notice(&self.nick, &line))
+                        .await?;
+                }
+            }
+            Err(err) => {
+                framed
+                    .send(replies::numeric(
+                        &self.nick,
+                        Response::ERR_CHANOPRIVSNEEDED,
+                        vec![context.to_string(), err.to_string()],
+                    ))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn project_moderation_event(
+        &mut self,
+        framed: &mut IrcStream,
+        event: ModerationEvent,
+    ) -> Result<()> {
+        match event {
+            ModerationEvent::RoomAction {
+                actor_user_id,
+                target_user_id,
+                room_id,
+                action,
+                reason,
+                ..
+            } if matches!(
+                action,
+                RoomModAction::Kick | RoomModAction::Ban | RoomModAction::Unban
+            ) =>
+            {
+                let Some(channel) = self.joined.get(&room_id).map(|joined| joined.name.clone())
+                else {
+                    return Ok(());
+                };
+                let directory = usernames::snapshot(&self.state.username_directory);
+                let actor = directory
+                    .get(&actor_user_id)
+                    .cloned()
+                    .unwrap_or_else(|| SERVER_NAME.to_string());
+                let target = directory
+                    .get(&target_user_id)
+                    .cloned()
+                    .unwrap_or_else(|| target_user_id.to_string());
+                match action {
+                    RoomModAction::Kick => {
+                        framed
+                            .send(replies::from_user(
+                                &actor,
+                                Command::KICK(channel.clone(), target, Some(reason)),
+                            ))
+                            .await?;
+                        if target_user_id == self.user_id {
+                            self.channels.remove(&proj::normalize_channel(&channel));
+                            self.joined.remove(&room_id);
+                        }
+                    }
+                    RoomModAction::Ban => {
+                        send_all(
+                            framed,
+                            vec![
+                                replies::server_msg(Command::ChannelMODE(
+                                    channel.clone(),
+                                    vec![Mode::Plus(
+                                        ChannelMode::Ban,
+                                        Some(format!("{target}!*@*")),
+                                    )],
+                                )),
+                                replies::from_user(
+                                    &actor,
+                                    Command::KICK(channel.clone(), target, Some(reason)),
+                                ),
+                            ],
+                        )
+                        .await?;
+                        if target_user_id == self.user_id {
+                            self.channels.remove(&proj::normalize_channel(&channel));
+                            self.joined.remove(&room_id);
+                        }
+                    }
+                    RoomModAction::Unban => {
+                        framed
+                            .send(replies::server_msg(Command::ChannelMODE(
+                                channel,
+                                vec![Mode::Minus(ChannelMode::Ban, Some(format!("{target}!*@*")))],
+                            )))
+                            .await?;
+                    }
+                }
+            }
+            ModerationEvent::RoleAction {
+                target_user_id,
+                action,
+                permissions,
+                ..
+            } => {
+                let directory = usernames::snapshot(&self.state.username_directory);
+                let Some(target) = directory.get(&target_user_id).cloned() else {
+                    return Ok(());
+                };
+                if target_user_id == self.user_id {
+                    self.is_admin = permissions.is_admin();
+                    self.is_moderator = permissions.is_moderator();
+                }
+                let mode = match action {
+                    RoleAction::GrantMod => Mode::Plus(ChannelMode::Oper, Some(target)),
+                    RoleAction::RevokeMod => Mode::Minus(ChannelMode::Oper, Some(target)),
+                };
+                let messages = self
+                    .joined
+                    .values()
+                    .map(|channel| {
+                        replies::server_msg(Command::ChannelMODE(
+                            channel.name.clone(),
+                            vec![mode.clone()],
+                        ))
+                    })
+                    .collect();
+                send_all(framed, messages).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn permissions(&self) -> Permissions {
+        Permissions::new(self.is_admin, self.is_moderator)
+    }
+
+    fn is_channel_op(&self) -> bool {
+        self.is_admin || self.is_moderator
     }
 
     async fn project_chat_event(&mut self, framed: &mut IrcStream, event: ChatEvent) -> Result<()> {
@@ -1417,6 +1725,18 @@ impl Session {
         send_all(framed, out).await?;
         Ok(())
     }
+}
+
+fn nick_from_ban_mask(mask: &str) -> Option<&str> {
+    let (nick, hostmask) = mask.split_once('!')?;
+    if hostmask != "*@*" {
+        return None;
+    }
+    let nick = nick.trim();
+    if nick.is_empty() || nick.contains(['*', '?', '@', ',', ' ']) {
+        return None;
+    }
+    Some(nick.trim_start_matches('@'))
 }
 
 fn lookup_user_by_nick(directory: &HashMap<Uuid, String>, nick: &str) -> Option<(Uuid, String)> {

@@ -28,7 +28,7 @@ client. We write the "d".
 | 4 | ircd core: listener, registration, auth, welcome burst | ✅ done |
 | 5 | Channel projection + messaging bridge | ✅ done |
 | 6 | Settings → Account: IRC token mint/revoke UI | ✅ done |
-| 7 | Moderation mapping: ops, kicks, bans, KILL, server-ban enforce | ⬜ pending |
+| 7 | Moderation mapping: ops, kicks, bans, KILL, server-ban enforce | ✅ done |
 | 8 | TLS listener (in-process rustls) on 6697 | ✅ done |
 | 9 | ircd integration tests + CONTEXT.md + splash tips | ⬜ pending |
 
@@ -89,32 +89,22 @@ the settings UI reach live connections. ✔ single shared instance.
   states: loading, no token/create, active/reset/revoke, and one-time reveal.
 - Validation run: `cargo fmt -p late-ssh -p late-core`; `cargo check --workspace`.
 
-## Task #7 — Moderation mapping (pending)
+## Task #7 — Moderation mapping: done
 
-Spec: FRD-IRCD.md §9. Currently `conn.rs` returns **polite refusals** with TODO
-markers for KICK / KILL / MODE ±b; `Session.is_moderator` is `#[allow(dead_code)]`
-pending this work. Implement:
+Spec: FRD-IRCD.md §9. Implemented through the existing moderation service path,
+so IRC-originated moderation uses the same permission checks, DB writes, audit
+logging, session effects, and broadcast events as `/mod` in the TUI.
 
-- **+o projection**: mods → channel op (+o) in every channel; admins → ircop
-  (and op). Users can never be opped via ircc (op is lock-tied to mod tier —
-  reject MODE +o from clients). Send the op state in NAMES/353 prefixes and a
-  MODE burst on join.
-- **KICK** (channel) ↔ room kick; **server KILL** by an ircop ↔ server force-quit
-  (disconnect + block via registry). Room kick ↔ channel kick projection inbound.
-- **MODE ±b** `nick!*@*` ↔ room ban; server ban must disconnect + block
-  (registry `disconnect_user`, and auth already rejects banned users on connect —
-  see `auth.rs` `AuthOutcome::Banned`). Surface banlist via 367/368.
-- **Server ban / kick / token-revoke** must force-disconnect live conns
-  immediately. Token-revoke path already wired (Task #6). Hook server ban/kick
-  emit events to `IrcRegistry::disconnect_user`.
-- `+i` (invisible) is a no-op (accept silently). INVITE is **deferred** — reply
-  with a polite notice (already stubbed; confirm wording).
-- **Audit logging** for moderation actions taken via ircc.
-- Watch the existing chat/moderation service events: the ircd needs to subscribe
-  to room ban/kick/mod-change broadcasts and project them to the right IRC verbs.
-  Find where bans/kicks/mod-grants are emitted in `late-ssh`/`late-core` and add
-  an ircd projection consumer (likely in `conn.rs`'s event select loop, parallel
-  to `project_chat_event`).
+- NAMES/353 already prefixes mods/admins with `@`; WHOIS shows admins as ircops.
+- `KICK #chan nick [:reason]` runs the room kick path for channel ops.
+- `KILL nick :reason` runs the server kick path for admins.
+- `MODE #chan +b nick!*@*` / `-b nick!*@*` runs room ban/unban. Other masks are
+  refused with a notice. `MODE #chan b` returns 367/368 ban list numerics.
+- Room kick/ban/unban events project to IRC as KICK / MODE +b / MODE -b.
+- Moderator tier changes project to all joined channels as MODE +o/-o; client
+  attempts to set op modes remain refused because op is tied to late.sh tier.
+- Server kick/ban session effects now also call `IrcRegistry::disconnect_user`,
+  so live IRC clients receive an ERROR and close.
 
 ## Task #8 — TLS listener: done
 
