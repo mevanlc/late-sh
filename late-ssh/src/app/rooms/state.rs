@@ -23,22 +23,32 @@ impl App {
 
     /// Push one "your turn" desktop notification per turn the active room
     /// game hands to this user (poker hand, blackjack hand, chess move).
+    /// The backend outlives the room view (leaving only clears
+    /// `rooms_active_room`), so the room is resolved from the directory
+    /// snapshot and turns keep notifying while the user is elsewhere in
+    /// the app.
     fn notify_game_turn(&mut self) {
-        let awaiting = self
-            .active_room_game
-            .as_ref()
-            .is_some_and(|game| game.awaiting_my_action());
-        if !awaiting {
+        let Some(game) = &self.active_room_game else {
+            self.rooms_turn_notified_room_id = None;
+            return;
+        };
+        if !game.awaiting_my_action() {
             self.rooms_turn_notified_room_id = None;
             return;
         }
-        let Some(room) = &self.rooms_active_room else {
-            return;
-        };
-        if self.rooms_turn_notified_room_id == Some(room.id) {
+        let room_id = game.room_id();
+        if self.rooms_turn_notified_room_id == Some(room_id) {
             return;
         }
-        self.rooms_turn_notified_room_id = Some(room.id);
+        let Some(room) = self
+            .rooms_snapshot
+            .rooms
+            .iter()
+            .find(|room| room.id == room_id)
+        else {
+            return;
+        };
+        self.rooms_turn_notified_room_id = Some(room_id);
         self.notifier.push(Notification::your_turn(
             self.room_game_registry.label(room.game_kind),
             &room.display_name,
