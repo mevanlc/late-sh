@@ -582,8 +582,8 @@ late-sh/
 - `LeaderboardService::subscribe()` → `watch::Receiver<Arc<LeaderboardData>>` (shared, refreshed every 30s from DB; contains today's champions, daily completion statuses, monthly Arcade champion points, high scores, and chip boards)
 - `subscribe_events() → broadcast::Receiver<...Event>` - transient events/notices
 
-**Embedded IRC server (late-ssh, optional port 6667/6697):**
-- `LATE_IRC_ENABLED=true` starts the embedded server from `late-ssh/src/ircd/serve.rs`; it is off by default. Plaintext dev mode defaults to port 6667. When both `LATE_IRC_TLS_CERT` and `LATE_IRC_TLS_KEY` are set, the listener accepts rustls TLS and defaults to port 6697 if `LATE_IRC_PORT` is unset.
+**Embedded IRC server (late-ssh, local-dev plaintext port 6667; TLS default 6697):**
+- The root `Makefile` enables the embedded server for local dev via `LATE_IRC_ENABLED=1` and `LATE_IRC_PORT=6667` in generated `.env`; when env vars are absent, the Rust config default remains disabled. `late-ssh/src/ircd/serve.rs` starts only when enabled. When both `LATE_IRC_TLS_CERT` and `LATE_IRC_TLS_KEY` are set, the listener accepts rustls TLS and defaults to port 6697 if `LATE_IRC_PORT` is unset.
 - Users mint, reset, and revoke IRC tokens from `Ctrl+O` Settings > Account. Tokens are shown once, stored hashed only in `irc_tokens`, and are supplied as the IRC `PASS`. The IRC nick is locked to the late.sh username after authentication.
 - `#lounge` is force-joined and cannot be permanently parted from IRC. Public rooms project as channels; DMs bridge through IRC query/private-message semantics. Channel messages route through `ChatService`, so IRC clients share the same DB writes, broadcasts, permissions, ignores, and notifications as the TUI.
 - IRC moderation uses the existing moderation service path: channel ops map `KICK`, `MODE +b/-b`, and ban list requests to room moderation; admins can use `KILL` for server kicks. TUI/server kicks, bans, token resets, and token revokes call `IrcRegistry::disconnect_user` so live IRC clients close immediately with an IRC `ERROR`.
