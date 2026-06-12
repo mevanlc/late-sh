@@ -27,6 +27,7 @@ use crate::app::common::overlay::Overlay;
 
 use crate::app::common::{composer, primitives::Banner};
 use crate::app::help_modal::data::HelpTopic;
+use crate::app::notify::{Notification, Notifier};
 use crate::authz::Permissions;
 use crate::moderation::{command::ServerUserAction, event::ModerationEvent};
 use crate::state::{ActiveUser, ActiveUsers};
@@ -450,9 +451,9 @@ pub struct ChatState {
     pub(crate) work: work::state::State,
     favorite_room_ids: Vec<Uuid>,
 
-    /// Pending desktop notifications drained on render. `kind` matches the
-    /// string identifiers stored in `users.settings.notify_kinds`.
-    pub(crate) pending_notifications: Vec<PendingNotification>,
+    /// Producer handle for desktop notifications; drained by render through
+    /// `App::notify_outbox`.
+    notifier: Notifier,
     requested_help_topic: Option<HelpTopic>,
     requested_settings_modal: bool,
     requested_mod_modal: bool,
@@ -502,12 +503,6 @@ pub struct ChatState {
     pub(crate) last_image_upload_at: Option<std::time::Instant>,
 }
 
-pub(crate) struct PendingNotification {
-    pub kind: &'static str,
-    pub title: String,
-    pub body: String,
-}
-
 pub(crate) struct ChatServices {
     pub chat: ChatService,
     pub notifications: NotificationService,
@@ -529,6 +524,7 @@ impl ChatState {
         user_id: Uuid,
         permissions: Permissions,
         active_users: Option<ActiveUsers>,
+        notifier: Notifier,
     ) -> Self {
         let ChatServices {
             chat: service,
@@ -626,7 +622,7 @@ impl ChatState {
             work_selected: false,
             work: work::state::State::new(work_service, user_id, permissions.is_admin()),
             favorite_room_ids: Vec::new(),
-            pending_notifications: Vec::new(),
+            notifier,
             requested_help_topic: None,
             requested_settings_modal: false,
             requested_mod_modal: false,
@@ -1916,12 +1912,6 @@ impl ChatState {
             return None;
         }
 
-        if body.trim() == "/music" {
-            self.clear_composer_after_submit();
-            self.requested_help_topic = Some(HelpTopic::Music);
-            return None;
-        }
-
         if body.trim() == "/settings" {
             self.clear_composer_after_submit();
             self.requested_settings_modal = true;
@@ -3151,11 +3141,7 @@ impl ChatState {
             return None;
         }
         self.usernames.insert(user_id, username.to_string());
-        self.pending_notifications.push(PendingNotification {
-            kind: "friends",
-            title: "Friend online".to_string(),
-            body: format!("@{username} joined late.sh"),
-        });
+        self.notifier.push(Notification::friend_online(username));
         Some(Banner::success(&format!("Friend online: @{username}")))
     }
 
@@ -3276,22 +3262,15 @@ impl ChatState {
                             message.body.replace('\n', " ").chars().take(80).collect();
 
                         if is_targeted {
-                            self.pending_notifications.push(PendingNotification {
-                                kind: "dms",
-                                title: format!("New DM from {nickname}"),
-                                body: preview,
-                            });
+                            self.notifier.push(Notification::dm(&nickname, preview));
                         } else if let Some(me) = self.usernames.get(&self.user_id) {
                             let me_lc = me.to_ascii_lowercase();
                             if crate::app::common::mentions::extract_mentions(&message.body)
                                 .iter()
                                 .any(|m| m == &me_lc)
                             {
-                                self.pending_notifications.push(PendingNotification {
-                                    kind: "mentions",
-                                    title: format!("{nickname} mentioned you"),
-                                    body: preview,
-                                });
+                                self.notifier
+                                    .push(Notification::mention(&nickname, preview));
                             }
                         }
                     }
@@ -3680,6 +3659,18 @@ impl ChatState {
                             .get(&room_id)
                             .filter(|existing| existing.poll.id == poll.poll.id)
                             .and_then(|existing| existing.my_vote_option_id);
+                    }
+                    // PollUpdated fires for votes too; only a previously
+                    // unseen poll id in a room we're a member of is a fresh
+                    // /poll start worth notifying about. The author is
+                    // notified too, doubling as a delivery check.
+                    let is_new_poll = self
+                        .active_polls
+                        .get(&room_id)
+                        .is_none_or(|existing| existing.poll.id != poll.poll.id);
+                    if is_new_poll && self.rooms.iter().any(|(room, _)| room.id == room_id) {
+                        self.notifier
+                            .push(Notification::poll_started(&poll.poll.question));
                     }
                     self.active_polls.insert(room_id, poll);
                     if self.user_id == actor_user_id {
