@@ -19,9 +19,9 @@ pub struct WebTunnelConfig {
     pub fingerprint: String,
 }
 
-/// Embedded ircd settings; see devdocs/FRD-IRCD.md. All env vars are
-/// optional so existing dev/test/prod environments are unaffected until
-/// the listener is explicitly enabled.
+/// Embedded ircd settings; see devdocs/FRD-IRCD.md. All env vars are optional
+/// so environments without `LATE_IRC_*` settings are unaffected until the
+/// listener is explicitly enabled. The root Makefile opts local dev in.
 #[derive(Clone, Debug)]
 pub struct IrcConfig {
     pub enabled: bool,
