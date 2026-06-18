@@ -10,6 +10,7 @@ use late_core::models::{
 };
 use late_core::shutdown::CancellationToken;
 use late_core::test_utils::{TestDb, create_test_user};
+use late_ssh::app::chat::svc::SendMessageTask;
 use late_ssh::config::IrcConfig;
 use late_ssh::state::State;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -439,6 +440,76 @@ async fn echo_message_client_receives_own_privmsg_with_time_and_msgid() {
     assert!(
         echo.contains(&format!(" :{}!{}@late.sh ", user.username, user.username)),
         "echo should retain user prefix: {echo}"
+    );
+}
+
+#[tokio::test]
+async fn tag_unaware_client_receives_plain_tui_privmsg_fallback() {
+    let server = IrcTestServer::start().await;
+    let user = server.seed_user("irc-plain-tui-user").await;
+    let mut client = server.connect(&user.token).await;
+    client.read_until(" 376 ").await;
+    client.read_until(" JOIN #lounge").await;
+    client.read_until(" 366 ").await;
+
+    server.state.chat_service.send_message_task(
+        user.id,
+        user.lounge_id,
+        Some("lounge".to_string()),
+        "plain from tui".to_string(),
+        uuid::Uuid::new_v4(),
+        false,
+    );
+
+    let line = client.read_until("PRIVMSG #lounge :plain from tui").await;
+    assert!(
+        !line.starts_with('@')
+            && line.contains(&format!(":{}!{}@late.sh ", user.username, user.username)),
+        "tag-unaware client should receive an untagged PRIVMSG fallback: {line}"
+    );
+}
+
+#[tokio::test]
+async fn tui_reply_projects_reply_tag_to_tag_aware_client() {
+    let server = IrcTestServer::start().await;
+    let user = server.seed_user("irc-tui-reply-user").await;
+    let db = server.state.db.get().await.expect("db client");
+    let parent = ChatMessage::create_with_reply_to(
+        &db,
+        ChatMessageParams {
+            room_id: user.lounge_id,
+            user_id: user.id,
+            body: "reply parent from tui".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("create parent message");
+    drop(db);
+    let mut client = server.connect_with_caps(&user.token, "message-tags").await;
+    client.read_until(" 376 ").await;
+    client.read_until(" JOIN #lounge").await;
+    client.read_until(" 366 ").await;
+
+    server
+        .state
+        .chat_service
+        .send_message_with_reply_task(SendMessageTask {
+            user_id: user.id,
+            room_id: user.lounge_id,
+            room_slug: Some("lounge".to_string()),
+            body: "reply from tui".to_string(),
+            reply_to_message_id: Some(parent.id),
+            request_id: uuid::Uuid::new_v4(),
+            is_admin: false,
+        });
+
+    let line = client.read_until("PRIVMSG #lounge :reply from tui").await;
+    assert!(
+        line.starts_with("@msgid=")
+            && line.contains(&format!(";+reply={}", parent.id))
+            && line.contains(&format!(":{}!{}@late.sh ", user.username, user.username)),
+        "tag-aware client should receive msgid and +reply tags for TUI replies: {line}"
     );
 }
 
