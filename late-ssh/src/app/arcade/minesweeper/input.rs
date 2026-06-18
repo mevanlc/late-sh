@@ -1,4 +1,9 @@
+use ratatui::layout::Rect;
+
+use crate::app::input::{MouseButton, MouseEvent, MouseEventKind};
+
 use super::state::State;
+use super::ui;
 
 pub fn handle_key(state: &mut State, byte: u8) -> bool {
     match byte {
@@ -20,6 +25,10 @@ pub fn handle_key(state: &mut State, byte: u8) -> bool {
         }
         b']' => {
             state.next_difficulty();
+            return true;
+        }
+        b'o' | b'O' => {
+            state.use_dot_style = !state.use_dot_style;
             return true;
         }
         _ => {}
@@ -78,6 +87,40 @@ pub fn handle_arrow(state: &mut State, key: u8) -> bool {
         }
         b'D' => {
             state.move_cursor(0, -1);
+            true
+        }
+        _ => false,
+    }
+}
+
+pub fn handle_mouse(state: &mut State, area: Rect, mouse: MouseEvent) -> bool {
+    match mouse.kind {
+        MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
+            let Some(x) = mouse.x.checked_sub(1) else {
+                return false;
+            };
+            let Some(y) = mouse.y.checked_sub(1) else {
+                return false;
+            };
+            let Some((row, col)) = ui::hit_test(area, state.difficulty(), x, y) else {
+                return false;
+            };
+            state.cursor = (row, col);
+            state.reveal();
+            true
+        }
+        MouseEventKind::Down if mouse.button == Some(MouseButton::Right) => {
+            let Some(x) = mouse.x.checked_sub(1) else {
+                return false;
+            };
+            let Some(y) = mouse.y.checked_sub(1) else {
+                return false;
+            };
+            let Some((row, col)) = ui::hit_test(area, state.difficulty(), x, y) else {
+                return false;
+            };
+            state.cursor = (row, col);
+            state.toggle_flag();
             true
         }
         _ => false,
