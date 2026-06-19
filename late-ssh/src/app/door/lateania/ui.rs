@@ -301,12 +301,13 @@ fn titles_panel(view: &PlayerView, cursor: usize) -> Vec<Line<'static>> {
     lines
 }
 
-/// Quest journal: the Frontier zone quests and whether each has been cleared.
+/// Quest journal: Frontier zone clears plus active board bounties.
 fn quests_panel(view: &PlayerView) -> Vec<Line<'static>> {
     let mut lines = vec![section("Quest Journal")];
-    let done = view.quests.iter().filter(|q| q.done).count();
+    let frontier_total = view.quests.iter().filter(|q| q.frontier).count();
+    let done = view.quests.iter().filter(|q| q.frontier && q.done).count();
     lines.push(Line::from(Span::styled(
-        format!("  {done}/{} zones cleared", view.quests.len()),
+        format!("  {done}/{frontier_total} zones cleared"),
         Style::default().fg(theme::TEXT_DIM()),
     )));
     lines.push(Line::raw(""));
@@ -323,11 +324,11 @@ fn quests_panel(view: &PlayerView) -> Vec<Line<'static>> {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "  reward: the \"Champion of ...\"",
+        "  Frontier: Champion title + bounty",
         Style::default().fg(theme::TEXT_DIM()),
     )));
     lines.push(Line::from(Span::styled(
-        "  title (Lv = boss) + a bounty",
+        "  Boards: claim ready bounties at their post",
         Style::default().fg(theme::TEXT_DIM()),
     )));
     lines.push(Line::raw(""));
@@ -404,6 +405,30 @@ fn room_panel(
     lines.push(Line::raw(""));
     lines.push(section("Here"));
     lines.extend(side_text_wrap(&view.zone, theme::TEXT(), width));
+    // The living-world clock: time of day and weather.
+    lines.push(Line::from(Span::styled(
+        format!("  {} · {}", view.time_of_day, view.weather),
+        Style::default().fg(theme::AMBER_DIM()),
+    )));
+    // An active escort: who you're leading, their health, and where to.
+    if let Some((name, hp, max_hp, dest)) = &view.escort {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("  ★ {name} "),
+                Style::default()
+                    .fg(theme::MENTION())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{hp}/{max_hp}"),
+                Style::default().fg(hp_color(*hp, *max_hp)),
+            ),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("    lead to {dest}"),
+            Style::default().fg(theme::TEXT_DIM()),
+        )));
+    }
     let exits = if view.exits.is_empty() {
         "none".to_string()
     } else {

@@ -37,8 +37,13 @@ Core shape:
 
 Current game scale:
 - `seed_world()` starts at Embergate room `1`.
-- Tests currently assert `1298` rooms: 198 base/extension rooms, 100 overworld rooms, and 1000 Frontier rooms.
+- The world holds `1565` rooms: 198 base/extension, 100 overworld, 1000 Frontier, plus three living-world regions — the 96-room Sunken Catacombs, the 96-room Thornwood Hollows, and the (CA-sized, ~75-room) Drowned Caverns. The room-count test checks each region range rather than one magic literal.
 - Frontier has 20 zones, each 10 by 5 rooms, starting at room `2000`.
+- Three deterministic living-world regions (fixed-seed `MazeRng`, identical every boot), each hung off a capital via a free direction:
+  - **Sunken Catacombs** (rooms `5000+`, off `TASMANIA_SQUARE`) — braided maze (`carve_maze` + `extend_catacombs`); undead.
+  - **Thornwood Hollows** (rooms `5200+`, off `MELVANALA_SQUARE`) — braided maze (`carve_maze` + `extend_thornwood`); beasts/fae.
+  - **Drowned Caverns** (rooms `5400+`, off `MATLATESH_SQUARE`) — organic cellular-automata cave (`carve_cavern` + `extend_caverns`), NOT a maze: noise smoothed into chambers, then only the largest connected pocket is kept (so no unreachable rooms); rooms are sparse within the cell field. Aberrations.
+- The living-world regions are a hard post-Archdemon arc: their capital entrances require `Bane of the Archdemon Mal'gareth`, their regular mobs are capped below local boss damage, and their boss titles act as the three living-dark seals for Frontier access.
 
 ---
 
@@ -59,7 +64,13 @@ Current game scale:
 | `items.rs` | Item catalog, equipment slots, consumables, valuables, shops, generated Frontier loot. |
 | `damage.rs` | Damage schools, mob resistance/weakness profiles, damage multiplier math. |
 | `stats.rs` | D&D-style ability scores, 4d6-drop-lowest rolls, modifiers, HP/attack bonuses. |
-| `persist.rs` | JSON schemas for durable character saves and shared world saves. |
+| `persist.rs` | JSON schemas for durable character saves and shared world saves. Versioned (`SCHEMA_VERSION`); new fields use `#[serde(default)]` so old saves load (e.g. `board_progress`/`board_done` for quests). |
+
+### Board quests [VOLATILE]
+
+`BOARD_QUESTS` (in `svc.rs`) is a static table of bounties posted on a `FeatureKind::Board` in each capital square (Tasmania/Melvanala/Matlatesh). Each has an `Objective` — `Bounty{name_contains,count}`, `Collect{item,count}`, `Reach{zone}`, or `Escort{npc,dest_zone}` — and a `Repeat` (`Once`/`Daily`/`Weekly`). Per-player state: `board_progress` (accepted counters), `board_done` (one-offs claimed), `quest_cooldowns` (id→Unix seconds when a repeatable was last claimed), all persisted; plus a transient `escort: Option<EscortState>` (not persisted).
+
+Examining a board (`use_board`): claims a finished bounty if ready (one-offs → `board_done`, repeatables → `quest_cooldowns`, re-available after `DAY_SECS`/×7 via `board_quest_available`), else posts the next available quest. Counter progress ticks via `bump_quests` from the kill / loot / room-enter paths. **Escorts** spawn a transient escortee that travels with the player; it is wounded by chance when the player is struck (`wound_escort`) and lost immediately on player death; reaching `dest_zone` with it alive completes the quest (`check_escort_arrival`, in `describe_room_context`). The escortee and active board quests surface in the room panel / quest journal.
 
 ---
 
@@ -97,11 +108,14 @@ Input capture contract:
 ### Tick loop
 
 Every `TICK_SECS = 2`, `WorldState::tick`:
-- respawns dead mobs whose timers have elapsed;
+- advances the world clock (`world_ticks`), which derives `TimeOfDay` (Dawn/Day/Dusk/Night, `PHASE_TICKS`) and `Weather` (Clear/Rain/Fog/Storm, `WEATHER_TICKS`), surfaced on `PlayerView` and shown in the room panel;
+- runs the wandering world-boss lifecycle: notes when the reigning boss has died (clearing `world_boss`, scheduling the next at `+WORLD_BOSS_INTERVAL`) and raises a new one (fixed id `WORLD_BOSS_ID`, a roaming Hunter boss) only after an online player has the Archdemon title plus all three living-dark boss titles, announced server-wide via `log_all`;
+- reaps runtime-only mobs (`id >= SUMMON_ID_START`: summoner adds and the dead world boss) and respawns authored mobs (resetting roamers to `leash_home` and re-hiding Ambushers);
+- moves roamers (`move_roamers`): Wanderers/Patrollers drift in-zone, Hunters prowl only after dark (the world boss can roam across endgame living-dark/Frontier space at any hour);
 - applies mob damage-over-time stacks and kills mobs if DoTs finish them;
 - respawns downed players at `TEMPLE_ROOM = 4` after `PLAYER_RESPAWN_SECS = 8`;
 - regenerates class resources and decrements buffs, shields, HoTs, stuns, and cooldowns;
-- resolves one combat round for each engaged player;
+- resolves one combat round for each engaged player, then per-mob behavior (`resolve_mob_behavior`): Caster bolts (storm-boosted), PackHunter gang-ups, Summoner adds, Brute enrage, Thief steal-and-flee, Skirmisher flee; all mob damage is scaled by `TimeOfDay::mob_damage_pct` (the dark hits harder) and Ambush reveals are fog-boosted;
 - removes idle players after `PLAYER_IDLE_TIMEOUT_SECS = 10 * 60`, exporting their save;
 - increments snapshot generation when dirty and drains kill outcomes for `ActivityGame::Mud`.
 
@@ -128,7 +142,8 @@ Before class choice:
 
 - Movement: `w/a/s/d`, `h/l` for west/east, and arrow keys for cardinal directions; `<` or `,` for up; `>` or `.` for down.
 - The first dungeon descent from Whisperwood into Duskhollow requires `Bane of the Elder Treant`.
-- The Town Square Frontier descent requires `Bane of the Archdemon Mal'gareth`; after that title gate, it still uses a transient two-step warning: the first `>` logs that the Frontier is older, meaner country for seasoned adventurers, and the next `>` confirms descent. Service-backed non-movement actions clear the pending warning.
+- Living-dark entrances from the three capitals require `Bane of the Archdemon Mal'gareth`.
+- The Town Square Frontier descent requires `Bane of the Archdemon Mal'gareth`, `Bane of The Bonewright Lich`, `Bane of the Elder Dryad`, and `Bane of the Abyss-Thing`; after those title gates, it still uses a transient two-step warning: the first `>` logs that the Frontier is older, meaner country for seasoned adventurers, and the next `>` confirms descent. Service-backed non-movement actions clear the pending warning.
 - Combat: `space`, `x`, or Enter attacks when not in a list panel; `z` flees.
 - Abilities: `1-9` use unlocked ability slots unless a list panel is open.
 - World actions: `r` recalls to Embergate's Town Square when out of combat; `f` toggles the Follow panel.
@@ -176,7 +191,7 @@ Non-Room side panels are rendered through `side_paragraph`, which enables Ratatu
 - The Mistfen sinkhole is signposted as a Fungal Hollow side-delving, not a relic altar or empty hole.
 - Safe capital squares are `TASMANIA_SQUARE = 620`, `MELVANALA_SQUARE = 660`, and `MATLATESH_SQUARE = 720`. Each must remain safe and carry a fountain plus dedication plaque.
 - `extend_frontier` adds 20 Frontier zones. Each zone is a 10 by 5 grid with a safe entrance cell, regular mobs on even-indexed cells, a boss in the last cell, generated names/descriptions, and down/up links between zones.
-- Frontier remains hung off Embergate's Town Square for reachability, but its exit label renders as `down (dangerous Frontier)`, entry is gated behind `Bane of the Archdemon Mal'gareth`, and the Town Square/class-choice guidance points new players toward the South Gate first.
+- Frontier remains hung off Embergate's Town Square for reachability, but its exit label renders as `down (dangerous Frontier)`, entry is gated behind the Archdemon title plus the three living-dark boss titles, and the Town Square/class-choice guidance points new players toward the South Gate first.
 
 ### Features
 
@@ -200,7 +215,8 @@ Non-Room side panels are rendered through `side_paragraph`, which enables Ratatu
 - Generated Frontier item IDs are `3000..3200`, 20 tiers times 10 slots.
 - `item(id)` searches both authored `ITEMS` and generated Frontier catalog.
 - Frontier mob and boss loot tables use `frontier_loot(zone)`, which includes representative weapon, head, chest, hands, ring, draught, and relic entries for the zone tier.
-- Early Frontier regulars are tuned to require some post-Archdemon attention without feeling like bosses; tests keep the first regular above beginner-pushover level and below the first Frontier boss.
+- Frontier item generation now starts at post-living-dark power and climbs hard across all 20 tiers; regional boss loot is authored, meaningful post-Archdemon gear, while Frontier remains the best long-term gear path.
+- Early Frontier regulars are tuned as endgame mobs: tests keep the first Frontier regular above the strongest living-dark boss damage while still below the first Frontier boss.
 
 ---
 
@@ -243,7 +259,7 @@ Progression:
 - Warrior survives the first lethal blow of each life at 1 HP.
 - Veteran accounts, checked on join by account age, can resurrect in place while charges remain; fountains refresh charges.
 - Normal death clears target, removes 20% of carried gold, sets `respawn_at`, and later respawns the player at the temple. Banked gold is protected.
-- `seed_world()` applies a balance scaler after all authored/overworld/Frontier spawns are generated: authored regular mobs are modestly tougher with a small XP bump and faster respawns, authored bosses gain larger HP/damage bumps with lower XP, and Frontier mobs/bosses scale harder than story content while Frontier regulars remain rewarding enough to grind.
+- `seed_world()` applies a balance scaler after all authored/overworld/Frontier/living-dark spawns are generated: authored regular mobs are modestly tougher with a small XP bump and faster respawns, authored bosses gain larger HP/damage bumps with lower XP, living-dark mobs/bosses become hard post-Archdemon progression, and Frontier mobs/bosses scale sharply above them while Frontier regulars remain rewarding enough to grind.
 
 ### Items, shops, and rewards
 
@@ -255,7 +271,7 @@ Progression:
 - Shops are in Embergate: Ember Forge, Outfitter, Apothecary, and Curio Cart.
 - Shop economy intentionally includes expensive late-game gold sinks: masterwork weapon/armor/head/hands, premium curio gear, and the repeatable Phoenix Tonic. The masterwork shop pieces are shop-stock, not boss drops, so gold remains useful after normal boss clears.
 - Apothecary consumables are tuned as the pressure valve for harder combat: early draughts are affordable recovery, Elixir of Renewal covers mid/late mixed HP/resource recovery, and Phoenix Tonic is a repeatable expensive late-game recovery sink.
-- Authored boss loot tables include head and hand upgrades across tiers, while regular mobs keep modest low-tier drop pools.
+- Authored boss loot tables include head and hand upgrades across tiers; living-dark bosses add controlled post-Archdemon unique gear, while their regular mobs mostly drop regional relics and sustain consumables.
 - Bosses always drop one item from their loot table. Regular mobs have a modest chance if their table is non-empty.
 - Mob kills grant XP, reduced gold, possible loot, and titles. Boss XP and Frontier quest XP/gold bounties are intentionally damped so boss chains do not skip too much of the level curve.
 - Boss title format is `Bane of ...`; lesser foes grant a derived `...bane` title.
@@ -272,7 +288,7 @@ Progression:
 
 Character persistence uses `late_core::models::mud_character` / `mud_characters`.
 
-Saved character schema version: `5`.
+Saved character schema version: `7`.
 
 Durable fields:
 - class key, XP, level, carried gold, banked gold, current HP;
@@ -360,7 +376,7 @@ Use integration tests under `late-ssh/tests/door/` only for DB/service orchestra
 
 ## 11. Known Gotchas And Future Work [VOLATILE]
 
-- Some comments in `world.rs` may lag current content scale. Trust current tests/data: 1298 rooms, 20 Frontier zones, 1000 Frontier rooms.
+- Some comments in `world.rs` may lag current content scale. Trust current tests/data: 1565 rooms, 20 Frontier zones, 1000 Frontier rooms, plus the three living-world regions.
 - `follow_task` still exists as an old toggle service command, but current input opens the Follow panel and uses `follow_to_task` / `stop_follow_task`.
 - `say_task` exists, but active Lateania has no typed command prompt yet.
 - Inventory snapshots include equipped items after pack items. Equip/use/sell mutations usually require the item to still be in `inventory`, so equipped-row activation is often a no-op.
