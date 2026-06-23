@@ -145,18 +145,9 @@ fn draw_cube(frame: &mut Frame, area: Rect, state: &State) {
         }
     }
 
-    let mut lines = vec![
-        Line::from(Span::styled(
-            format!(
-                "Visible: {} top / {} front / {} right",
-                top_face.label(),
-                front_face.label(),
-                right_face.label()
-            ),
-            Style::default().fg(theme::TEXT_DIM()),
-        )),
-        Line::from(""),
-    ];
+    // Two blank leads keep the cube's top edge aligned with the net's first
+    // face box across the gutter (the net column spends two rows on its title).
+    let mut lines = vec![Line::from(""), Line::from("")];
     for row in canvas {
         let mut spans = Vec::new();
         let mut x = 0;
