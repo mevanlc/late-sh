@@ -399,8 +399,7 @@ written yet (agent/HWK follow-up, R-E). See REVIEW H1 for the full resolution no
 | `late --no-onboard` | This run only: no probe, no prompts, no file writes. Honor a saved method if present; else default non-interactive key resolution, else the setup hint. |
 
 **Status: implemented** (`--onboard` / `--no-onboard` flags + `onboard = …` in
-config.toml). Note R-B's `late` row is the H1-core behavior; the *menu* that the
-onboard path shows (R-C / M1) is still the existing auto-attach prompt, pending.
+config.toml). The `late` row's onboard path now also shows the R-C menu (see below).
 
 ### R-C. Lead with the discovered state; confirm the attach (replaces silent auto-attach)
 
@@ -417,6 +416,11 @@ yes/no prompts with a menu that leads with what was found:
   plainly that nothing is merged or removed; others stay reachable), then the same
   menu. Non-interactive → fail clearly with the accounts + key paths and the
   `--key <path>` escape, never guess (matches step in §5).
+
+**Status: implemented** in `identity.rs` (`prompt_onboarding_choice` /
+`OnboardingChoice` for Stage 2; `select_known_account` + reframed
+`prompt_account_choice` for Stage 1). OSWKK removal stays parked (R-D). See REVIEW M1
+for the full resolution note.
 
 ### R-D. Parked: fingerprint removal
 

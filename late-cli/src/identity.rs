@@ -82,8 +82,9 @@ pub(super) async fn ensure_default_identity_with_onboarding(config: &Config) -> 
 }
 
 /// First-run onboarding for the missing-dedicated-key case: probe the user's
-/// well-known keys for an existing account, generate the dedicated key, and
-/// optionally attach it. Records the chosen method on success.
+/// well-known keys for an existing account, then either lead with the discovered
+/// account (menu) or fall back to creating a fresh key. Records the chosen method
+/// on success.
 async fn onboard_new_dedicated_identity(
     config: &Config,
     dedicated_path: PathBuf,
@@ -95,20 +96,108 @@ async fn onboard_new_dedicated_identity(
         anyhow::bail!("{}", noninteractive_onboarding_hint(&dedicated_path));
     }
 
-    let selected_account = select_known_account(&probe_known_accounts(config).await?)?;
-    // Declining key generation bails here, before any marker is written, so the
-    // can't-proceed case re-onboards next launch.
+    match select_known_account(&probe_known_accounts(config).await?)? {
+        Some(account) => onboard_with_discovered_account(config, account, dedicated_path).await,
+        None => onboard_fresh_identity(config, dedicated_path).await,
+    }
+}
+
+/// No existing account was discovered: a truly-new user. Generate the dedicated
+/// key (the prompt's decline bails before any marker is written) and record it.
+async fn onboard_fresh_identity(config: &Config, dedicated_path: PathBuf) -> Result<PathBuf> {
     prompt_generate_identity(&dedicated_path)?;
-    let username = match selected_account {
-        Some(account) => {
-            associate_dedicated_key(config, &account, &dedicated_path).await?;
-            Some(account.username)
-        }
-        None => None,
-    };
     maybe_offer_openssh_config(config)?;
-    record_native_marker(&dedicated_path, username.as_deref());
+    record_native_marker(&dedicated_path, None);
     Ok(dedicated_path)
+}
+
+/// Probing found an existing account. Lead with it and let the user choose how to
+/// proceed, rather than silently attaching a freshly-generated key.
+async fn onboard_with_discovered_account(
+    config: &Config,
+    account: KnownAccountProbe,
+    dedicated_path: PathBuf,
+) -> Result<PathBuf> {
+    match prompt_onboarding_choice(&account, &dedicated_path)? {
+        // R2 (recommended): generate the dedicated key and additively attach it.
+        // The menu choice is the consent to generate, so go straight to
+        // `generate_identity` without re-prompting.
+        OnboardingChoice::CreateDedicated => {
+            generate_identity(&dedicated_path)?;
+            associate_dedicated_key(config, &account, &dedicated_path).await?;
+            maybe_offer_openssh_config(config)?;
+            record_native_marker(&dedicated_path, Some(&account.username));
+            Ok(dedicated_path)
+        }
+        // R1: keep using the existing well-known key as the late.sh identity, and
+        // persist that as a first-class choice so it is not re-asked every launch.
+        OnboardingChoice::UseExisting => {
+            println!(
+                "Keeping {} as your late.sh identity for @{}.",
+                display_tilde_path(&account.path),
+                account.username
+            );
+            record_native_marker(&account.path, Some(&account.username));
+            Ok(account.path)
+        }
+        // R3: connect this once with the existing key and persist nothing, so the
+        // offer comes back next launch. Never a dead end.
+        OnboardingChoice::Skip => Ok(account.path),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnboardingChoice {
+    CreateDedicated,
+    UseExisting,
+    Skip,
+}
+
+fn prompt_onboarding_choice(
+    account: &KnownAccountProbe,
+    dedicated_path: &Path,
+) -> Result<OnboardingChoice> {
+    println!(
+        "You already have a late.sh account (@{}) under {}.\n",
+        account.username,
+        display_tilde_path(&account.path)
+    );
+    println!(
+        "  1. Create a dedicated late.sh key ({}) and add it to @{}  [recommended]",
+        display_tilde_path(dedicated_path),
+        account.username
+    );
+    println!(
+        "  2. Keep using {} for late.sh",
+        display_tilde_path(&account.path)
+    );
+    println!("  3. Skip for now (ask again next time)");
+
+    loop {
+        print!("Choose [1-3] (default 1): ");
+        std::io::stdout()
+            .flush()
+            .context("failed to flush prompt")?;
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("failed to read prompt response")?;
+
+        if let Some(choice) = parse_onboarding_choice(&input) {
+            return Ok(choice);
+        }
+        println!("Please enter 1, 2, or 3.");
+    }
+}
+
+fn parse_onboarding_choice(input: &str) -> Option<OnboardingChoice> {
+    match input.trim() {
+        "1" | "" => Some(OnboardingChoice::CreateDedicated),
+        "2" => Some(OnboardingChoice::UseExisting),
+        "3" => Some(OnboardingChoice::Skip),
+        _ => None,
+    }
 }
 
 async fn ensure_existing_dedicated_identity(
@@ -508,7 +597,9 @@ fn select_known_account(accounts: &[KnownAccountProbe]) -> Result<Option<KnownAc
 }
 
 fn prompt_account_choice(choices: &[KnownAccountProbe]) -> Result<KnownAccountProbe> {
-    println!("Multiple existing late.sh accounts were found:");
+    println!("Heads up: more than one late.sh account is linked to your existing SSH keys.");
+    println!("Nothing will be merged or removed — pick the one `late` should use; the rest");
+    println!("stay as they are.\n");
     for (index, account) in choices.iter().enumerate() {
         println!(
             "  {}. @{} ({})",
@@ -519,10 +610,7 @@ fn prompt_account_choice(choices: &[KnownAccountProbe]) -> Result<KnownAccountPr
     }
 
     loop {
-        print!(
-            "Use which account for ~/.ssh/id_late_sh_ed25519? [1-{}]: ",
-            choices.len()
-        );
+        print!("Use which account? [1-{}]: ", choices.len());
         std::io::stdout()
             .flush()
             .context("failed to flush prompt")?;
@@ -709,6 +797,26 @@ mod tests {
         assert_eq!(parse_default_yes("n"), Some(false));
         assert_eq!(parse_default_yes("NO"), Some(false));
         assert_eq!(parse_default_yes("maybe"), None);
+    }
+
+    #[test]
+    fn onboarding_choice_defaults_to_recommended_and_maps_digits() {
+        // Empty (bare Enter) takes the recommended option.
+        assert_eq!(
+            parse_onboarding_choice(""),
+            Some(OnboardingChoice::CreateDedicated)
+        );
+        assert_eq!(
+            parse_onboarding_choice("1"),
+            Some(OnboardingChoice::CreateDedicated)
+        );
+        assert_eq!(
+            parse_onboarding_choice(" 2 "),
+            Some(OnboardingChoice::UseExisting)
+        );
+        assert_eq!(parse_onboarding_choice("3"), Some(OnboardingChoice::Skip));
+        assert_eq!(parse_onboarding_choice("4"), None);
+        assert_eq!(parse_onboarding_choice("yes"), None);
     }
 
     #[test]

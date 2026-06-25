@@ -181,7 +181,7 @@ is untested despite its byte-preservation contract.
 
 ## Medium
 
-### M1. First-run auto-associates without confirmation; onboarding should lead with the discovered state
+### M1. First-run auto-associates without confirmation; onboarding should lead with the discovered state — ✅ RESOLVED
 
 **The bug.** In `ensure_default_identity_with_onboarding` (identity.rs:49-58), after
 generating the key the code calls `associate_dedicated_key(...)` directly whenever a
@@ -272,6 +272,25 @@ account/identity so disambiguation happens once, not per launch. `prompt_account
 essentially that plus the "nothing will be merged" preamble. Copy must not imply R2
 *consolidates* accounts: it gives the one you picked a stable identity; the others
 remain. Genuine account merges are out of scope — point users at docs/support.
+
+**✅ RESOLVED.** The silent auto-attach is gone; the missing-key path now leads with
+the discovered account.
+
+- `onboard_new_dedicated_identity` dispatches on the probe result: an account found →
+  `onboard_with_discovered_account` (the menu); none → `onboard_fresh_identity` (the
+  unchanged "create a key?" flow for a truly-new user).
+- **Stage 2 menu** (`prompt_onboarding_choice` → `OnboardingChoice`): `1.` create the
+  dedicated key + additively `associate-key` it to the account *(recommended; bare
+  Enter)*; `2.` keep the existing well-known key as the late.sh identity; `3.` skip for
+  now. R2 generates without re-prompting (the menu choice *is* the consent). R1 and R3
+  return the existing key's path; R1 persists it via the H1 marker (first-class, not
+  re-asked), R3 persists nothing (re-offered next launch — never a dead end).
+- **Stage 1** (`select_known_account` / `prompt_account_choice`) is reused for 2+
+  accounts, now with the "nothing will be merged or removed" preamble; non-interactive
+  still fails clearly rather than guessing.
+- Parked as specified: no OSWKK removal / disassociation (additive only).
+- Test: `parse_onboarding_choice` mapping incl. the bare-Enter default
+  (`identity::tests`).
 
 ### M2. Probing happens before the interactivity check; bail message then misleads — ✅ RESOLVED
 In `ensure_default_identity_with_onboarding`, `probe_known_accounts` (several SSH
