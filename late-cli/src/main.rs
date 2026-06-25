@@ -23,7 +23,7 @@ mod ws;
 
 use audio::{AudioRuntime, audio_startup_hint};
 use config::{Config, init_logging};
-use identity::ensure_client_identity_at;
+use identity::{ensure_client_identity_at, ensure_default_identity_with_onboarding};
 use raw_mode::{RawModeGuard, enable_ansi_output_if_tty};
 use ssh::{SshProcess, flush_stdin_input_queue, forward_resize_events, spawn_ssh};
 use ws::{
@@ -57,8 +57,10 @@ async fn main() -> Result<()> {
     // helper in that mode unless the caller explicitly asks for a key.
     let ssh_identity = if config.ssh_mode == config::SshMode::OpenSsh && config.key_file.is_none() {
         None
+    } else if let Some(key_file) = config.key_file.as_deref() {
+        Some(ensure_client_identity_at(Some(key_file))?)
     } else {
-        Some(ensure_client_identity_at(config.key_file.as_deref())?)
+        Some(ensure_default_identity_with_onboarding(&config).await?)
     };
     // In OpenSSH mode the system ssh client owns the terminal, so PIN,
     // passphrase, and touch prompts keep OpenSSH's normal echo behavior.

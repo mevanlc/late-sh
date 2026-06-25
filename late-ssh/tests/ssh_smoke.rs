@@ -8,6 +8,7 @@ use russh::{
     ChannelMsg, client,
     keys::{PrivateKey, PrivateKeyWithHashAlg},
 };
+use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
@@ -220,6 +221,111 @@ async fn closing_token_exec_channel_does_not_close_interactive_shell() {
         .await
         .expect("disconnect client");
     handle.abort();
+}
+
+#[tokio::test]
+async fn whoami_exec_does_not_create_user_but_token_exec_still_does() {
+    let test_db = new_test_db().await;
+    let config = test_config(test_db.db.config().clone());
+    let state = test_app_state(test_db.db.clone(), config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let _ = run_with_listener(listener, state, None).await;
+    });
+
+    let initial_user_count = user_count(&test_db.db).await;
+    let user = "whoami-user";
+    let key = Arc::new(
+        PrivateKey::random(
+            &mut UnwrapErr(SysRng),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .expect("generate client key"),
+    );
+    let mut client = client::connect(Arc::new(client::Config::default()), addr, TestClient)
+        .await
+        .expect("connect client");
+    let auth = client
+        .authenticate_publickey(
+            user,
+            PrivateKeyWithHashAlg::new(
+                key,
+                client
+                    .best_supported_rsa_hash()
+                    .await
+                    .expect("rsa hash")
+                    .flatten(),
+            ),
+        )
+        .await
+        .expect("auth client")
+        .success();
+    assert!(auth, "auth should succeed");
+    assert_eq!(
+        user_count(&test_db.db).await,
+        initial_user_count,
+        "SSH auth alone must not create a user"
+    );
+
+    let (whoami_payload, whoami_status) = exec_request(&client, "late-cli-whoami-v1").await;
+    assert_eq!(whoami_status, Some(0), "whoami should exit successfully");
+    let whoami: Value = serde_json::from_slice(&whoami_payload).expect("whoami JSON");
+    assert_eq!(whoami["status"], "nobody");
+    assert!(whoami["ssh_fingerprint"].as_str().is_some());
+    assert_eq!(
+        user_count(&test_db.db).await,
+        initial_user_count,
+        "whoami must not create a user"
+    );
+
+    let (token_payload, token_status) = exec_request(&client, "late-cli-token-v1").await;
+    assert_eq!(token_status, Some(0), "token should exit successfully");
+    let token: Value = serde_json::from_slice(&token_payload).expect("token JSON");
+    assert!(token["session_token"].as_str().is_some());
+    assert_eq!(
+        user_count(&test_db.db).await,
+        initial_user_count + 1,
+        "token exec should still materialize an account"
+    );
+
+    client
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await
+        .expect("disconnect client");
+    handle.abort();
+}
+
+async fn user_count(db: &late_core::db::Db) -> i64 {
+    let client = db.get().await.expect("db client");
+    client
+        .query_one("SELECT COUNT(*) FROM users", &[])
+        .await
+        .expect("count users")
+        .get(0)
+}
+
+async fn exec_request(
+    client: &client::Handle<TestClient>,
+    command: &str,
+) -> (Vec<u8>, Option<u32>) {
+    let mut channel = client.channel_open_session().await.expect("open channel");
+    channel.exec(true, command).await.expect("exec request");
+
+    let mut payload = Vec::new();
+    let mut exit_status = None;
+    loop {
+        match timeout(Duration::from_secs(15), channel.wait())
+            .await
+            .expect("exec response timeout")
+        {
+            Some(ChannelMsg::Data { data }) => payload.extend_from_slice(data.as_ref()),
+            Some(ChannelMsg::ExitStatus { exit_status: code }) => exit_status = Some(code),
+            Some(ChannelMsg::Close) | None => return (payload, exit_status),
+            Some(_) => {}
+        }
+    }
 }
 
 async fn expect_shell_data(channel: &mut russh::Channel<client::Msg>) {

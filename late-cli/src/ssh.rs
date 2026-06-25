@@ -1,9 +1,10 @@
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use russh::{
     ChannelMsg, ChannelReadHalf, ChannelWriteHalf, Disconnect, client,
     keys::{self, PrivateKeyWithHashAlg, known_hosts},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::{
     env, fs, io,
@@ -51,6 +52,8 @@ use tokio::process::{Child, Command};
 pub(super) const CLI_MODE_ENV: &str = "LATE_CLI_MODE";
 const CLI_TOKEN_PREFIX: &str = "LATE_SESSION_TOKEN=";
 const CLI_TOKEN_REQUEST: &str = "late-cli-token-v1";
+const CLI_WHOAMI_REQUEST: &str = "late-cli-whoami-v1";
+const CLI_ASSOCIATE_KEY_REQUEST: &str = "late-cli-associate-key-v1";
 const GENERIC_SSH_AUTH_HINT_MARKER: &str = "late.sh requires SSH public-key auth.";
 const TERMINAL_ENV_HINTS: &[&str] = &[
     "TERM_PROGRAM",
@@ -673,6 +676,61 @@ async fn spawn_native_ssh(
     identity_file: &Path,
     token_tx: oneshot::Sender<String>,
 ) -> Result<SshProcess> {
+    let session = connect_native_ssh(config, identity_file).await?;
+
+    let token = fetch_native_session_token(&session)
+        .await
+        .context("failed to fetch session token over native ssh handshake")?;
+    let _ = token_tx.send(token);
+
+    let channel = session
+        .channel_open_session()
+        .await
+        .context("failed to open native ssh session channel")?;
+    let (cols, rows) = terminal_size_or_default();
+    let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
+    channel
+        .request_pty(true, &term, cols as u32, rows as u32, 0, 0, &[])
+        .await
+        .context("failed to request ssh pty")?;
+    send_terminal_env_hints(&channel).await;
+    channel
+        .request_shell(true)
+        .await
+        .context("failed to request remote shell")?;
+
+    let (mut read_half, write_half) = channel.split();
+    let input_gate = Arc::new(AtomicBool::new(false));
+    let input_gate_for_task = Arc::clone(&input_gate);
+    let (writer_tx, writer_rx) = mpsc::unbounded_channel();
+    let writer_tx_for_completion = writer_tx.clone();
+    let writer_tx_for_resize = writer_tx.clone();
+
+    let writer_task = tokio::spawn(async move { drive_native_writer(write_half, writer_rx).await });
+    spawn_stdin_forwarder("late-cli-stdin-native", move || {
+        forward_stdin_to_native(writer_tx, input_gate_for_task)
+    });
+    let completion_task = tokio::spawn(async move {
+        let exit = drive_native_output(&mut read_half).await;
+        let _ = writer_tx_for_completion.send(WriterCommand::Close);
+        let _ = writer_task.await;
+        let _ = session
+            .disconnect(Disconnect::ByApplication, "", "en")
+            .await;
+        exit
+    });
+
+    Ok(SshProcess {
+        completion_task,
+        resize_handle: ResizeHandle::Native(writer_tx_for_resize),
+        input_gate,
+    })
+}
+
+async fn connect_native_ssh(
+    config: &Config,
+    identity_file: &Path,
+) -> Result<client::Handle<NativeClientHandler>> {
     let target = ResolvedTarget::from_config(config)?;
     let private_key = keys::load_secret_key(identity_file, None).with_context(|| {
         format!(
@@ -725,53 +783,7 @@ async fn spawn_native_ssh(
         );
     }
 
-    let token = fetch_native_session_token(&session)
-        .await
-        .context("failed to fetch session token over native ssh handshake")?;
-    let _ = token_tx.send(token);
-
-    let channel = session
-        .channel_open_session()
-        .await
-        .context("failed to open native ssh session channel")?;
-    let (cols, rows) = terminal_size_or_default();
-    let term = env::var("TERM").unwrap_or_else(|_| "xterm-256color".to_string());
-    channel
-        .request_pty(true, &term, cols as u32, rows as u32, 0, 0, &[])
-        .await
-        .context("failed to request ssh pty")?;
-    send_terminal_env_hints(&channel).await;
-    channel
-        .request_shell(true)
-        .await
-        .context("failed to request remote shell")?;
-
-    let (mut read_half, write_half) = channel.split();
-    let input_gate = Arc::new(AtomicBool::new(false));
-    let input_gate_for_task = Arc::clone(&input_gate);
-    let (writer_tx, writer_rx) = mpsc::unbounded_channel();
-    let writer_tx_for_completion = writer_tx.clone();
-    let writer_tx_for_resize = writer_tx.clone();
-
-    let writer_task = tokio::spawn(async move { drive_native_writer(write_half, writer_rx).await });
-    spawn_stdin_forwarder("late-cli-stdin-native", move || {
-        forward_stdin_to_native(writer_tx, input_gate_for_task)
-    });
-    let completion_task = tokio::spawn(async move {
-        let exit = drive_native_output(&mut read_half).await;
-        let _ = writer_tx_for_completion.send(WriterCommand::Close);
-        let _ = writer_task.await;
-        let _ = session
-            .disconnect(Disconnect::ByApplication, "", "en")
-            .await;
-        exit
-    });
-
-    Ok(SshProcess {
-        completion_task,
-        resize_handle: ResizeHandle::Native(writer_tx_for_resize),
-        input_gate,
-    })
+    Ok(session)
 }
 
 async fn send_terminal_env_hints(channel: &russh::Channel<russh::client::Msg>) {
@@ -794,17 +806,128 @@ struct SessionTokenResponse {
     session_token: String,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status")]
+pub(super) enum WhoamiResponse {
+    #[serde(rename = "known")]
+    Known {
+        username: String,
+        ssh_fingerprint: String,
+    },
+    #[serde(rename = "nobody")]
+    Nobody { ssh_fingerprint: String },
+}
+
+#[derive(Deserialize)]
+struct NativeExecErrorResponse {
+    message: String,
+}
+
+#[derive(Serialize)]
+struct AssociateKeyRequest<'a> {
+    public_key: &'a str,
+}
+
 async fn fetch_native_session_token(
     session: &client::Handle<NativeClientHandler>,
 ) -> Result<String> {
+    let response =
+        exec_native_request(session, CLI_TOKEN_REQUEST, "native ssh token handshake").await?;
+    response.ensure_success_with_message("native ssh token handshake")?;
+    parse_session_token_response(&response.stdout, "native ssh token handshake")
+}
+
+pub(super) async fn probe_native_whoami(
+    config: &Config,
+    identity_file: &Path,
+) -> Result<WhoamiResponse> {
+    let session = connect_native_ssh(config, identity_file).await?;
+    let result = async {
+        let response =
+            exec_native_request(&session, CLI_WHOAMI_REQUEST, "native ssh whoami").await?;
+        response.ensure_success_with_message("native ssh whoami")?;
+        serde_json::from_slice(&response.stdout).context("native ssh whoami returned invalid JSON")
+    }
+    .await;
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "", "en")
+        .await;
+    result
+}
+
+pub(super) async fn associate_native_public_key(
+    config: &Config,
+    auth_identity_file: &Path,
+    public_key: &str,
+) -> Result<()> {
+    let request = AssociateKeyRequest { public_key };
+    let payload = URL_SAFE_NO_PAD
+        .encode(serde_json::to_vec(&request).context("failed to encode associate-key request")?);
+    let command = format!("{CLI_ASSOCIATE_KEY_REQUEST} {payload}");
+
+    let session = connect_native_ssh(config, auth_identity_file).await?;
+    let result = async {
+        let response = exec_native_request(&session, &command, "native ssh associate-key").await?;
+        response.ensure_success_with_message("native ssh associate-key")
+    }
+    .await;
+    let _ = session
+        .disconnect(Disconnect::ByApplication, "", "en")
+        .await;
+    result
+}
+
+struct NativeExecResponse {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    exit_code: Option<u32>,
+}
+
+impl NativeExecResponse {
+    fn success(&self) -> bool {
+        matches!(self.exit_code, None | Some(0))
+    }
+
+    fn ensure_success(&self, context: &str) -> Result<()> {
+        if self.success() {
+            return Ok(());
+        }
+        let code = self.exit_code.unwrap_or(1);
+        let stderr = String::from_utf8_lossy(&self.stderr);
+        anyhow::bail!("{context} exited with status {code}: {}", stderr.trim());
+    }
+
+    /// Like [`Self::ensure_success`], but if the failing response carries a
+    /// structured `{"status":"error","message":…}` body, surface that message
+    /// directly. The CLI exec handlers report transient failures this way
+    /// instead of tearing down the channel, so a discovery blip reads as the
+    /// real cause rather than a malformed-response error.
+    fn ensure_success_with_message(&self, context: &str) -> Result<()> {
+        if self.success() {
+            return Ok(());
+        }
+        if let Ok(error) = serde_json::from_slice::<NativeExecErrorResponse>(&self.stdout)
+            && !error.message.trim().is_empty()
+        {
+            anyhow::bail!("{}", error.message);
+        }
+        self.ensure_success(context)
+    }
+}
+
+async fn exec_native_request(
+    session: &client::Handle<NativeClientHandler>,
+    command: &str,
+    context: &str,
+) -> Result<NativeExecResponse> {
     let mut channel = session
         .channel_open_session()
         .await
-        .context("failed to open native ssh token channel")?;
+        .with_context(|| format!("failed to open {context} channel"))?;
     channel
-        .exec(true, CLI_TOKEN_REQUEST)
+        .exec(true, command)
         .await
-        .context("failed to request native ssh token handshake")?;
+        .with_context(|| format!("failed to request {context}"))?;
 
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
@@ -815,27 +938,25 @@ async fn fetch_native_session_token(
             ChannelMsg::Data { data } => stdout.extend_from_slice(data.as_ref()),
             ChannelMsg::ExtendedData { data, .. } => stderr.extend_from_slice(data.as_ref()),
             ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
-            ChannelMsg::Failure => anyhow::bail!("server rejected the native ssh token handshake"),
+            ChannelMsg::Failure => anyhow::bail!("server rejected {context}"),
             ChannelMsg::Close => break,
             _ => {}
         }
     }
 
-    if let Some(code) = exit_code
-        && code != 0
-    {
-        let stderr = String::from_utf8_lossy(&stderr);
-        anyhow::bail!("native ssh token handshake exited with status {code}: {stderr}");
-    }
-
     if !stderr.is_empty() {
         debug!(
             stderr = %String::from_utf8_lossy(&stderr),
-            "native ssh token handshake wrote stderr"
+            %context,
+            "native ssh exec wrote stderr"
         );
     }
 
-    parse_session_token_response(&stdout, "native ssh token handshake")
+    Ok(NativeExecResponse {
+        stdout,
+        stderr,
+        exit_code,
+    })
 }
 
 fn parse_session_token_response(stdout: &[u8], context: &str) -> Result<String> {

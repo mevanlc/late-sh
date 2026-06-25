@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use getrandom::SysRng;
 use late_core::MutexRecover;
 use late_core::models::{
@@ -6,9 +7,10 @@ use late_core::models::{
     server_ban::ServerBan,
     user::{User, UserParams, extract_theme_id},
 };
-use russh::keys::{PrivateKey, signature::rand_core::UnwrapErr};
+use russh::keys::{self, PrivateKey, signature::rand_core::UnwrapErr};
 use russh::server::{Auth, Msg, Session};
 use russh::*;
+use serde::Deserialize;
 use serde_json::{Value, json};
 #[cfg(unix)]
 use std::fs::Permissions;
@@ -42,6 +44,8 @@ const PROXY_HEADER_TIMEOUT: Duration = Duration::from_millis(250);
 const CLI_MODE_ENV: &str = "LATE_CLI_MODE";
 const CLI_TOKEN_PREFIX: &str = "LATE_SESSION_TOKEN=";
 const CLI_TOKEN_REQUEST: &str = "late-cli-token-v1";
+const CLI_WHOAMI_REQUEST: &str = "late-cli-whoami-v1";
+const CLI_ASSOCIATE_KEY_REQUEST: &str = "late-cli-associate-key-v1";
 const AUTH_SETUP_BANNER: &str = "\r\nlate.sh requires SSH public-key auth.\r\n\
 New here? Install the companion CLI:\r\n\
   curl -fsSL https://cli.late.sh/install.sh | bash\r\n\
@@ -68,8 +72,7 @@ struct Server {
 struct ClientHandler {
     /// Core state
     state: State,
-    user: Option<User>,
-    is_new_user: bool,
+    account_state: LateSshAccountState,
 
     /// Connection metadata
     transport_peer_addr: Option<std::net::SocketAddr>,
@@ -97,6 +100,31 @@ struct ClientHandler {
     terminal_env_hints: Vec<(String, String)>,
     session_token: Option<String>,
     session_rx: Option<tokio::sync::mpsc::Receiver<crate::session::SessionMessage>>,
+}
+
+#[derive(Clone, Debug)]
+struct LateSshAuthenticatedKey {
+    ssh_username: String,
+    ssh_fingerprint: String,
+}
+
+#[derive(Clone, Debug, Default)]
+enum LateSshAccountState {
+    #[default]
+    Unauthenticated,
+    Authenticated {
+        ssh_key: LateSshAuthenticatedKey,
+    },
+    AuthenticatedWithAccount {
+        ssh_key: LateSshAuthenticatedKey,
+        late_user: User,
+        is_new_late_user: bool,
+    },
+}
+
+#[derive(Deserialize)]
+struct AssociateKeyRequest {
+    public_key: String,
 }
 
 pub fn load_or_generate_key(state: &State) -> anyhow::Result<PrivateKey> {
@@ -286,8 +314,7 @@ impl Server {
         );
         ClientHandler {
             state: self.state.clone(),
-            user: None,
-            is_new_user: false,
+            account_state: LateSshAccountState::default(),
             activity_feed_rx: None,
             room_join_rx: None,
             transport_peer_addr,
@@ -410,7 +437,7 @@ impl Drop for ClientHandler {
         }
 
         if self.active_user_incremented
-            && let Some(user) = self.user.as_ref()
+            && let Some(user) = self.late_user()
         {
             metrics::add_ssh_session(-1);
             let user_id = user.id;
@@ -450,15 +477,126 @@ impl Drop for ClientHandler {
 }
 
 impl ClientHandler {
+    fn authenticated_key(&self) -> Option<&LateSshAuthenticatedKey> {
+        match &self.account_state {
+            LateSshAccountState::Unauthenticated => None,
+            LateSshAccountState::Authenticated { ssh_key }
+            | LateSshAccountState::AuthenticatedWithAccount { ssh_key, .. } => Some(ssh_key),
+        }
+    }
+
+    fn late_user(&self) -> Option<&User> {
+        match &self.account_state {
+            LateSshAccountState::AuthenticatedWithAccount { late_user, .. } => Some(late_user),
+            _ => None,
+        }
+    }
+
+    fn late_account(&self) -> Option<(&LateSshAuthenticatedKey, &User, bool)> {
+        match &self.account_state {
+            LateSshAccountState::AuthenticatedWithAccount {
+                ssh_key,
+                late_user,
+                is_new_late_user,
+            } => Some((ssh_key, late_user, *is_new_late_user)),
+            _ => None,
+        }
+    }
+
+    async fn ensure_late_account(&mut self) -> Result<()> {
+        let ssh_key = match &self.account_state {
+            LateSshAccountState::AuthenticatedWithAccount { .. } => return Ok(()),
+            LateSshAccountState::Authenticated { ssh_key } => ssh_key.clone(),
+            LateSshAccountState::Unauthenticated => {
+                anyhow::bail!("late account requested before SSH public-key authentication")
+            }
+        };
+
+        let (user, is_new_late_user) =
+            ensure_user(&self.state, &ssh_key.ssh_username, &ssh_key.ssh_fingerprint).await?;
+
+        let client = self.state.db.get().await?;
+        if ServerBan::find_active_for_user_id(&client, user.id)
+            .await?
+            .is_some()
+        {
+            anyhow::bail!("active server ban rejected SSH account materialization");
+        }
+        drop(client);
+
+        self.track_active_late_user(&user, &ssh_key.ssh_fingerprint);
+        crate::usernames::upsert(
+            &self.state.username_directory,
+            user.id,
+            user.username.clone(),
+        );
+
+        let user_id = user.id;
+        let username = user.username.clone();
+
+        tracing::info!(
+            username = %username,
+            fingerprint = %ssh_key.ssh_fingerprint,
+            "user connected"
+        );
+
+        self.activity_feed_rx = Some(self.state.activity_feed.subscribe());
+        self.room_join_rx = Some(self.state.room_join_feed.subscribe());
+        let _ = self
+            .state
+            .activity_feed
+            .send(ActivityEvent::joined(user_id, username));
+
+        self.account_state = LateSshAccountState::AuthenticatedWithAccount {
+            ssh_key,
+            late_user: user,
+            is_new_late_user,
+        };
+        Ok(())
+    }
+
+    fn track_active_late_user(&mut self, user: &User, ssh_fingerprint: &str) {
+        if self.active_user_incremented {
+            return;
+        }
+
+        let mut active_users = self.state.active_users.lock_recover();
+
+        if let Some(active) = active_users.get_mut(&user.id) {
+            active.connection_count += 1;
+            active.username = user.username.clone();
+            active.fingerprint = Some(ssh_fingerprint.to_string());
+            active.peer_ip = self.peer_ip;
+            active.audio_source = late_core::models::user::extract_audio_source(&user.settings);
+            active.last_login_at = std::time::Instant::now();
+        } else {
+            active_users.insert(
+                user.id,
+                crate::state::ActiveUser {
+                    username: user.username.clone(),
+                    fingerprint: Some(ssh_fingerprint.to_string()),
+                    peer_ip: self.peer_ip,
+                    audio_source: late_core::models::user::extract_audio_source(&user.settings),
+                    sessions: Vec::new(),
+                    connection_count: 1,
+                    last_login_at: std::time::Instant::now(),
+                },
+            );
+        }
+        self.active_user_incremented = true;
+        metrics::add_ssh_session(1);
+    }
+
     async fn ensure_cli_session(&mut self) -> Result<String> {
         if let Some(token) = self.session_token.clone() {
             return Ok(token);
         }
 
-        let user_id =
-            self.user.as_ref().map(|u| u.id).ok_or_else(|| {
-                anyhow::anyhow!("cli session requested before user authenticated")
-            })?;
+        self.ensure_late_account().await?;
+        let user_id = self
+            .late_user()
+            .map(|user| user.id)
+            .ok_or_else(|| anyhow::anyhow!("cli session requested before account materialized"))?;
 
         let session_token = crate::session::new_session_token();
         let (session_tx, session_rx) = tokio::sync::mpsc::channel(64);
@@ -472,7 +610,7 @@ impl ClientHandler {
     }
 
     fn track_active_session_token(&self, session_token: &str) {
-        let Some(user) = self.user.as_ref() else {
+        let Some((ssh_key, user, _)) = self.late_account() else {
             return;
         };
         let mut active_users = self.state.active_users.lock_recover();
@@ -488,10 +626,106 @@ impl ClientHandler {
         }
         active.sessions.push(ActiveSession {
             token: session_token.to_string(),
-            fingerprint: Some(user.fingerprint.clone()),
+            fingerprint: Some(ssh_key.ssh_fingerprint.clone()),
             peer_ip: self.peer_ip,
             afk: None,
         });
+    }
+
+    async fn cli_whoami_response(&self) -> Result<Value> {
+        let ssh_key = self
+            .authenticated_key()
+            .ok_or_else(|| {
+                anyhow::anyhow!("whoami requested before SSH public-key authentication")
+            })?
+            .clone();
+        let client = self.state.db.get().await?;
+        let user = User::find_by_fingerprint(&client, &ssh_key.ssh_fingerprint).await?;
+        let response = match user {
+            Some(user) => json!({
+                "status": "known",
+                "username": user.username,
+                "ssh_fingerprint": ssh_key.ssh_fingerprint,
+            }),
+            None => json!({
+                "status": "nobody",
+                "ssh_fingerprint": ssh_key.ssh_fingerprint,
+            }),
+        };
+        Ok(response)
+    }
+
+    async fn cli_associate_key_response(&self, payload_arg: &str) -> Result<Value> {
+        let current_key = self
+            .authenticated_key()
+            .ok_or_else(|| {
+                anyhow::anyhow!("associate-key requested before SSH public-key authentication")
+            })?
+            .clone();
+        let payload = URL_SAFE_NO_PAD
+            .decode(payload_arg.as_bytes())
+            .context("associate-key payload is not valid base64url JSON")?;
+        let request: AssociateKeyRequest =
+            serde_json::from_slice(&payload).context("associate-key payload is not valid JSON")?;
+        let public_key =
+            russh::keys::ssh_key::PublicKey::from_openssh(request.public_key.trim())
+                .context("associate-key payload public_key is not a valid OpenSSH public key")?;
+        let associated_fingerprint = public_key.fingerprint(keys::HashAlg::Sha256).to_string();
+
+        let client = self.state.db.get().await?;
+        let current_user = User::find_by_fingerprint(&client, &current_key.ssh_fingerprint)
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!("authenticated key is not associated with a late.sh account")
+            })?;
+
+        if let Some(existing_owner) =
+            User::find_by_fingerprint(&client, &associated_fingerprint).await?
+            && existing_owner.id != current_user.id
+        {
+            anyhow::bail!("public key is already associated with another late.sh account");
+        }
+
+        User::ensure_ssh_key(&client, current_user.id, &associated_fingerprint).await?;
+
+        Ok(json!({
+            "status": "associated",
+            "username": current_user.username,
+            "ssh_fingerprint": associated_fingerprint,
+        }))
+    }
+
+    async fn send_exec_json_response(
+        &mut self,
+        channel: ChannelId,
+        session: &mut Session,
+        payload: Value,
+        exit_status: u32,
+        label: &str,
+    ) -> Result<()> {
+        let payload =
+            serde_json::to_vec(&payload).with_context(|| format!("failed to encode {label}"))?;
+
+        if let Some(chan) = self.channel.take() {
+            // `channel_open_session` populates `self.channel` immediately before the
+            // exec request, so this slot should hold the exec channel we are replying
+            // on. The fallback below writes via `Session` if that invariant changes.
+            chan.data(payload.as_slice()).await?;
+            let _ = chan.exit_status(exit_status).await;
+            let _ = chan.eof().await;
+            let _ = chan.close().await;
+        } else {
+            session
+                .data(channel, payload)
+                .with_context(|| format!("failed to send {label}"))?;
+            if let Err(e) = session.eof(channel) {
+                tracing::error!(error = ?e, label, "exec eof failed");
+            }
+            if let Err(e) = session.close(channel) {
+                tracing::error!(error = ?e, label, "exec close failed");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -509,7 +743,7 @@ impl russh::server::Handler for ClientHandler {
         key: &russh::keys::PublicKey,
     ) -> Result<Auth, Self::Error> {
         let login_username = user;
-        tracing::debug!(user, "public key auth accepted");
+        tracing::debug!(user, "public key auth attempt");
         if self.over_limit {
             tracing::debug!(user, "connection over limit, rejecting auth");
             return Ok(reject_publickey_only());
@@ -567,64 +801,17 @@ impl russh::server::Handler for ClientHandler {
             }
         }
         drop(client);
-        let (user, is_new_user) =
-            match crate::ssh::ensure_user(&self.state, login_username, &fingerprint).await {
-                Ok(pair) => pair,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "failed to ensure user, rejecting auth");
-                    return Ok(reject_publickey_only());
-                }
-            };
-        self.is_new_user = is_new_user;
-        if !self.active_user_incremented {
-            let mut active_users = self.state.active_users.lock_recover();
-
-            if let Some(active) = active_users.get_mut(&user.id) {
-                active.connection_count += 1;
-                active.username = user.username.clone();
-                active.fingerprint = Some(fingerprint.clone());
-                active.peer_ip = self.peer_ip;
-                active.audio_source = late_core::models::user::extract_audio_source(&user.settings);
-                active.last_login_at = std::time::Instant::now();
-            } else {
-                active_users.insert(
-                    user.id,
-                    crate::state::ActiveUser {
-                        username: user.username.clone(),
-                        fingerprint: Some(fingerprint.clone()),
-                        peer_ip: self.peer_ip,
-                        audio_source: late_core::models::user::extract_audio_source(&user.settings),
-                        sessions: Vec::new(),
-                        connection_count: 1,
-                        last_login_at: std::time::Instant::now(),
-                    },
-                );
-            }
-            self.active_user_incremented = true;
-            metrics::add_ssh_session(1);
-        }
-        crate::usernames::upsert(
-            &self.state.username_directory,
-            user.id,
-            user.username.clone(),
-        );
-
-        let user_id = user.id;
-        let username = user.username.clone();
-
+        self.account_state = LateSshAccountState::Authenticated {
+            ssh_key: LateSshAuthenticatedKey {
+                ssh_username: login_username.to_string(),
+                ssh_fingerprint: fingerprint.clone(),
+            },
+        };
         tracing::info!(
-            username = %username,
+            ssh_username = %login_username,
             fingerprint = %fingerprint,
-            "user connected"
+            "ssh key authenticated"
         );
-
-        self.user = Some(user);
-        self.activity_feed_rx = Some(self.state.activity_feed.subscribe());
-        self.room_join_rx = Some(self.state.room_join_feed.subscribe());
-        let _ = self
-            .state
-            .activity_feed
-            .send(ActivityEvent::joined(user_id, username));
         Ok(Auth::Accept)
     }
 
@@ -693,11 +880,13 @@ impl russh::server::Handler for ClientHandler {
         let solitaire_service = self.state.solitaire_service.clone();
         let nonogram_library = self.state.nonogram_library.clone();
 
-        let user = match self.user.as_ref() {
-            Some(user) => user,
+        let (user, is_new_late_user) = match self.late_account() {
+            Some((_, user, is_new_late_user)) => (user.clone(), is_new_late_user),
             None => {
-                tracing::error!("pty request without authenticated user");
-                return Err(anyhow::anyhow!("unauthenticated pty request"));
+                tracing::error!("pty request without materialized late account");
+                return Err(anyhow::anyhow!(
+                    "pty request without materialized late account"
+                ));
             }
         };
 
@@ -905,7 +1094,7 @@ impl russh::server::Handler for ClientHandler {
             artboard_banned: artboard_ban.is_some(),
             artboard_ban_expires_at: artboard_ban.and_then(|ban| ban.expires_at),
 
-            is_new_user: self.is_new_user,
+            is_new_user: is_new_late_user,
 
             // Display config
             initial_theme_id: late_ssh_theme_id(&user.settings),
@@ -974,37 +1163,110 @@ impl russh::server::Handler for ClientHandler {
     ) -> Result<(), Self::Error> {
         let command = String::from_utf8_lossy(data);
         let preview: String = command.chars().take(128).collect();
-        if command.trim() == CLI_TOKEN_REQUEST {
+        let command = command.trim();
+        if command == CLI_TOKEN_REQUEST {
             tracing::info!("serving cli token exec request");
             match session.channel_success(channel) {
                 Ok(()) => tracing::debug!("exec token channel_success sent"),
                 Err(e) => tracing::error!(error = ?e, "exec token channel_success failed"),
             }
 
-            let token = self.ensure_cli_session().await?;
-            let payload = serde_json::to_vec(&json!({ "session_token": token }))
-                .context("failed to encode cli token exec response")?;
+            let (payload, exit_status) = match self.ensure_cli_session().await {
+                Ok(token) => (json!({ "session_token": token }), 0),
+                Err(err) => {
+                    tracing::warn!(error = ?err, "cli token request failed");
+                    (
+                        json!({
+                            "status": "error",
+                            "message": err.to_string(),
+                        }),
+                        1,
+                    )
+                }
+            };
+            self.send_exec_json_response(
+                channel,
+                session,
+                payload,
+                exit_status,
+                "cli token exec response",
+            )
+            .await?;
+            return Ok(());
+        }
 
-            if let Some(chan) = self.channel.take() {
-                // `channel_open_session` populates `self.channel` immediately before this
-                // `exec_request`, so for the token handshake this slot should hold the exec
-                // channel we are replying on. The fallback below writes via `Session` if that
-                // invariant ever stops holding.
-                chan.data(payload.as_slice()).await?;
-                let _ = chan.exit_status(0).await;
-                let _ = chan.eof().await;
-                let _ = chan.close().await;
-            } else {
-                session
-                    .data(channel, payload)
-                    .context("failed to send cli token exec response")?;
-                if let Err(e) = session.eof(channel) {
-                    tracing::error!(error = ?e, "exec token eof failed");
-                }
-                if let Err(e) = session.close(channel) {
-                    tracing::error!(error = ?e, "exec token close failed");
-                }
+        if command == CLI_WHOAMI_REQUEST {
+            tracing::info!("serving cli whoami exec request");
+            match session.channel_success(channel) {
+                Ok(()) => tracing::debug!("exec whoami channel_success sent"),
+                Err(e) => tracing::error!(error = ?e, "exec whoami channel_success failed"),
             }
+
+            let (payload, exit_status) = match self.cli_whoami_response().await {
+                Ok(payload) => (payload, 0),
+                Err(err) => {
+                    tracing::warn!(error = ?err, "cli whoami request failed");
+                    (
+                        json!({
+                            "status": "error",
+                            "message": err.to_string(),
+                        }),
+                        1,
+                    )
+                }
+            };
+            self.send_exec_json_response(
+                channel,
+                session,
+                payload,
+                exit_status,
+                "cli whoami exec response",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        if let Some(rest) = command.strip_prefix(CLI_ASSOCIATE_KEY_REQUEST)
+            && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+        {
+            tracing::info!("serving cli associate-key exec request");
+            match session.channel_success(channel) {
+                Ok(()) => tracing::debug!("exec associate-key channel_success sent"),
+                Err(e) => tracing::error!(error = ?e, "exec associate-key channel_success failed"),
+            }
+
+            let payload_arg = rest.trim();
+            let (payload, exit_status) = if payload_arg.is_empty() {
+                (
+                    json!({
+                        "status": "error",
+                        "message": "associate-key payload is required",
+                    }),
+                    1,
+                )
+            } else {
+                match self.cli_associate_key_response(payload_arg).await {
+                    Ok(payload) => (payload, 0),
+                    Err(err) => {
+                        tracing::warn!(error = ?err, "cli associate-key request failed");
+                        (
+                            json!({
+                                "status": "error",
+                                "message": err.to_string(),
+                            }),
+                            1,
+                        )
+                    }
+                }
+            };
+            self.send_exec_json_response(
+                channel,
+                session,
+                payload,
+                exit_status,
+                "cli associate-key exec response",
+            )
+            .await?;
             return Ok(());
         }
 
