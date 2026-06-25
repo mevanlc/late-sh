@@ -13,6 +13,7 @@ mod clipboard;
 
 mod config;
 mod identity;
+mod onboarding;
 mod pty;
 mod raw_mode;
 mod ssh;

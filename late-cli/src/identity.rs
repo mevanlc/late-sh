@@ -11,6 +11,7 @@ use tracing::debug;
 
 use super::{
     config::{Config, DEFAULT_SSH_TARGET},
+    onboarding::{self, OnboardingMarker},
     ssh::{self, WhoamiResponse},
 };
 
@@ -58,10 +59,35 @@ pub(super) fn ensure_client_identity_at(explicit_path: Option<&Path>) -> Result<
 pub(super) async fn ensure_default_identity_with_onboarding(config: &Config) -> Result<PathBuf> {
     let dedicated_path = dedicated_identity_path()?;
 
-    if dedicated_path.exists() {
-        return ensure_existing_dedicated_identity(config, dedicated_path).await;
+    // `--no-onboard`: this run only — honor a saved method if still valid, else
+    // fall back to the existing key with no probe, prompts, or writes.
+    if config.onboard == Some(false) {
+        return resolve_without_onboarding(&dedicated_path);
     }
 
+    // Steady state: a still-valid saved method short-circuits the server probe
+    // entirely. `--onboard` forces a fresh pass (and overwrites the marker), so
+    // skip the fast path when it is set.
+    if config.onboard != Some(true)
+        && let Some(path) = identity_from_marker()
+    {
+        return Ok(path);
+    }
+
+    if dedicated_path.exists() {
+        ensure_existing_dedicated_identity(config, dedicated_path).await
+    } else {
+        onboard_new_dedicated_identity(config, dedicated_path).await
+    }
+}
+
+/// First-run onboarding for the missing-dedicated-key case: probe the user's
+/// well-known keys for an existing account, generate the dedicated key, and
+/// optionally attach it. Records the chosen method on success.
+async fn onboard_new_dedicated_identity(
+    config: &Config,
+    dedicated_path: PathBuf,
+) -> Result<PathBuf> {
     // Check interactivity before probing: onboarding can only proceed at a TTY, so a
     // non-interactive caller should exit immediately with an honest reason rather than
     // opening probe connections it cannot act on.
@@ -70,11 +96,18 @@ pub(super) async fn ensure_default_identity_with_onboarding(config: &Config) -> 
     }
 
     let selected_account = select_known_account(&probe_known_accounts(config).await?)?;
+    // Declining key generation bails here, before any marker is written, so the
+    // can't-proceed case re-onboards next launch.
     prompt_generate_identity(&dedicated_path)?;
-    if let Some(account) = selected_account {
-        associate_dedicated_key(config, &account, &dedicated_path).await?;
-    }
+    let username = match selected_account {
+        Some(account) => {
+            associate_dedicated_key(config, &account, &dedicated_path).await?;
+            Some(account.username)
+        }
+        None => None,
+    };
     maybe_offer_openssh_config(config)?;
+    record_native_marker(&dedicated_path, username.as_deref());
     Ok(dedicated_path)
 }
 
@@ -85,10 +118,12 @@ async fn ensure_existing_dedicated_identity(
     match probe_identity(config, &dedicated_path).await {
         IdentityProbe::Known { username, .. } => {
             reject_dedicated_account_conflicts(config, &username).await?;
+            record_native_marker(&dedicated_path, Some(&username));
             Ok(dedicated_path)
         }
         IdentityProbe::Nobody { .. } => {
             let selected_account = select_known_account(&probe_known_accounts(config).await?)?;
+            let mut username = None;
             if let Some(account) = selected_account
                 && is_interactive()
                 && prompt_default_yes(&format!(
@@ -98,10 +133,17 @@ async fn ensure_existing_dedicated_identity(
             {
                 associate_dedicated_key(config, &account, &dedicated_path).await?;
                 maybe_offer_openssh_config(config)?;
+                username = Some(account.username);
             }
+            // The user is proceeding with this dedicated key as their method
+            // (self-healing migration for pre-feature keys); record it so later
+            // launches skip the probe.
+            record_native_marker(&dedicated_path, username.as_deref());
             Ok(dedicated_path)
         }
         IdentityProbe::Failed { error } => {
+            // Do not record a marker on a failed probe: the state is unknown, so
+            // re-probe next launch rather than pinning a guess.
             debug!(
                 path = %dedicated_path.display(),
                 error,
@@ -110,6 +152,79 @@ async fn ensure_existing_dedicated_identity(
             Ok(dedicated_path)
         }
     }
+}
+
+/// `--no-onboard`: honor a saved native method if still valid, otherwise use the
+/// existing dedicated key with no probing or prompting, else the setup hint.
+/// Writes nothing.
+fn resolve_without_onboarding(dedicated_path: &Path) -> Result<PathBuf> {
+    if let Some(path) = identity_from_marker() {
+        return Ok(path);
+    }
+    if dedicated_path.exists() {
+        return Ok(dedicated_path.to_path_buf());
+    }
+    anyhow::bail!("{}", ssh_key_setup_hint(dedicated_path));
+}
+
+/// Steady-state fast path: resolve the identity from a saved marker, skipping the
+/// probe. Returns `None` (→ onboard) when there is no marker, the key
+/// rotated/vanished, or the method can't be honored from the native path.
+fn identity_from_marker() -> Option<PathBuf> {
+    let marker = onboarding::load_marker()?;
+    let on_disk_fingerprint = marker
+        .method
+        .native_key_path()
+        .and_then(|path| fingerprint_for_identity(path).ok());
+    match marker
+        .method
+        .native_path_if_fingerprint_matches(on_disk_fingerprint.as_deref())
+    {
+        Some(path) => {
+            debug!(path = %path.display(), "using saved onboarding method; skipping probe");
+            Some(path.to_path_buf())
+        }
+        None => {
+            debug!("onboarding marker absent, stale, or unsupported; running onboarding");
+            None
+        }
+    }
+}
+
+/// Persist the "connect with this native key" decision so later launches skip
+/// the probe. Best-effort: a write (or fingerprint) failure degrades to today's
+/// per-launch probe rather than failing the connect path.
+fn record_native_marker(path: &Path, username: Option<&str>) {
+    let fingerprint = match fingerprint_for_identity(path) {
+        Ok(fingerprint) => fingerprint,
+        Err(err) => {
+            debug!(
+                path = %path.display(),
+                error = %format!("{err:#}"),
+                "skipping onboarding marker; could not fingerprint key"
+            );
+            return;
+        }
+    };
+    let marker =
+        OnboardingMarker::native_file(path.to_path_buf(), fingerprint, username.map(str::to_owned));
+    if let Err(err) = onboarding::save_marker(&marker) {
+        debug!(
+            error = %format!("{err:#}"),
+            "failed to persist onboarding marker; will re-probe next launch"
+        );
+    }
+}
+
+/// SHA256 fingerprint of the public half of the identity at `path`, in the same
+/// `SHA256:…` form the server reports.
+fn fingerprint_for_identity(path: &Path) -> Result<String> {
+    let key = keys::load_secret_key(path, None)
+        .with_context(|| format!("failed to load SSH identity from {}", path.display()))?;
+    Ok(key
+        .public_key()
+        .fingerprint(keys::HashAlg::Sha256)
+        .to_string())
 }
 
 pub(super) fn ssh_key_setup_hint(path: &Path) -> String {

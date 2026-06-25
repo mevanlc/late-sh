@@ -42,6 +42,11 @@ pub(super) struct Config {
     pub(super) audio_output_device: Option<String>,
     pub(super) api_base_url: String,
     pub(super) verbose: bool,
+    /// Tri-state onboarding control. `None` = default (onboard only when no
+    /// saved method exists); `Some(true)` = `--onboard` (force a fresh pass and
+    /// overwrite the saved method); `Some(false)` = `--no-onboard` (this run
+    /// only: no probe, prompts, or file writes).
+    pub(super) onboard: Option<bool>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -56,6 +61,7 @@ struct ConfigLayer {
     audio_output_device: Option<String>,
     api_base_url: Option<String>,
     verbose: Option<bool>,
+    onboard: Option<bool>,
 }
 
 impl Config {
@@ -84,6 +90,7 @@ fn resolve_config(
         audio_output_device: None,
         api_base_url: DEFAULT_API_BASE_URL.to_string(),
         verbose: false,
+        onboard: None,
     };
     apply_layer(&mut config, file_layer);
     apply_layer(&mut config, env_layer);
@@ -121,6 +128,9 @@ fn apply_layer(config: &mut Config, layer: ConfigLayer) {
     }
     if let Some(value) = layer.verbose {
         config.verbose = value;
+    }
+    if let Some(value) = layer.onboard {
+        config.onboard = Some(value);
     }
 }
 
@@ -173,6 +183,8 @@ fn parse_arg_layer(
             }
             "--api-base-url" => layer.api_base_url = Some(next_value(&mut args, "--api-base-url")?),
             "--verbose" | "-v" => layer.verbose = Some(true),
+            "--onboard" => layer.onboard = Some(true),
+            "--no-onboard" => layer.onboard = Some(false),
             "--help" | "-h" => {
                 print_help();
                 std::process::exit(0);
@@ -218,6 +230,7 @@ fn env_config_layer() -> Result<ConfigLayer> {
             .filter(|value| !value.is_empty()),
         api_base_url: env::var("LATE_API_BASE_URL").ok(),
         verbose: None,
+        onboard: None,
     })
 }
 
@@ -318,6 +331,8 @@ fn print_help() {
            --audio-output-device <n>  Audio output device name (default: system default)\n\
            --api-base-url <url>       API base URL used for /api/ws/pair\n\
            -v, --verbose              Enable debug logging (file-backed on interactive terminals)\n\
+           --onboard                  Re-run key onboarding and save the chosen connect method\n\
+           --no-onboard               Skip onboarding this run (no probe, prompts, or file writes)\n\
            -V, --version              Print version and exit\n\
          \n\
          Runtime hotkeys:\n\
@@ -325,17 +340,20 @@ fn print_help() {
     );
 }
 
-fn default_config_path() -> PathBuf {
+/// The `~/.config/late/` directory (XDG-aware) that holds `config.toml` and the
+/// onboarding marker. Single-sourced so both stay co-located.
+pub(super) fn config_dir() -> PathBuf {
     if let Some(base) = nonempty_os_env("XDG_CONFIG_HOME") {
-        return PathBuf::from(base).join("late").join("config.toml");
+        return PathBuf::from(base).join("late");
     }
     if let Some(home) = nonempty_os_env("HOME") {
-        return PathBuf::from(home)
-            .join(".config")
-            .join("late")
-            .join("config.toml");
+        return PathBuf::from(home).join(".config").join("late");
     }
-    env::temp_dir().join("late").join("config.toml")
+    env::temp_dir().join("late")
+}
+
+fn default_config_path() -> PathBuf {
+    config_dir().join("config.toml")
 }
 
 fn parse_config_layer(text: &str) -> Result<ConfigLayer> {
@@ -388,6 +406,7 @@ fn parse_config_layer(text: &str) -> Result<ConfigLayer> {
                 layer.audio_output_device = Some(value);
             }
             "verbose" => layer.verbose = Some(parse_toml_bool(raw_value, line_number)?),
+            "onboard" => layer.onboard = Some(parse_toml_bool(raw_value, line_number)?),
             other => anyhow::bail!("line {line_number}: unsupported config key '{other}'"),
         }
     }
@@ -598,6 +617,16 @@ mod tests {
             config.audio_output_device,
             Some("Built-in Audio".to_string())
         );
+    }
+
+    #[test]
+    fn onboard_flags_parse_to_tristate() {
+        let (_, none_layer) = parse_arg_layer(Vec::<String>::new()).unwrap();
+        assert_eq!(none_layer.onboard, None);
+        let (_, on_layer) = parse_arg_layer(["--onboard".to_string()]).unwrap();
+        assert_eq!(on_layer.onboard, Some(true));
+        let (_, off_layer) = parse_arg_layer(["--no-onboard".to_string()]).unwrap();
+        assert_eq!(off_layer.onboard, Some(false));
     }
 
     #[test]

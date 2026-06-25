@@ -385,6 +385,11 @@ persist the user's chosen method once and skip the probe in steady state.
   user (opensshed in first, dedicated key missing) is matched to their existing
   account. The marker only short-circuits the *post-onboarding* steady state.
 
+**Status: implemented.** `late-cli/src/onboarding.rs` (marker), `config_dir()` +
+tri-state `onboard` flag in `config.rs`, hot-path short-circuit + fingerprint-gated
+honoring + write-on-success in `identity.rs`. `OpenSshMode` is modeled but never
+written yet (agent/HWK follow-up, R-E). See REVIEW H1 for the full resolution note.
+
 ### R-B. CLI surface (the whole state machine)
 
 | Command | Behavior |
@@ -392,6 +397,10 @@ persist the user's chosen method once and skip the probe in steady state.
 | `late` | Marker absent → onboard. Marker present → use saved method, no probe/prompt. |
 | `late --onboard` | Force onboarding regardless of marker, overwrite it (revisit a prior choice; doubles as `--reconfigure`). |
 | `late --no-onboard` | This run only: no probe, no prompts, no file writes. Honor a saved method if present; else default non-interactive key resolution, else the setup hint. |
+
+**Status: implemented** (`--onboard` / `--no-onboard` flags + `onboard = …` in
+config.toml). Note R-B's `late` row is the H1-core behavior; the *menu* that the
+onboard path shows (R-C / M1) is still the existing auto-attach prompt, pending.
 
 ### R-C. Lead with the discovered state; confirm the attach (replaces silent auto-attach)
 

@@ -22,7 +22,7 @@ before merge.
 
 ## High
 
-### H1. Steady-state launches now do a redundant full SSH round-trip on every run
+### H1. Steady-state launches now do a redundant full SSH round-trip on every run — ✅ RESOLVED (marker + flags; M1 menu still pending)
 `ensure_existing_dedicated_identity` (identity.rs:62) unconditionally calls
 `probe_identity` → `probe_native_whoami` → `connect_native_ssh`, even in the common
 `Known` case where it does nothing but return the path. In Native mode with the
@@ -110,6 +110,34 @@ arrives with a manually-created `id_late_sh_ed25519` while already owning `@alic
 another key would, on the next real connect, create `@alice-2`. The marker records
 the *method the user chose* and stops the per-launch re-probe, which raw
 key-existence cannot.
+
+**✅ RESOLVED (H1 core).** Implemented the marker + flag surface; the lead-with-
+discovery menu (M1 / R-C) is intentionally a *separate* follow-up and is **not** part
+of this change — the existing auto-attach prompt flow is preserved for now.
+
+- New `onboarding` module (`late-cli/src/onboarding.rs`): a method-shaped marker at
+  `~/.config/late/onboarding.json` — `OnboardingMethod::NativeFile { path, fingerprint }`
+  or `OpenSshMode` (modeled for the agent/HWK follow-up but never written here), plus
+  `username?` / `completed_at?`. Reads are best-effort (missing/unreadable/stale →
+  re-onboard); writes are 0600.
+- `config_dir()` factored out in `config.rs` so the marker sits beside `config.toml`.
+- Hot path in `ensure_default_identity_with_onboarding`: a valid marker
+  (`identity_from_marker`) short-circuits the probe entirely. `NativeFile` is honored
+  **only when its fingerprint matches the key on disk** (`fingerprint_for_identity`),
+  so rotating the key re-triggers onboarding — no stale pinning.
+- Marker is written (`record_native_marker`, best-effort) on the success points: a
+  `Known` probe, the existing-key `Nobody` path (self-healing migration for
+  pre-feature keys), and the truly-new user who generates a key. **Not** written on a
+  `Failed` probe or when key generation is declined.
+- Tri-state CLI surface (`config.rs`): `--onboard` (force + overwrite),
+  `--no-onboard` (this run only: no probe/prompt/write — `resolve_without_onboarding`),
+  bare `late` (marker present → fast path; absent → onboard). Also accepts
+  `onboard = true|false` in `config.toml`.
+- Tests: marker JSON round-trip + internal-tag + fingerprint-gating
+  (`onboarding::tests`); tri-state flag parsing (`config::tests`).
+- `OpenSshMode` is parsed/printed but not yet honored on the native path (this PR
+  never writes it); wiring it to the system-ssh handoff is part of the agent/HWK
+  follow-up (F1/R-E).
 
 Why no decline tombstone (considered, dropped): a persisted "declined, stop asking"
 state is the cleaner UX, but it adds a second persisted path and is *new* behavior

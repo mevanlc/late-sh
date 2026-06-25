@@ -1448,6 +1448,7 @@ mod tests {
             audio_output_device: None,
             api_base_url: "https://api.example".to_string(),
             verbose: false,
+            onboard: None,
         }
     }
 
