@@ -912,6 +912,49 @@ mod tests {
         assert!(hostname < user && user < identity);
     }
 
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("late-test-{tag}-{}-{n}", std::process::id()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn openssh_install_creates_file_with_just_the_snippet_when_absent() {
+        let dir = unique_temp_dir("openssh-absent");
+        let config_path = dir.join("config");
+        let snippet = openssh_config_snippet(None);
+
+        install_openssh_config_snippet(&config_path, &snippet).expect("install");
+
+        let written = fs::read_to_string(&config_path).expect("read back");
+        assert_eq!(written, snippet);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn openssh_install_prepends_snippet_and_preserves_existing_config_byte_for_byte() {
+        let dir = unique_temp_dir("openssh-existing");
+        let config_path = dir.join("config");
+        let original = "Host example\n  User bob\n  IdentityFile ~/.ssh/other\n";
+        fs::write(&config_path, original).expect("seed config");
+        let snippet = openssh_config_snippet(None);
+
+        install_openssh_config_snippet(&config_path, &snippet).expect("install");
+
+        let written = fs::read_to_string(&config_path).expect("read back");
+        // Snippet first, then a blank-line separator (the snippet ends in '\n' and
+        // the original does not start with one), then the original verbatim.
+        assert_eq!(written, format!("{snippet}\n{original}"));
+        assert!(
+            written.ends_with(original),
+            "original config must survive verbatim: {written:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn select_known_account_collapses_same_username() {
         let accounts = vec![

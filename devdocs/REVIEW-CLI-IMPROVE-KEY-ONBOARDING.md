@@ -22,7 +22,7 @@ before merge.
 
 ## High
 
-### H1. Steady-state launches now do a redundant full SSH round-trip on every run — ✅ RESOLVED (marker + flags; M1 menu still pending)
+### H1. Steady-state launches now do a redundant full SSH round-trip on every run — ✅ RESOLVED (marker + flags; M1 menu done separately)
 `ensure_existing_dedicated_identity` (identity.rs:62) unconditionally calls
 `probe_identity` → `probe_native_whoami` → `connect_native_ssh`, even in the common
 `Known` case where it does nothing but return the path. In Native mode with the
@@ -161,7 +161,7 @@ Recommendation: minimize connections (see H1), and/or verify the production
 `LATE_SSH_MAX_ATTEMPTS_PER_IP` / window values comfortably absorb an onboarding burst
 plus normal reconnects. Worth an explicit note in CONTEXT.md if the budget is tight.
 
-### H3. Missing tests the plan explicitly requires
+### H3. Missing tests the plan explicitly requires — ✅ RESOLVED
 Plan §8 lists tests that are not present:
 
 - `late-cli-associate-key-v1` happy path (attach new fingerprint to existing account).
@@ -176,6 +176,28 @@ Plan §8 lists tests that are not present:
 plus the pure unit tests (`parse_default_yes`, host-rule detection, `.pub` suffix,
 username collapse) exist. The OpenSSH install path (`install_openssh_config_snippet`)
 is untested despite its byte-preservation contract.
+
+**✅ RESOLVED.** All five are now covered (DB tests run against the project's postgres
+via `make check` / `TEST_DATABASE_URL`):
+
+- `late-ssh/tests/ssh_smoke.rs`:
+  - `associate_key_attaches_new_fingerprint_to_account_and_is_idempotent` — happy
+    path **and** idempotency (re-associating the same key still succeeds for the
+    account; the dedicated key then authenticates into the same account via whoami).
+  - `associate_key_refuses_a_fingerprint_owned_by_another_account` — cross-account
+    theft is rejected (exit 1, structured error), no account created/removed, the
+    victim key still resolves to its owner.
+  - `interactive_pty_entry_materializes_account` — a PTY/TUI entry alone (no token
+    exec) materializes the account (`pty_request` → `ensure_cli_session` →
+    `ensure_late_account`).
+- `late-cli/src/identity.rs` (`identity::tests`):
+  - `openssh_install_creates_file_with_just_the_snippet_when_absent` and
+    `openssh_install_prepends_snippet_and_preserves_existing_config_byte_for_byte`
+    — the install path's no-config and prepend-preserving-remainder contracts.
+
+Helpers added: `generate_key` / `connect_and_auth` / `associate_key_command` /
+`materialize_account` / `start_server` in the smoke test; `unique_temp_dir` in the
+identity unit tests. (These close the explicit Plan §8 gaps.)
 
 ---
 
