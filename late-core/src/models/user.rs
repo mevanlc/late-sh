@@ -300,6 +300,50 @@ impl User {
         Ok(())
     }
 
+    /// Atomically associate `fingerprint` with `user_id`, refusing to take over a
+    /// fingerprint already owned by a *different* account. Returns `true` if the
+    /// fingerprint now belongs to `user_id` (freshly claimed or already theirs),
+    /// `false` if it is owned by someone else and was left untouched.
+    ///
+    /// This is the race-safe counterpart to [`Self::ensure_ssh_key`], which moves
+    /// ownership unconditionally. The ownership check and the write happen in one
+    /// statement, so a concurrent associate (or an associate racing a connect)
+    /// cannot slip between a separate "who owns this?" query and the upsert. Two
+    /// guards run together against the same snapshot:
+    /// * the `ON CONFLICT ... WHERE user_ssh_keys.user_id = $1` clause keeps an
+    ///   existing `user_ssh_keys` row from being reassigned away from its owner, and
+    /// * the `NOT EXISTS` clause refuses to insert when the legacy
+    ///   `users.fingerprint` column (consulted only when no `user_ssh_keys` row
+    ///   exists, mirroring [`Self::find_by_fingerprint`] precedence) points at a
+    ///   different account.
+    pub async fn try_associate_ssh_key(
+        client: &impl GenericClient,
+        user_id: Uuid,
+        fingerprint: &str,
+    ) -> Result<bool> {
+        let claimed = client
+            .query_opt(
+                "INSERT INTO user_ssh_keys (user_id, fingerprint)
+                 SELECT $1, $2
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM users legacy
+                     WHERE legacy.fingerprint = $2
+                       AND legacy.id <> $1
+                       AND NOT EXISTS (
+                           SELECT 1 FROM user_ssh_keys k WHERE k.fingerprint = $2
+                       )
+                 )
+                 ON CONFLICT (fingerprint) DO UPDATE
+                 SET last_seen = current_timestamp,
+                     updated = current_timestamp
+                 WHERE user_ssh_keys.user_id = $1
+                 RETURNING user_id",
+                &[&user_id, &fingerprint],
+            )
+            .await?;
+        Ok(claimed.is_some())
+    }
+
     pub async fn touch_ssh_key(client: &Client, fingerprint: &str) -> Result<()> {
         client
             .execute(

@@ -225,6 +225,11 @@ Rules:
 - If the supplied key fingerprint is associated with a different user, fail with
   a clear message and do not move it automatically.
 
+> Status (implemented): the insert/owner-check is a single atomic statement,
+> `User::try_associate_ssh_key`, so concurrent associates can't bypass the
+> "different user" guard (review L1). It also honors the legacy `users.fingerprint`
+> column with `user_ssh_keys`-wins precedence (review L2).
+
 Response example:
 
 ```json

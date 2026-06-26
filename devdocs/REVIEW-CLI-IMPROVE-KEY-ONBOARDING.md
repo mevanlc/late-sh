@@ -368,7 +368,7 @@ offer no longer needs to be suppressed for non-default users. Added two unit tes
 
 ## Low / Nits
 
-### L1. associate-key owner check is a TOCTOU over an unconditional upsert
+### L1. associate-key owner check is a TOCTOU over an unconditional upsert — ✅ RESOLVED
 `cli_associate_key_response` (late-ssh/src/ssh.rs:663) does
 `find_by_fingerprint` → bail-if-different-owner → `User::ensure_ssh_key`. But
 `ensure_ssh_key` is `ON CONFLICT (fingerprint) DO UPDATE SET user_id = EXCLUDED.user_id`
@@ -379,19 +379,37 @@ protection. Low likelihood, but the upsert is precisely the operation the guard
 intends to forbid. Consider a single conditional statement that refuses to reassign a
 fingerprint already owned by a different user, or wrap the check+insert in a tx.
 
-**Deferred (out of this PR) — needs codeowner decision.** `ensure_ssh_key` is shared
-core plumbing (also the normal connect/auth path in ssh.rs, `web_tunnel`, and the AI
-`ghost`), so its "move ownership on conflict" semantics can't be changed without
-auditing those flows. The contained fix is a *new, associate-only* atomic statement:
-`INSERT … ON CONFLICT (fingerprint) DO UPDATE SET last_seen=…, updated=… WHERE
-user_ssh_keys.user_id = $self RETURNING user_id` → reject when no row returns. **But**
-that single statement only guards `user_ssh_keys`, whereas the current guard
-(`find_by_fingerprint`) *also* checks the legacy `users.fingerprint` column (L2) — so
-the atomic fix must also account for the legacy column or it silently drops that
-protection. That couples L1 to L2 (ideally: retire the legacy column, then the atomic
-upsert is complete). Low likelihood + security-sensitive shared code + migration
-wrinkle → own focused change, not folded into onboarding. Note: the non-racy reject
-and idempotent paths are now covered by the H3 associate-key smoke tests.
+**Resolution.** Left the shared `ensure_ssh_key` (connect/auth, `web_tunnel`, AI
+`ghost`) untouched and added a *new, associate-only* race-safe claim,
+`User::try_associate_ssh_key` (late-core/src/models/user.rs). It folds the ownership
+check and the write into a single statement so nothing can slip between them:
+
+```sql
+INSERT INTO user_ssh_keys (user_id, fingerprint)
+SELECT $1, $2
+WHERE NOT EXISTS (
+    SELECT 1 FROM users legacy
+    WHERE legacy.fingerprint = $2 AND legacy.id <> $1
+      AND NOT EXISTS (SELECT 1 FROM user_ssh_keys k WHERE k.fingerprint = $2)
+)
+ON CONFLICT (fingerprint) DO UPDATE
+    SET last_seen = current_timestamp, updated = current_timestamp
+    WHERE user_ssh_keys.user_id = $1
+RETURNING user_id
+```
+
+`Ok(row.is_some())` → claimed vs refused. The two guards run against one snapshot:
+the `ON CONFLICT … WHERE user_ssh_keys.user_id = $1` clause refuses to move an
+existing row away from its owner, and the `NOT EXISTS` clause refuses to insert when
+the legacy `users.fingerprint` column owns it — consulted *only* when no
+`user_ssh_keys` row exists, mirroring `find_by_fingerprint` precedence, so the legacy
+fix (L2) is addressed here without disturbing it. Concurrent associates to the same
+new fingerprint serialize on the `fingerprint` unique index; exactly one returns a row.
+`cli_associate_key_response` (late-ssh/src/ssh.rs) now calls it and bails on `false`
+with the same "owned by another account" message. Covered by four new late-core
+integration tests (`late-core/tests/ssh_key.rs`: claim-new + idempotent, refuse via
+`user_ssh_keys`, refuse via legacy column, self-heal own legacy key) plus the existing
+H3 associate-key smoke tests; clippy `--all-targets` clean.
 
 ### L2. `find_by_fingerprint` legacy column vs `ensure_ssh_key` table mismatch
 `find_by_fingerprint` checks `user_ssh_keys` then falls back to the legacy
@@ -400,6 +418,12 @@ and idempotent paths are now covered by the H3 associate-key smoke tests.
 the owner check resolves via `users` while the upsert inserts a fresh
 `user_ssh_keys` row — consistent here, but worth confirming there's no path where the
 two representations disagree for the same user during association.
+
+**Partially addressed by L1.** The associate path's new `try_associate_ssh_key`
+honors legacy-column ownership (refuses to claim a fingerprint owned by another
+account via `users.fingerprint`) and uses `user_ssh_keys`-wins precedence to match
+`find_by_fingerprint`. The broader cleanup — retiring the legacy column so a single
+representation remains — is still out of scope for this PR.
 
 ### L3. `.pub` file is written on generation but unused thereafter
 `generate_identity` now also writes `<path>.pub` (good for OpenSSH ergonomics), but

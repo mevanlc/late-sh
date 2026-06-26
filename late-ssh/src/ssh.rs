@@ -679,14 +679,15 @@ impl ClientHandler {
                 anyhow::anyhow!("authenticated key is not associated with a late.sh account")
             })?;
 
-        if let Some(existing_owner) =
-            User::find_by_fingerprint(&client, &associated_fingerprint).await?
-            && existing_owner.id != current_user.id
-        {
+        // Atomic claim: the ownership check and the write are a single statement,
+        // so two concurrent associates (or an associate racing a connect) cannot
+        // bypass the "owned by another account" guard the way a separate
+        // find-then-upsert could (see User::try_associate_ssh_key).
+        let claimed =
+            User::try_associate_ssh_key(&client, current_user.id, &associated_fingerprint).await?;
+        if !claimed {
             anyhow::bail!("public key is already associated with another late.sh account");
         }
-
-        User::ensure_ssh_key(&client, current_user.id, &associated_fingerprint).await?;
 
         Ok(json!({
             "status": "associated",
