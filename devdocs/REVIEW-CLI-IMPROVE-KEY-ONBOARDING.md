@@ -379,6 +379,20 @@ protection. Low likelihood, but the upsert is precisely the operation the guard
 intends to forbid. Consider a single conditional statement that refuses to reassign a
 fingerprint already owned by a different user, or wrap the check+insert in a tx.
 
+**Deferred (out of this PR) — needs codeowner decision.** `ensure_ssh_key` is shared
+core plumbing (also the normal connect/auth path in ssh.rs, `web_tunnel`, and the AI
+`ghost`), so its "move ownership on conflict" semantics can't be changed without
+auditing those flows. The contained fix is a *new, associate-only* atomic statement:
+`INSERT … ON CONFLICT (fingerprint) DO UPDATE SET last_seen=…, updated=… WHERE
+user_ssh_keys.user_id = $self RETURNING user_id` → reject when no row returns. **But**
+that single statement only guards `user_ssh_keys`, whereas the current guard
+(`find_by_fingerprint`) *also* checks the legacy `users.fingerprint` column (L2) — so
+the atomic fix must also account for the legacy column or it silently drops that
+protection. That couples L1 to L2 (ideally: retire the legacy column, then the atomic
+upsert is complete). Low likelihood + security-sensitive shared code + migration
+wrinkle → own focused change, not folded into onboarding. Note: the non-racy reject
+and idempotent paths are now covered by the H3 associate-key smoke tests.
+
 ### L2. `find_by_fingerprint` legacy column vs `ensure_ssh_key` table mismatch
 `find_by_fingerprint` checks `user_ssh_keys` then falls back to the legacy
 `users.fingerprint` column, but `ensure_ssh_key` only writes/conflicts on
@@ -397,6 +411,12 @@ informational and is overwritten on (re)generation.
 `select_known_account` only decides it can't proceed *after* `probe_known_accounts`
 has connected to each key. Folds into M2 — short-circuit earlier when
 non-interactive.
+
+**Largely moot after H1 + M2.** The missing-key path now bails at the top of
+`onboard_new_dedicated_identity` when non-interactive (M2), *before* any probing; and
+the steady state short-circuits on the marker (H1), so the probe doesn't run per
+launch. The only residue is the existing-key `Nobody` branch, which still probes
+before `select_known_account` can bail non-interactively — a rare edge, left as-is.
 
 ---
 
