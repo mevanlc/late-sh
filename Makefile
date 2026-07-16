@@ -3,11 +3,18 @@
 ####################################################
 
 # --- General (Docker/dev containers) ---
+REPO_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST))))
+WORKTREE_SCOPE := $(shell printf '%s\n' '$(REPO_ROOT)' | cksum | awk '{print $$1}')
 RUST_LOG ?= info,late_web=debug,late_ssh=debug,late_core=debug
 CARGO_TARGET_DIR ?= /app/target
 CARGO_INCREMENTAL ?= 0
 CARGO_PROFILE_DEV_DEBUG ?= 1
-INSTANCE ?= late                                            # Prefix for container names; bump (e.g. late2) for a parallel clone
+# Human-readable instance name; bump (e.g. late2) for a parallel clone.
+INSTANCE ?= late
+# Checkout-specific Compose ownership boundary.
+LATE_COMPOSE_PROJECT ?= late-sh-$(INSTANCE)-$(WORKTREE_SCOPE)
+COMPOSE = INSTANCE="$(INSTANCE)" LATE_COMPOSE_PROJECT="$(LATE_COMPOSE_PROJECT)" "$(REPO_ROOT)/scripts/dev_compose.sh"
+MONITORING_COMPOSE = $(COMPOSE) -f "$(REPO_ROOT)/docker-compose.monitoring.yml"
 LATE_UI_NEW_SHELL=1
 
 # --- SSH ---
@@ -40,6 +47,14 @@ LATE_PG_HOST_PORT ?= 5433                                   # Host-side port map
 # --- Audio ---
 LATE_ICECAST_URL ?= http://icecast:8000                     # Icecast streaming server URL
 LATE_ICECAST_HOST_PORT ?= 8000                              # Host-side port mapped to icecast 8000
+
+# --- Monitoring ---
+LATE_OTEL_GRPC_HOST_PORT ?= 4317
+LATE_OTEL_HTTP_HOST_PORT ?= 4318
+LATE_VICTORIAMETRICS_HOST_PORT ?= 8428
+LATE_VICTORIALOGS_HOST_PORT ?= 9428
+LATE_VICTORIATRACES_HOST_PORT ?= 10428
+LATE_GRAFANA_HOST_PORT ?= 3001
 
 # --- Voice ---
 # Enable LiveKit-backed voice room control plane.
@@ -113,6 +128,7 @@ LATE_FILES_S3_SECRET_ACCESS_KEY ?=  								                        # S3/R2 secr
 	@echo "CARGO_INCREMENTAL=$(CARGO_INCREMENTAL)" >> .env
 	@echo "CARGO_PROFILE_DEV_DEBUG=$(CARGO_PROFILE_DEV_DEBUG)" >> .env
 	@echo "INSTANCE=$(INSTANCE)" >> .env
+	@echo "LATE_COMPOSE_PROJECT=$(LATE_COMPOSE_PROJECT)" >> .env
 	@echo "LATE_UI_NEW_SHELL=$(LATE_UI_NEW_SHELL)" >> .env
 	@echo "LATE_FORCE_ADMIN=$(LATE_FORCE_ADMIN)" >> .env
 	@echo "LATE_SSH_PORT=$(LATE_SSH_PORT)" >> .env
@@ -139,6 +155,12 @@ LATE_FILES_S3_SECRET_ACCESS_KEY ?=  								                        # S3/R2 secr
 	@echo "LATE_PG_HOST_PORT=$(LATE_PG_HOST_PORT)" >> .env
 	@echo "LATE_ICECAST_URL=$(LATE_ICECAST_URL)" >> .env
 	@echo "LATE_ICECAST_HOST_PORT=$(LATE_ICECAST_HOST_PORT)" >> .env
+	@echo "LATE_OTEL_GRPC_HOST_PORT=$(LATE_OTEL_GRPC_HOST_PORT)" >> .env
+	@echo "LATE_OTEL_HTTP_HOST_PORT=$(LATE_OTEL_HTTP_HOST_PORT)" >> .env
+	@echo "LATE_VICTORIAMETRICS_HOST_PORT=$(LATE_VICTORIAMETRICS_HOST_PORT)" >> .env
+	@echo "LATE_VICTORIALOGS_HOST_PORT=$(LATE_VICTORIALOGS_HOST_PORT)" >> .env
+	@echo "LATE_VICTORIATRACES_HOST_PORT=$(LATE_VICTORIATRACES_HOST_PORT)" >> .env
+	@echo "LATE_GRAFANA_HOST_PORT=$(LATE_GRAFANA_HOST_PORT)" >> .env
 	@echo "LATE_VOICE_ENABLED=$(LATE_VOICE_ENABLED)" >> .env
 	@echo "LATE_LIVEKIT_URL=$(LATE_LIVEKIT_URL)" >> .env
 	@echo "LATE_LIVEKIT_HOST_PORT=$(LATE_LIVEKIT_HOST_PORT)" >> .env
@@ -191,16 +213,24 @@ LATE_FILES_S3_SECRET_ACCESS_KEY ?=  								                        # S3/R2 secr
 
 # Recipe for a parallel "instance 2" clone. Run from the second clone:
 #   make start-instance2          # bring up the stack (foreground)
+#   make startm-instance2         # bring up the stack with monitoring
+#   make stop-instance2           # stop this clone's services
+#   make down-instance2           # remove this clone's containers/network
 #   make .env-instance2           # just (re)generate .env without starting
-# Only ports are overridden; URL/origin vars track the port defaults above.
+# Ports are overridden; URL/origin vars track the port defaults above.
 INSTANCE2_OVERRIDES = \
   INSTANCE=late2 \
   LATE_SSH_PORT=2223 \
-  LATE_API_PORT=4001 \
+  LATE_API_PORT=4002 \
   LATE_WEB_PORT=3001 \
   LATE_PG_HOST_PORT=5434 \
   LATE_ICECAST_HOST_PORT=8001 \
-  LATE_LIQUIDSOAP_HOST_PORT=1235 \
+  LATE_OTEL_GRPC_HOST_PORT=14317 \
+  LATE_OTEL_HTTP_HOST_PORT=14318 \
+  LATE_VICTORIAMETRICS_HOST_PORT=8429 \
+  LATE_VICTORIALOGS_HOST_PORT=9429 \
+  LATE_VICTORIATRACES_HOST_PORT=10429 \
+  LATE_GRAFANA_HOST_PORT=3002 \
   LATE_IRC_PORT=6668 \
   LATE_IRC_TLS_HOST_PORT=6698 \
   LATE_LIVEKIT_HOST_PORT=7883 \
@@ -209,9 +239,10 @@ INSTANCE2_OVERRIDES = \
 
 CHECK_PACKAGES = -p late-cli -p late-core -p late-ssh -p late-web -p late-webview
 CHECK_CARGO_ENV = CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
-CHECK_INSTANCE ?= late-check
+CHECK_INSTANCE ?= $(INSTANCE)-$(WORKTREE_SCOPE)
+CHECK_COMPOSE_PROJECT = late-sh-check-$(CHECK_INSTANCE)
 CHECK_PG_HOST_PORT ?= 55433
-CHECK_COMPOSE = CHECK_PG_HOST_PORT=$(CHECK_PG_HOST_PORT) docker compose -p $(CHECK_INSTANCE) -f docker-compose.check.yml
+CHECK_COMPOSE = CHECK_PG_HOST_PORT=$(CHECK_PG_HOST_PORT) docker compose -p "$(CHECK_COMPOSE_PROJECT)" --project-directory "$(REPO_ROOT)" -f "$(REPO_ROOT)/docker-compose.check.yml"
 CHECK_TEST_DATABASE_URL ?= host=127.0.0.1 port=$(CHECK_PG_HOST_PORT) user=postgres password=postgres dbname=postgres
 CHECK_DB_STOP = $(CHECK_COMPOSE) down -v --remove-orphans
 CHECK_DB_RESET = $(CHECK_DB_STOP) >/dev/null 2>&1 || true
@@ -221,9 +252,21 @@ CHECK_DB_START = $(CHECK_DB_RESET); $(CHECK_COMPOSE) up -d --wait postgres
 .env-instance2:
 	@$(MAKE) .env $(INSTANCE2_OVERRIDES)
 
-.PHONY: start-instance2
+.PHONY: start-instance2 startm-instance2 stop-instance2 down-instance2 remove-instance2
 start-instance2:
 	@$(MAKE) start $(INSTANCE2_OVERRIDES)
+
+startm-instance2:
+	@$(MAKE) startm $(INSTANCE2_OVERRIDES)
+
+stop-instance2:
+	@$(MAKE) stop $(INSTANCE2_OVERRIDES)
+
+down-instance2:
+	@$(MAKE) down $(INSTANCE2_OVERRIDES)
+
+remove-instance2:
+	@$(MAKE) remove $(INSTANCE2_OVERRIDES)
 
 .PHONY: keys
 keys:
@@ -255,14 +298,14 @@ checkci: .env
 	$(CHECK_CARGO_ENV) cargo clippy --workspace --all-targets --features otel -- -D warnings; \
 	TEST_DATABASE_URL="$(CHECK_TEST_DATABASE_URL)" $(CHECK_CARGO_ENV) cargo nextest run --workspace --all-targets
 
+.PHONY: start startm down stop remove
 start: .env keys
-	docker compose -f docker-compose.yml up --build
+	$(COMPOSE) up --build
 
 startm: .env keys
-	docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up --build
+	$(MONITORING_COMPOSE) up --build
 down:
-	docker compose -f docker-compose.yml -f docker-compose.monitoring.yml down
+	$(MONITORING_COMPOSE) down --remove-orphans
 stop:
-	docker ps -aq | xargs -r docker stop
-remove:
-	docker ps -aq | xargs -r docker rm -f
+	$(MONITORING_COMPOSE) stop
+remove: down

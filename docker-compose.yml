@@ -4,7 +4,6 @@ services:
     build:
       context: .
       target: dev-ssh
-    container_name: ${INSTANCE}-ssh
     ports:
       - "${LATE_SSH_PORT}:${LATE_SSH_PORT}"
       - "${LATE_API_PORT}:${LATE_API_PORT}"
@@ -36,7 +35,6 @@ services:
     build:
       context: .
       target: dev-web
-    container_name: ${INSTANCE}-web
     ports:
       - "${LATE_WEB_PORT}:${LATE_WEB_PORT}"
     env_file:
@@ -63,7 +61,6 @@ services:
     build:
       context: .
       target: dev-nethack
-    container_name: ${INSTANCE}-nethack
     env_file:
       - .env
       - path: .env.local
@@ -78,7 +75,6 @@ services:
     build:
       context: .
       target: dev-dopewars
-    container_name: ${INSTANCE}-dopewars
     env_file:
       - .env
       - path: .env.local
@@ -90,7 +86,6 @@ services:
       - cargo-target:/app/target
 
   postgres:
-    container_name: ${INSTANCE}-postgres
     image: postgres:18
     ports:
       - "${LATE_PG_HOST_PORT}:5432"
@@ -107,7 +102,6 @@ services:
 
   icecast:
     image: libretime/icecast:2.4.4
-    container_name: ${INSTANCE}-icecast
     networks:
       default:
         aliases:
@@ -119,7 +113,6 @@ services:
 
   liquidsoap:
     image: savonet/liquidsoap:v2.4.0
-    container_name: ${INSTANCE}-liquidsoap
     depends_on:
       - icecast
     volumes:
@@ -132,7 +125,6 @@ services:
 
   livekit:
     image: livekit/livekit-server:latest
-    container_name: ${INSTANCE}-livekit
     command: ["--dev", "--bind", "0.0.0.0"]
     ports:
       - "${LATE_LIVEKIT_HOST_PORT}:7880"

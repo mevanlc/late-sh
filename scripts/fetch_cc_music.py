@@ -832,7 +832,7 @@ def main():
         print("\nDone! Next steps:")
         print(f"  1. Review the generated .m3u files in {LIQUIDSOAP_DIR}/")
         print("  2. Update radio.liq to remove input.http() streams")
-        print("  3. Restart liquidsoap: docker compose restart liquidsoap")
+        print("  3. Restart liquidsoap: scripts/dev_compose.sh restart liquidsoap")
     else:
         print("\nDone! Skipped .m3u generation.")
 

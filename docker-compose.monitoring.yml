@@ -15,7 +15,6 @@ services:
       - otel-collector
 
   otel-collector:
-    container_name: late-otel-collector
     image: otel/opentelemetry-collector-contrib:0.147.0
     command:
       - --config=/etc/otelcol-contrib/config.yaml
@@ -26,18 +25,17 @@ services:
     volumes:
       - ./monitoring/otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
     ports:
-      - "4317:4317"   # OTLP gRPC
-      - "4318:4318"   # OTLP HTTP
+      - "${LATE_OTEL_GRPC_HOST_PORT:-4317}:4317"   # OTLP gRPC
+      - "${LATE_OTEL_HTTP_HOST_PORT:-4318}:4318"   # OTLP HTTP
     depends_on:
       - victorialogs
       - victoriatraces
       - victoriametrics
 
   victoriametrics:
-    container_name: late-victoriametrics
     image: victoriametrics/victoria-metrics:latest
     ports:
-      - "8428:8428"
+      - "${LATE_VICTORIAMETRICS_HOST_PORT:-8428}:8428"
     volumes:
       - vmdata:/storage
     command:
@@ -46,10 +44,9 @@ services:
     restart: always
 
   victorialogs:
-    container_name: late-victorialogs
     image: victoriametrics/victoria-logs:latest
     ports:
-      - "9428:9428"
+      - "${LATE_VICTORIALOGS_HOST_PORT:-9428}:9428"
     volumes:
       - vldata:/victoria-logs-data
     command:
@@ -58,10 +55,9 @@ services:
     restart: always
 
   victoriatraces:
-    container_name: late-victoriatraces
     image: victoriametrics/victoria-traces:latest
     ports:
-      - "10428:10428"
+      - "${LATE_VICTORIATRACES_HOST_PORT:-10428}:10428"
     volumes:
       - vtdata:/victoria-traces-data
     command:
@@ -74,10 +70,9 @@ services:
     restart: always
 
   grafana:
-    container_name: late-grafana
     image: grafana/grafana-enterprise:12.4.0
     ports:
-      - 3001:3000
+      - "${LATE_GRAFANA_HOST_PORT:-3001}:3000"
     volumes:
       - ./monitoring/grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml
       - ./monitoring/grafana-dashboards.yaml:/etc/grafana/provisioning/dashboards/dashboards.yaml

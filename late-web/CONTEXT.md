@@ -219,7 +219,7 @@ make start
 Native Rust services with Docker infrastructure:
 
 ```bash
-docker compose up -d postgres icecast liquidsoap
+scripts/dev_compose.sh up -d postgres icecast liquidsoap
 cargo run -p late-ssh
 cargo run -p late-web
 ```

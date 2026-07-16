@@ -68,23 +68,11 @@ if [[ "${MODE}" == "user_id" && -z "${USER_ID}" ]]; then
   exit 1
 fi
 
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker is required" >&2
-  exit 1
-fi
-
-COMPOSE=(docker compose)
-if ! "${COMPOSE[@]}" version >/dev/null 2>&1; then
-  if command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE=(docker-compose)
-  else
-    echo "docker compose is required" >&2
-    exit 1
-  fi
-fi
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+COMPOSE=("${ROOT_DIR}/scripts/dev_compose.sh")
 
 echo "-> ensuring local postgres is running"
-"${COMPOSE[@]}" up -d postgres >/dev/null
+"${COMPOSE[@]}" up -d --wait postgres >/dev/null
 
 echo "-> adding ${AMOUNT} chips (${MODE})"
 "${COMPOSE[@]}" exec -T postgres psql \

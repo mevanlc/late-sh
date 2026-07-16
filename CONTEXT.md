@@ -150,7 +150,8 @@ make check
 ```
 
 - `make check` intentionally formats/checks only first-party workspace packages (`late-cli`, `late-core`, `late-ssh`, `late-web`, `late-webview`). Do not replace it with `cargo fmt --all`: Cargo's `--all` also formats local path dependencies, including vendored Potatis under `vendor/potatis`, whose upstream style is not rustfmt-clean in this repo.
-- `make check` and `make checkci` start a dedicated Compose Postgres project from `docker-compose.check.yml` (`CHECK_INSTANCE ?= late-check`, `CHECK_PG_HOST_PORT ?= 55433`) and tear it down with volumes. They must not start, stop, or reuse the app `postgres` service from `docker-compose.yml`.
+- `make check` and `make checkci` start a dedicated checkout-scoped Compose Postgres project from `docker-compose.check.yml` (`late-sh-check-<instance>-<worktree-scope>`, `CHECK_PG_HOST_PORT ?= 55433`) and tear it down with volumes. `CHECK_INSTANCE` changes the suffix but cannot remove the `late-sh-check-` ownership prefix. Checks must not start, stop, or reuse the app `postgres` service from `docker-compose.yml`.
+- Normal dev Compose entry points must go through `scripts/dev_compose.sh` (directly or through the Makefile). It supplies an explicit `late-sh-<instance>-<worktree-scope>` project name and repository-root paths so lifecycle operations cannot inherit another directory's Compose project. The sole exception is the README's manual, name-verified cleanup of a legacy pre-scoping project. Do not reintroduce daemon-global `docker ps -aq` cleanup or explicit `container_name` values.
 
 ### Known environment caveats
 
@@ -907,11 +908,11 @@ let tracks = late_core::icecast::fetch_tracks(&icecast_url)?;  // blocking; moun
 
 ```bash
 # Start full dev stack
-docker compose up -d
+scripts/dev_compose.sh up -d
 
 # Or run services individually:
 # Postgres + Icecast + Liquidsoap via docker, Rust services via cargo
-docker compose up -d postgres icecast liquidsoap
+scripts/dev_compose.sh up -d postgres icecast liquidsoap
 cargo run -p late-ssh   # Needs LATE_* env vars
 cargo run -p late-web   # Needs LATE_WEB_* env vars
 ```

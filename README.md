@@ -101,10 +101,29 @@ For development without Docker wrapping the Rust builds, you can run the
 infrastructure in Docker and the apps natively:
 
 ```bash
-docker compose up -d postgres icecast liquidsoap
+scripts/dev_compose.sh up -d postgres icecast liquidsoap
 cargo run -p late-ssh
 cargo run -p late-web
 ```
+
+All repository-provided Docker commands use an explicit Compose project named
+for Late.sh and this checkout. This prevents `make stop`, `make remove`, checks,
+and helper scripts from operating on containers owned by other projects. Use
+`LATE_COMPOSE_PROJECT` only when you intentionally need a stable custom project
+name beginning with `late-sh-`; use a distinct `INSTANCE` and host ports for a
+parallel Late.sh stack.
+`make stop` stops only this checkout's services, while `make down` and
+`make remove` remove only this checkout's containers and network; named volumes
+are preserved. The corresponding `*-instance2` targets manage the parallel
+instance created by `make start-instance2` or `make startm-instance2`.
+
+The checkout path is part of the default project identity. After moving a
+checkout or adopting this scoped workflow, older containers keep their previous
+Compose project identity. Inspect `docker compose ls`, verify the old project
+name, and remove it explicitly with
+`docker compose -p <old-project> -f docker-compose.yml -f docker-compose.monitoring.yml down --remove-orphans`
+if it is no longer needed. The Make targets deliberately do not guess at legacy
+ownership.
 
 Local host development can use Cargo's normal defaults, including the standard
 repo-local `target/` directory. The `/app/target` path is only for Docker/dev
@@ -126,7 +145,7 @@ make check
 ```
 
 This runs `cargo fmt --check`, `cargo clippy`, and `cargo nextest`.
-The local check starts a dedicated Compose Postgres project (`late-check`) on
+The local check starts a dedicated checkout-scoped Compose Postgres project on
 port `55433` and points DB integration tests at it via `TEST_DATABASE_URL`.
 Override `CHECK_INSTANCE` or `CHECK_PG_HOST_PORT` if you need a parallel check
 database.

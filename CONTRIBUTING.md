@@ -40,7 +40,7 @@ The repo includes `.mise.toml` with `rust`, `mold`, and `cargo-nextest`. Run
 ### Running locally
 
 ```bash
-make start          # docker compose: ssh, web, postgres, icecast, liquidsoap
+make start              # scoped Compose: ssh, web, postgres, icecast, liquidsoap
 ssh localhost -p 2222   # connect to your local instance
 ```
 
