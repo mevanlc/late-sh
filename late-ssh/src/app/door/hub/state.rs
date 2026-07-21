@@ -10,15 +10,19 @@ pub enum HubGame {
     Lateania,
     Rebels,
     Nethack,
+    Dcss,
+    Usurper,
     GreenDragon,
     Dopewars,
 }
 
 impl HubGame {
     /// Selector order, left to right.
-    pub const ALL: [HubGame; 5] = [
+    pub const ALL: [HubGame; 7] = [
         HubGame::Lateania,
         HubGame::Nethack,
+        HubGame::Dcss,
+        HubGame::Usurper,
         HubGame::GreenDragon,
         HubGame::Rebels,
         HubGame::Dopewars,
@@ -29,6 +33,8 @@ impl HubGame {
             HubGame::Lateania => "Lateania",
             HubGame::Rebels => "Rebels",
             HubGame::Nethack => "NetHack",
+            HubGame::Dcss => "DCSS",
+            HubGame::Usurper => "Usurper",
             HubGame::GreenDragon => "Green Dragon",
             HubGame::Dopewars => "dopewars",
         }
@@ -65,45 +71,5 @@ impl State {
         if index < HubGame::ALL.len() {
             self.selected = index;
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn selection_clamps_at_both_ends() {
-        let mut s = State::default();
-        assert_eq!(s.selected_game(), HubGame::Lateania);
-        s.select_prev();
-        assert_eq!(s.selected_game(), HubGame::Lateania);
-        s.select_next();
-        assert_eq!(s.selected_game(), HubGame::Nethack);
-        s.select_next();
-        assert_eq!(s.selected_game(), HubGame::GreenDragon);
-        s.select_next();
-        assert_eq!(s.selected_game(), HubGame::Rebels);
-        s.select_next();
-        assert_eq!(s.selected_game(), HubGame::Dopewars);
-        s.select_next();
-        assert_eq!(s.selected_game(), HubGame::Dopewars);
-    }
-
-    #[test]
-    fn select_jumps_directly() {
-        let mut s = State::default();
-        s.select(2);
-        assert_eq!(s.selected_game(), HubGame::GreenDragon);
-        s.select(99);
-        assert_eq!(s.selected_game(), HubGame::GreenDragon);
-    }
-
-    #[test]
-    fn all_games_are_listed_in_order() {
-        assert_eq!(
-            HubGame::ALL.map(HubGame::label),
-            ["Lateania", "NetHack", "Green Dragon", "Rebels", "dopewars"],
-        );
     }
 }

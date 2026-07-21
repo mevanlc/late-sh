@@ -70,7 +70,7 @@ Cross-module wiring (client side, outside this folder — the ~10 door touchpoin
 - `app/tick.rs`: `State::tick()` each app tick + return-to-`Games` once `!is_running() && !in_exit_grace()`.
 - `app/render.rs`: `DrawContext.dopewars_enabled`/`dopewars_state`, take/restore `dopewars_state` (like rebels/nethack) so the draw path can `set_viewport(content_area)` before blitting, the dispatch arm, and the title-bar credit + in-game `Ctrl-C quit` hint.
 - `app/input.rs`: hub launch arm (`set_screen` + `connect`, banner if disabled), dedicated-screen `Enter` launcher, and arrow/key dispatch no-ops (Running-mode bytes are forwarded raw upstream).
-- `config.rs`, `state.rs` (`SessionConfig`), `ssh.rs`, `session_bootstrap.rs`, `tests/helpers/mod.rs`: thread `dopewars_enabled`/`dopewars_host`/`dopewars_port`/`dopewars_secret`.
+- `config.rs`, `state.rs` (`SessionConfig`), `ssh.rs`, `session_bootstrap.rs`, `src/test_helpers.rs`: thread `dopewars_enabled`/`dopewars_host`/`dopewars_port`/`dopewars_secret`.
 
 ---
 
@@ -212,5 +212,5 @@ cargo test -p late-dopewars && cargo test -p late-ssh dopewars
 
 ### Possible future work
 - Milestones/chips/awards by scraping the final-score screen (deferred; mirror `nethack/milestone.rs` + `award.rs` + the `scan_screen` scrape in `nethack/state.rs`).
-- Optional shared/competitive market: one `dopewars -S` server with `-o`/`-p` clients per session (single-player ships first).
+- ~~Optional shared/competitive market: one `dopewars -S` server with `-o`/`-p` clients per session.~~ **Evaluated and rejected 2026-07-18**: concurrency is far too low (~1 player/week) for two people to ever share the market, and one shared server makes every deploy wipe all in-progress runs. Cheap to build (supervised `-S` on localhost, spawn `-t -b -o 127.0.0.1 -p 7902 -P <handle>`, thread the handle through the SSH username), so revisit only if concurrent players become a thing.
 - A cross-crate known-answer fingerprint test pinning `derive_client_key` (mirror nethack's KAT), once test-running is re-enabled.

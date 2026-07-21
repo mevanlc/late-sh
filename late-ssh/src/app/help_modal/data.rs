@@ -105,7 +105,11 @@ impl HelpTopic {
     }
 }
 
-pub fn lines_for(topic: HelpTopic, keep_composer_focused: bool, pair_url: &str) -> Vec<String> {
+pub(crate) fn lines_for(
+    topic: HelpTopic,
+    keep_composer_focused: bool,
+    pair_url: &str,
+) -> Vec<String> {
     match topic {
         HelpTopic::Pair => pair_help_lines(pair_url),
         HelpTopic::Overview => overview_lines(),
@@ -143,7 +147,7 @@ pub fn lines_for(topic: HelpTopic, keep_composer_focused: bool, pair_url: &str) 
     }
 }
 
-pub fn bot_app_context() -> String {
+pub(crate) fn bot_app_context() -> String {
     let mut out = String::from(
         "APP CONTEXT:\n\
         CRITICAL FACTS:\n\
@@ -155,7 +159,7 @@ pub fn bot_app_context() -> String {
         - The buzz sobers up on its own over time, no action needed: it decays 150 points an hour, so even a maxed-out binge is fully sober again in about a day.\n\
         - Drunk level tints the username label's background everywhere it appears (the Clubhouse floor and chat author labels alike), light green through yellow and orange to red as the level climbs.\n\
         - There is no separate top-level Chat screen. Home/Dashboard owns the chat room rail and chat center; top-level screens are Clubhouse (0), Home (1), The Arcade (2), Games (3), Artboard (4), Directory (5), and World Cup (6).\n\
-        - The Games hub (page 3) is the dedicated landing for the door games Lateania, NetHack, Green Dragon, dopewars, and Rebels; each is launched from there, not from its own top-level page.\n\
+        - The Games hub (page 3) is the dedicated landing for the door games Lateania, NetHack, DCSS, Usurper, Green Dragon, dopewars, and Rebels; each is launched from there, not from its own top-level page.\n\
         - Directory page 5 owns Profiles, Projects, and Pinstar tabs. Artboard and Pinstar have detailed page-local editing keybinds.\n",
     );
     for topic in HelpTopic::ALL {
@@ -179,11 +183,11 @@ pub fn bot_app_context() -> String {
 /// Trimmed app context for @bartender: navigation only, not the full guide.
 /// He is house furniture, not the help desk — @bot owns explaining features
 /// in depth, so anything past "which screen / which key" should route there.
-pub fn bartender_app_context() -> String {
+pub(crate) fn bartender_app_context() -> String {
     "APP CONTEXT (basic navigation):\n\
-    - Screens: 0 Clubhouse (this room, the Late Lounge tavern), 1 Home (chat + music), 2 The Arcade (single-player games), 3 Games hub (Lateania, NetHack, Green Dragon, dopewars, Rebels), 4 Artboard (shared ASCII canvas), 5 Directory (Profiles, Projects, Pinstar), 6 World Cup (live scores).\n\
+    - Screens: 0 Clubhouse (this room, the Late Lounge tavern), 1 Home (chat + music), 2 The Arcade (single-player games), 3 Games hub (Lateania, NetHack, DCSS, Usurper, Green Dragon, dopewars, Rebels), 4 Artboard (shared ASCII canvas), 5 Directory (Profiles, Projects, Pinstar), 6 World Cup (live scores).\n\
     - Tab / Shift+Tab cycles screens; number keys 0-6 jump straight to one.\n\
-    - Ctrl+O opens Settings from anywhere. Ctrl+G opens Hub (Quests, Shop, Leaderboard, Events). Ctrl+Q opens the Lobby (daily correspondence games plus the fixed house tables: Poker, Blackjack, Asterion, Tron).\n\
+    - Ctrl+O opens Settings from anywhere. Ctrl+G opens Hub (Quests, Shop, Leaderboard, Events). Ctrl+Q opens the Lobby (daily correspondence games plus the fixed house tables: Poker, Blackjack, Asterion, Tron, Super Snake).\n\
     - Ctrl+/ opens jump search across rooms and DMs; typing ?query searches messages.\n\
     - Home's room rail also holds RSS, News, Voice, Mentions, and Discover.\n\
     - In the Clubhouse: arrows/hjkl walk, i talks (it floats over your head and lands in #lounge), w waves, x dances, Enter interacts with a landmark.\n\
@@ -307,7 +311,7 @@ fn economy_lines() -> Vec<String> {
     crate::app::help_modal::hub_guide::bot_context_lines()
 }
 
-pub fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
+pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
     let compose_send_lines: &[&str] = if keep_composer_focused {
         &["  Enter              send and keep open"]
     } else {
@@ -340,7 +344,7 @@ pub fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "  /members           list users in this room",
         "  /list              list public rooms",
         "  /poll              start a Home room poll with 2-3 options",
-        "  /challenge [@user] daily challenge (chess, battleship, connect4): lobby or directed",
+        "  /challenge [@user] daily challenge (chess, battleship, connect4, reversi, checkers, backgammon): lobby or directed",
         "  /roll [NdM ...]    roll dice (default d20), e.g. /roll 3d6 2d20",
         "  /sheet [@user]     your character sheet, or another user's (#dnd)",
         "  /paste-image       upload image from paired CLI clipboard (see Images)",
@@ -685,6 +689,7 @@ fn arcade_help_lines() -> Vec<String> {
         "  [LMG]     Lateania Archdemon",
         "  [LKN]     Lateania Frontier King",
         "  [LYS]     Lateania Sundering Deep",
+        "  [LKA]     Lateania Kaethyr Ascendant",
         "  [NHA]     NetHack Amulet",
         "  [NHY]     NetHack Ascension",
         "  [GDS]     Green Dragon Slayer",
@@ -705,12 +710,12 @@ fn lobby_help_lines() -> Vec<String> {
         "  Esc               close the Lobby",
         "",
         "Daily matches",
-        "  /challenge [@user] post a chess, battleship, or connect4 challenge",
+        "  /challenge [@user] post a chess, battleship, connect4, reversi, checkers, or backgammon challenge",
         "  24h per move; boards live outside the Tab cycle, Esc returns to the Lobby",
         "  `                 hop Home chat, boards on your move, seated tables, unfinished dailies",
         "",
         "House tables",
-        "  Poker, Blackjack, Asterion, and Tron: one fixed table each, no setup forms",
+        "  Poker, Blackjack, Asterion, Tron, and Super Snake: one fixed table each, no setup forms",
         "  the Lobby row shows live occupancy; empty tables are always joinable",
         "  q / Esc           leave the table screen (your seat follows the game's rules)",
         "",
@@ -750,15 +755,20 @@ fn lateania_help_lines() -> Vec<String> {
         "  Disconnecting (or the server closing) also returns to the hub.",
         "",
         "Lateania",
-        "  1-5               choose class before your first adventure",
+        "  w/s + Enter       choose your calling (1-9 quick-pick the first nine)",
         "  w/a/s/d or arrows move north/west/south/east",
-        "  y/u/n/m           diagonal movement",
         "  < / >             move up / down where exits exist",
         "  o                 look around",
         "  Space / Enter / x attack",
         "  1-9, 0            use ability slots 1-10 after choosing a class",
         "  v then Enter      cast any ability from the panel, however deep the roster",
         "  z                 flee combat",
+        "",
+        "Getting around",
+        "  m                 world atlas: every region, your progress, where you stand",
+        "  i                 the ways: fast-travel between waystones, town to continent gates",
+        "  r                 recall to Embergate when out of combat",
+        "  ;                 retreat to the nearest safe haven when lost in a maze",
         "",
         "Panels",
         "  c                 character",
@@ -767,8 +777,12 @@ fn lateania_help_lines() -> Vec<String> {
         "  b                 shop, when a merchant is present",
         "  j                 quest journal",
         "  k                 earned titles",
-        "  r                 recall to Embergate when out of combat",
         "  f                 follow another adventurer in the room",
+        "  y                 gather at a resource node",
+        "  u                 craft where a station stands",
+        "  q                 tame a wild beast where one roams",
+        "  n                 housing ledger",
+        "  '                 say to your room (local chat)",
         "  Enter             activate selected inventory/shop row",
         "  x                 sell selected inventory item at a shop",
         "",
@@ -978,12 +992,11 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "  Bio               multiline markdown bio".to_string(),
         "  Themes            expanded theme browser".to_string(),
+        "  Tweaks            power-user toggles for appearance, compose, music, display, and startup"
+            .to_string(),
+        "  Account           link SSH keys across accounts, reset/revoke your IRC access token, or delete your account"
+            .to_string(),
         "  RSS               private RSS/Atom subscriptions".to_string(),
-        "  Account           link SSH keys across accounts, or delete your account".to_string(),
-        "  IRC access token  create, reset, or revoke the token used by IRC clients"
-            .to_string(),
-        "  Special           show-settings-on-connect toggle; unlocks after profile setup"
-            .to_string(),
         "".to_string(),
         "What you can set".to_string(),
         "  username".to_string(),
@@ -994,8 +1007,8 @@ fn settings_help_lines() -> Vec<String> {
         "  country via picker, with Unicode flag rendering".to_string(),
         "  timezone via picker".to_string(),
         "  IDE, terminal, OS, and languages for profile/late.fetch surfaces".to_string(),
-        "  background color, room list, and the Activity boxes toggle".to_string(),
-        "  right sidebar mode (on/off/custom) for Home and Arcade".to_string(),
+        "  Tweaks: background color, text brightness, right sidebar mode, room list, pet strip, composer send behavior, music mute-on-start, chat flag fallback, land on Home"
+            .to_string(),
         "  private RSS/Atom subscriptions".to_string(),
         "  IRC access token for external IRC clients".to_string(),
         "".to_string(),
@@ -1027,6 +1040,30 @@ fn settings_help_lines() -> Vec<String> {
         "".to_string(),
         "Account deletion".to_string(),
         "  Settings > Account > Delete Account opens delete confirmation; type DELETE to confirm".to_string(),
+        "".to_string(),
+        "Tweaks tab".to_string(),
+        "  Power-user toggles, grouped by area:".to_string(),
+        "  Appearance".to_string(),
+        "    Background color        theme background fill on/off; off keeps text colors on your terminal's own background"
+            .to_string(),
+        "    Text Brightness         nudge overall text brightness up or down".to_string(),
+        "    Right sidebar           on / off / custom for Home and Arcade; Custom opens a panel checklist"
+            .to_string(),
+        "    Room list               show/hide the Home room-list rail".to_string(),
+        "    Pet companion strip     show/hide the pet strip above the Lounge chat composer (pet owners only)"
+            .to_string(),
+        "  Compose".to_string(),
+        "    Send and keep open on Enter   Enter sends without closing the composer; while on, Alt+S becomes a no-op"
+            .to_string(),
+        "  Music".to_string(),
+        "    Start app with music muted    mutes the first paired audio client on each new session so music doesn't auto-play"
+            .to_string(),
+        "  Display".to_string(),
+        "    Chat flag text fallback       show text/boxed-letter labels instead of flag emoji in chat badges, Shop Flags, and World Cup"
+            .to_string(),
+        "  Startup".to_string(),
+        "    Land on Home page             land on Home (page 1) instead of the Clubhouse (page 0) when a session starts"
+            .to_string(),
         "".to_string(),
         "RSS tab".to_string(),
         "  j / k or arrows move through RSS rows".to_string(),
@@ -1350,179 +1387,5 @@ Track length
   Every track is capped at 1 hour. Shorter videos play to their real end; anything longer (long mixes, live streams, the YouTube fallback) gets cut off at the 1h mark and the queue moves on.";
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn all_purpose_guide_keeps_artboard_out_of_topic_tabs() {
-        assert!(
-            !HelpTopic::ALL
-                .iter()
-                .any(|topic| topic.title() == "Artboard")
-        );
-        assert!(!bot_app_context().contains("## Artboard\n"));
-    }
-
-    #[test]
-    fn all_purpose_guide_splits_game_topics() {
-        assert!(HelpTopic::ALL.iter().any(|topic| topic.title() == "Arcade"));
-        assert!(HelpTopic::ALL.iter().any(|topic| topic.title() == "Lobby"));
-        assert!(
-            HelpTopic::ALL
-                .iter()
-                .any(|topic| topic.title() == "Lateania")
-        );
-        assert!(!HelpTopic::ALL.iter().any(|topic| topic.title() == "Games"));
-        assert!(bot_app_context().contains("## Arcade\n"));
-        assert!(bot_app_context().contains("## Lobby\n"));
-        assert!(bot_app_context().contains("## Lateania\n"));
-        assert!(!bot_app_context().contains("## Games\n"));
-    }
-
-    #[test]
-    fn all_purpose_guide_folds_music_into_pair_topic() {
-        assert!(!HelpTopic::ALL.iter().any(|topic| topic.title() == "Music"));
-        assert!(!bot_app_context().contains("## Music\n"));
-        let pair = lines_for(HelpTopic::Pair, false, "").join("\n");
-        assert!(pair.contains("Music controls"));
-        assert!(pair.contains("Music Booth"));
-        assert!(pair.contains("active YouTube-source users"));
-    }
-
-    #[test]
-    fn bot_context_includes_hub_guide_facts() {
-        let context = bot_app_context();
-        assert!(context.contains("## Economy\n"));
-        assert!(context.contains("Monthly Top Chips counts net chip delta."));
-        assert!(context.contains("Lateris, 2048, Snake, and Traffic record run scores."));
-        assert!(context.contains("Blackjack form: name, pace, stake."));
-        assert!(context.contains("Four-seat fixed-stack Texas Hold'em"));
-    }
-
-    #[test]
-    fn bot_context_includes_terminal_faq_and_image_facts() {
-        let context = bot_app_context();
-        assert!(context.contains("## Copy\n"));
-        assert!(context.contains("## Images\n"));
-        assert!(context.contains("## CLI YouTube\n"));
-        assert!(context.contains("Why copy sometimes silently fails"));
-        assert!(context.contains("CLI YouTube playback"));
-        assert!(context.contains("/paste-image"));
-        assert!(context.contains("This is CLI-only"));
-        assert!(context.contains("The original-quality image is the uploaded/copied URL."));
-        assert!(context.contains("Kitty protocol: kitty, Ghostty, rio, warp, Konsole."));
-        assert!(context.contains("iTerm2 inline images: iTerm2, WezTerm, mintty, hterm."));
-    }
-
-    #[test]
-    fn bot_context_includes_account_linking_flow() {
-        let context = bot_app_context();
-        assert!(context.contains("## Settings\n"));
-        assert!(context.contains("Use Settings > Account > Link Accounts"));
-        assert!(context.contains("one side generates a 10-minute link code"));
-        assert!(context.contains("Choose the main account to keep: Current or Other."));
-        assert!(context.contains("Both SSH keys will open the main account after linking."));
-        assert!(
-            context.contains(
-                "chips, messages, scores, streaks, settings, and other data are not merged"
-            )
-        );
-    }
-
-    #[test]
-    fn bot_context_includes_irc_access_flow() {
-        let context = bot_app_context();
-        assert!(HelpTopic::ALL.iter().any(|topic| topic.title() == "IRC"));
-        assert!(context.contains("## IRC\n"));
-        assert!(context.contains("Settings > Account > IRC access token"));
-        assert!(context.contains("server password / PASS field"));
-        assert!(context.contains("localhost:6667 with TLS off when running make start"));
-        assert!(context.contains("irc.late.sh port 6697 with TLS/SSL enabled"));
-        assert!(context.contains("/server add late irc.late.sh/6697"));
-        assert!(context.contains("IRC is raw TCP, so irc.late.sh must be DNS-only"));
-        assert!(context.contains("Game-room chat is not exposed as IRC channels."));
-        assert!(context.contains("Resetting a token shows the new value once"));
-    }
-
-    #[test]
-    fn chat_guide_lists_user_facing_slash_commands() {
-        let lines = chat_help_lines(false).join("\n");
-        for expected in [
-            "/brb [message]",
-            "/challenge [@user]",
-            "/coffee",
-            "/friend [@user]",
-            "/friends",
-            "/icons",
-            "/petname [name]",
-            "/poll",
-            "/profile [@user]",
-            "/tea",
-            "/upload <url>",
-        ] {
-            assert!(lines.contains(expected), "missing {expected}");
-        }
-        assert!(!lines.contains("/music"));
-    }
-
-    #[test]
-    fn music_guide_defers_pairing_setup_to_pair_tab() {
-        assert!(MUSIC_PAIR_TEXT.contains("three music sources"));
-        assert!(MUSIC_PAIR_TEXT.contains("active YouTube-source users"));
-        assert!(!MUSIC_PAIR_TEXT.contains("two audio surfaces"));
-        assert!(!MUSIC_PAIR_TEXT.contains("paired users agree"));
-        assert!(!MUSIC_PAIR_TEXT.contains(SHELL_INSTALL_COMMAND));
-        assert!(!MUSIC_PAIR_TEXT.contains(WINDOWS_INSTALL_COMMAND));
-        assert!(!MUSIC_PAIR_TEXT.contains(NIX_COMMAND));
-        assert!(!MUSIC_PAIR_TEXT.contains(SOURCE_URL));
-    }
-
-    #[test]
-    fn chat_guide_collapses_compose_section_when_keep_composer_focused() {
-        let off = chat_help_lines(false).join("\n");
-        assert!(off.contains("Enter              send and exit"));
-        assert!(off.contains("Alt+S              send and keep open"));
-        assert!(!off.contains("<<COMPOSE_SEND_LINES>>"));
-
-        let on = chat_help_lines(true).join("\n");
-        assert!(on.contains("Enter              send and keep open"));
-        assert!(!on.contains("Alt+S"));
-        assert!(!on.contains("send and exit"));
-        assert!(!on.contains("<<COMPOSE_SEND_LINES>>"));
-    }
-
-    #[test]
-    fn bot_context_does_not_leak_restricted_commands() {
-        let context = bot_app_context();
-        for forbidden in [
-            "/audio",
-            "/create-room",
-            "/delete-room",
-            "/fill-room",
-            "/mod",
-            "staff",
-            "admin",
-            "moderation",
-            "unskippable",
-        ] {
-            assert!(
-                !context.to_lowercase().contains(forbidden),
-                "bot context leaked {forbidden}"
-            );
-        }
-    }
-
-    #[test]
-    fn global_guide_points_to_hub_for_game_details() {
-        let arcade = arcade_help_lines().join("\n");
-        let lobby = lobby_help_lines().join("\n");
-        let lateania = lateania_help_lines().join("\n");
-        assert!(arcade.contains("Economy"));
-        assert!(lobby.contains("Economy tab"));
-        assert!(lateania.contains("Lateania"));
-        // The badge glossary names games to explain each badge code; game
-        // details still live in the hub, not here.
-        assert!(!lobby.contains("Sudoku"));
-        assert!(!lateania.contains("Clock presets"));
-    }
-}
+#[path = "data_test.rs"]
+mod data_test;

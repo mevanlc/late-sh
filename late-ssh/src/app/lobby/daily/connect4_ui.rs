@@ -9,25 +9,32 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::Paragraph,
+    widgets::{Paragraph, Wrap},
 };
 use uuid::Uuid;
 
 use crate::app::{
     common::theme,
     lobby::daily::{
-        board_ui::{draw_center_message, name_for, result_banner},
+        board_ui::{
+            CellTier, PUCK_SOLID, cell_text, draw_center_message, hint_cell, name_for,
+            pick_cell_tier, piece_cell, result_banner,
+        },
         connect4::{self, DailyConnect4State, Disc},
         state::{Connect4Detail, DailyBoardState, DailyMatchDetail, DailyState, format_deadline},
     },
 };
 
-/// column header + drop indicator + 6 rows + drop count.
-const GRID_ROWS: u16 = 2 + connect4::ROWS as u16 + 1;
-/// Terminal columns per board cell; the mouse hit-test divides by this.
-pub(crate) const CELL_W: u16 = 3;
+/// column header + drop indicator + board rows + drop count.
+fn grid_rows(tier: CellTier) -> u16 {
+    2 + connect4::ROWS as u16 * tier.ch + 1
+}
+
 /// row labels (3) + 7 cells.
-const GRID_WIDTH: u16 = 3 + (connect4::COLS as u16) * CELL_W;
+fn grid_width(tier: CellTier) -> u16 {
+    3 + connect4::COLS as u16 * tier.cw
+}
+
 /// status + two player bars + key hints around the grid.
 const CHROME_ROWS: u16 = 4;
 
@@ -43,7 +50,10 @@ pub(crate) fn draw(
     detail: &DailyMatchDetail,
     connect4: &Connect4Detail,
 ) {
-    if area.width < GRID_WIDTH || area.height < GRID_ROWS + CHROME_ROWS {
+    let tier = pick_cell_tier(|tier| {
+        grid_width(tier) <= area.width && grid_rows(tier) + CHROME_ROWS <= area.height
+    });
+    if area.width < grid_width(tier) || area.height < grid_rows(tier) + CHROME_ROWS {
         draw_center_message(frame, area, "The board needs more room.");
         return;
     }
@@ -55,7 +65,7 @@ pub(crate) fn draw(
 
     // Same shape as the other boards: the drop rail splits off the right
     // edge when there is room, everything else centres in what remains.
-    let show_rail = area.width >= GRID_WIDTH + INFO_RAIL_WIDTH + INFO_RAIL_MIN_EXTRA;
+    let show_rail = area.width >= grid_width(tier) + INFO_RAIL_WIDTH + INFO_RAIL_MIN_EXTRA;
     let content = if show_rail {
         let cols = Layout::horizontal([Constraint::Fill(1), Constraint::Length(INFO_RAIL_WIDTH)])
             .split(area);
@@ -66,16 +76,16 @@ pub(crate) fn draw(
     };
     let area = content;
 
-    let stack_h = GRID_ROWS + CHROME_ROWS;
+    let stack_h = grid_rows(tier) + CHROME_ROWS;
     let top_pad = area.height.saturating_sub(stack_h) / 2;
     let rows = Layout::vertical([
         Constraint::Length(top_pad),
-        Constraint::Length(1),         // status
-        Constraint::Length(1),         // opponent bar
-        Constraint::Length(GRID_ROWS), // the grid
-        Constraint::Length(1),         // own bar
-        Constraint::Min(0),            // slack, pushing the hints to the floor
-        Constraint::Length(1),         // key hints
+        Constraint::Length(1),               // status
+        Constraint::Length(1),               // opponent bar
+        Constraint::Length(grid_rows(tier)), // the grid
+        Constraint::Length(1),               // own bar
+        Constraint::Min(0),                  // slack, pushing the hints to the floor
+        Constraint::Length(1),               // key hints
     ])
     .split(area);
     let (status_row, top_bar, grid_row, bottom_bar, hint_row) =
@@ -86,13 +96,13 @@ pub(crate) fn draw(
         && detail.row.turn_user_id == Some(daily.user_id())
         && !connect4.drop_in_flight;
 
-    let grid_x = grid_row.x + grid_row.width.saturating_sub(GRID_WIDTH) / 2;
+    let grid_x = grid_row.x + grid_row.width.saturating_sub(grid_width(tier)) / 2;
     // Player bars hug the grid, not the screen edges — the same
     // centred-stack rule as the other boards.
     let over_grid = |row: Rect| Rect {
         x: grid_x,
         y: row.y,
-        width: GRID_WIDTH.min(row.width),
+        width: grid_width(tier).min(row.width),
         height: row.height,
     };
 
@@ -113,8 +123,8 @@ pub(crate) fn draw(
     let grid_rect = Rect {
         x: grid_x,
         y: grid_row.y,
-        width: GRID_WIDTH,
-        height: GRID_ROWS,
+        width: grid_width(tier),
+        height: grid_rows(tier),
     };
     frame.render_widget(
         Paragraph::new(board_lines(
@@ -122,6 +132,7 @@ pub(crate) fn draw(
             my_turn.then_some(board.cursor),
             my_disc,
             finished,
+            tier,
         )),
         grid_rect,
     );
@@ -129,8 +140,8 @@ pub(crate) fn draw(
     board.target_geometry.set(Some(Rect {
         x: grid_rect.x + 3,
         y: grid_rect.y + 2,
-        width: (connect4::COLS as u16) * CELL_W,
-        height: connect4::ROWS as u16,
+        width: connect4::COLS as u16 * tier.cw,
+        height: connect4::ROWS as u16 * tier.ch,
     }));
 
     draw_player_bar(
@@ -156,12 +167,15 @@ fn disc_color(disc: Disc) -> Color {
 }
 
 /// The board: header letters, the drop indicator, six rows bottom-up, and
-/// the running drop count. The winning line lights up as solid tiles.
+/// the running drop count. The winning line lights up as solid tiles. Each
+/// board row is `tier.ch` text lines; the glyph and row label sit on the
+/// middle one, the rest just carry the cell background.
 fn board_lines(
     state: &DailyConnect4State,
     cursor: Option<usize>,
     my_disc: Disc,
     finished: bool,
+    tier: CellTier,
 ) -> Vec<Line<'static>> {
     let grid = state.grid();
     let last = state.last_drop();
@@ -172,44 +186,52 @@ fn board_lines(
     // Where the hovered column would take a disc, for the ghost preview.
     let landing = cursor.and_then(|col| (0..connect4::ROWS).find(|&row| grid[row][col].is_none()));
 
-    let mut lines = vec![header_line(cursor), indicator_line(cursor)];
+    let mut lines = vec![header_line(cursor, tier), indicator_line(cursor, tier)];
     for row in (0..connect4::ROWS).rev() {
-        let mut spans = vec![row_label(row, landing == Some(row))];
-        for (col, cell) in grid[row].iter().enumerate() {
-            let span = match *cell {
-                Some(disc) if winning.contains(&(row, col)) => {
-                    // The line that ended it: dark discs on solid tiles.
-                    Span::styled(
-                        " ● ".to_string(),
+        for sub in 0..tier.ch {
+            let glyph_row = sub == tier.glyph_sub();
+            let mut spans = vec![if glyph_row {
+                row_label(row, landing == Some(row))
+            } else {
+                Span::raw("   ")
+            }];
+            for (col, cell) in grid[row].iter().enumerate() {
+                let span = match *cell {
+                    Some(disc) if winning.contains(&(row, col)) => Span::styled(
+                        // The line that ended it: dark discs on solid tiles.
+                        piece_cell(PUCK_SOLID, '●', tier, sub),
                         Style::default()
                             .fg(theme::BG_CANVAS())
                             .bg(disc_color(disc))
                             .add_modifier(Modifier::BOLD),
-                    )
-                }
-                Some(disc) if last == Some((row, col)) => Span::styled(
-                    " ● ".to_string(),
-                    Style::default()
-                        .fg(disc_color(disc))
-                        .bg(theme::BG_SELECTION())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Some(disc) => {
-                    Span::styled(" ● ".to_string(), checker(row, col).fg(disc_color(disc)))
-                }
-                None if cursor == Some(col) && landing == Some(row) => Span::styled(
-                    " ◌ ".to_string(),
-                    checker(row, col)
-                        .fg(disc_color(my_disc))
-                        .add_modifier(Modifier::BOLD),
-                ),
-                None => Span::styled(" · ".to_string(), checker(row, col).fg(theme::BORDER_DIM())),
-            };
-            spans.push(span);
+                    ),
+                    Some(disc) if last == Some((row, col)) => Span::styled(
+                        piece_cell(PUCK_SOLID, '●', tier, sub),
+                        Style::default()
+                            .fg(disc_color(disc))
+                            .bg(theme::BG_SELECTION())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Some(disc) => Span::styled(
+                        piece_cell(PUCK_SOLID, '●', tier, sub),
+                        checker(row, col).fg(disc_color(disc)),
+                    ),
+                    None if cursor == Some(col) && landing == Some(row) => Span::styled(
+                        // Where the drop would land: the corner frame in
+                        // your colour.
+                        hint_cell('◌', tier, sub),
+                        checker(row, col)
+                            .fg(disc_color(my_disc))
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    None => Span::styled(" ".repeat(tier.cw as usize), checker(row, col)),
+                };
+                spans.push(span);
+            }
+            lines.push(Line::from(spans));
         }
-        lines.push(Line::from(spans));
     }
-    lines.push(summary_line(format!("{} drops", state.move_count())));
+    lines.push(summary_line(format!("{} drops", state.move_count()), tier));
     lines
 }
 
@@ -224,7 +246,7 @@ fn checker(row: usize, col: usize) -> Style {
 }
 
 /// `hot_col` lights up the cursor's column letter as a crosshair.
-fn header_line(hot_col: Option<usize>) -> Line<'static> {
+fn header_line(hot_col: Option<usize>, tier: CellTier) -> Line<'static> {
     let mut spans = vec![Span::raw("   ")];
     for col in 0..connect4::COLS {
         let style = if hot_col == Some(col) {
@@ -235,7 +257,7 @@ fn header_line(hot_col: Option<usize>) -> Line<'static> {
             Style::default().fg(theme::TEXT_FAINT())
         };
         spans.push(Span::styled(
-            format!(" {} ", connect4::column_label(col)),
+            cell_text(connect4::column_label(col), tier.cw),
             style,
         ));
     }
@@ -244,18 +266,18 @@ fn header_line(hot_col: Option<usize>) -> Line<'static> {
 
 /// The `▼` hovering over the cursor column. Blank off-turn: the row keeps
 /// its slot so the grid never shifts.
-fn indicator_line(hot_col: Option<usize>) -> Line<'static> {
+fn indicator_line(hot_col: Option<usize>, tier: CellTier) -> Line<'static> {
     let mut spans = vec![Span::raw("   ")];
     for col in 0..connect4::COLS {
         if hot_col == Some(col) {
             spans.push(Span::styled(
-                " ▼ ",
+                cell_text('▼', tier.cw),
                 Style::default()
                     .fg(theme::AMBER())
                     .add_modifier(Modifier::BOLD),
             ));
         } else {
-            spans.push(Span::raw("   "));
+            spans.push(Span::raw(" ".repeat(tier.cw as usize)));
         }
     }
     Line::from(spans)
@@ -272,8 +294,8 @@ fn row_label(row: usize, hot: bool) -> Span<'static> {
     Span::styled(format!("{:>2} ", row + 1), style)
 }
 
-fn summary_line(text: String) -> Line<'static> {
-    let pad = (GRID_WIDTH as usize).saturating_sub(text.chars().count()) / 2;
+fn summary_line(text: String, tier: CellTier) -> Line<'static> {
+    let pad = (grid_width(tier) as usize).saturating_sub(text.chars().count()) / 2;
     Line::from(Span::styled(
         format!("{}{text}", " ".repeat(pad)),
         Style::default().fg(theme::TEXT_FAINT()),
@@ -462,7 +484,7 @@ fn draw_info_rail(
 ) {
     let mut lines = vec![
         Line::from(Span::styled(
-            "Correspondence connect four".to_string(),
+            "Connect four".to_string(),
             Style::default()
                 .fg(theme::TEXT_DIM())
                 .add_modifier(Modifier::ITALIC),
@@ -529,5 +551,5 @@ fn draw_info_rail(
             ]));
         }
     }
-    frame.render_widget(Paragraph::new(lines), area);
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }

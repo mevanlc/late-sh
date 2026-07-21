@@ -172,6 +172,158 @@ RUN ./configure --disable-gui-client --disable-gui-server --enable-curses-client
     && cp src/dopewars /dopewars
 
 # ==============================================================================
+# Stage 0c: DCSS - Build the door game binary from verified upstream source
+# ==============================================================================
+# Like NetHack, Dungeon Crawl Stone Soup runs in its own SSH host (late-dcss);
+# this stage builds the console (non-tiles) binary, which is copied into
+# runtime-dcss for prod (and base for dev-dcss). We build from the official
+# release tarball rather than installing the distro "crawl" package because the
+# Debian package lags well behind upstream (bookworm ships 0.29; we want 0.34).
+#
+# The tarball SHA-256 is verified BEFORE the build (downloaded + hashed
+# 2026-07-18 from the GitHub release); `sha256sum -c` fails the build closed on
+# any mismatch. Build recipe follows the release's own INSTALL.md ("Installing
+# For All Users"): `make install prefix=...` produces the console build by
+# default (tiles needs an explicit TILES=y, which we do not pass) and bakes
+# DATADIR=$prefix/data into the binary. SAVEDIR stays the default `~/.crawl`,
+# so per-player saves land under the child's HOME (the host's
+# LATE_DCSS_DATA_DIR playground), keyed by the `-name` the host passes.
+FROM debian:${DEBIAN_VERSION}-slim AS dcss-build
+
+ARG DCSS_VERSION=0.34.1
+ARG DCSS_TARBALL=stone_soup-0.34.1.tar.xz
+ARG DCSS_URL=https://github.com/crawl/crawl/releases/download/0.34.1/stone_soup-0.34.1.tar.xz
+ARG DCSS_SHA256=473b9cdc16be0b537ac11e43c6c77db4b290000e4a17f72a842eba59c6b7be2a
+# Everything (binary + read-only data) installs under this prefix; the runtime
+# stages copy the whole tree and symlink the binary to /usr/games/crawl (the
+# LATE_DCSS_BIN default).
+ARG DCSS_PREFIX=/opt/dcss
+
+# The console-build dependency list from INSTALL.md (Ubuntu/Debian section),
+# minus the tiles-only SDL/freetype set. xz-utils unpacks the .tar.xz release.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    xz-utils \
+    build-essential \
+    bison \
+    flex \
+    pkg-config \
+    libncursesw5-dev \
+    liblua5.4-dev \
+    libsqlite3-dev \
+    libz-dev \
+    python3-yaml \
+    python-is-python3 \
+    binutils-gold \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN curl -fsSL -o "${DCSS_TARBALL}" "${DCSS_URL}" \
+    && echo "${DCSS_SHA256}  ${DCSS_TARBALL}" | sha256sum -c - \
+    && tar -xJf "${DCSS_TARBALL}" \
+    && rm "${DCSS_TARBALL}"
+
+WORKDIR /build/stone_soup-${DCSS_VERSION}/source
+# With a bare `prefix`, crawl's Makefile installs the binary to $prefix/bin and
+# the read-only data tree to $prefix/data (NOT the $prefix/share/crawl the
+# INSTALL.md mentions -- verified from the actual install log), baking that
+# DATADIR into the binary. The asserts pin both landing spots.
+#
+# NOWIZARD=y compiles OUT wizard (cheat) mode, which local builds enable by
+# default; the Makefile's own comment says to set it "if you have untrusted"
+# users, which a hosted door is. The -version grep fails the build closed if a
+# version bump ever re-enables it (-DWIZARD would reappear in the CFLAGS line).
+RUN make -j"$(nproc)" prefix=${DCSS_PREFIX} NOWIZARD=y install \
+    && test -x ${DCSS_PREFIX}/bin/crawl \
+    && test -d ${DCSS_PREFIX}/data/dat \
+    && ! ${DCSS_PREFIX}/bin/crawl -version | grep -q -- -DWIZARD
+
+# ==============================================================================
+# Stage 0d: Usurper - Build the door game binary from verified upstream source
+# ==============================================================================
+# Usurper (the classic LORD-style BBS door, GPL-2.0-or-later, Rick Parrish's
+# 32/64-bit Free Pascal port) runs in its own SSH host (late-usurper). The
+# upstream CI cross-compiles from Windows with fpcupdeluxe, but the source
+# builds cleanly with Debian's stock fpc using the same flags as upstream's
+# build.ps1 (verified against the official release binary). We pin a source
+# commit tarball + SHA-256 (`sha256sum -c`, fail-closed) rather than using the
+# upstream "Development Build" zips, which are a moving pre-release tag.
+#
+# The game has no separate data tree: everything is resolved relative to the
+# process working directory (DATA/, TEXT/, NODE/, SCORES/, DOCS/, USURPER.CFG).
+# This stage assembles /opt/usurper: bin/ (USURPER.EXE + EDITOR.EXE) and seed/
+# (the writable game-tree template the host copies into its data dir at boot).
+# The world data files (MONSTER.DAT, NPCS.DAT, ...) are not distributed by
+# upstream; they are generated here by scripting the EDITOR's Reset Game TUI
+# (scripts/usurper_seed_data.py), with fail-closed asserts on the vital files.
+# NPC generation is randomized, so the seed is not bit-reproducible; the world
+# it defines is the stock one.
+FROM debian:${DEBIAN_VERSION}-slim AS usurper-build
+
+# Pinned to rickparrish/Usurper master (v0.25 development line, 2025-02-16
+# build); update the commit + SHA-256 together.
+ARG USURPER_COMMIT=7b04f7e5c50fc1f7cc3626186f10423994b171dd
+ARG USURPER_URL=https://github.com/rickparrish/Usurper/archive/${USURPER_COMMIT}.tar.gz
+ARG USURPER_SHA256=38f7ee61a2bb2d4b280e121aa4aeb64107c2c0d997a7d98d30174f393b18db0f
+ARG USURPER_PREFIX=/opt/usurper
+
+# fpc: the Free Pascal compiler (bookworm ships 3.2.2, same line as upstream's
+# toolchain). python3-minimal drives the EDITOR reset on a PTY.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    fpc \
+    python3-minimal \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN curl -fsSL -o usurper.tar.gz "${USURPER_URL}" \
+    && echo "${USURPER_SHA256}  usurper.tar.gz" | sha256sum -c - \
+    && tar -xzf usurper.tar.gz \
+    && mv "Usurper-${USURPER_COMMIT}" usurper \
+    && rm usurper.tar.gz
+
+WORKDIR /build/usurper
+# The fpc invocation is upstream build.ps1's, retargeted natively (-Tlinux
+# -Px86_64): TP compatibility mode (-Mtp), C-style operators + goto + inlining
+# (-Scgi), O3, stripped + smartlinked. Separate obj dirs per program: the two
+# share COMMON units compiled with different include paths.
+RUN mkdir -p obj-usurper obj-editor bin \
+    && fpc -B -Tlinux -Px86_64 -Mtp -Scgi -CX -O3 -Xs -XX -l -vewnibq \
+        -FiSOURCE/USURPER -FiSOURCE/COMMON -Fiobj-usurper \
+        -FuSOURCE/COMMON -FUobj-usurper -FEbin -obin/USURPER.EXE \
+        SOURCE/USURPER/USURPER.PAS \
+    && fpc -B -Tlinux -Px86_64 -Mtp -Scgi -CX -O3 -Xs -XX -l -vewnibq \
+        -FiSOURCE/EDITOR -FiSOURCE/COMMON -Fiobj-editor \
+        -FuSOURCE/COMMON -FUobj-editor -FEbin -obin/EDITOR.EXE \
+        SOURCE/EDITOR/EDITOR.PAS \
+    && test -x bin/USURPER.EXE \
+    && test -x bin/EDITOR.EXE
+
+# Assemble the seed game tree: the RELEASE assets the game reads at runtime
+# (TEXT/ screens, DOCS/ shown by the in-game Instructions menu), the sample
+# USURPER.CFG (game options; lines 1-2 are the displayed sysop/BBS names), and
+# a minimal USURP.CTL naming the sysop "Late Sysop" - handles can't contain
+# spaces and late/late_* are reserved arcade handles, so no player can ever
+# match the sysop identity. UPGRADES/ (DOS-only tools) and the SDN-era
+# metadata files are deliberately not shipped.
+COPY scripts/usurper_seed_data.py /build/usurper_seed_data.py
+RUN mkdir -p ${USURPER_PREFIX}/bin ${USURPER_PREFIX}/seed \
+    && cp bin/USURPER.EXE bin/EDITOR.EXE ${USURPER_PREFIX}/bin/ \
+    && cp -r RELEASE/TEXT RELEASE/DOCS ${USURPER_PREFIX}/seed/ \
+    && cp RELEASE/COPYING ${USURPER_PREFIX}/seed/ \
+    && cp RELEASE/SAMPLES/USURPER.CFG ${USURPER_PREFIX}/seed/USURPER.CFG \
+    && sed -i '1s/.*/Late Sysop/;2s/.*/late.sh/' ${USURPER_PREFIX}/seed/USURPER.CFG \
+    && printf 'SYSOPFIRST Late\nSYSOPLAST Sysop\nBBSNAME late.sh\n' > ${USURPER_PREFIX}/seed/USURP.CTL \
+    && python3 /build/usurper_seed_data.py ${USURPER_PREFIX}/seed ${USURPER_PREFIX}/bin/EDITOR.EXE \
+    && test -s ${USURPER_PREFIX}/seed/DATA/MONSTER.DAT \
+    && test -s ${USURPER_PREFIX}/seed/DATA/NPCS.DAT \
+    && test -s ${USURPER_PREFIX}/seed/DATA/GUARDS.DAT \
+    && test -s ${USURPER_PREFIX}/seed/DATA/LEVELS.DAT \
+    && test -s ${USURPER_PREFIX}/seed/DATA/TNAMES.DAT
+
+# ==============================================================================
 # Stage 0: Base - Common system dependencies
 # ==============================================================================
 FROM rust:${RUST_VERSION}-slim-${DEBIAN_VERSION} AS base
@@ -192,8 +344,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libncursesw6 \
     libglib2.0-0 \
     libcurl4 \
+    liblua5.4-0 \
+    libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/* \
-    && mkdir -p /var/lib/late-nethack && chmod 0777 /var/lib/late-nethack
+    && mkdir -p /var/lib/late-nethack && chmod 0777 /var/lib/late-nethack \
+    && mkdir -p /var/lib/late-dcss && chmod 0777 /var/lib/late-dcss \
+    && mkdir -p /var/lib/late-usurper && chmod 0777 /var/lib/late-usurper
 
 # NetHack door game: the from-source binary lives inside its read-only playground
 # (/var/games/nethack/nethack) and self-locates via its compiled-in HACKDIR; the
@@ -213,6 +369,21 @@ RUN mkdir -p /usr/games \
 # runtime libs (glib2/ncursesw/curl) are installed above. LATE_DOPEWARS_BIN
 # defaults to /usr/games/dopewars.
 COPY --from=dopewars-build /dopewars /usr/games/dopewars
+
+# DCSS door game: served over SSH by the late-dcss host (see late-ssh dcss
+# proxy). The from-source console binary + data tree live here so dev-dcss
+# (which derives from `base`) can run it; prod ships it in runtime-dcss. Its
+# runtime libs (ncursesw/lua/sqlite) are installed above. LATE_DCSS_BIN
+# defaults to /usr/games/crawl.
+COPY --from=dcss-build /opt/dcss /opt/dcss
+RUN ln -sf /opt/dcss/bin/crawl /usr/games/crawl
+
+# Usurper door game: served over SSH by the late-usurper host (see late-ssh
+# usurper proxy). The from-source binaries + seed game tree live here so
+# dev-usurper (which derives from `base`) can run it; prod ships them in
+# runtime-usurper. The binary is statically linked (Free Pascal), no extra
+# runtime libs. LATE_USURPER_BIN defaults to /opt/usurper/bin/USURPER.EXE.
+COPY --from=usurper-build /opt/usurper /opt/usurper
 
 # Configure cargo to use mold linker
 RUN echo '[target.x86_64-unknown-linux-gnu]\nlinker = "clang"\nrustflags = ["-C", "link-arg=-fuse-ld=mold"]\n\n[target.aarch64-unknown-linux-gnu]\nlinker = "clang"\nrustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> /usr/local/cargo/config.toml
@@ -238,7 +409,9 @@ COPY late-ssh/Cargo.toml late-ssh/Cargo.toml
 COPY late-web/Cargo.toml late-web/Cargo.toml
 COPY late-cli/Cargo.toml late-cli/Cargo.toml
 COPY late-nethack/Cargo.toml late-nethack/Cargo.toml
+COPY late-dcss/Cargo.toml late-dcss/Cargo.toml
 COPY late-dopewars/Cargo.toml late-dopewars/Cargo.toml
+COPY late-usurper/Cargo.toml late-usurper/Cargo.toml
 COPY late-webview/Cargo.toml late-webview/Cargo.toml
 COPY vendor vendor
 
@@ -246,13 +419,15 @@ COPY vendor vendor
 # built in these images (CLI-only YouTube helper), but it is a workspace member
 # and a late-cli path dependency, so its manifest and target stubs must exist
 # for `cargo metadata` to resolve the workspace.
-RUN mkdir -p late-core/src late-ssh/src late-web/src late-cli/src late-nethack/src late-dopewars/src late-webview/src && \
+RUN mkdir -p late-core/src late-ssh/src late-web/src late-cli/src late-nethack/src late-dcss/src late-dopewars/src late-usurper/src late-webview/src && \
     echo "fn main() {}" > late-core/src/lib.rs && \
     echo "fn main() {}" > late-ssh/src/main.rs && \
     echo "fn main() {}" > late-web/src/main.rs && \
     echo "fn main() {}" > late-cli/src/main.rs && \
     echo "fn main() {}" > late-nethack/src/main.rs && \
+    echo "fn main() {}" > late-dcss/src/main.rs && \
     echo "fn main() {}" > late-dopewars/src/main.rs && \
+    echo "fn main() {}" > late-usurper/src/main.rs && \
     echo "" > late-webview/src/lib.rs && \
     echo "fn main() {}" > late-webview/src/main.rs
 
@@ -269,7 +444,7 @@ COPY vendor vendor
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
-    cargo chef cook --release --features otel --recipe-path recipe.json -p late-core -p late-ssh -p late-web -p late-nethack -p late-dopewars
+    cargo chef cook --release --features otel --recipe-path recipe.json -p late-core -p late-ssh -p late-web -p late-nethack -p late-dcss -p late-dopewars -p late-usurper
 
 # Copy actual source code
 COPY Cargo.toml Cargo.lock ./
@@ -277,7 +452,9 @@ COPY late-core late-core
 COPY late-ssh late-ssh
 COPY late-web late-web
 COPY late-nethack late-nethack
+COPY late-dcss late-dcss
 COPY late-dopewars late-dopewars
+COPY late-usurper late-usurper
 COPY vendor vendor
 COPY late-cli/Cargo.toml late-cli/Cargo.toml
 COPY late-webview/Cargo.toml late-webview/Cargo.toml
@@ -287,17 +464,19 @@ RUN mkdir -p late-cli/src late-webview/src && \
     echo "fn main() {}" > late-webview/src/main.rs
 # Build deployable binaries only (late-cli and late-webview excluded - local
 # CLI tooling; the webview helper ships via deploy_cli.yml, not these images).
-# late-nethack/late-dopewars have no otel feature; they are built without the
-# workspace feature flag.
+# late-nethack/late-dcss/late-dopewars have no otel feature; they are built
+# without the workspace feature flag.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
     cargo build --release --features otel -p late-ssh -p late-web && \
-    cargo build --release -p late-nethack -p late-dopewars && \
+    cargo build --release -p late-nethack -p late-dcss -p late-dopewars -p late-usurper && \
     cp /app/target/release/late-ssh /app/late-ssh-bin && \
     cp /app/target/release/late-web /app/late-web-bin && \
     cp /app/target/release/late-nethack /app/late-nethack-bin && \
-    cp /app/target/release/late-dopewars /app/late-dopewars-bin
+    cp /app/target/release/late-dcss /app/late-dcss-bin && \
+    cp /app/target/release/late-dopewars /app/late-dopewars-bin && \
+    cp /app/target/release/late-usurper /app/late-usurper-bin
 
 # Build frontend assets
 RUN cd late-web && npm install && npm run tailwind:build
@@ -331,6 +510,18 @@ CMD ["cargo", "watch", "-w", "late-nethack", "-x", "run -p late-nethack"]
 # so the default LATE_DOPEWARS_BIN (/usr/games/dopewars) resolves here.
 FROM dev-base AS dev-dopewars
 CMD ["cargo", "watch", "-w", "late-dopewars", "-x", "run -p late-dopewars"]
+
+# DCSS host: serves the game over SSH (see late-dcss). dev-base derives from
+# `base`, which already has the from-source crawl binary + data tree, so the
+# default LATE_DCSS_BIN (/usr/games/crawl) resolves here.
+FROM dev-base AS dev-dcss
+CMD ["cargo", "watch", "-w", "late-dcss", "-x", "run -p late-dcss"]
+
+# Usurper host: serves the game over SSH (see late-usurper). dev-base derives
+# from `base`, which already has the from-source binaries + seed game tree, so
+# the default LATE_USURPER_BIN/SEED_DIR (/opt/usurper/...) resolve here.
+FROM dev-base AS dev-usurper
+CMD ["cargo", "watch", "-w", "late-usurper", "-x", "run -p late-usurper"]
 
 # ==============================================================================
 # Stage 4a: Runtime base - Common runtime setup
@@ -442,3 +633,55 @@ USER late
 EXPOSE 2324
 
 CMD ["/app/late-dopewars"]
+
+# ==============================================================================
+# Stage 4f: Runtime DCSS - the late-dcss host (game served over SSH)
+# ==============================================================================
+# Owns everything the game needs: the from-source console crawl binary + its
+# read-only data tree (/opt/dcss, DATADIR baked in at build time), the curses/
+# lua/sqlite runtime, and the writable playground HOME (/var/lib/late-dcss;
+# backed by a PVC in prod so per-player saves under $HOME/.crawl survive
+# restarts). LATE_DCSS_BIN defaults to /usr/games/crawl, LATE_DCSS_DATA_DIR to
+# that playground path.
+FROM runtime-base AS runtime-dcss
+USER root
+# libncursesw6/liblua5.4-0/libsqlite3-0: crawl's runtime deps. ncurses-term: the
+# EXTENDED terminfo DB (alacritty, rxvt, st, etc.) so clients on those terminals
+# get native terminfo rather than the xterm-256color fallback. Terminals that
+# ship their own terminfo (ghostty/kitty/wezterm) are covered by the host's TERM
+# fallback in late-dcss (effective_term), since they are not in ncurses-term.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libncursesw6 \
+    liblua5.4-0 \
+    libsqlite3-0 \
+    ncurses-term \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/late-dcss && chown late:late /var/lib/late-dcss
+COPY --from=dcss-build /opt/dcss /opt/dcss
+RUN mkdir -p /usr/games && ln -sf /opt/dcss/bin/crawl /usr/games/crawl
+COPY --from=builder /app/late-dcss-bin /app/late-dcss
+USER late
+
+EXPOSE 2325
+
+CMD ["/app/late-dcss"]
+
+# ==============================================================================
+# Stage 4g: Runtime Usurper - the late-usurper host (game served over SSH)
+# ==============================================================================
+# Owns everything the game needs: the from-source statically-linked USURPER.EXE
+# + EDITOR.EXE and the seed game tree in /opt/usurper (read-only image layer),
+# plus the writable game dir /var/lib/late-usurper (backed by a PVC in prod so
+# the shared world - players, gangs, king, news - survives restarts). The host
+# copies missing seed files into the game dir at boot. No ncurses/terminfo: the
+# game emits raw CP437 ANSI which the host transcodes to UTF-8 itself.
+FROM runtime-base AS runtime-usurper
+USER root
+RUN mkdir -p /var/lib/late-usurper && chown late:late /var/lib/late-usurper
+COPY --from=usurper-build /opt/usurper /opt/usurper
+COPY --from=builder /app/late-usurper-bin /app/late-usurper
+USER late
+
+EXPOSE 2326
+
+CMD ["/app/late-usurper"]

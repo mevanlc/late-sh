@@ -170,6 +170,10 @@ fn house_line(table: HouseTable, occupancy: String, selected: bool) -> Line<'sta
         col(table.tagline(), GAME_COL + DETAIL_COL),
         Style::default().fg(theme::TEXT_DIM()),
     ));
+    spans.push(Span::styled(
+        col(&table.price_label().unwrap_or_default(), PRICE_COL),
+        Style::default().fg(theme::AMBER_DIM()),
+    ));
     let occupied = !occupancy.starts_with("empty");
     spans.push(Span::styled(
         occupancy,
@@ -225,6 +229,7 @@ fn selected_line_index(
 const NAME_COL: usize = 16;
 const GAME_COL: usize = 12;
 const DETAIL_COL: usize = 25;
+const PRICE_COL: usize = 16;
 
 fn col(text: &str, width: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
@@ -260,6 +265,8 @@ fn match_line(daily: &DailyState, item: &DailyMatchItem, selected: bool) -> Line
         }
         DailyGame::Battleship => format!("{} shots", item.move_count),
         DailyGame::ConnectFour => format!("{} drops", item.move_count),
+        DailyGame::Reversi | DailyGame::Checkers => format!("{} moves", item.move_count),
+        DailyGame::Backgammon => format!("{} rolls", item.move_count),
     };
 
     let mut spans = vec![marker_span(selected)];
@@ -417,6 +424,8 @@ fn spectate_line(item: &DailyMatchItem, selected: bool) -> Line<'static> {
         DailyGame::Chess => format!("{} moves", item.move_count),
         DailyGame::Battleship => format!("{} shots", item.move_count),
         DailyGame::ConnectFour => format!("{} drops", item.move_count),
+        DailyGame::Reversi | DailyGame::Checkers => format!("{} moves", item.move_count),
+        DailyGame::Backgammon => format!("{} rolls", item.move_count),
     };
     // The versus pair is two usernames wide, so it takes the name and game
     // columns together and the game rides with the progress instead.
@@ -678,25 +687,5 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::col;
-
-    #[test]
-    fn col_pads_short_text_to_width() {
-        assert_eq!(col("chess", 8), "chess   ");
-    }
-
-    #[test]
-    fn col_always_leaves_a_gap_before_the_next_column() {
-        // Exactly width chars would swallow the separator; the longest
-        // fitting content is width - 1 chars plus one space.
-        assert_eq!(col("12345678", 8), "123456… ");
-        assert_eq!(col("1234567", 8), "1234567 ");
-        assert_eq!(col("challenges @kirii.md", 18), "challenges @kiri… ");
-    }
-
-    #[test]
-    fn col_counts_chars_not_bytes() {
-        assert_eq!(col("héllo", 8), "héllo   ");
-    }
-}
+#[path = "modal_ui_test.rs"]
+mod modal_ui_test;

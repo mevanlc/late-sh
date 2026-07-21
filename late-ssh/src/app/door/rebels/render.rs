@@ -23,22 +23,10 @@ fn draw_launcher(frame: &mut Frame, area: Rect, state: &State) {
     draw_landing(frame, area, state.is_enabled());
 }
 
-/// Two-column Rebels landing (copy left, ship art right), used by both the
-/// standalone screen fallback and the Games hub when Rebels is selected.
+/// Rebels landing, used by both the standalone screen fallback and the Games
+/// hub when Rebels is selected.
 pub fn draw_landing(frame: &mut Frame, area: Rect, enabled: bool) {
-    let layout = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints(if area.width >= 122 && area.height >= 20 {
-            [Constraint::Min(62), Constraint::Length(38)]
-        } else {
-            [Constraint::Min(0), Constraint::Length(0)]
-        })
-        .split(area);
-
-    draw_launch_copy(frame, layout[0], enabled);
-    if layout.len() > 1 && layout[1].width > 0 {
-        draw_sky_art(frame, layout[1]);
-    }
+    draw_launch_copy(frame, area, enabled);
 }
 
 fn draw_launch_copy(frame: &mut Frame, area: Rect, enabled: bool) {
@@ -105,31 +93,6 @@ fn draw_launch_copy(frame: &mut Frame, area: Rect, enabled: bool) {
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn draw_sky_art(frame: &mut Frame, area: Rect) {
-    let inner = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Length(12),
-            Constraint::Length(2),
-            Constraint::Min(0),
-        ])
-        .split(area);
-
-    frame.render_widget(Paragraph::new(spaceship_ascii()), inner[1]);
-    frame.render_widget(
-        Paragraph::new(vec![
-            landing::heading("Starter ships"),
-            Line::raw(""),
-            fact_line("Bresci", "fast shuttle"),
-            fact_line("Orwell", "sturdy pincher"),
-            fact_line("Ibarruri", "double-engine jester"),
-        ])
-        .wrap(Wrap { trim: false }),
-        inner[3],
-    );
-}
-
 fn rebels_logo() -> Vec<Line<'static>> {
     [
         "██████╗ ███████╗██████╗ ███████╗██╗     ███████╗",
@@ -151,26 +114,6 @@ fn rebels_logo() -> Vec<Line<'static>> {
     .collect()
 }
 
-fn spaceship_ascii() -> Vec<Line<'static>> {
-    [
-        "          .        *",
-        "    *                  .",
-        "              /\\",
-        "             /  \\",
-        "            /_==_\\",
-        "       ____/|_||_|\\____",
-        "   ___/  _    ||    _  \\___",
-        "  /___  /_\\___||___/_\\  ___\\",
-        "      \\____   ||   ____/",
-        "           \\__||__/",
-        "            /_||_\\",
-        "          ==  ||  ==",
-    ]
-    .into_iter()
-    .map(|line| Line::from(Span::styled(line, Style::default().fg(theme::TEXT_DIM()))))
-    .collect()
-}
-
 fn game_stats() -> Vec<Line<'static>> {
     vec![
         landing::stat("remote ssh", "proxied live into this terminal", 12),
@@ -178,6 +121,11 @@ fn game_stats() -> Vec<Line<'static>> {
         landing::stat("style", "explore, crew up, settle it on the court", 12),
         Line::from(""),
         flavor_quote(),
+        Line::from(""),
+        landing::heading("Starter ships"),
+        fact_line("Bresci", "fast shuttle"),
+        fact_line("Orwell", "sturdy pincher"),
+        fact_line("Ibarruri", "double-engine jester"),
         Line::from(""),
         landing::heading("Launch"),
     ]
@@ -290,71 +238,5 @@ pub fn blit_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen) {
         {
             dst.set_style(dst.style().add_modifier(Modifier::REVERSED));
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parser(rows: u16, cols: u16, bytes: &[u8]) -> vt100::Parser {
-        let mut p = vt100::Parser::new(rows, cols, 0);
-        p.process(bytes);
-        p
-    }
-
-    #[test]
-    fn plain_text_lands_in_the_right_cells() {
-        let p = parser(2, 5, b"hi");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 5, 2));
-        blit_screen(&mut buf, Rect::new(0, 0, 5, 2), p.screen());
-        assert_eq!(buf[(0, 0)].symbol(), "h");
-        assert_eq!(buf[(1, 0)].symbol(), "i");
-    }
-
-    #[test]
-    fn blit_respects_area_offset() {
-        let p = parser(1, 3, b"abc");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 3));
-        let area = Rect::new(2, 1, 3, 1);
-        blit_screen(&mut buf, area, p.screen());
-        assert_eq!(buf[(2, 1)].symbol(), "a");
-        assert_eq!(buf[(4, 1)].symbol(), "c");
-        // outside the area is untouched
-        assert_eq!(buf[(0, 0)].symbol(), " ");
-    }
-
-    #[test]
-    fn sgr_red_foreground_maps_through() {
-        // ESC[31m sets foreground to indexed red (idx 1).
-        let p = parser(1, 1, b"\x1b[31mX");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 1, 1));
-        blit_screen(&mut buf, Rect::new(0, 0, 1, 1), p.screen());
-        assert_eq!(buf[(0, 0)].fg, Color::Indexed(1));
-    }
-
-    #[test]
-    fn default_color_maps_to_reset() {
-        assert_eq!(to_ratatui_color(vt100::Color::Default), Color::Reset);
-    }
-
-    #[test]
-    fn visible_cursor_is_drawn_as_a_reversed_block() {
-        // Park the cursor at row 0, col 2 (CUP is 1-based) with it shown.
-        let p = parser(2, 5, b"\x1b[?25h\x1b[1;3H");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 5, 2));
-        blit_screen(&mut buf, Rect::new(0, 0, 5, 2), p.screen());
-        assert!(buf[(2, 0)].modifier.contains(Modifier::REVERSED));
-        // A cell the cursor is not on stays un-reversed.
-        assert!(!buf[(0, 0)].modifier.contains(Modifier::REVERSED));
-    }
-
-    #[test]
-    fn hidden_cursor_draws_no_block() {
-        // ESC[?25l hides the cursor; nothing should be reversed.
-        let p = parser(2, 5, b"\x1b[?25l\x1b[1;3H");
-        let mut buf = Buffer::empty(Rect::new(0, 0, 5, 2));
-        blit_screen(&mut buf, Rect::new(0, 0, 5, 2), p.screen());
-        assert!(!buf[(2, 0)].modifier.contains(Modifier::REVERSED));
     }
 }

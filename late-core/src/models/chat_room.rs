@@ -61,6 +61,26 @@ impl ChatRoom {
         Ok(row.map(Self::from))
     }
 
+    /// The public, non-DM room for a slug, preferring a permanent room and
+    /// then the oldest match. Used by the login announcements splash, which
+    /// must resolve `#announcements` to the same room `auto_join_public_rooms`
+    /// joins users to.
+    pub async fn find_public_non_dm_by_slug(client: &Client, slug: &str) -> Result<Option<Self>> {
+        let row = client
+            .query_opt(
+                "SELECT *
+                 FROM chat_rooms
+                 WHERE slug = $1
+                   AND kind <> 'dm'
+                   AND visibility = 'public'
+                 ORDER BY permanent DESC, created ASC, id ASC
+                 LIMIT 1",
+                &[&slug],
+            )
+            .await?;
+        Ok(row.map(Self::from))
+    }
+
     pub async fn find_irc_channel_by_slug_for_user(
         client: &Client,
         slug: &str,
@@ -288,6 +308,16 @@ impl ChatRoom {
         }
     }
 
+    pub async fn list_by_ids(client: &Client, room_ids: &[Uuid]) -> Result<Vec<Self>> {
+        if room_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = client
+            .query("SELECT * FROM chat_rooms WHERE id = ANY($1)", &[&room_ids])
+            .await?;
+        Ok(rows.into_iter().map(Self::from).collect())
+    }
+
     pub async fn is_kind(client: &Client, room_id: Uuid, kind: &str) -> Result<bool> {
         let row = client
             .query_opt("SELECT kind FROM chat_rooms WHERE id = $1", &[&room_id])
@@ -464,7 +494,7 @@ impl ChatRoom {
             .collect())
     }
 
-    pub async fn touch_updated(client: &Client, room_id: Uuid) -> Result<u64> {
+    pub async fn touch_updated(client: &impl GenericClient, room_id: Uuid) -> Result<u64> {
         let rows = client
             .execute(
                 "UPDATE chat_rooms SET updated = current_timestamp WHERE id = $1",
@@ -717,45 +747,5 @@ fn normalize_game_slug(slug: &str) -> Result<String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn canonical_dm_pair_orders_smaller_first() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        assert_eq!(canonical_dm_pair(a, b), (a, b));
-        assert_eq!(canonical_dm_pair(b, a), (a, b));
-    }
-
-    #[test]
-    fn canonical_dm_pair_equal_uuids() {
-        let a = Uuid::from_u128(42);
-        let (x, y) = canonical_dm_pair(a, a);
-        assert_eq!(x, a);
-        assert_eq!(y, a);
-    }
-
-    #[test]
-    fn normalize_topic_slug_slugifies_room_names() {
-        assert_eq!(
-            normalize_topic_slug("  Rust Nerds  ").unwrap(),
-            "rust-nerds"
-        );
-        assert_eq!(normalize_topic_slug("room\nname").unwrap(), "room-name");
-        assert_eq!(normalize_topic_slug("vps/d9d0").unwrap(), "vps-d9d0");
-        assert_eq!(normalize_topic_slug("a___b...c").unwrap(), "a-b-c");
-    }
-
-    #[test]
-    fn normalize_topic_slug_rejects_empty_or_reserved_names() {
-        assert!(normalize_topic_slug("   ").is_err());
-        assert!(normalize_topic_slug("!!!").is_err());
-        assert!(normalize_topic_slug("lounge").is_err());
-    }
-
-    #[test]
-    fn normalize_room_slug_allows_lounge_for_non_creation_paths() {
-        assert_eq!(normalize_room_slug(" Lounge ").unwrap(), "lounge");
-    }
-}
+#[path = "chat_room_internal_test.rs"]
+mod chat_room_internal_test;

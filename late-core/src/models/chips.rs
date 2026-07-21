@@ -49,6 +49,17 @@ impl From<tokio_postgres::Row> for UserChips {
 }
 
 impl UserChips {
+    /// Load the user's chips row without creating one, `None` if they have no
+    /// chip account yet. Chip rows are created lazily on the first chip
+    /// operation, not on profile access, so callers verifying that invariant
+    /// need a read that never inserts.
+    pub async fn find(client: &Client, user_id: Uuid) -> Result<Option<Self>> {
+        let row = client
+            .query_opt("SELECT * FROM user_chips WHERE user_id = $1", &[&user_id])
+            .await?;
+        Ok(row.map(Self::from))
+    }
+
     /// Ensure a chips row exists for the user. Called on SSH login.
     pub async fn ensure(client: &Client, user_id: Uuid) -> Result<Self> {
         let row = client
@@ -368,26 +379,4 @@ pub struct ChipLeader {
     pub username: String,
     pub user_id: Uuid,
     pub balance: i64,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn difficulty_bonus_mapping() {
-        assert_eq!(difficulty_bonus("easy"), 100);
-        assert_eq!(difficulty_bonus("medium"), 250);
-        assert_eq!(difficulty_bonus("mid"), 250);
-        assert_eq!(difficulty_bonus("hard"), 500);
-        assert_eq!(difficulty_bonus("draw-1"), 250);
-        assert_eq!(difficulty_bonus("draw-3"), 500);
-        assert_eq!(difficulty_bonus("unknown"), 100);
-    }
-
-    #[test]
-    fn constants() {
-        assert_eq!(CHIP_FLOOR, 100);
-        assert_eq!(INITIAL_CHIP_BALANCE, 1_000);
-    }
 }

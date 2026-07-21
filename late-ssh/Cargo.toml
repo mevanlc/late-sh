@@ -7,11 +7,13 @@ edition = "2024"
 default = []
 otel = ["late-core/otel", "opentelemetry", "tracing-opentelemetry", "opentelemetry-http"]
 
+[lints]
+workspace = true
+
 [dependencies]
 late-core.workspace = true
 asterion-core.workspace = true
 sshattrick-core.workspace = true
-nes = { path = "../vendor/potatis/nes" }
 irc-proto = { path = "../vendor/irc-proto" }
 
 # Core Utils

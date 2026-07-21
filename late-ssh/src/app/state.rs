@@ -83,17 +83,7 @@ pub(crate) const GAME_SELECTION_MINESWEEPER: usize = 5;
 pub(crate) const GAME_SELECTION_SOLITAIRE: usize = 6;
 pub(crate) const GAME_SELECTION_SNAKE: usize = 7;
 pub(crate) const GAME_SELECTION_TRAFFIC: usize = 8;
-pub(crate) const GAME_SELECTION_NES_SQUIRREL_DOMINO: usize = 9;
-pub(crate) const GAME_SELECTION_NES_THWAITE: usize = 10;
-pub(crate) const GAME_SELECTION_NES_DABG: usize = 11;
-pub(crate) const GAME_SELECTION_NES_FALLING: usize = 12;
-pub(crate) const GAME_SELECTION_NES_BRICK_BREAKER: usize = 13;
-pub(crate) const GAME_SELECTION_NES_ESCAPE_FROM_PONG: usize = 14;
-pub(crate) const GAME_SELECTION_NES_RHDE: usize = 15;
-pub(crate) const GAME_SELECTION_NES_CONCENTRATION_ROOM: usize = 16;
-pub(crate) const GAME_SELECTION_NES_ZAP_RUDER: usize = 17;
-pub(crate) const GAME_SELECTION_NES_2048: usize = 18;
-pub(crate) const GAME_SELECTION_RUBIKS_CUBE: usize = 19;
+pub(crate) const GAME_SELECTION_RUBIKS_CUBE: usize = 9;
 pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_2048;
 
 const BONSAI_V2_ACTIVITY_WINDOW_TICKS: usize = 15 * 60 * 5;
@@ -224,6 +214,19 @@ pub struct SessionConfig {
     /// Chip/badge grant sink for NetHack milestones (Amulet, ascension). `None`
     /// on headless/test paths, which disables milestone awards.
     pub nethack_awards: Option<crate::app::door::nethack::award::NethackAwards>,
+    /// DCSS door game: reached over SSH like nethack (host `late-dcss`).
+    pub dcss_enabled: bool,
+    pub dcss_host: String,
+    pub dcss_port: u16,
+    pub dcss_secret: String,
+    /// Accessor for the account's arcade handle (the public door-game name;
+    /// crawl's `-name`), claimed once from the DCSS launcher.
+    pub arcade_handle_service: crate::app::door::arcade::ArcadeHandleService,
+    /// Usurper door game: reached over SSH like nethack (host `late-usurper`).
+    pub usurper_enabled: bool,
+    pub usurper_host: String,
+    pub usurper_port: u16,
+    pub usurper_secret: String,
     /// dopewars door game: reached over SSH like nethack (host `late-dopewars`).
     pub dopewars_enabled: bool,
     pub dopewars_host: String,
@@ -485,6 +488,25 @@ pub struct App {
     pub(crate) nethack_secret: String,
     /// Chip/badge grant sink threaded into the per-session NetHack door state.
     pub(crate) nethack_awards: Option<crate::app::door::nethack::award::NethackAwards>,
+    pub(crate) dcss_state: Option<crate::app::door::dcss::state::State>,
+    /// Per-session TERM string (from the PTY request), forwarded to the DCSS
+    /// host so curses gets a real terminfo entry.
+    pub(crate) dcss_term: String,
+    /// DCSS door game: enable flag + host connection details (global Config).
+    pub(crate) dcss_enabled: bool,
+    pub(crate) dcss_host: String,
+    pub(crate) dcss_port: u16,
+    pub(crate) dcss_secret: String,
+    pub(crate) arcade_handle_service: crate::app::door::arcade::ArcadeHandleService,
+    pub(crate) usurper_state: Option<crate::app::door::usurper::state::State>,
+    /// Per-session TERM string (from the PTY request); the Usurper host pins
+    /// the child's TERM itself, this only sizes the request.
+    pub(crate) usurper_term: String,
+    /// Usurper door game: enable flag + host connection details (global Config).
+    pub(crate) usurper_enabled: bool,
+    pub(crate) usurper_host: String,
+    pub(crate) usurper_port: u16,
+    pub(crate) usurper_secret: String,
     pub(crate) dopewars_state: Option<crate::app::door::dopewars::state::State>,
     /// Per-session TERM string (from the PTY request), forwarded to the dopewars
     /// host so curses gets a real terminfo entry.
@@ -514,7 +536,6 @@ pub struct App {
     pub(crate) nonogram_state: crate::app::arcade::nonogram::state::State,
     pub(crate) solitaire_state: crate::app::arcade::solitaire::state::State,
     pub(crate) minesweeper_state: crate::app::arcade::minesweeper::state::State,
-    pub(crate) nes_cabinet_state: crate::app::arcade::nes_cabinet::state::State,
     pub(crate) traffic_state: crate::app::arcade::traffic::state::State,
     /// `Some` while the user is inside the dartboard game, `None` otherwise.
     /// Constructed on entry (connecting + consuming a color slot) and
@@ -814,7 +835,6 @@ impl App {
             config.minesweeper_service.clone(),
             config.initial_minesweeper_games,
         );
-        let nes_cabinet_state = crate::app::arcade::nes_cabinet::state::State::new();
         let mut traffic_state = crate::app::arcade::traffic::state::State::new();
         traffic_state.hydrate(
             config.user_id,
@@ -1117,6 +1137,19 @@ impl App {
             nethack_port: config.nethack_port,
             nethack_secret: config.nethack_secret,
             nethack_awards: config.nethack_awards,
+            dcss_state: None,
+            dcss_term: config.term.clone(),
+            dcss_enabled: config.dcss_enabled,
+            dcss_host: config.dcss_host,
+            dcss_port: config.dcss_port,
+            dcss_secret: config.dcss_secret,
+            arcade_handle_service: config.arcade_handle_service,
+            usurper_state: None,
+            usurper_term: config.term.clone(),
+            usurper_enabled: config.usurper_enabled,
+            usurper_host: config.usurper_host,
+            usurper_port: config.usurper_port,
+            usurper_secret: config.usurper_secret,
             dopewars_state: None,
             dopewars_term: config.term.clone(),
             dopewars_enabled: config.dopewars_enabled,
@@ -1140,7 +1173,6 @@ impl App {
             nonogram_state,
             solitaire_state,
             minesweeper_state,
-            nes_cabinet_state,
             traffic_state,
             dartboard_state: None,
             directory_state: crate::app::directory::state::DirectoryState::new(),
@@ -1295,12 +1327,57 @@ impl App {
             self.nethack_enabled,
             self.repaint_signal.clone(),
             self.nethack_awards.clone(),
+            Some(self.arcade_handle_service.clone()),
         ));
     }
 
     fn leave_nethack(&mut self) {
         // Dropping the State drops the process, which kills the child nethack.
         self.nethack_state = None;
+    }
+
+    pub(crate) fn enter_dcss(&mut self) {
+        if self.dcss_state.is_some() {
+            return;
+        }
+        self.dcss_state = Some(crate::app::door::dcss::state::State::new(
+            self.user_id,
+            self.dcss_host.clone(),
+            self.dcss_port,
+            self.dcss_secret.clone(),
+            self.dcss_term.clone(),
+            self.dcss_enabled,
+            self.repaint_signal.clone(),
+            Some(self.arcade_handle_service.clone()),
+        ));
+    }
+
+    fn leave_dcss(&mut self) {
+        // Dropping the State drops the process; the host then SIGHUP-saves the
+        // child crawl so the run resumes next launch.
+        self.dcss_state = None;
+    }
+
+    pub(crate) fn enter_usurper(&mut self) {
+        if self.usurper_state.is_some() {
+            return;
+        }
+        self.usurper_state = Some(crate::app::door::usurper::state::State::new(
+            self.user_id,
+            self.usurper_host.clone(),
+            self.usurper_port,
+            self.usurper_secret.clone(),
+            self.usurper_term.clone(),
+            self.usurper_enabled,
+            self.repaint_signal.clone(),
+            Some(self.arcade_handle_service.clone()),
+        ));
+    }
+
+    fn leave_usurper(&mut self) {
+        // Dropping the State drops the process; the host then tears the child
+        // down (the game's state is already on disk in the shared world).
+        self.usurper_state = None;
     }
 
     pub(crate) fn enter_dopewars(&mut self) {
@@ -1519,27 +1596,20 @@ impl App {
             if screen == Screen::Nethack {
                 self.enter_nethack();
             }
+            if screen == Screen::Dcss {
+                self.enter_dcss();
+            }
+            if screen == Screen::Usurper {
+                self.enter_usurper();
+            }
             if screen == Screen::Dopewars {
                 self.enter_dopewars();
             }
             if screen == Screen::Artboard {
                 self.enter_dartboard();
             }
-            if screen == Screen::Arcade
-                && self.is_playing_game
-                && crate::app::arcade::input::is_nes_selection(self.game_selection)
-            {
-                self.nes_cabinet_state.activate();
-            }
             self.sync_visible_chat_room();
             return;
-        }
-
-        if self.screen == Screen::Arcade
-            && self.is_playing_game
-            && crate::app::arcade::input::is_nes_selection(self.game_selection)
-        {
-            self.nes_cabinet_state.deactivate();
         }
 
         if self.screen == Screen::Artboard {
@@ -1561,6 +1631,16 @@ impl App {
 
         if self.screen == Screen::Nethack {
             self.leave_nethack();
+            self.force_full_repaint();
+        }
+
+        if self.screen == Screen::Dcss {
+            self.leave_dcss();
+            self.force_full_repaint();
+        }
+
+        if self.screen == Screen::Usurper {
+            self.leave_usurper();
             self.force_full_repaint();
         }
 
@@ -1600,6 +1680,12 @@ impl App {
         if self.screen == Screen::Nethack {
             self.enter_nethack();
         }
+        if self.screen == Screen::Dcss {
+            self.enter_dcss();
+        }
+        if self.screen == Screen::Usurper {
+            self.enter_usurper();
+        }
         if self.screen == Screen::Dopewars {
             self.enter_dopewars();
         }
@@ -1608,12 +1694,6 @@ impl App {
         }
         if self.screen == Screen::Clubhouse {
             self.clubhouse.enter_screen();
-        }
-        if self.screen == Screen::Arcade
-            && self.is_playing_game
-            && crate::app::arcade::input::is_nes_selection(self.game_selection)
-        {
-            self.nes_cabinet_state.activate();
         }
         // Hold a viewer guard only while on the World Cup screen; this both
         // wakes the demand-gated poller on entry and (by dropping the prior
@@ -1759,6 +1839,40 @@ impl App {
         // global quit and drop the whole SSH session.
         if self.screen == crate::app::common::primitives::Screen::Nethack
             && let Some(state) = self.nethack_state.as_ref()
+            && state.in_exit_grace()
+        {
+            return;
+        }
+        // DCSS: same raw passthrough + F1->`?` remap as nethack (both are
+        // roguelikes hosted the same way), and the same post-exit input grace.
+        if self.screen == crate::app::common::primitives::Screen::Dcss
+            && let Some(state) = self.dcss_state.as_mut()
+            && state.is_running()
+        {
+            if !state.intercept_input(data) {
+                state.forward_input(data);
+            }
+            return;
+        }
+        if self.screen == crate::app::common::primitives::Screen::Dcss
+            && let Some(state) = self.dcss_state.as_ref()
+            && state.in_exit_grace()
+        {
+            return;
+        }
+        // Usurper: raw passthrough with no F1 remap (the game has no universal
+        // help key); the state's own forward_input strips mouse noise and the
+        // function keys (in DOOR32 local mode they are DDPlus sysop keys).
+        // Same post-exit input grace as the others.
+        if self.screen == crate::app::common::primitives::Screen::Usurper
+            && let Some(state) = self.usurper_state.as_ref()
+            && state.is_running()
+        {
+            state.forward_input(data);
+            return;
+        }
+        if self.screen == crate::app::common::primitives::Screen::Usurper
+            && let Some(state) = self.usurper_state.as_ref()
             && state.in_exit_grace()
         {
             return;
@@ -2336,112 +2450,5 @@ impl Drop for App {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Write;
-
-    #[test]
-    fn shared_buffer_write_and_take() {
-        let mut buf = SharedBuffer::default();
-        buf.write_all(b"hello").unwrap();
-        let taken = buf.take();
-        assert_eq!(taken, b"hello");
-    }
-
-    #[test]
-    fn shared_buffer_take_clears() {
-        let mut buf = SharedBuffer::default();
-        buf.write_all(b"data").unwrap();
-        let _ = buf.take();
-        assert!(buf.take().is_empty());
-    }
-
-    #[test]
-    fn shared_buffer_multiple_writes() {
-        let mut buf = SharedBuffer::default();
-        buf.write_all(b"hello").unwrap();
-        buf.write_all(b" world").unwrap();
-        assert_eq!(buf.take(), b"hello world");
-    }
-
-    #[test]
-    fn shared_buffer_flush_succeeds() {
-        let mut buf = SharedBuffer::default();
-        assert!(buf.flush().is_ok());
-    }
-
-    #[test]
-    fn shared_buffer_write_returns_correct_len() {
-        let mut buf = SharedBuffer::default();
-        let written = buf.write(b"test").unwrap();
-        assert_eq!(written, 4);
-    }
-
-    #[test]
-    fn shared_buffer_default_is_empty() {
-        let buf = SharedBuffer::default();
-        assert!(buf.take().is_empty());
-    }
-
-    #[test]
-    fn leave_alt_screen_resets_cursor_shape() {
-        let bytes = App::leave_alt_screen();
-        assert!(
-            bytes
-                .windows(CURSOR_SHAPE_STEADY_BLOCK.len())
-                .any(|w| w == CURSOR_SHAPE_STEADY_BLOCK),
-            "expected steady block cursor reset in shutdown bytes, got: {bytes:?}"
-        );
-    }
-
-    #[test]
-    fn alt_screen_boundaries_recover_terminal_string_state() {
-        assert!(App::enter_alt_screen().starts_with(terminal_string_terminator()));
-        assert!(App::leave_alt_screen().starts_with(terminal_string_terminator()));
-    }
-
-    #[test]
-    fn cursor_shape_sequences_match_expected_descusr_codes() {
-        assert_eq!(CURSOR_SHAPE_STEADY_BLOCK, b"\x1b[2 q");
-        assert_eq!(CURSOR_SHAPE_STEADY_UNDERLINE, b"\x1b[4 q");
-    }
-
-    #[test]
-    fn voice_toggle_intent_joins_when_not_already_in_voice() {
-        let active = uuid::Uuid::from_u128(1);
-
-        assert_eq!(
-            voice_toggle_intent(None, Some(active)),
-            VoiceToggleIntent::JoinOrSwitch
-        );
-        assert_eq!(
-            voice_toggle_intent(None, None),
-            VoiceToggleIntent::JoinOrSwitch
-        );
-    }
-
-    #[test]
-    fn voice_toggle_intent_leaves_current_voice_room() {
-        let room = uuid::Uuid::from_u128(1);
-
-        assert_eq!(
-            voice_toggle_intent(Some(room), Some(room)),
-            VoiceToggleIntent::Leave
-        );
-        assert_eq!(
-            voice_toggle_intent(Some(room), None),
-            VoiceToggleIntent::Leave
-        );
-    }
-
-    #[test]
-    fn voice_toggle_intent_switches_to_active_voice_room() {
-        let joined = uuid::Uuid::from_u128(1);
-        let active = uuid::Uuid::from_u128(2);
-
-        assert_eq!(
-            voice_toggle_intent(Some(joined), Some(active)),
-            VoiceToggleIntent::JoinOrSwitch
-        );
-    }
-}
+#[path = "state_internal_test.rs"]
+mod state_internal_test;

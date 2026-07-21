@@ -1,7 +1,10 @@
 # Door Games & MUDs - Candidate Research
 
 Investigation notes for slowly adding more door games / MUDs to late.sh.
-Status: **research only, nothing committed.** Last updated 2026-06-28.
+Status: **research notes.** Last updated 2026-07-21 (roadmap re-cut: Brogue CE
+is the next door, one marketing beat before the Green Dragon push (see root
+`DRAGON.md`); TradeWars/twclone re-parked as future season/event content
+despite a green spike; museum wing passed on).
 
 ## TL;DR
 
@@ -14,7 +17,7 @@ Status: **research only, nothing committed.** Last updated 2026-06-28.
   (GPL, LORD-like, already ported to 64-bit Linux). Both run as a normal process
   on a PTY - exactly how NetHack already works here.
 - **TradeWars 2002 is a no-go on license** (proprietary, EIS/Pritchett own the
-  trademark). The open path is **twclone** (MIT clone), which would be a port,
+  trademark). The open path is **twclone** (GPL-2 clone), which would be a port,
   not the real thing.
 - **MUDs are parked** (see bottom). Almost all the demand is for *doors*, not
   MUDs, and MUDs fight late.sh's quick-session format. Licensing is fine if we
@@ -51,10 +54,16 @@ worth owning. Licensing is the gate before any of this matters.
 | Game | License | Notes / fit |
 |---|---|---|
 | **dopewars** | GPL | Drug Wars / Dope Wars done right. Has a **curses text client** and a client/server **multiplayer** mode. Pure Linux terminal program → **pattern 2, near-zero friction.** Copyright Ben Webb 1998-2022, still maintained. |
-| **Usurper** | GPL | Classic LORD-style RPG door. Rick Parrish ported it to **32/64-bit** (orig by Jakob Dangarden). Runs on Linux → **pattern 2.** Good "second LORD-like" alongside LotGD. |
+| **Usurper** | GPL | **Shipped 2026-07-20** (`late-usurper` + the Usurper screen). Classic LORD-style RPG door. Rick Parrish ported it to **32/64-bit** (orig by Jakob Dangarden). Runs as a DOOR32 local-mode child on a PTY; the host generates per-session dropfiles, leases node numbers, and transcodes CP437→UTF-8. One shared world on a PVC. |
 | **Legend of the Green Dragon (LotGD)** | GPL (≤0.9.7), Creative Commons (after) | **The open LORD.** Faithful remake. BUT it's **PHP + MySQL web**, not a terminal door → needs either a TUI front-end or a native port (**pattern 1**). Highest player-recognition payoff, highest effort. Active forks exist (incl. a Symfony rewrite). |
 | **Wolfpack Empire** | GPLv3 | Classic large multiplayer strategy "Empire" door. Server + client, runs on Linux. Heavier/niche but clean. |
-| **twclone** | MIT (v1.0.0, Dec 2025) | Independent TradeWars clone, **fully rewritten and now headless**: a TCP server with a **pure JSON protocol** and a **PostgreSQL** backend. No BBS, no DOSBox, no telnet/ANSI. The clean way to get TradeWars-like gameplay. See deep dive below. |
+| **Dungeon Crawl Stone Soup (DCSS)** | GPL-2.0-or-later (project relicensed with every past contributor's consent) | **Shipped 2026-07-18** (`late-dcss` + the DCSS screen). Not a door - the *other* flagship roguelike - but the cleanest **pattern 2** candidate on this list. Native Linux curses binary (`crawl`), actively maintained, yearly releases. Built to be hosted: official public servers run dgamelaunch, and the game writes machine-readable `logfile`/`milestones` files (rune pickups, Zot entry, wins) - so achievements come off disk, no vt100 scraping like NetHack. Reuses the `late-nethack` host machinery almost verbatim. Wants 80x24 minimum. |
+| **twclone** | GPL-2.0 (v1.0.0-rc1, Dec 2025). The README claims MIT, but the actual LICENSE/COPYING files are GPLv2 (GitHub detects GPL-2.0) | Independent TradeWars clone, **fully rewritten and now headless**: a TCP server with a **pure JSON protocol** and a **PostgreSQL** backend. No BBS, no DOSBox, no telnet/ANSI. The clean way to get TradeWars-like gameplay - but still a release candidate with ~175 open issues and federation/economy/NPC systems deferred. See deep dive below. |
+| **Brogue CE** | AGPL-3.0 | The most beautiful pure-terminal roguelike ever made, and the friendliest of the classics: short runs, no grinding, stunning colored ASCII. Community Edition is actively maintained, builds a curses/terminal binary on Linux, saves per player, and public dgamelaunch servers already host it → **pattern 2, drop into the nethack/dcss host shape.** AGPL is fine for us: we build from source and can point at the pinned tarball. Best "third dungeon" candidate. |
+| **Angband 4.2** | GPL-2.0 (dual-licensed Angband licence / GPLv2) | The third giant lineage next to NetHack and Crawl. Long-form dungeon diving, rock-solid ncurses build (`-mgcu`), per-user saves, still maintained → **pattern 2.** Opens the door to celebrated variants later (Sil-Q, FrogComposband), which reuse the same shape. |
+| **NetHack variants: EvilHack / xNetHack / UnNetHack** | NGPL (same as NetHack) | Cheapest wins on the whole list: same license, same build recipe, and the **late-nethack host code reuses almost verbatim** - new crate, new port, new secret. EvilHack is what the hardcore public-server crowd plays; xNetHack is the polished modernization. Only cost is another image + pod each. |
+| **Cataclysm: Dark Days Ahead** | CC-BY-SA-3.0 (code and data) | Modern zombie-survival roguelike with a real ncurses build. Genuinely popular. The catch is weight: big binary, big RAM per session, and long-lived per-player worlds on disk → **pattern 2 but a heavyweight**; treat as an experiment with one watched pod, not a casual add. |
+| **The museum wing: Rogue 5.4 / Hack 1.0 / Umoria** | BSD-3-clause (Rogue 5.4.4 restoration; verify tarball license before shipping) / BSD (Hack) / GPL-3.0 (Umoria, relicensed 2017) | "Where it all began" shelf: the actual 1980 Rogue next to the roots of both family trees (Hack → NetHack, Moria → Angband). Tiny ncurses binaries, trivial hosting, one shared host crate could run all three → **pattern 2, minimal effort, maximum charm.** Great story for the public launch. |
 
 ### 🟡 Yellow - usable but read the terms
 
@@ -102,12 +111,14 @@ fixups - which tells you this is a well-known pain point, not just us.
 **Verdict on the real thing:** red. Proprietary server, DOS emulation, ANSI
 mess. Not worth it.
 
-### The actual answer: twclone (MIT, headless, JSON + Postgres)
+### The actual answer: twclone (GPL-2, headless, JSON + Postgres)
 
-`twclone` was **fully rewritten and released as v1.0.0 in Dec 2025**, and it's
-now shaped almost perfectly for late.sh:
+`twclone` was **fully rewritten**, with **v1.0.0-rc1 released Dec 15 2025** (a
+release candidate, not a finished 1.0.0 - ~175 open issues, federation/economy/
+NPC systems still deferred), and it's shaped almost perfectly for late.sh:
 
-- **MIT licensed** - no permission needed, donations/chip economy is fine.
+- **GPL-2 licensed** (the README says MIT, but the actual LICENSE/COPYING files
+  are GPLv2) - same license family as dopewars, donations/chip economy is fine.
 - **Headless TCP server, no BBS** - just run the server binary.
 - **Pure JSON protocol** - "all client<->server interactions use JSON." No
   telnet, no ANSI, no CP437. Any language that speaks JSON can be a client.
@@ -124,15 +135,75 @@ late.sh instead of being a blitted foreign terminal. The JSON protocol means no
 screen-scraping for milestones either (contrast NetHack, where we scrape vt100
 for the Amulet/ascension) - we read game state straight off the wire.
 
-**Open questions specific to twclone:**
-- Does its JSON protocol expose enough state to render a full TUI, or is the
-  bundled terminal client doing logic we'd have to reimplement? Read
-  `data/menus.json` + the protocol spec first.
-- Shared universe (one server, Lateania-style) vs. per-player - TW is
-  inherently a shared persistent universe, so this is one global instance, not
-  isolated NetHack-style sessions.
-- Does it want its **own** Postgres or can it share ours with a schema/db
-  separation? Prefer a separate database on the same instance.
+### Protocol spike results (2026-07-20, repo audit + local build)
+
+Audited the full repo (docs, both bundled clients, server source, SQL, test
+rig) and built it locally on Arch: `./configure && make` produces `server` and
+`bigbang` cleanly (needs `touch aclocal.m4 configure Makefile.in` first to
+stop autotools regen on fresh clones). Local reference clone: `~/projects/twclone`.
+
+**The key question is answered: YES, the protocol is data, not screens.**
+- Newline-delimited JSON over TCP (default port 1234), request/response
+  correlated by `id`/`reply_to`; frames without `reply_to` are async push
+  events (pub-sub via `subscribe.*`). Docs explicitly mandate "no prose inside
+  `data`": everything is codes/ids/enums, the client renders.
+- Menus are 100% client-side (`client/menus.json` is the Python client's own
+  config; the server never sees it). Our ratatui UI is unconstrained.
+- All game logic is server-side: trade math, combat, pathfinding
+  (`move.pathfind`), autopilot routes, economy. Both bundled clients (Python
+  menu client + the LLM-driven `ai_player` bot) are thin protocol clients
+  using zero hidden commands. A Rust client owns only rendering, input,
+  framing, and deserialization.
+- Command surface: **235 commands registered** in `src/server_loop.c` (the
+  shipped `published_commands.json` lists 177 and is stale). Move/trade/
+  combat/planets/citadels/corps/stock market/banking/tavern gambling/mail/
+  news/bounties/insurance are all real implementations with protocol-level
+  integration tests (`tests.v2/`, ~185 commands covered). Discover schemas at
+  runtime via `system.cmd_list` / `system.describe_schema`, NOT from the docs.
+- Identity: one TCP connection = one authenticated player (session token from
+  `auth.login`/`auth.register`). No single-socket multiplexing, so late-ssh
+  opens one connection per active door session. Fits the arcade-handle +
+  host-held random password pattern we already use for Usurper dropfiles.
+
+**Postgres: shares our instance fine.** Postgres is the only real backend
+(MySQL driver is a stub; server hard-fails on non-PG). Wants a dedicated
+database (unqualified names in `public`), no extensions, no pg_cron (cron is
+a DB table driven by its own engine), no superuser if we pre-create the DB and
+role. Config via a `bigbang.json` (libpq conninfo), not env vars. `bigbang` is
+the one-time universe generator (default 500 sectors).
+
+**Caveats found (none fatal, all handleable):**
+- **Plaintext password storage** (`repo_auth.c`: raw `strcmp` against a
+  `passwd` column). Contained for us: users never type a password, our host
+  mints random per-user credentials, and the server sits on the internal
+  network. Never expose port 1234 publicly.
+- **One blocking libpq connection per client thread**: 100 players = 100 PG
+  backends. Upstream's answer is pgbouncer (their deploy script even ships a
+  hardcoded password - ignore it, we do our own deploy). Our concurrent door
+  sessions will be small; a hard client cap or pgbouncer in the pod solves it.
+- **Ships a dev build**: `bin/Makefile.am` bakes in ASan/UBSan. Strip
+  sanitizers for the prod image.
+- **Server auto-generates a universe if the DB looks empty** - point the
+  conninfo carefully.
+- Docs are partly aspirational and contradict the wire (e.g. `passwd` vs
+  `password`, money fields int-or-string, police bribe/surrender and bank
+  standing orders are stubs, federation/S2S is not real). Trust the runtime
+  schema endpoints and `tests.v2/`, not the markdown.
+- **Project pulse**: solo, heavily AI-assisted development; quiet since
+  2026-02-14; 175 open issues (P0s are mostly a localisation epic + test
+  infra, not broken gameplay; 42 "canon" deviations from real TW2002 open).
+  Plan to pin a commit and treat it as ours to patch (GPL-2; the README
+  claims the rewrite is MIT but COPYING/LICENSE both say GPLv2 - either way
+  fine, we run it as a separate process).
+
+**Integration shape:** twclone server + own PG database as one pod (own
+image, sanitizers stripped, TLS off - internal network, SSH fronts it);
+`door/tradewars` native ratatui client in late-ssh speaking NDJSON over TCP;
+one shared persistent universe (Lateania-style, not per-player); milestones
+and achievements read straight off the wire (no scraping). Effort sits
+between dopewars and a native port: no game to design, but a full multi-panel
+TUI to build. Start with the core loop (sector view, warp, port trade, ship,
+bank) and grow toward planets/corps/stardock.
 
 ## The Pit (the gladiator one)
 
@@ -158,22 +229,49 @@ ever want the gladiator-arena vibe, a **native Rust original** inspired by it
 (mechanics aren't copyrightable) is the only sane route - and at that point it's
 really a new Lateania-style game, not "The Pit."
 
+**Resolved 2026-07-21:** the gladiator vibe is absorbed into the Green Dragon
+plan instead - a town arena where player characters fight each other, results
+called into #lounge (see root `DRAGON.md`, we-own-it liberties). Gladiators
+fighting is a mechanic, not a door; The Pit stays red and stays unhosted.
+
 ## Recommended order of attack
 
-1. **dopewars** - fastest real win. GPL, terminal-native, multiplayer. Wrap it
-   like NetHack (`late-nethack`-style host or a local PTY child). Low risk, high
-   "oh nice, Drug Wars" recognition.
-2. **Usurper** - second easy PTY door, scratches the LORD-RPG itch with a clean
-   license while we decide on LotGD.
-3. **Legend of the Green Dragon** - the marquee "this is basically LORD" feature,
-   but budget real effort: it's a web app, so either a native Rust port
-   (Lateania-style) or a TUI shim over the PHP backend. Decide pattern before
-   starting.
-4. **TradeWars via twclone** - the most-requested game, finally tractable.
-   Run the MIT twclone server next to our Postgres and write a native Rust JSON
-   client. More work than dopewars but no licensing/DOS/BBS nightmare, and the
-   payoff is the game people keep asking for. Do the protocol spike first (see
-   deep dive) before committing.
+1. **dopewars** - **done, shipped.** GPL, terminal-native. Runs as its own
+   `late-dopewars` SSH host (NetHack-style), single-player with a shared
+   high-score table. See `late-ssh/src/app/door/dopewars/CONTEXT.md`.
+2. **DCSS** - **done, built (prod deploy pending).** Same standalone-SSH-host
+   pattern as NetHack (`late-dcss` host crate + `door/dcss` client), from-source
+   0.34.1 console build with wizard mode compiled out. File-based milestones
+   (no scraping) deferred to a v2. See `late-ssh/src/app/door/dcss/CONTEXT.md`.
+   First rollout must be `deploy_dcss.yml` (it builds the image).
+3. **Usurper** - **done, built (prod deploy pending).** Standalone-SSH-host
+   pattern like DCSS (`late-usurper` host crate + `door/usurper` client), built
+   from pinned source with Debian's Free Pascal, world data generated by
+   scripting the EDITOR's Reset Game at image build. First rollout must be
+   `deploy_usurper.yml` (it builds the image). See
+   `late-ssh/src/app/door/usurper/CONTEXT.md`.
+4. **Legend of the Green Dragon** - **done, shipped** as the native Green
+   Dragon door: an in-process Rust remake of LoGD with per-user persistent
+   characters (pattern 1, Lateania-style). See
+   `late-ssh/src/app/door/greendragon/CONTEXT.md`.
+5. **Brogue CE** - **next up (decided 2026-07-21).** The one-more-game
+   marketing beat before the Green Dragon push: NetHack/DCSS host shape
+   reused almost verbatim (new host crate + image + screen), short gorgeous
+   interruptible runs that fit the ambient format, and the best screenshots a
+   terminal can produce. Caveats for the build: per-user save/highscore dir
+   handling like the other hosts, and no machine-readable milestone files
+   (unlike DCSS), so v1 ships without awards, like dopewars did. Museum wing
+   (Rogue/Hack/Umoria) was considered for the same slot and passed on.
+6. **TradeWars via twclone** - **parked until it can be a season.** Protocol
+   spike done 2026-07-20 (see deep dive): verdict green on the tech
+   (structured-data protocol end to end, Postgres coexists on our instance,
+   caveats handleable). Parked anyway: an always-on persistent universe is
+   appointment gaming that needs player density we don't have; at ~30
+   concurrent it's an empty 500-sector world, and its stories (ambushes, corp
+   wars) all require other players. The right format is **event content after
+   the dragon ships**: a fresh small universe per season (`bigbang` makes
+   regeneration cheap), a daily turn ration, "highest net worth by Sunday",
+   #lounge coronation, universe dies. Do not build the always-on version.
 MUDs are intentionally **not** in this list anymore - see Parked below.
 
 ## Open questions before building anything

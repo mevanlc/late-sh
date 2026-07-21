@@ -1,7 +1,6 @@
 pub mod input;
 pub mod le_word;
 pub mod minesweeper;
-pub mod nes_cabinet;
 pub mod nonogram;
 pub mod rubiks_cube;
 pub mod snake;
@@ -12,3 +11,6 @@ pub mod traffic;
 pub mod twenty_forty_eight;
 pub mod ui;
 pub mod workspace;
+
+#[cfg(test)]
+mod ui_test;

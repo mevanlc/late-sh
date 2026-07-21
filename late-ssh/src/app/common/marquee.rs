@@ -1,5 +1,5 @@
 //! Shared horizontal marquee for rows too long for their rail. Used by the
-//! Activity panel's event rows and the music stage's now-playing rows.
+//! music stage's now-playing rows and the core block's connected-friends row.
 
 /// Render `text` into a `width`-column window. Text that fits is returned
 /// unchanged; longer text scrolls back and forth so the whole thing can be
@@ -27,22 +27,4 @@ pub(crate) fn marquee_text(text: &str, width: usize, tick: usize) -> String {
     }
     .min(travel);
     chars[offset..offset + width].iter().collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn marquee_returns_text_that_fits_unchanged() {
-        assert_eq!(marquee_text("short", 10, 42), "short");
-    }
-
-    #[test]
-    fn marquee_holds_at_start_then_scrolls() {
-        // 8 chars in a 5-col window: travel 3, hold 20, step 3.
-        assert_eq!(marquee_text("abcdefgh", 5, 0), "abcde");
-        assert_eq!(marquee_text("abcdefgh", 5, 19), "abcde");
-        assert_eq!(marquee_text("abcdefgh", 5, 23), "bcdef");
-    }
 }

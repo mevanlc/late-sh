@@ -131,6 +131,8 @@ struct DrawContext<'a> {
     games_hub_selected: usize,
     rebels_enabled: bool,
     nethack_enabled: bool,
+    dcss_enabled: bool,
+    usurper_enabled: bool,
     dopewars_enabled: bool,
     lateania_state: Option<&'a crate::app::door::lateania::state::State>,
     /// Players currently in the Lateania world (for the landing/hub card).
@@ -138,6 +140,8 @@ struct DrawContext<'a> {
     greendragon_state: Option<&'a crate::app::door::greendragon::state::State>,
     rebels_state: Option<&'a mut crate::app::door::rebels::state::State>,
     nethack_state: Option<&'a mut crate::app::door::nethack::state::State>,
+    dcss_state: Option<&'a mut crate::app::door::dcss::state::State>,
+    usurper_state: Option<&'a mut crate::app::door::usurper::state::State>,
     dopewars_state: Option<&'a mut crate::app::door::dopewars::state::State>,
     /// Detected terminal-image protocol for the current session.
     /// `None` -> no native images supported; capable terminals get
@@ -153,7 +157,6 @@ struct DrawContext<'a> {
     nonogram_state: &'a crate::app::arcade::nonogram::state::State,
     solitaire_state: &'a crate::app::arcade::solitaire::state::State,
     minesweeper_state: &'a crate::app::arcade::minesweeper::state::State,
-    nes_cabinet_state: &'a crate::app::arcade::nes_cabinet::state::State,
     dartboard_state: Option<&'a crate::app::artboard::state::State>,
     directory_state: &'a crate::app::directory::state::DirectoryState,
     directory_tab: crate::app::directory::state::DirectoryTab,
@@ -889,6 +892,8 @@ impl App {
         // call set_viewport with the exact content_area before blitting.
         let mut rebels_state_taken = self.rebels_state.take();
         let mut nethack_state_taken = self.nethack_state.take();
+        let mut dcss_state_taken = self.dcss_state.take();
+        let mut usurper_state_taken = self.usurper_state.take();
         let mut dopewars_state_taken = self.dopewars_state.take();
 
         let pinstar_browser = if screen == Screen::Pinstar {
@@ -915,12 +920,16 @@ impl App {
                         games_hub_selected: self.games_hub_state.selected(),
                         rebels_enabled: self.rebels_enabled,
                         nethack_enabled: self.nethack_enabled,
+                        dcss_enabled: self.dcss_enabled,
+                        usurper_enabled: self.usurper_enabled,
                         dopewars_enabled: self.dopewars_enabled,
                         lateania_state: self.lateania_state.as_ref(),
                         lateania_online: self.lateania_service.player_count(),
                         greendragon_state: self.greendragon_state.as_ref(),
                         rebels_state: rebels_state_taken.as_mut(),
                         nethack_state: nethack_state_taken.as_mut(),
+                        dcss_state: dcss_state_taken.as_mut(),
+                        usurper_state: usurper_state_taken.as_mut(),
                         dopewars_state: dopewars_state_taken.as_mut(),
                         terminal_image_protocol: self.terminal_image_protocol,
                         twenty_forty_eight_state: &self.twenty_forty_eight_state,
@@ -933,7 +942,6 @@ impl App {
                         nonogram_state: &self.nonogram_state,
                         solitaire_state: &self.solitaire_state,
                         minesweeper_state: &self.minesweeper_state,
-                        nes_cabinet_state: &self.nes_cabinet_state,
                         dartboard_state: self.dartboard_state.as_ref(),
                         directory_state: &self.directory_state,
                         directory_tab: self.directory_state.tab,
@@ -1043,6 +1051,8 @@ impl App {
         self.pinstar_state = pinstar_state_taken;
         self.rebels_state = rebels_state_taken;
         self.nethack_state = nethack_state_taken;
+        self.dcss_state = dcss_state_taken;
+        self.usurper_state = usurper_state_taken;
         self.dopewars_state = dopewars_state_taken;
         draw_result?;
 
@@ -1245,11 +1255,11 @@ impl App {
                         delete_confirm: ctx.door_delete_confirm,
                         rebels_enabled: ctx.rebels_enabled,
                         nethack_enabled: ctx.nethack_enabled,
+                        dcss_enabled: ctx.dcss_enabled,
+                        usurper_enabled: ctx.usurper_enabled,
                         dopewars_enabled: ctx.dopewars_enabled,
-                        terminal_image_protocol: ctx.terminal_image_protocol,
                         lateania_online: ctx.lateania_online,
                     },
-                    terminal_images,
                 );
             }
             Screen::Lateania => {
@@ -1260,7 +1270,6 @@ impl App {
                         delete_confirm: ctx.door_delete_confirm,
                         state: ctx.lateania_state,
                         usernames: ctx.usernames,
-                        terminal_image_protocol: ctx.terminal_image_protocol,
                         online: ctx.lateania_online,
                     },
                     terminal_images,
@@ -1286,10 +1295,24 @@ impl App {
                 }
             }
             Screen::Nethack => {
-                if let Some(state) = ctx.nethack_state {
+                if let Some(state) = ctx.nethack_state.as_deref_mut() {
                     // Size the child PTY to the exact widget area before blitting.
                     state.set_viewport(content_area);
                     crate::app::door::nethack::render::draw_page(frame, content_area, state);
+                }
+            }
+            Screen::Dcss => {
+                if let Some(state) = ctx.dcss_state.as_deref_mut() {
+                    // Size the child PTY to the exact widget area before blitting.
+                    state.set_viewport(content_area);
+                    crate::app::door::dcss::render::draw_page(frame, content_area, state);
+                }
+            }
+            Screen::Usurper => {
+                if let Some(state) = ctx.usurper_state.as_deref_mut() {
+                    // Size the child PTY to the exact widget area before blitting.
+                    state.set_viewport(content_area);
+                    crate::app::door::usurper::render::draw_page(frame, content_area, state);
                 }
             }
             Screen::Dopewars => {
@@ -1337,7 +1360,6 @@ impl App {
                     nonogram_state: ctx.nonogram_state,
                     solitaire_state: ctx.solitaire_state,
                     minesweeper_state: ctx.minesweeper_state,
-                    nes_cabinet_state: ctx.nes_cabinet_state,
                     daily_completion: ctx.leaderboard.user_daily_statuses.get(&ctx.user_id),
                 },
             ),
@@ -1522,6 +1544,42 @@ impl App {
             crate::app::lobby::modal_ui::draw(frame, inner, ctx.lobby, ctx.daily, ctx.house);
         }
 
+        // One-time arcade-name claim modal, over the door landings that need a
+        // handle before playing (visibility is decided by the door state).
+        if screen == Screen::Nethack
+            && let Some(state) = ctx.nethack_state.as_deref()
+            && state.name_modal_visible()
+        {
+            crate::app::door::landing::draw_name_modal(
+                frame,
+                inner,
+                state.handle_status(),
+                state.entry_input(),
+            );
+        }
+        if screen == Screen::Dcss
+            && let Some(state) = ctx.dcss_state.as_deref()
+            && state.name_modal_visible()
+        {
+            crate::app::door::landing::draw_name_modal(
+                frame,
+                inner,
+                state.handle_status(),
+                state.entry_input(),
+            );
+        }
+        if screen == Screen::Usurper
+            && let Some(state) = ctx.usurper_state.as_deref()
+            && state.name_modal_visible()
+        {
+            crate::app::door::landing::draw_name_modal(
+                frame,
+                inner,
+                state.handle_status(),
+                state.entry_input(),
+            );
+        }
+
         if let Some(modal) = ctx.login_announcements {
             announcements::draw(frame, inner, modal);
         }
@@ -1626,6 +1684,8 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                     Screen::Lateania
                         | Screen::Rebels
                         | Screen::Nethack
+                        | Screen::Dcss
+                        | Screen::Usurper
                         | Screen::Dopewars
                         | Screen::GreenDragon
                 ))
@@ -1648,6 +1708,8 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Lateania => "Lateania",
         Screen::Rebels => "Rebels",
         Screen::Nethack => "NetHack",
+        Screen::Dcss => "DCSS",
+        Screen::Usurper => "Usurper",
         Screen::Dopewars => "dopewars",
         Screen::GreenDragon => "Green Dragon",
         Screen::Arcade => "The Arcade",
@@ -1696,6 +1758,46 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         if in_game {
             spans.push(Span::styled(
                 "· ? help · S save · Ctrl-C quit ",
+                Style::default().fg(theme::TEXT_DIM()),
+            ));
+        }
+    }
+
+    if screen == Screen::Dcss {
+        spans.push(Span::styled(
+            "by crawl.develz.org ",
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+        // While a game is live, surface the leave/help keys in the chrome (it
+        // sits outside the game grid, so it never covers glyphs). Players who
+        // skipped the launcher otherwise mash Esc trying to get out.
+        let in_game = ctx
+            .dcss_state
+            .as_deref()
+            .is_some_and(|state| state.is_running());
+        if in_game {
+            spans.push(Span::styled(
+                "· ? help · S save · Ctrl-Q abandon ",
+                Style::default().fg(theme::TEXT_DIM()),
+            ));
+        }
+    }
+
+    if screen == Screen::Usurper {
+        spans.push(Span::styled(
+            "by usurper.info ",
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+        // While a game is live, surface the leave key in the chrome (it sits
+        // outside the game grid, so it never covers glyphs). Players who
+        // skipped the launcher otherwise mash Esc trying to get out.
+        let in_game = ctx
+            .usurper_state
+            .as_deref()
+            .is_some_and(|state| state.is_running());
+        if in_game {
+            spans.push(Span::styled(
+                "\u{b7} menus list their keys \u{b7} Q quits at the main menus ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
         }
@@ -2026,198 +2128,5 @@ fn status_hud_title(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        HelpHintStyle, app_frame_bottom_titles, app_frame_help_hint_title, app_frame_sponsor_title,
-        dashboard_home_selected, line_width, resolve_right_sidebar_enabled,
-        room_list_sidebar_enabled, sidebar_enabled, sponsor_line, status_hud_title,
-    };
-    use crate::app::common::primitives::Screen;
-    use late_core::models::user::RightSidebarMode;
-    use uuid::Uuid;
-
-    fn line_text(line: &ratatui::text::Line<'_>) -> String {
-        line.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    #[test]
-    fn sidebar_enabled_prefers_settings_draft_while_modal_is_open() {
-        assert!(!sidebar_enabled(true, false, true));
-        assert!(sidebar_enabled(true, true, false));
-    }
-
-    #[test]
-    fn sidebar_enabled_uses_saved_profile_when_modal_is_closed() {
-        assert!(sidebar_enabled(false, false, true));
-        assert!(!sidebar_enabled(false, true, false));
-    }
-
-    #[test]
-    fn right_sidebar_is_only_available_on_first_three_pages() {
-        assert!(resolve_right_sidebar_enabled(
-            RightSidebarMode::On,
-            Screen::Dashboard,
-        ));
-        assert!(resolve_right_sidebar_enabled(
-            RightSidebarMode::On,
-            Screen::Arcade,
-        ));
-        assert!(!resolve_right_sidebar_enabled(
-            RightSidebarMode::On,
-            Screen::Lateania,
-        ));
-        assert!(!resolve_right_sidebar_enabled(
-            RightSidebarMode::On,
-            Screen::Artboard,
-        ));
-        assert!(!resolve_right_sidebar_enabled(
-            RightSidebarMode::On,
-            Screen::Pinstar,
-        ));
-    }
-
-    #[test]
-    fn right_sidebar_off_hides_on_allowed_pages() {
-        assert!(!resolve_right_sidebar_enabled(
-            RightSidebarMode::Off,
-            Screen::Dashboard,
-        ));
-        assert!(!resolve_right_sidebar_enabled(
-            RightSidebarMode::Off,
-            Screen::Arcade,
-        ));
-    }
-
-    #[test]
-    fn room_list_sidebar_enabled_prefers_settings_draft_while_modal_is_open() {
-        assert!(!room_list_sidebar_enabled(true, false, true));
-        assert!(room_list_sidebar_enabled(true, true, false));
-    }
-
-    #[test]
-    fn room_list_sidebar_enabled_uses_saved_profile_when_modal_is_closed() {
-        assert!(room_list_sidebar_enabled(false, false, true));
-        assert!(!room_list_sidebar_enabled(false, true, false));
-    }
-
-    #[test]
-    fn dashboard_home_selected_for_lounge_room_without_synthetic_entry() {
-        let lounge = Uuid::from_u128(1);
-        assert!(dashboard_home_selected(Some(lounge), Some(lounge), false));
-    }
-
-    #[test]
-    fn dashboard_home_selected_rejects_synthetic_and_non_lounge_rooms() {
-        let lounge = Uuid::from_u128(1);
-        let topic = Uuid::from_u128(2);
-        assert!(!dashboard_home_selected(Some(lounge), Some(lounge), true));
-        assert!(!dashboard_home_selected(Some(lounge), Some(topic), false));
-        assert!(!dashboard_home_selected(None, Some(topic), false));
-    }
-
-    #[test]
-    fn status_hud_title_hidden_when_empty() {
-        assert!(status_hud_title(None, 0, None).is_none());
-        assert!(status_hud_title(None, -3, None).is_none());
-    }
-
-    #[test]
-    fn status_hud_title_renders_right_aligned_pluralized_text() {
-        use ratatui::layout::Alignment;
-
-        let one = status_hud_title(None, 1, None).expect("one mention should render");
-        assert_eq!(one.alignment, Some(Alignment::Right));
-        let text: String = one.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " 1 unread mention ");
-
-        let many = status_hud_title(None, 14, None).expect("many mentions should render");
-        let text: String = many.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " 14 unread mentions ");
-    }
-
-    #[test]
-    fn status_hud_title_combines_voice_and_mentions() {
-        let line =
-            status_hud_title(None, 2, Some(" mic #lounge [muted] ")).expect("status should render");
-        let text: String = line.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " 2 unread mentions | mic #lounge [muted] ");
-    }
-
-    #[test]
-    fn status_hud_title_renders_balance_right_of_mentions() {
-        use ratatui::layout::Alignment;
-
-        let only = status_hud_title(Some(1_500), 0, None).expect("balance should render alone");
-        assert_eq!(only.alignment, Some(Alignment::Right));
-        let text: String = only.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(text, " 1500 chips ");
-
-        let combined = status_hud_title(Some(1_500), 2, Some(" mic #lounge [muted] "))
-            .expect("balance + voice + mentions should render");
-        let text: String = combined.iter().map(|s| s.content.as_ref()).collect();
-        assert_eq!(
-            text,
-            " 2 unread mentions | mic #lounge [muted] | 1500 chips "
-        );
-    }
-
-    #[test]
-    fn sponsor_title_drops_optional_segments_before_overlapping_help_hints() {
-        let full_width = line_width(&sponsor_line(true, true));
-        let url_width = line_width(&sponsor_line(false, true));
-        let short_url_width = line_width(&sponsor_line(false, false));
-
-        let full = app_frame_sponsor_title(full_width).expect("full sponsor should fit");
-        assert_eq!(
-            line_text(&full),
-            " thanks for hanging out ☕ https://ko-fi.com/mateuszpiorowski "
-        );
-
-        let url_only =
-            app_frame_sponsor_title(full_width - 1).expect("url-only sponsor should fit");
-        assert_eq!(line_text(&url_only), "https://ko-fi.com/mateuszpiorowski ");
-
-        let short_url =
-            app_frame_sponsor_title(url_width - 1).expect("protocol-stripped sponsor should fit");
-        assert_eq!(line_text(&short_url), "ko-fi.com/mateuszpiorowski ");
-
-        let hidden = app_frame_sponsor_title(short_url_width - 1);
-        assert!(hidden.is_none());
-    }
-
-    #[test]
-    fn help_hint_title_lists_guide_last() {
-        let help = app_frame_help_hint_title(HelpHintStyle::DottedCtrl);
-        assert_eq!(
-            line_text(&help),
-            " Settings Ctrl+O · Hub Ctrl+G · Lobby Ctrl+Q · Guide ? "
-        );
-    }
-
-    #[test]
-    fn help_hint_title_compacts_separators_then_ctrl_notation() {
-        let dotted = app_frame_help_hint_title(HelpHintStyle::DottedCtrl);
-        let spaced = app_frame_help_hint_title(HelpHintStyle::SpacedCtrl);
-        let caret = app_frame_help_hint_title(HelpHintStyle::SpacedCaret);
-        assert_eq!(
-            line_text(&spaced),
-            " Settings Ctrl+O  Hub Ctrl+G  Lobby Ctrl+Q  Guide ? "
-        );
-        assert_eq!(
-            line_text(&caret),
-            " Settings ^O  Hub ^G  Lobby ^Q  Guide ? "
-        );
-
-        let (help, sponsor) = app_frame_bottom_titles((line_width(&dotted) + 2) as u16);
-        assert_eq!(line_text(&help), line_text(&dotted));
-        assert!(sponsor.is_none());
-
-        let (help, sponsor) = app_frame_bottom_titles((line_width(&spaced) + 2) as u16);
-        assert_eq!(line_text(&help), line_text(&spaced));
-        assert!(sponsor.is_none());
-
-        let (help, sponsor) = app_frame_bottom_titles((line_width(&caret) + 2) as u16);
-        assert_eq!(line_text(&help), line_text(&caret));
-        assert!(sponsor.is_none());
-    }
-}
+#[path = "render_test.rs"]
+mod render_test;
