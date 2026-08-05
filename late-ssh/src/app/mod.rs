@@ -24,6 +24,7 @@ pub(crate) mod icon_picker;
 pub mod input;
 #[cfg(test)]
 mod input_flow_test;
+pub(crate) mod leaderboard;
 pub mod lobby;
 pub(crate) mod mod_modal;
 pub(crate) mod notify;
@@ -33,7 +34,9 @@ pub mod profile;
 pub(crate) mod profile_modal;
 pub(crate) mod quit_confirm;
 mod render;
+pub(crate) mod room_info_modal;
 pub(crate) mod room_search_modal;
+pub mod scratchpad;
 pub(crate) mod settings_modal;
 pub(crate) mod sheet_modal;
 #[cfg(test)]
@@ -43,10 +46,11 @@ mod smoke_test;
 pub mod state;
 #[cfg(test)]
 mod state_test;
-mod tick;
+pub mod tick;
+#[cfg(test)]
+mod tick_test;
 pub(crate) mod ultimates;
 pub mod voice;
-pub mod worldcup;
 
 pub use hub::dailies::svc::QuestService;
 pub use hub::shop::svc::ShopService;

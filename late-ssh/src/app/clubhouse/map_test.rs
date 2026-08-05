@@ -39,6 +39,7 @@ fn spawn_and_standing_spots_are_walkable() {
     for &(x, y) in DOG_WAYPOINTS {
         assert!(walkable(x, y), "dog waypoint ({x}, {y}) is blocked");
     }
+    assert!(walkable(BOT_SPOT.0, BOT_SPOT.1), "bot spot is blocked");
 }
 
 #[test]
@@ -121,6 +122,13 @@ fn interactives_resolve_by_proximity() {
         nearest_interactive(28, 12, DOG_HOME),
         Some(Interactive::Bartender)
     );
+    // The approach apron: still the bartender three rows further out,
+    // one row past it nothing.
+    assert_eq!(
+        nearest_interactive(28, 15, DOG_HOME),
+        Some(Interactive::Bartender)
+    );
+    assert_eq!(nearest_interactive(28, 16, DOG_HOME), None);
     // Next to the jukebox.
     assert_eq!(
         nearest_interactive(82, 4, DOG_HOME),

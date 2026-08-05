@@ -6,15 +6,17 @@
 // list panels. All real actions delegate to the service's *_task methods; this
 // struct never blocks and never mutates world truth.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 
+use ratatui::layout::Rect;
 use tokio::sync::watch;
 use uuid::Uuid;
 
 use super::classes::Class;
 use super::svc::{LateaniaService, MudSnapshot, PlayerView, empty_player_view};
 use super::world::Dir;
+use super::worldmap::{Coord, MapCamera};
 
 /// Lines moved per `[` / `]` press when scrolling a text panel.
 const SCROLL_STEP: usize = 3;
@@ -59,6 +61,34 @@ pub enum Panel {
     Map,
 }
 
+/// A combat action a player can trigger by clicking its on-screen chip, mapping
+/// one-to-one to a key: [`ClickAction::Attack`] is space/x, [`ClickAction::Quaff`]
+/// is Q, [`ClickAction::Flee`] is z, and [`ClickAction::Ability`] is the digit of
+/// that action-bar slot. The mouse handler resolves a click to one of these and
+/// then calls the very same method the key would.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClickAction {
+    Attack,
+    Quaff,
+    Flee,
+    Ability(u8),
+    /// Lock onto the foe with this spawn id (a click on its roster row).
+    AttackMob(u32),
+}
+
+/// The first recorded chip whose rect contains cell `(x, y)`. Pure so the click
+/// geometry can be unit-tested without standing up a whole `State`.
+fn hit_at(hits: &[(Rect, ClickAction)], x: u16, y: u16) -> Option<ClickAction> {
+    hits.iter()
+        .find(|(r, _)| {
+            x >= r.x
+                && x < r.x.saturating_add(r.width)
+                && y >= r.y
+                && y < r.y.saturating_add(r.height)
+        })
+        .map(|(_, action)| *action)
+}
+
 pub struct State {
     user_id: Uuid,
     session_id: Uuid,
@@ -72,6 +102,10 @@ pub struct State {
     /// (which only holds `&State`) can keep the highlighted row inside a
     /// scroll-off margin. Reset whenever the panel changes.
     list_scroll: Cell<usize>,
+    /// Absolute screen rects of the combat action-bar chips, recorded fresh each
+    /// draw so a mouse click can resolve to the same action as its key. Interior-
+    /// mutable because the render pass only holds `&State`.
+    combat_hits: RefCell<Vec<(Rect, ClickAction)>>,
     /// Category headers the player has folded in the collapsible list panels
     /// (crafting / inventory / shop), by prefixed key (e.g. `"inv:Weapons"`).
     /// Session-only; folds a long list down to its category headers.
@@ -85,6 +119,10 @@ pub struct State {
     /// mode captures keys). Chat is world-local via the service's `say`, so it
     /// never leaks into late.sh's global feed.
     chat_buffer: Option<String>,
+    /// Where the overhead world map (Panel::Map) is looking, relative to the
+    /// player. Reset whenever the panel changes, so opening the map always
+    /// re-centres on them.
+    map_camera: MapCamera,
 }
 
 impl State {
@@ -107,6 +145,7 @@ impl State {
             panel: Panel::Room,
             cursor: 0,
             list_scroll: Cell::new(0),
+            combat_hits: RefCell::new(Vec::new()),
             collapsed: std::collections::HashSet::new(),
             joined: true,
             join_pending: true,
@@ -114,14 +153,19 @@ impl State {
             reset_version,
             reset_elsewhere: false,
             chat_buffer: None,
+            map_camera: MapCamera::default(),
         };
         state.svc.join_task(user_id, session_id);
         state
     }
 
-    pub fn tick(&mut self) {
+    /// Returns true when the visible state moved: a world snapshot landed,
+    /// a remote reset kicked this session, or the pending join resolved.
+    pub fn tick(&mut self) -> bool {
+        let mut changed = false;
         if self.snapshot_rx.has_changed().unwrap_or(false) {
             self.snapshot = self.snapshot_rx.borrow_and_update().clone();
+            changed = true;
         }
         let reset_version = self
             .snapshot
@@ -134,17 +178,13 @@ impl State {
             self.joined = false;
             self.join_pending = false;
             self.reset_elsewhere = true;
-            return;
+            return true;
         }
-        if self.snapshot.players.contains_key(&self.user_id) {
+        if self.snapshot.players.contains_key(&self.user_id) && self.join_pending {
             self.join_pending = false;
+            changed = true;
         }
-    }
-
-    pub fn touch_activity(&mut self) {
-        if self.ensure_player_present() {
-            self.svc.touch_activity_task(self.user_id);
-        }
+        changed
     }
 
     pub fn ensure_player_present(&mut self) -> bool {
@@ -192,6 +232,7 @@ impl State {
             self.panel = panel;
             self.cursor = 0;
             self.list_scroll.set(0);
+            self.map_camera.recenter();
         }
     }
 
@@ -203,6 +244,57 @@ impl State {
         }
         self.cursor = 0;
         self.list_scroll.set(0);
+        self.map_camera.recenter();
+    }
+
+    /// True when the graphical overhead world map is the active panel.
+    pub fn map_open(&self) -> bool {
+        self.panel == Panel::Map
+    }
+
+    /// Flip between the live-map RPG view and the plain text MUD view. The
+    /// preference lives on the character (persisted), so this routes through the
+    /// service; the next snapshot carries the new value into the view.
+    pub fn toggle_rpg_mode(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.toggle_rpg_mode_task(self.user_id);
+        }
+    }
+
+    /// Where the world map is looking, relative to the player.
+    pub fn map_camera(&self) -> MapCamera {
+        self.map_camera
+    }
+
+    /// Where the player's own room sits in the coordinate field, if it has one.
+    /// Reads the snapshot directly rather than through `view()`, which clones
+    /// the whole PlayerView.
+    pub fn player_coord(&self) -> Option<Coord> {
+        let room = self.snapshot.players.get(&self.user_id)?.room?;
+        super::worldmap::world_coords().get(&room).copied()
+    }
+
+    /// Pan the world-map camera (arrow / wasd while the map is open).
+    pub fn pan_map(&mut self, dx: i32, dy: i32) {
+        let Some(player) = self.player_coord() else {
+            return;
+        };
+        self.map_camera
+            .pan(player, super::worldmap::bounds(), dx, dy);
+    }
+
+    /// Re-centre the world-map camera on the player (position and level).
+    pub fn recenter_map(&mut self) {
+        self.map_camera.recenter();
+    }
+
+    /// Move the viewed world-map level up (+1) or down (-1).
+    pub fn change_map_level(&mut self, delta: i32) {
+        let Some(player) = self.player_coord() else {
+            return;
+        };
+        self.map_camera
+            .change_level(player, super::worldmap::bounds(), delta);
     }
 
     /// Current list scroll offset (first visible line).
@@ -380,8 +472,11 @@ impl State {
     // ---- Local chat (say) ----------------------------------------------
     //
     // Composing a line captures keystrokes until Enter (send) or Esc (cancel).
-    // Sending routes through the service's world-local `say`, so Lateania chat
-    // stays inside Lateania and never reaches late.sh's global feed.
+    // Sending routes through the service's `say`, which is scope-aware: a
+    // leading `/z`/`/zone` reaches everyone in the same named zone, `/w`/
+    // `/world` reaches every adventurer in Lateania, and no marker means the
+    // room, same as it always has. Whichever scope, this is still world-local
+    // chat - it never reaches late.sh's own global feed.
 
     /// True while the player is typing a chat line (input capture is active).
     pub fn chat_active(&self) -> bool {
@@ -435,6 +530,20 @@ impl State {
     pub fn recall(&mut self) {
         if self.ensure_player_present() {
             self.svc.recall_task(self.user_id);
+        }
+    }
+
+    /// Fix a personal waypoint at the current room.
+    pub fn set_waypoint(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.set_waypoint_task(self.user_id);
+        }
+    }
+
+    /// Warp to the marked personal waypoint, from anywhere.
+    pub fn warp_to_waypoint(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.warp_to_waypoint_task(self.user_id);
         }
     }
 
@@ -499,6 +608,61 @@ impl State {
         }
     }
 
+    /// Mount or dismount the companion (Wildbound rideable beasts).
+    pub fn toggle_mount(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.toggle_mount_task(self.user_id);
+        }
+    }
+
+    /// Quaff the best healing potion without leaving the combat view, so you can
+    /// keep an eye on both health bars instead of opening the inventory panel.
+    pub fn quaff(&mut self) {
+        if self.ensure_player_present() {
+            self.svc.quaff_task(self.user_id);
+        }
+    }
+
+    /// Drop last frame's action-bar hit-map. Called at the top of every draw so a
+    /// bar that isn't shown this frame (map open, etc.) leaves nothing clickable.
+    pub fn clear_combat_hits(&self) {
+        self.combat_hits.borrow_mut().clear();
+    }
+
+    /// Record the absolute screen rect of one action-bar chip during draw.
+    pub fn record_combat_hit(&self, rect: Rect, action: ClickAction) {
+        self.combat_hits.borrow_mut().push((rect, action));
+    }
+
+    /// The action whose chip covers cell `(x, y)`, if a click landed on one.
+    pub fn combat_hit_at(&self, x: u16, y: u16) -> Option<ClickAction> {
+        hit_at(&self.combat_hits.borrow(), x, y)
+    }
+
+    /// Perform a click-resolved combat action (routes to the same method its key
+    /// does). Returns whether a chip was actually hit.
+    pub fn click_combat(&mut self, x: u16, y: u16) -> bool {
+        let Some(action) = self.combat_hit_at(x, y) else {
+            return false;
+        };
+        match action {
+            ClickAction::Attack => self.attack(),
+            ClickAction::Quaff => self.quaff(),
+            ClickAction::Flee => self.flee(),
+            ClickAction::Ability(slot) => self.use_ability(slot),
+            ClickAction::AttackMob(mob_id) => self.attack_mob(mob_id),
+        }
+        true
+    }
+
+    /// Lock onto a specific foe (a click on its roster row) and start trading
+    /// blows; the combat tick carries it from there, same as a plain attack.
+    pub fn attack_mob(&mut self, mob_id: u32) {
+        if self.ensure_player_present() {
+            self.svc.engage_mob_task(self.user_id, mob_id);
+        }
+    }
+
     /// Release a fallen spirit to the temple instead of waiting for a rez.
     pub fn release(&mut self) {
         if self.ensure_player_present() {
@@ -548,10 +712,12 @@ impl State {
                     Some(SectionRow::Header { key, .. }) => self.toggle_section(key),
                     Some(SectionRow::Item { index }) => {
                         if let Some(row) = self.view().inventory.get(index) {
-                            if row.slot.is_some() {
-                                self.svc.equip_task(self.user_id, row.item_id);
-                            } else {
-                                self.svc.use_item_task(self.user_id, row.item_id);
+                            match inv_action(row) {
+                                InvAction::Unequip => {
+                                    self.svc.unequip_task(self.user_id, row.item_id)
+                                }
+                                InvAction::Equip => self.svc.equip_task(self.user_id, row.item_id),
+                                InvAction::Use => self.svc.use_item_task(self.user_id, row.item_id),
                             }
                         }
                     }
@@ -687,3 +853,27 @@ impl Drop for State {
         self.close_session();
     }
 }
+
+/// What Enter does to a row of the inventory panel. The panel lists worn gear
+/// alongside loose gear, so the row's own state picks the verb.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InvAction {
+    /// Take off worn gear and put it back in the pack.
+    Unequip,
+    /// Put on a piece of gear from the pack.
+    Equip,
+    /// Drink/eat/apply a consumable.
+    Use,
+}
+
+pub fn inv_action(row: &super::svc::InvView) -> InvAction {
+    match (row.equipped, row.slot.is_some()) {
+        (true, _) => InvAction::Unequip,
+        (false, true) => InvAction::Equip,
+        (false, false) => InvAction::Use,
+    }
+}
+
+#[cfg(test)]
+#[path = "state_test.rs"]
+mod state_test;

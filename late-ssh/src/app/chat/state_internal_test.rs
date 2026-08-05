@@ -634,6 +634,9 @@ fn make_room(
             language_code: None,
             dm_user_a: None,
             dm_user_b: None,
+            topic: None,
+            rules: None,
+            created_by: None,
         },
         Vec::new(),
     )
@@ -685,6 +688,7 @@ fn visual_order_matches_cozy_rail_grouping() {
             favorite_room_ids: &[],
             collapsed_sections: &HashSet::new(),
             ignored_user_ids: &HashSet::new(),
+            sticky_unread_dm: None,
         }),
         vec![
             RoomSlot::Room(lounge),
@@ -708,7 +712,6 @@ fn room_section_label_round_trips() {
         RoomSection::Favorites,
         RoomSection::Core,
         RoomSection::Channels,
-        RoomSection::Updates,
         RoomSection::Dms,
     ] {
         assert_eq!(RoomSection::from_label(section.label()), Some(section));
@@ -749,6 +752,7 @@ fn collapsed_sections_drop_their_rooms_from_visual_order() {
             favorite_room_ids: &[],
             collapsed_sections: collapsed,
             ignored_user_ids: &HashSet::new(),
+            sticky_unread_dm: None,
         })
     };
 
@@ -758,7 +762,7 @@ fn collapsed_sections_drop_their_rooms_from_visual_order() {
     assert!(full.contains(&RoomSlot::Room(public_alpha)));
     assert!(full.contains(&RoomSlot::Room(dm_bob.id)));
 
-    // Channels collapsed: the channel drops out, Core/Updates/DMs stay.
+    // Channels collapsed: the channel drops out, Core and DMs stay.
     let channels_collapsed = HashSet::from([RoomSection::Channels]);
     let c = order(&channels_collapsed);
     assert!(!c.contains(&RoomSlot::Room(public_alpha)));
@@ -776,15 +780,6 @@ fn collapsed_sections_drop_their_rooms_from_visual_order() {
     // Discover now lives at the bottom of Core, so it collapses with it.
     assert!(!co.contains(&RoomSlot::Discover));
     assert!(co.contains(&RoomSlot::Room(public_alpha)));
-
-    // Updates is now hosted by the Directory page, not the Home rail.
-    let updates_collapsed = HashSet::from([RoomSection::Updates]);
-    let u = order(&updates_collapsed);
-    assert!(u.contains(&RoomSlot::News));
-    assert!(!u.contains(&RoomSlot::Showcase));
-    assert!(!u.contains(&RoomSlot::Work));
-    // Discover lives in Core, which is expanded here, so it stays present.
-    assert!(u.contains(&RoomSlot::Discover));
 
     // DMs collapsed: the DM drops out.
     let dms_collapsed = HashSet::from([RoomSection::Dms]);
@@ -834,6 +829,7 @@ fn visual_order_dms_use_snapshot_activity_not_loaded_tails() {
         favorite_room_ids: &[],
         collapsed_sections: &HashSet::new(),
         ignored_user_ids: &HashSet::new(),
+        sticky_unread_dm: None,
     });
     let dm_order: Vec<_> = order
         .into_iter()
@@ -871,6 +867,7 @@ fn visual_order_hides_dm_with_ignored_peer() {
         favorite_room_ids: &[],
         collapsed_sections: &HashSet::new(),
         ignored_user_ids: &ignored,
+        sticky_unread_dm: None,
     });
 
     assert!(order.contains(&RoomSlot::Room(dm_alice.id)));
@@ -889,8 +886,231 @@ fn visual_order_hides_dm_with_ignored_peer() {
         favorite_room_ids: &[dm_bob.id],
         collapsed_sections: &HashSet::new(),
         ignored_user_ids: &ignored,
+        sticky_unread_dm: None,
     });
     assert!(!favorited.contains(&RoomSlot::Room(dm_bob.id)));
+}
+
+#[test]
+fn visual_order_promotes_unread_dms_above_channels() {
+    let me = Uuid::from_u128(1);
+    let alice = Uuid::from_u128(2);
+    let bob = Uuid::from_u128(3);
+    let carol = Uuid::from_u128(4);
+    let lounge = Uuid::from_u128(10);
+    let public_alpha = Uuid::from_u128(20);
+    let dm_alice = make_dm(me, alice);
+    let dm_bob = make_dm(me, bob);
+    let dm_carol = make_dm(me, carol);
+
+    let mut usernames = HashMap::new();
+    usernames.insert(alice, "alice".to_string());
+    usernames.insert(bob, "bob".to_string());
+    usernames.insert(carol, "carol".to_string());
+
+    let rooms = vec![
+        make_room(lounge, "lounge", "public", true, Some("lounge")),
+        make_room(public_alpha, "topic", "public", false, Some("alpha")),
+        (dm_alice.clone(), Vec::new()),
+        (dm_bob.clone(), Vec::new()),
+        (dm_carol.clone(), Vec::new()),
+    ];
+    // Carol is favorited, so she stays in Favorites even while unread.
+    let unread_counts = HashMap::from([(dm_bob.id, 3), (dm_carol.id, 1)]);
+
+    let order = visual_order_for_rooms(RoomVisualOrderInput {
+        rooms: &rooms,
+        user_id: me,
+        usernames: &usernames,
+        unread_counts: &unread_counts,
+        room_last_message_at: &HashMap::new(),
+        feeds_available: false,
+        favorite_room_ids: &[dm_carol.id],
+        collapsed_sections: &HashSet::new(),
+        ignored_user_ids: &HashSet::new(),
+        sticky_unread_dm: None,
+    });
+
+    assert_eq!(
+        order,
+        vec![
+            RoomSlot::Room(dm_carol.id),
+            RoomSlot::Room(lounge),
+            RoomSlot::Notifications,
+            RoomSlot::News,
+            RoomSlot::Discover,
+            RoomSlot::Room(dm_bob.id),
+            RoomSlot::Room(public_alpha),
+            RoomSlot::Room(dm_alice.id),
+        ]
+    );
+}
+
+#[test]
+fn visual_order_holds_the_dm_being_read_in_the_unread_group() {
+    let me = Uuid::from_u128(1);
+    let bob = Uuid::from_u128(3);
+    let public_alpha = Uuid::from_u128(20);
+    let dm_bob = make_dm(me, bob);
+
+    let mut usernames = HashMap::new();
+    usernames.insert(bob, "bob".to_string());
+
+    let rooms = vec![
+        make_room(public_alpha, "topic", "public", false, Some("alpha")),
+        (dm_bob.clone(), Vec::new()),
+    ];
+    let order = |sticky: Option<Uuid>| {
+        visual_order_for_rooms(RoomVisualOrderInput {
+            rooms: &rooms,
+            user_id: me,
+            usernames: &usernames,
+            // Opening the DM zeroes its count, which is exactly the moment the
+            // row must not move.
+            unread_counts: &HashMap::from([(dm_bob.id, 0)]),
+            room_last_message_at: &HashMap::new(),
+            feeds_available: false,
+            favorite_room_ids: &[],
+            collapsed_sections: &HashSet::new(),
+            ignored_user_ids: &HashSet::new(),
+            sticky_unread_dm: sticky,
+        })
+    };
+
+    let dm_index = |order: &[RoomSlot]| {
+        order
+            .iter()
+            .position(|slot| *slot == RoomSlot::Room(dm_bob.id))
+            .expect("dm present")
+    };
+    let channel_index = |order: &[RoomSlot]| {
+        order
+            .iter()
+            .position(|slot| *slot == RoomSlot::Room(public_alpha))
+            .expect("channel present")
+    };
+
+    let reading = order(Some(dm_bob.id));
+    assert!(dm_index(&reading) < channel_index(&reading));
+
+    // Reading any other room releases it, and the DM drops back down.
+    let left = order(None);
+    assert!(dm_index(&left) > channel_index(&left));
+}
+
+#[test]
+fn visual_order_keeps_promoted_unread_dms_when_the_dms_section_is_collapsed() {
+    let me = Uuid::from_u128(1);
+    let alice = Uuid::from_u128(2);
+    let bob = Uuid::from_u128(3);
+    let dm_alice = make_dm(me, alice);
+    let dm_bob = make_dm(me, bob);
+
+    let mut usernames = HashMap::new();
+    usernames.insert(alice, "alice".to_string());
+    usernames.insert(bob, "bob".to_string());
+
+    let rooms = vec![(dm_alice.clone(), Vec::new()), (dm_bob.clone(), Vec::new())];
+
+    let order = visual_order_for_rooms(RoomVisualOrderInput {
+        rooms: &rooms,
+        user_id: me,
+        usernames: &usernames,
+        unread_counts: &HashMap::from([(dm_bob.id, 2)]),
+        room_last_message_at: &HashMap::new(),
+        feeds_available: false,
+        favorite_room_ids: &[],
+        collapsed_sections: &HashSet::from([RoomSection::Dms]),
+        ignored_user_ids: &HashSet::new(),
+        sticky_unread_dm: None,
+    });
+
+    // Collapsing DMs folds away the read ones only; an unread DM lives in its
+    // own group and stays reachable.
+    assert!(order.contains(&RoomSlot::Room(dm_bob.id)));
+    assert!(!order.contains(&RoomSlot::Room(dm_alice.id)));
+}
+
+#[test]
+fn sticky_unread_dm_holds_the_open_dm_until_another_room_is_read() {
+    let dm = Uuid::from_u128(1);
+    let other_dm = Uuid::from_u128(2);
+    let channel = Uuid::from_u128(3);
+
+    // Opening an unread DM claims the slot.
+    let sticky = next_sticky_unread_dm(NextStickyUnreadDm {
+        current: None,
+        room_id: dm,
+        is_dm: true,
+        unread: true,
+    });
+    assert_eq!(sticky, Some(dm));
+
+    // A message landing while it is open re-marks it read; it must stay.
+    assert_eq!(
+        next_sticky_unread_dm(NextStickyUnreadDm {
+            current: sticky,
+            room_id: dm,
+            is_dm: true,
+            unread: false,
+        }),
+        Some(dm)
+    );
+
+    // Reading a channel or an already-read DM releases it.
+    assert_eq!(
+        next_sticky_unread_dm(NextStickyUnreadDm {
+            current: sticky,
+            room_id: channel,
+            is_dm: false,
+            unread: true,
+        }),
+        None
+    );
+    assert_eq!(
+        next_sticky_unread_dm(NextStickyUnreadDm {
+            current: sticky,
+            room_id: other_dm,
+            is_dm: true,
+            unread: false,
+        }),
+        None
+    );
+
+    // Moving straight into another unread DM hands the slot over.
+    assert_eq!(
+        next_sticky_unread_dm(NextStickyUnreadDm {
+            current: sticky,
+            room_id: other_dm,
+            is_dm: true,
+            unread: true,
+        }),
+        Some(other_dm)
+    );
+}
+
+#[test]
+fn visual_order_never_promotes_an_ignored_peers_unread_dm() {
+    let me = Uuid::from_u128(1);
+    let bob = Uuid::from_u128(3);
+    let dm_bob = make_dm(me, bob);
+    let usernames = HashMap::new();
+    let rooms = vec![(dm_bob.clone(), Vec::new())];
+
+    let order = visual_order_for_rooms(RoomVisualOrderInput {
+        rooms: &rooms,
+        user_id: me,
+        usernames: &usernames,
+        unread_counts: &HashMap::from([(dm_bob.id, 5)]),
+        room_last_message_at: &HashMap::new(),
+        feeds_available: false,
+        favorite_room_ids: &[],
+        collapsed_sections: &HashSet::new(),
+        ignored_user_ids: &HashSet::from([bob]),
+        sticky_unread_dm: None,
+    });
+
+    assert!(!order.contains(&RoomSlot::Room(dm_bob.id)));
 }
 
 #[test]
@@ -1023,6 +1243,9 @@ fn room_slug_for_uses_explicit_room_id() {
                 language_code: None,
                 dm_user_a: None,
                 dm_user_b: None,
+                topic: None,
+                rules: None,
+                created_by: None,
             },
             vec![],
         ),
@@ -1039,6 +1262,9 @@ fn room_slug_for_uses_explicit_room_id() {
                 language_code: None,
                 dm_user_a: None,
                 dm_user_b: None,
+                topic: None,
+                rules: None,
+                created_by: None,
             },
             vec![],
         ),
@@ -1459,7 +1685,6 @@ fn make_msg(id: Uuid) -> ChatMessage {
         id,
         created: chrono::Utc::now(),
         updated: chrono::Utc::now(),
-        pinned: false,
         reply_to_message_id: None,
         reply_to_user_id: None,
         room_id: Uuid::from_u128(999),
@@ -1758,6 +1983,9 @@ fn make_dm(user_a: Uuid, user_b: Uuid) -> ChatRoom {
         language_code: None,
         dm_user_a: Some(user_a),
         dm_user_b: Some(user_b),
+        topic: None,
+        rules: None,
+        created_by: None,
     }
 }
 
@@ -1827,4 +2055,434 @@ fn parse_brb_rejects_non_command() {
     assert_eq!(parse_brb_command("/brbx something"), None);
     assert_eq!(parse_brb_command("hello /brb"), None);
     assert_eq!(parse_brb_command(""), None);
+}
+
+#[test]
+fn set_context_value_reports_only_real_changes() {
+    let user_id = Uuid::from_u128(1);
+    let mut map = HashMap::new();
+
+    // Insert, same-value no-op, change, blank clears, clear of absent key.
+    assert!(set_context_value(&mut map, user_id, Some("mod")));
+    assert!(!set_context_value(&mut map, user_id, Some("mod")));
+    assert!(set_context_value(&mut map, user_id, Some("artist")));
+    assert!(set_context_value(&mut map, user_id, Some("  ")));
+    assert!(map.is_empty());
+    assert!(!set_context_value(&mut map, user_id, None));
+}
+
+#[test]
+fn extend_changed_reports_only_real_changes() {
+    let a = Uuid::from_u128(1);
+    let b = Uuid::from_u128(2);
+    let mut map = HashMap::from([(a, "alice".to_string())]);
+
+    // Identical merge is a no-op; a new key or changed value reports true.
+    assert!(!extend_changed(
+        &mut map,
+        HashMap::from([(a, "alice".to_string())])
+    ));
+    assert!(extend_changed(
+        &mut map,
+        HashMap::from([(b, "bob".to_string())])
+    ));
+    assert!(extend_changed(
+        &mut map,
+        HashMap::from([(a, "alicia".to_string())])
+    ));
+    assert_eq!(map.get(&a).map(String::as_str), Some("alicia"));
+}
+
+/// A ChatState wired to a real DB with inert side services, for exercising
+/// the row-cache counter contract directly.
+fn counter_test_state(test_db: &late_core::test_utils::TestDb, user_id: Uuid) -> ChatState {
+    let db = test_db.db.clone();
+    let notifications = crate::app::chat::notifications::svc::NotificationService::new(db.clone());
+    let chat = crate::app::chat::svc::ChatService::new(db.clone(), notifications.clone());
+    let ai = crate::app::ai::svc::AiService::new(false, None);
+    let articles = crate::app::chat::news::svc::ArticleService::new(db.clone(), ai, chat.clone());
+    let (notifier, _outbox) = crate::app::notify::channel();
+    ChatState::new(
+        ChatServices {
+            chat,
+            notifications,
+            articles,
+            feeds: crate::app::chat::feeds::svc::FeedService::new(db.clone()),
+            showcases: crate::app::chat::showcase::svc::ShowcaseService::new(db.clone()),
+            work: crate::app::chat::work::svc::WorkService::new(db),
+        },
+        user_id,
+        crate::authz::Permissions::new(false, false),
+        None,
+        notifier,
+        crate::app::ai::ladder::MentionLadders::new(),
+    )
+}
+
+async fn wait_for_snapshot(state: &mut ChatState) {
+    crate::test_helpers::wait_until(
+        || async { state.snapshot_rx.has_changed().unwrap_or(false) },
+        "chat snapshot refresh",
+    )
+    .await;
+}
+
+/// Pump the chat event stream until `ready` holds, the way the app tick loop
+/// drains events every frame. `wait_until` cannot serve here: its predicate
+/// borrows immutably, and draining needs `&mut ChatState`.
+async fn drain_events_until(
+    state: &mut ChatState,
+    label: &str,
+    ready: impl Fn(&ChatState) -> bool,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        state.drain_events();
+        if ready(state) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+    panic!("timed out waiting for condition: {label}");
+}
+
+#[tokio::test]
+async fn snapshot_and_message_updates_preserve_row_cache_contract() {
+    use late_core::models::chat_message::{ChatMessage, ChatMessageParams};
+    use late_core::models::chat_room::ChatRoom;
+    use late_core::models::chat_room_member::ChatRoomMember;
+
+    let test_db = crate::test_helpers::new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let user = late_core::test_utils::create_test_user(&test_db.db, "counter_user").await;
+    let author = late_core::test_utils::create_test_user(&test_db.db, "counter_author").await;
+    let lounge = ChatRoom::ensure_lounge(&client).await.expect("lounge");
+    let other = ChatRoom::get_or_create_public_room(&client, "counter-other")
+        .await
+        .expect("other room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join user");
+    ChatRoomMember::join(&client, other.id, user.id)
+        .await
+        .expect("join other");
+    ChatRoomMember::join(&client, lounge.id, author.id)
+        .await
+        .expect("join author");
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: lounge.id,
+            user_id: author.id,
+            body: "first".to_string(),
+        },
+    )
+    .await
+    .expect("first message");
+
+    let mut state = counter_test_state(&test_db, user.id);
+    wait_for_snapshot(&mut state).await;
+    assert!(state.drain_snapshot(), "first snapshot populates state");
+    assert!(!state.rooms.is_empty(), "initial snapshot loads rooms");
+    let epoch = state.context_epoch();
+    let version = state.room_version(lounge.id);
+    let other_version = state.room_version(other.id);
+
+    // Snapshots arrive on a fixed cadence whether or not anything changed;
+    // an identical reapply must report clean and leave every counter stable,
+    // or every session rebuilds its row caches every 10 seconds for nothing.
+    state.refresh_tx.send(()).expect("force refresh");
+    wait_for_snapshot(&mut state).await;
+    assert!(
+        !state.drain_snapshot(),
+        "identical snapshot reapply reports clean"
+    );
+    assert_eq!(state.context_epoch(), epoch);
+    assert_eq!(state.room_version(lounge.id), version);
+    assert_eq!(state.room_version(other.id), other_version);
+
+    // A snapshot carrying a new message must still dirty the frame.
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: lounge.id,
+            user_id: author.id,
+            body: "second".to_string(),
+        },
+    )
+    .await
+    .expect("second message");
+    state.refresh_tx.send(()).expect("force refresh");
+    wait_for_snapshot(&mut state).await;
+    assert!(
+        state.drain_snapshot(),
+        "snapshot with a new message reports changed"
+    );
+    let lounge_version = state.room_version(lounge.id);
+    let other_version = state.room_version(other.id);
+
+    let message = late_core::models::chat_message::ChatMessage {
+        id: Uuid::now_v7(),
+        created: Utc::now(),
+        updated: Utc::now(),
+        reply_to_message_id: None,
+        reply_to_user_id: None,
+        room_id: lounge.id,
+        user_id: user.id,
+        body: "hello".to_string(),
+    };
+    state.push_message(message.clone());
+    assert_eq!(state.room_version(lounge.id), lounge_version + 1);
+    assert_eq!(state.room_version(other.id), other_version);
+
+    // Duplicate delivery dedups by id and must not invalidate the cache.
+    state.push_message(message.clone());
+    assert_eq!(state.room_version(lounge.id), lounge_version + 1);
+
+    // An edit replaces in place and must repaint.
+    let mut edited = message;
+    edited.body = "hello, edited".to_string();
+    edited.updated = Utc::now();
+    state.replace_message(edited);
+    assert_eq!(state.room_version(lounge.id), lounge_version + 2);
+}
+
+#[tokio::test]
+async fn stale_snapshot_does_not_roll_back_a_newer_ignore_list() {
+    use late_core::models::chat_room::ChatRoom;
+    use late_core::models::chat_room_member::ChatRoomMember;
+
+    let test_db = crate::test_helpers::new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let viewer = late_core::test_utils::create_test_user(&test_db.db, "stale_ignore_viewer").await;
+    let target = late_core::test_utils::create_test_user(&test_db.db, "stale_ignore_target").await;
+    let lounge = ChatRoom::ensure_lounge(&client).await.expect("lounge");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, lounge.id, target.id)
+        .await
+        .expect("join target");
+
+    let mut state = counter_test_state(&test_db, viewer.id);
+    wait_for_snapshot(&mut state).await;
+    state.drain_snapshot();
+
+    // A snapshot whose read ran before the ignore was written, held back
+    // undrained: every live session has one of these in flight, and a slow
+    // host delivers it after the ignore lands.
+    state.refresh_tx.send(()).expect("force refresh");
+    crate::test_helpers::wait_until(
+        || async { state.snapshot_rx.has_changed().unwrap_or(false) },
+        "pre-ignore chat snapshot",
+    )
+    .await;
+
+    state
+        .service
+        .ignore_user_task(viewer.id, target.username.clone());
+    let target_id = target.id;
+    drain_events_until(&mut state, "ignore list updated", |state| {
+        state.ignored_user_ids().contains(&target_id)
+    })
+    .await;
+
+    // The stale read is older than the write it would overwrite, so it must
+    // not un-ignore the target and let their next message through.
+    state.drain_snapshot();
+    assert!(
+        state.ignored_user_ids().contains(&target_id),
+        "stale snapshot must not roll back the ignore list"
+    );
+}
+
+#[test]
+fn parse_pair_command_accepts_directed_form() {
+    assert_eq!(
+        parse_pair_command("/pair @alice"),
+        Some(Some(PairRequest::Directed("alice".to_string())))
+    );
+}
+
+#[test]
+fn parse_pair_command_rejects_bare_and_malformed_forms() {
+    assert_eq!(parse_pair_command("/pair"), Some(None), "no target");
+    assert_eq!(parse_pair_command("/pair @"), Some(None), "empty username");
+    assert_eq!(parse_pair_command("/pair alice"), Some(None), "missing @");
+    assert_eq!(
+        parse_pair_command("/pair @alice extra"),
+        Some(None),
+        "trailing token"
+    );
+}
+
+#[test]
+fn parse_pair_command_ignores_unrelated_input() {
+    assert_eq!(parse_pair_command("/pairing @alice"), None);
+    assert_eq!(parse_pair_command("hello /pair @alice"), None);
+    assert_eq!(parse_pair_command("/challenge @alice"), None);
+}
+
+fn pomodoro_start(minutes: u32, label: &str) -> Option<PomodoroParse> {
+    Some(PomodoroParse::Request(PomodoroRequest::Start {
+        minutes,
+        label: label.to_string(),
+    }))
+}
+
+#[test]
+fn parse_pomodoro_command_defaults_duration_and_label() {
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro"),
+        pomodoro_start(POMODORO_DEFAULT_MINUTES, POMODORO_DEFAULT_LABEL)
+    );
+    assert_eq!(
+        parse_pomodoro_command("  /pomodoro   "),
+        pomodoro_start(POMODORO_DEFAULT_MINUTES, POMODORO_DEFAULT_LABEL),
+        "surrounding whitespace is not a label"
+    );
+}
+
+#[test]
+fn parse_pomodoro_command_reads_leading_minutes_then_label() {
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro 50"),
+        pomodoro_start(50, POMODORO_DEFAULT_LABEL)
+    );
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro 50 deep   work"),
+        pomodoro_start(50, "deep work"),
+        "label whitespace collapses"
+    );
+    // No leading integer means the whole rest is the label, so a plain
+    // `/pomodoro <thing>` still starts the default block.
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro deep work"),
+        pomodoro_start(POMODORO_DEFAULT_MINUTES, "deep work")
+    );
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro 5k run"),
+        pomodoro_start(POMODORO_DEFAULT_MINUTES, "5k run"),
+        "a digit-prefixed word is not a duration"
+    );
+}
+
+#[test]
+fn parse_pomodoro_command_sanitizes_and_caps_the_label() {
+    let long = "x".repeat(POMODORO_LABEL_MAX_COLS + 10);
+    assert_eq!(
+        parse_pomodoro_command(&format!("/pomodoro {long}")),
+        pomodoro_start(
+            POMODORO_DEFAULT_MINUTES,
+            &"x".repeat(POMODORO_LABEL_MAX_COLS)
+        )
+    );
+    // The cap is display cells, so a double-width label stops at half the
+    // char count rather than twice the border budget.
+    assert_eq!(
+        parse_pomodoro_command(&format!("/pomodoro {}", "深".repeat(20))),
+        pomodoro_start(
+            POMODORO_DEFAULT_MINUTES,
+            &"深".repeat(POMODORO_LABEL_MAX_COLS / 2)
+        )
+    );
+    // The label reaches a desktop notification and the top border, so control
+    // characters never survive parsing.
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro focus\u{1b}]777;notify"),
+        pomodoro_start(POMODORO_DEFAULT_MINUTES, "focus]777;notify")
+    );
+}
+
+#[test]
+fn parse_pomodoro_command_stops_a_running_timer() {
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro stop"),
+        Some(PomodoroParse::Request(PomodoroRequest::Stop))
+    );
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro STOP"),
+        Some(PomodoroParse::Request(PomodoroRequest::Stop))
+    );
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro stop now"),
+        Some(PomodoroParse::Invalid),
+        "stop takes no arguments"
+    );
+}
+
+#[test]
+fn parse_pomodoro_command_rejects_out_of_range_durations() {
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro 0"),
+        Some(PomodoroParse::Invalid),
+        "zero"
+    );
+    assert_eq!(
+        parse_pomodoro_command(&format!("/pomodoro {}", POMODORO_MAX_MINUTES + 1)),
+        Some(PomodoroParse::Invalid),
+        "over the cap"
+    );
+    assert_eq!(
+        parse_pomodoro_command("/pomodoro 99999999999999999999"),
+        Some(PomodoroParse::Invalid),
+        "digit run too long for u32"
+    );
+}
+
+#[test]
+fn parse_pomodoro_command_ignores_unrelated_input() {
+    assert_eq!(parse_pomodoro_command("/pomodoros"), None);
+    assert_eq!(parse_pomodoro_command("hello /pomodoro"), None);
+    assert_eq!(parse_pomodoro_command("/poll"), None);
+}
+
+#[test]
+fn format_cooldown_rounds_minutes_up() {
+    assert_eq!(format_cooldown(Duration::from_secs(45)), "45s");
+    assert_eq!(format_cooldown(Duration::from_millis(200)), "1s");
+    assert_eq!(format_cooldown(Duration::from_secs(60)), "1 min");
+    assert_eq!(format_cooldown(Duration::from_secs(90)), "2 min");
+    assert_eq!(format_cooldown(Duration::from_secs(300)), "5 min");
+}
+
+#[tokio::test]
+async fn bot_cooldown_banner_warns_only_for_the_hot_bot_and_room() {
+    use crate::app::ai::ladder::LadderBot;
+
+    let test_db = crate::test_helpers::new_test_db().await;
+    let user = late_core::test_utils::create_test_user(&test_db.db, "ladder_banner_user").await;
+    let state = counter_test_state(&test_db, user.id);
+    let room = Uuid::now_v7();
+    let other_room = Uuid::now_v7();
+
+    // Nothing answered yet: a mention warns nobody.
+    assert!(state.bot_cooldown_banner(room, "@bot hello").is_none());
+
+    // The ghost loop answers once; the ladder is now hot in this room.
+    state
+        .mention_ladders
+        .check_and_step(LadderBot::Bot, user.id, room);
+
+    let banner = state
+        .bot_cooldown_banner(room, "hey @bot still there?")
+        .expect("hot ladder warns");
+    assert!(
+        banner.message.contains("@bot is cooling down"),
+        "unexpected banner text: {}",
+        banner.message
+    );
+
+    // A different bot, a plain message, and another room all stay quiet.
+    assert!(
+        state
+            .bot_cooldown_banner(room, "@bartender a pint")
+            .is_none()
+    );
+    assert!(state.bot_cooldown_banner(room, "no bots here").is_none());
+    assert!(
+        state
+            .bot_cooldown_banner(other_room, "@bot hello")
+            .is_none()
+    );
 }

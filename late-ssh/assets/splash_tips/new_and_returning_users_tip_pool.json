@@ -1,5 +1,6 @@
 [
-  "Try our games! ~Rank up on the leaderboards~",
+  "late.sh is 18+ ~ house rules at late.sh/terms, reports to admin@dwarfforge.io",
+  "Try our games! ~Rank up on the leaderboards, page 6~",
   "Water your bonsai once a day with the w key",
   "You can open a public room with /public #room",
   "Switch what you hear: v then x cycles audio sources, v then 1-4 picks a stream or station",
@@ -20,7 +21,7 @@
   "Use /members to see who's in the current room",
   "Select a chat message with j/k and press r to reply to it",
   "Solve a daily puzzle every day to build a streak and earn chip rewards",
-  "Earn chips by solving daily puzzles (see ctrl+g)",
+  "Earn chips by solving daily puzzles and quests (page 2)",
   "Share a web link in the special 'news' chatroom",
   "Install and use Nerd Fonts for the best experience!",
   "Press c to check in on your cat — feed, water, or play",
@@ -31,6 +32,9 @@
   "You land in the Clubhouse: walk with hjkl, press i to talk, w to wave, x to dance",
   "In the Clubhouse your words float over your head; the full chat lives on Home (1)",
   "Walk up to the Clubhouse dog and press Enter. Everyone sees the pet",
-  "Press ` on Home to hop through games waiting on you: your-move boards, seated tables, unfinished daily puzzles",
-  "Type /search in chat to find old messages across all your rooms"
+  "Press ` on Home to hop through games waiting on you: your-move boards, seated tables, unfinished daily puzzles, live roguelike dungeons",
+  "Type /search in chat to find old messages across all your rooms",
+  "Made a private room? /roominfo sets what it is about and its rules",
+  "Lost in Lateania? Press m for the overhead map: it fills in only where you have walked",
+  "Defend the Gate in CodeKeep: open Games (3), select CodeKeep, and press Enter"
 ]

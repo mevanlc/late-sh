@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: `late-cli` - companion CLI for late.sh (plus the sibling `late-webview` helper crate)
 - Primary audience: LLM agents working on the CLI, human contributors
-- Last updated: 2026-07-15 (webview helper resiliency: helper pair-WS reconnects with backoff instead of exiting on drops; parent respawns a dead helper from the 1s pair-WS heartbeat watchdog instead of waiting for the next `set_playback_source`; parent hands its current mute/volume to the helper at spawn via `LATE_WEBVIEW_INITIAL_MUTED`/`LATE_WEBVIEW_INITIAL_VOLUME` so respawns keep the session's mute)
+- Last updated: 2026-07-31 (Linux MPRIS publication: the CLI publishes the selected source as a desktop media player; widget transport/volume commands go up the pair WS as `set_muted`/`set_volume` and the server fans them to every paired client, YouTube's webview helper included; missing session D-Bus fails open)
 - Status: Active
 - Stability note: Sections marked `[STABLE]` should change rarely. Sections marked `[VOLATILE]` are expected to change often.
 
@@ -36,6 +36,7 @@ Primary responsibilities:
 - MP3 stream decoding via `symphonia`
 - FFT visualizer frames sent to the SSH TUI over WebSocket
 - Paired mute/volume controls received from the TUI
+- Linux MPRIS publication for the selected YouTube, Icecast, or radio track
 - LiveKit voice capture/playout for native desktop CLI users, controlled over the pair WebSocket
 - Cross-platform installer targets for Linux, macOS, Windows, and Android/Termux
 
@@ -61,7 +62,8 @@ flowchart LR
     DEC --> OUT["cpal output"]
     OUT --> ANA["playback analyzer"]
     ANA -->|"viz frames"| API
-    API -->|"toggle_mute / volume_up / volume_down"| CLI
+    API -->|"toggle_mute / volume_up / volume_down / set_muted / set_volume"| CLI
+    CLI -->|"set_muted / set_volume (MPRIS)"| API
     SSH -->|"session token"| CLI
 ```
 
@@ -84,6 +86,7 @@ OpenSSH mode differs slightly: it authenticates and fetches the token first thro
 - `src/clipboard.rs` - paired `/paste-image` clipboard read, Wayland/X clipboard backend use, PNG encoding, and local size guards. Clipboard support is only advertised on Linux, macOS, and Windows; Android/Termux builds do not depend on `arboard`.
 - `src/config.rs` - flags, env vars, defaults, logging
 - `src/identity.rs` - dedicated key discovery/generation
+- `src/mpris.rs` - Linux MPRIS service, track metadata projection, and the desktop command queue (transport/volume mapped to server-routed `set_muted`/`set_volume`); other platforms compile a no-op publisher
 - `src/ssh.rs` - native SSH, OpenSSH ControlMaster mode, legacy PTY subprocess mode, token parsing, resize forwarding
 - `src/pty.rs` - terminal size/PTY helpers
 - `src/raw_mode.rs` - local raw-mode guard for modes where CLI owns terminal forwarding
@@ -249,6 +252,13 @@ Client to server:
 }
 ```
 
+Client to server, from the Linux desktop MPRIS surface (widget play/pause, media keys, volume slider). The server fans the matching `set_muted`/`set_volume` control back to every paired client on the token:
+
+```json
+{ "event": "set_muted", "muted": true }
+{ "event": "set_volume", "volume_percent": 45 }
+```
+
 Server to client:
 
 ```json
@@ -264,11 +274,16 @@ Server to client:
 ```
 
 ```json
+{ "event": "set_muted", "muted": true }
+{ "event": "set_volume", "volume_percent": 45 }
+```
+
+```json
 { "event": "request_clipboard_image" }
 ```
 
 ```json
-{ "event": "set_playback_source", "source": "icecast|youtube|radio", "stream_url": "...", "station": "...", "embedded_webview_enabled": true }
+{ "event": "set_playback_source", "source": "icecast|youtube|radio", "stream_url": "...", "station": "..." }
 ```
 
 ```json
@@ -301,16 +316,16 @@ Client state labels:
 
 Pairing behavior:
 - The server stores one paired-client sender/state entry per token.
-- If multiple browser/CLI clients pair with the same token, latest registration owns control/state until it disconnects.
+- If the CLI and its webview helper both pair on the same token, latest registration owns control/state until it disconnects.
 - CLI WebSocket reconnects up to 10 consecutive failures with a 2s delay.
 - The pair WebSocket loop is selected alongside SSH session completion in the root async task, not spawned with `tokio::spawn`. This is intentional because native LiveKit voice room state is not guaranteed to be `Send` across desktop platforms.
 - The first `client_state` is sent immediately after connect. It is resent after local mute/volume controls and when `icecast_output_available` changes; source changes and voice controls use their own handling/`voice_state`.
-- `/paste-image` in SSH chat depends on the paired CLI control channel. The server only sends `request_clipboard_image` after seeing `clipboard_image` in the latest paired client's `client_state.capabilities`, so older CLIs and browser pairs do not receive unsupported control events.
+- `/paste-image` in SSH chat depends on the paired CLI control channel. The server only sends `request_clipboard_image` after seeing `clipboard_image` in the latest paired client's `client_state.capabilities`, so older CLIs and the webview helper do not receive unsupported control events.
 - Linux Wayland support for `/paste-image` depends on the workspace `arboard` dependency enabling `wayland-data-control`; Hyprland uses this path. Without it, the CLI may report that the clipboard does not contain an image even when Wayland has `image/png` content.
 - Clipboard images are converted to PNG in the CLI before upload. The CLI rejects zero-size images, very large decoded RGBA buffers, and PNG payloads above the upload cap before sending them over the pair socket.
 
 Embedded YouTube helper window:
-- The helper opens a minimal 200x200 non-resizable, undecorated webview window only while the user source is YouTube and no real browser connect page is paired. On Linux the helper is the standalone `late-webview` binary installed next to `late` (`LATE_WEBVIEW_BIN` overrides, `$PATH` is the last fallback); on Windows/macOS it is `late webview-pair`, the `late` binary re-executed with the webview compiled in. `late webview-pair`/`late webview-spike` on Linux just forward to the external binary.
+- The helper opens a minimal 200x200 non-resizable, undecorated webview window while the user source is YouTube. On Linux the helper is the standalone `late-webview` binary installed next to `late` (`LATE_WEBVIEW_BIN` overrides, `$PATH` is the last fallback); on Windows/macOS it is `late webview-pair`, the `late` binary re-executed with the webview compiled in. `late webview-pair`/`late webview-spike` on Linux just forward to the external binary.
 - Linux invariant: `late` itself must never link WebKitGTK/GTK. A machine without the webview libraries has to run the full CLI; only embedded YouTube playback may degrade. Missing helper binary or missing WebKitGTK/GStreamer libraries fail the helper spawn/startup and land in the crash-loop backoff below — installing the distro packages later fixes playback with no CLI reinstall. The helper page gives the YouTube iframe the full viewport, disables YouTube's visible controls, and does not draw app UI over the player.
 - The helper page is served from a loopback listener but loaded as `http://localhost:<port>/`, sends `Referrer-Policy: strict-origin-when-cross-origin`, and passes `window.location.origin` as the YouTube IFrame `origin`.
 - By default the parent redirects helper stderr to the webview log path. For a single combined debug capture, run `LATE_WEBVIEW_DEBUG_STDERR=1 late -v 2>late-debug.log`; this captures both parent CLI tracing and helper GTK/WebKit/GStreamer output.
@@ -318,7 +333,7 @@ Embedded YouTube helper window:
 - The helper's pair WebSocket reconnects on drops (2s delay, up to 10 consecutive failures, counter reset once a connection has lived 60s) instead of exiting the process, so server redeploys and network blips do not tear down the window or reset mute/volume. The helper process exits only on window close, a real crash, or a reconnect give-up.
 - While the source is YouTube, the parent checks the helper child from the pair-WS 1s heartbeat (`maintain_helper`) and respawns it if it died, honoring the crash backoff below. Respawn must not depend on `set_playback_source` replays: the server can miss the helper's disconnect entirely on a half-open TCP drop and then never replays.
 - At spawn the parent passes its current mute/volume via `LATE_WEBVIEW_INITIAL_MUTED` / `LATE_WEBVIEW_INITIAL_VOLUME` (internal parent-to-helper env, not user config); the helper seeds its audio settings from them and pushes them into the page on the page's `ready` event. Server-side, `api.rs` aligns a connecting webview client's mute to the live CLI entry's muted state instead of `start_with_music_muted`, so a respawned or reconnected helper keeps the session's runtime mute.
-- If the embedded helper exits or fails to start 3 times within 60 seconds, the parent disables embedded YouTube fallback for 5 minutes and logs the helper log path. This prevents the repeated open/close loop when a host WebKit/GStreamer install is broken; a real browser connect page can still take over YouTube playback. After the backoff expires the heartbeat watchdog retries automatically.
+- If the embedded helper exits or fails to start 3 times within 60 seconds, the parent disables embedded YouTube fallback for 5 minutes and logs the helper log path. This prevents the repeated open/close loop when a host WebKit/GStreamer install is broken. Nothing takes over: YouTube is simply unavailable in the CLI until the helper works, and users can listen at late.sh/listen meanwhile. After the backoff expires the heartbeat watchdog retries automatically.
 - The helper requests no initial focus, always-on-bottom placement, and an initial top-right position on the primary monitor; on Linux it also skips the taskbar. These are best-effort window-manager hints, not a hidden/background player. On Linux/Wayland the app id/class is `sh.late.youtube`; Hyprland may ignore always-on-bottom or client-side positioning, so users who need stronger routing should use a special workspace/scratchpad instead of relying on fully off-screen placement.
 - On initial helper open only, `webview-pair` uses the first `queue_update.current.started_at_ms` snapshot to apply one `startSeconds` value to the first matching `load_video`. If a `load_video` arrives before that first snapshot, the relay buffers it and flushes it when the snapshot decision is known. After that first load is dispatched, heartbeats and later track switches do not receive a seek offset and continue through the normal `loadVideoById({ videoId })` path.
 - The helper page suppresses transient YouTube IFrame `unstarted`/`cued` states and only reports `ended` after the current item has reached `playing`; the server still owns queue advancement through its playback timer.
@@ -346,7 +361,7 @@ Critical audio invariant:
 
 Platform notes:
 - Android/Termux currently disables local audio in the runtime and still allows the SSH/client path to proceed.
-- WSL uses a dedicated audio profile: fixed 2048-frame CPAL buffer where possible, a short prebuffer before `stream.play()`, and fail-open startup. If local WSL audio cannot start, the CLI continues into SSH with audio disabled and points users to browser pairing or Windows-native `late.exe`.
+- WSL uses a dedicated audio profile: fixed 2048-frame CPAL buffer where possible, a short prebuffer before `stream.play()`, and fail-open startup. If local WSL audio cannot start, the CLI continues into SSH with audio disabled and points users to late.sh/listen or Windows-native `late.exe`.
 - On all platforms, local audio startup failure now fails open: the CLI continues into SSH/pairing with audio disabled and reports `icecast_output_available=false` in `client_state`.
 - WSL startup failures include a targeted hint that checks `DISPLAY`, `WAYLAND_DISPLAY`, and `PULSE_SERVER`.
 - A working configured or default local audio output device is required for full desktop CLI audio, but not for SSH connection.
@@ -354,6 +369,10 @@ Platform notes:
 - Stream URL normalization trims trailing slashes, preserves `/stream`, `/stream/...`, and direct `.mp3`/`.m4a`/`.aac` URLs, and appends `/stream` only for base URLs.
 - Stream probing scans up to 64 KiB for MP3 sync/ID3 before probing.
 - Initial volume is 30%. Enabled desktop audio boots muted until the pair WebSocket delivers the user's initial mute/source state; if pairing repeatedly fails, the CLI releases startup mute after the 10 failed pair attempts. Volume uses squared scaling.
+- On Linux, the pair client consumes `queue_update`, `now_playing_update`, and `radio_meta_update` snapshots and publishes the currently selected source through `org.mpris.MediaPlayer2`. YouTube includes title/channel/duration, watch URL, thumbnail, and wall-clock-derived initial position; Icecast and radio select the metadata entry matching `set_playback_source.station`. Missing metadata falls back to the source/station label.
+- MPRIS is controllable, but only over mute and volume. `Play`/`Pause`/`PlayPause`/`Stop` resolve through `TransportCommand` to an absolute mute target, and `SetVolume` maps the slider to a percent (raising it off zero also unmutes). `CanPlay`/`CanPause`/`CanControl` are therefore true, `CanSeek`/`CanGoNext`/`CanGoPrevious` false. Muted publishes as `Paused` rather than a zeroed volume, which is what a desktop widget draws a play button for. Reporting the read-only truth (`CanControl=false`) is spec-correct but makes the player invisible to **playerctl**, which skips any player whose `can-play` is false, and with it waybar/polybar, since those link `libplayerctl`.
+- Desktop writes are not applied locally. The MPRIS interface queues a `DesktopCommand`, the pair WS loop sends it as a `set_muted`/`set_volume` event, and the server fans the result back to every paired client (`PairControlMessage::SetMuted`/`SetVolume`), exactly like a TUI `m` keypress. That round trip is what lets a widget pause reach YouTube, which plays in the separate `late-webview` helper on its own pair WS, and it keeps CLI, helper, and sidebar convergent. It also means controls need a live pair socket, and the widget updates when the fan-out lands rather than instantly.
+- MPRIS startup and update errors fail open. Headless Linux, WSL, containers, and other environments without a usable session D-Bus continue SSH/audio normally without desktop publication.
 - The playback queue caps at roughly two seconds of output samples.
 - Analyzer cadence is about 15 Hz with a 1024-sample FFT and 8 log-spaced bands.
 
@@ -361,8 +380,8 @@ Audio and stream resiliency:
 - WebSocket pairing has a 10-attempt retry loop with 2s delay.
 - Startup stream probing and the decoder thread's first stream open each retry 3 times with a short 750ms delay before aborting startup. This covers rare Icecast/network timing blips where the first CLI launch says "failed to create audio decoder" but immediately joining again works.
 - Decoder recovery re-probes `SymphoniaStreamDecoder` in place after stream failures, sleeps 2s between reconnects, and gives up after 10 consecutive failures.
-- CPAL output stream errors mark `icecast_output_available=false`; the pair WebSocket sends an updated `client_state` so the server can allow browser Icecast takeover while the CLI remains connected.
-- The native CLI is the current real visualizer source. It sends pair-WS `viz` frames from a Rust FFT over audible playback samples; the browser connect page no longer creates a Web Audio analyzer or sends analyzer frames.
+- CPAL output stream errors mark `icecast_output_available=false`; the pair WebSocket sends an updated `client_state` so the server knows this CLI is not producing audio.
+- `viz` frames are a legacy pair-WS payload. Nothing renders them: the sidebar equalizer is synthesized from the wall tick (see `late-ssh/src/app/audio/CONTEXT.md` §10).
 
 ---
 
@@ -491,16 +510,15 @@ Relevant TUI controls:
 - `m`: toggle mute on paired client
 - `+` / `=`: volume up on paired client
 - `-` / `_`: volume down on paired client
-- `P`: Home combined install + pair modal, with curl, Nix, build-from-source options and browser pairing QR/link
+- `P`: Home combined install modal, with curl, Nix, build-from-source options and the late.sh/listen QR/link
 
 ---
 
 ## 12. Current Known Gaps [VOLATILE]
 
 - Full desktop CLI audio still depends on a working configured or default local audio output device; without one, the CLI proceeds into SSH/pairing with local audio disabled.
-- Embedded YouTube on Linux depends on the `late-webview` helper binary being installed next to `late` (plus the host WebKitGTK/GStreamer packages). A missing helper or missing libraries only disables embedded YouTube via the crash backoff; radio/icecast and browser-paired YouTube are unaffected.
+- Embedded YouTube on Linux depends on the `late-webview` helper binary being installed next to `late` (plus the host WebKitGTK/GStreamer packages). A missing helper or missing libraries only disables embedded YouTube via the crash backoff; radio and icecast are unaffected, and the queue stays listenable at late.sh/listen.
 - OpenSSH mode is Unix-only; Windows users should use native mode.
 - Old mode remains as a compatibility path and still depends on system OpenSSH plus PTY behavior.
 - Native mode does not handle OpenSSH/FIDO/YubiKey auth flows; users must switch to OpenSSH mode for those.
-- Browser and CLI analyzers are intentionally not numerically identical.
 - `scripts/run_local_cli.sh` checks for `script` but does not use it.

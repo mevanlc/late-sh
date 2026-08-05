@@ -145,7 +145,6 @@ async fn main() -> anyhow::Result<()> {
     let now_playing_rx = now_playing_service.subscribe_state();
     let radio_meta_service = late_ssh::app::audio::radio_meta::svc::RadioMetaService::new();
     let radio_meta_rx = radio_meta_service.subscribe_state();
-    let worldcup_service = late_ssh::app::worldcup::svc::WorldCupService::new();
     let public_stream_base_url = format!("{}/stream", config.web_url.trim_end_matches('/'));
     let paired_client_registry =
         late_ssh::paired_clients::PairedClientRegistry::new(public_stream_base_url);
@@ -175,11 +174,7 @@ async fn main() -> anyhow::Result<()> {
         username_directory.clone(),
         activity_tx.subscribe(),
     );
-    let ai_service = AiService::new(
-        config.ai.enabled,
-        config.ai.api_key.clone(),
-        config.ai.model.clone(),
-    );
+    let ai_service = AiService::new(config.ai.enabled, config.ai.api_key.clone());
     let profile_service = ProfileService::new(db.clone(), active_users.clone())
         .with_username_directory(username_directory.clone())
         .with_session_registry(session_registry.clone())
@@ -223,7 +218,9 @@ async fn main() -> anyhow::Result<()> {
         chip_service.clone(),
         db.clone(),
     );
+    let darkroom_service = late_ssh::app::door::darkroom::svc::DarkroomService::new(db.clone());
     let arcade_handle_service = late_ssh::app::door::arcade::ArcadeHandleService::new(db.clone());
+    let door_rc_service = late_ssh::app::door::rc::DoorRcService::new(db.clone());
     let house_registry = late_ssh::app::lobby::house::registry::HouseTableRegistry::new(
         chip_service.clone(),
         late_ssh::app::lobby::house::blackjack::player::BlackjackPlayerDirectory::new(db.clone()),
@@ -296,6 +293,8 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let clubhouse_lobby = late_ssh::app::clubhouse::lobby::SharedLobby::new();
+    let scratchpad_registry = late_ssh::app::scratchpad::registry::SharedScratchpadRegistry::new();
+    let mention_ladders = late_ssh::app::ai::ladder::MentionLadders::new();
     let ghost_service = GhostService::new(
         db.clone(),
         chat_service.clone(),
@@ -305,6 +304,7 @@ async fn main() -> anyhow::Result<()> {
         username_directory.clone(),
         chip_service.clone(),
         clubhouse_lobby.clone(),
+        mention_ladders.clone(),
     );
     let ssh_attempt_limiter = IpRateLimiter::new(
         config.ssh_max_attempts_per_ip,
@@ -343,7 +343,9 @@ async fn main() -> anyhow::Result<()> {
         minesweeper_service,
         lateania_service,
         greendragon_service,
+        darkroom_service,
         arcade_handle_service,
+        door_rc_service,
         daily_service,
         bonsai_service,
         pet_service,
@@ -358,15 +360,18 @@ async fn main() -> anyhow::Result<()> {
         ultimate_service,
         conn_limit,
         conn_counts,
+        pair_ws_counts: Arc::new(Mutex::new(HashMap::new())),
         active_users,
         clubhouse_lobby,
+        mention_ladders,
+        scratchpad_registry,
         afk_users,
         username_directory: username_directory.clone(),
         flair_directory: flair_directory.clone(),
+        pomodoro_directory: late_ssh::app::common::pomodoro::new_directory(),
         activity_feed: activity_tx,
         now_playing_rx: now_playing_rx.clone(),
         radio_meta_rx: radio_meta_rx.clone(),
-        worldcup_service: worldcup_service.clone(),
         session_registry,
         paired_client_registry,
         irc_registry: irc_registry.clone(),
@@ -433,13 +438,6 @@ async fn main() -> anyhow::Result<()> {
         Ok(())
     });
 
-    let worldcup_shutdown = session_shutdown.clone();
-    let worldcup_task = worldcup_service.start_task(worldcup_shutdown);
-    tasks.spawn(async move {
-        worldcup_task.await.context("world cup task panicked")?;
-        Ok(())
-    });
-
     let meta_forward_task = audio_service.start_meta_forward_task(
         now_playing_rx.clone(),
         radio_meta_rx.clone(),
@@ -453,7 +451,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // Audio rides session_shutdown (fires after ssh drain) rather than
-    // singleton_shutdown (fires at drain begin) so paired browsers keep
+    // singleton_shutdown (fires at drain begin) so paired clients keep
     // hearing music through the entire drain window. Liquidsoap/Icecast
     // streams from a separate process and is unaffected either way.
     let audio_shutdown = session_shutdown.clone();

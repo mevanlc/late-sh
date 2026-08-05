@@ -11,8 +11,9 @@
 //     cooldown on a failed tame).
 //   * The taming success mechanic (`tame_chance`), driven by how far the tamer's
 //     Animal Taming level exceeds the beast's required level.
-//   * The pet **auto-skills** - abilities keyed to a pet's level (by size class)
-//     that fire automatically in the combat round (see `svc.rs`).
+//   * The pet **auto-skills** - abilities keyed to a pet's level, firing
+//     automatically in the combat round (see `svc.rs`). Their raw power scales
+//     with the pet's own attack, so a bigger beast hits harder on the same rung.
 //
 // The world wiring (the taming action, the panel, and the pet auto-skill combat
 // step) lives in `svc.rs` / `state.rs` / `ui.rs`; only the data and the pure
@@ -480,10 +481,125 @@ pub const TAMEABLE: &[PetSpecies] = &[
         34,
         "a living scion of the World-Oak, oldest and mightiest of all beasts",
     ),
+    // ---- Wildbound: the rideable beasts (five wild, five mythical) -------
+    beast(
+        "wb_palfrey",
+        "Duskmane Palfrey",
+        "\u{1F40E}",
+        55,
+        420,
+        22,
+        "a calm-eyed forest horse, dusk-grey down the mane; steady under a saddle",
+    ),
+    beast(
+        "wb_elk",
+        "Greatantler Elk",
+        "\u{1F98C}",
+        60,
+        460,
+        26,
+        "a bull elk whose antlers scrape the low boughs; strong enough to carry two",
+    ),
+    beast(
+        "wb_ram",
+        "Snowcrest Ram",
+        "\u{1F411}",
+        65,
+        500,
+        28,
+        "a mountain ram, sure-footed on ledges no horse would dare",
+    ),
+    beast(
+        "wb_strider",
+        "Fenland Strider",
+        "\u{1F9B6}",
+        70,
+        540,
+        30,
+        "a long-legged marsh runner that skims the soft ground like a skipped stone",
+    ),
+    beast(
+        "wb_direstag",
+        "Direhorn Stag",
+        "\u{1F98C}",
+        75,
+        600,
+        34,
+        "a stag grown vast and wary in the deep wood; it suffers only a worthy rider",
+    ),
+    beast(
+        "wb_unicorn",
+        "Moonlit Unicorn",
+        "\u{1F984}",
+        80,
+        680,
+        38,
+        "a unicorn seen only where moonlight pools; its stride bends the miles",
+    ),
+    beast(
+        "wb_hippogriff",
+        "Stormfeather Hippogriff",
+        "\u{1F985}",
+        85,
+        740,
+        42,
+        "half hawk, half horse, all weather; it lands where the storm was heading",
+    ),
+    beast(
+        "wb_griffin",
+        "Emberwing Griffin",
+        "\u{1F981}",
+        90,
+        800,
+        46,
+        "a griffin whose wingbeats shed sparks; the sky shortens beneath it",
+    ),
+    beast(
+        "wb_wyvern",
+        "Verdant Wyvern",
+        "\u{1F409}",
+        95,
+        880,
+        50,
+        "a green-scaled wyvern of the canopy roads; it knows every gap in the world",
+    ),
+    beast(
+        "wb_worldserpent",
+        "Aurora Worldserpent",
+        "\u{1F30C}",
+        100,
+        1000,
+        56,
+        "the horizon-swimmer of the old sagas; to ride it is to arrive before you left",
+    ),
 ];
 
 /// Number of tameable beasts (the design target is fifty).
 pub const TAMEABLE_COUNT: usize = TAMEABLE.len();
+
+/// The rideable species and how far they carry you: one keypress while mounted
+/// strides this many rooms. The wild mounts walk 2-3; the mythicals at the top
+/// of the taming ladder stride 4, and the very best skip 5 rooms at a time.
+pub const RIDEABLE: &[(&str, u8)] = &[
+    ("wb_palfrey", 2),
+    ("wb_elk", 2),
+    ("wb_ram", 3),
+    ("wb_strider", 3),
+    ("wb_direstag", 3),
+    ("wb_unicorn", 4),
+    ("wb_hippogriff", 4),
+    ("wb_griffin", 4),
+    ("wb_wyvern", 5),
+    ("wb_worldserpent", 5),
+];
+
+/// How many rooms one mounted step covers for a species, if it can be ridden.
+pub fn mount_stride(species_key: &str) -> Option<u8> {
+    RIDEABLE
+        .iter()
+        .find(|(key, _)| *key == species_key)
+        .map(|&(_, stride)| stride)
+}
 
 /// A `const` constructor for a tameable species (keeps the table readable).
 const fn beast(
@@ -573,8 +689,8 @@ pub fn tame_chance(taming_xp: i64, beast: &PetSpecies) -> u32 {
 
 /// Xp awarded for a *successful* tame: scales with the beast's difficulty, so
 /// taming a great wyrm is worth far more than a hare. Kept generous enough that
-/// working up the fifty beasts is a real, rewarding progression on the shared
-/// 1..=50 curve.
+/// working up the beasts is a real, rewarding progression on the shared
+/// skill curve.
 pub fn tame_xp(beast: &PetSpecies) -> i32 {
     30 + beast.tame_level * beast.tame_level / 2
 }
@@ -582,11 +698,12 @@ pub fn tame_xp(beast: &PetSpecies) -> i32 {
 // ---- Pet auto-skills ------------------------------------------------------
 //
 // A companion (bought or tamed) unlocks abilities as it gains levels, and they
-// fire automatically in the combat round on their own cooldowns. The set a pet
-// gets is keyed to its **size class** (derived from base health), so a hare
-// learns light, quick tricks and a wyrm learns devastating ones - but every pet
-// walks the same unlock ladder (L3 / L8 / L15 / L22 / L30) surfaced in the pet
-// view so the player sees what is coming.
+// fire automatically in the combat round on their own cooldowns. Every pet walks
+// the same unlock ladder, keyed to its **level** (L2 / L4 / L6 / L8 / L10,
+// surfaced in the pet view so the player sees what is coming). The skills aren't
+// varied by species; instead each one's power scales with the pet's own attack
+// in `svc.rs`, so a wyrm's Savage Bite lands far harder than a hare's on the
+// same rung.
 
 /// What an auto-skill does when it fires in the combat round. Resolved in
 /// `svc.rs` against the existing combat machinery (bonus damage, mob DoTs via
@@ -619,40 +736,41 @@ pub struct PetSkill {
     pub power: i32,
 }
 
-/// The unlock ladder shared by every companion. The five rungs unlock at L3, L8,
-/// L15, L22 and L30. (Pets currently cap at level 10 via loyalty, so the higher
-/// rungs reward the most-fed, most-loyal companions.)
+/// The unlock ladder shared by every companion. The five rungs unlock at L2, L4,
+/// L6, L8 and L10, so a well-fed, loyal companion reaches all five within the
+/// `PET_MAX_LEVEL` (10) loyalty cap. (They previously unlocked at 3/8/15/22/30,
+/// which left the top three rungs dead content behind the cap.)
 pub const PET_SKILLS: &[PetSkill] = &[
     PetSkill {
-        level: 3,
+        level: 2,
         name: "Savage Bite",
         effect: PetSkillEffect::SavageBite,
         cooldown: 3,
         power: 6,
     },
     PetSkill {
-        level: 8,
+        level: 4,
         name: "Rend",
         effect: PetSkillEffect::Rend,
         cooldown: 4,
         power: 4,
     },
     PetSkill {
-        level: 15,
+        level: 6,
         name: "Intimidating Roar",
         effect: PetSkillEffect::Roar,
         cooldown: 6,
         power: 5,
     },
     PetSkill {
-        level: 22,
+        level: 8,
         name: "Loyal Guard",
         effect: PetSkillEffect::Guard,
         cooldown: 6,
         power: 12,
     },
     PetSkill {
-        level: 30,
+        level: 10,
         name: "Killing Pounce",
         effect: PetSkillEffect::Pounce,
         cooldown: 7,

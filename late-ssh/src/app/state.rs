@@ -4,10 +4,10 @@ use crossterm::{
     cursor,
     terminal::{self, ClearType},
 };
-use late_core::{MutexRecover, api_types::NowPlaying, audio::VizFrame};
+use late_core::{MutexRecover, api_types::NowPlaying};
 use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend, layout::Rect};
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     io::{self, Write},
     sync::{Arc, Mutex},
     time::Instant,
@@ -17,23 +17,25 @@ use uuid::Uuid;
 
 use late_core::models::leaderboard::LeaderboardData;
 use late_core::models::profile::Profile;
+use late_core::models::user::{RightSidebarMode, RoomListMode};
+use late_core::models::user_ssh_key::KeyLayout;
 
 use crate::{
     app::activity::event::ActivityEvent,
-    app::audio::{client_state::ClientAudioState, viz::Visualizer},
+    app::audio::client_state::ClientAudioState,
     app::files::inline_image::InlineImageSymbolMode,
     app::files::terminal_image::{
-        TerminalImageProtocol, TerminalImageRenderState, da1_probe, identity_is_kitty,
-        iterm2_capabilities_probe, kitty_cleanup_commands, protocol_from_device_attributes,
-        protocol_from_env_hint, protocol_from_term, protocol_from_terminal_features,
-        protocol_from_xtversion, term_disables_terminal_images, terminal_image_cleanup_commands,
-        terminal_string_terminator,
+        TerminalImageProtocol, TerminalImageRenderState, da1_probe, iterm2_capabilities_probe,
+        kitty_cleanup_commands, protocol_from_device_attributes, protocol_from_env_hint,
+        protocol_from_term, protocol_from_terminal_features, protocol_from_xtversion,
+        term_disables_terminal_images, terminal_image_cleanup_commands, terminal_string_terminator,
     },
     app::{
         chat,
         chat::news::svc::ArticleService,
         chat::notifications::svc::NotificationService,
         chat::svc::ChatService,
+        common::pomodoro::{PomodoroDirectory, PomodoroTimer},
         common::primitives::{Banner, Screen},
         help_modal, hub, mod_modal, profile,
         profile::svc::ProfileService,
@@ -86,7 +88,18 @@ pub(crate) const GAME_SELECTION_TRAFFIC: usize = 8;
 pub(crate) const GAME_SELECTION_RUBIKS_CUBE: usize = 9;
 pub(crate) const DEFAULT_GAME_SELECTION: usize = GAME_SELECTION_2048;
 
-const BONSAI_V2_ACTIVITY_WINDOW_TICKS: usize = 15 * 60 * 5;
+/// Rail modes in force: this device's stored layout when its key has one, else
+/// the account default. Free-standing so `App::new` can seed the settings draft
+/// with it before the `App` itself exists.
+fn device_rails_or_profile(
+    device_rails: Option<KeyLayout>,
+    profile: &Profile,
+) -> (RoomListMode, RightSidebarMode) {
+    match device_rails {
+        Some(layout) => (layout.room_list_mode, layout.right_sidebar_mode),
+        None => (profile.room_list_mode, profile.right_sidebar_mode),
+    }
+}
 
 /// Bounds for the aquarium simulation. The tray renders inside the chat
 /// column, so mirror the default Home layout: frame borders (2) plus the
@@ -125,6 +138,15 @@ impl Write for SharedBuffer {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Terminal backend writer: batches ratatui's many small per-cell writes in
+/// a local buffer so `SharedBuffer`'s mutex is taken a handful of times per
+/// frame instead of once per ANSI command. ratatui flushes the backend at
+/// the end of every `draw`, so the buffer is empty between frames and
+/// `SharedBuffer::take()` never races unflushed frame bytes.
+fn frame_writer(shared: &SharedBuffer) -> io::BufWriter<SharedBuffer> {
+    io::BufWriter::with_capacity(64 * 1024, shared.clone())
 }
 
 // Passed to App::new() to configure the app on startup
@@ -172,6 +194,7 @@ pub struct SessionConfig {
     pub initial_minesweeper_games: Vec<late_core::models::minesweeper::Game>,
     pub lateania_service: crate::app::door::lateania::svc::LateaniaService,
     pub greendragon_service: crate::app::door::greendragon::svc::GreenDragonService,
+    pub darkroom_service: crate::app::door::darkroom::svc::DarkroomService,
     pub daily_service: crate::app::lobby::daily::svc::DailyService,
     pub house_registry: crate::app::lobby::house::registry::HouseTableRegistry,
     /// Shared in-proc dartboard server handle. Each session only connects — consuming a
@@ -186,6 +209,8 @@ pub struct SessionConfig {
     pub initial_bonsai_tree: Option<late_core::models::bonsai::Tree>,
     pub initial_bonsai_care: Option<late_core::models::bonsai::DailyCare>,
     pub initial_bonsai_v2_tree: Option<late_core::models::bonsai::BonsaiV2Tree>,
+    pub initial_bonsai_decay_protection:
+        Option<late_core::models::bonsai_decay_protection::BonsaiDecayProtection>,
     pub pet_service: crate::app::pet::svc::PetService,
     pub initial_pet: Option<late_core::models::pet::PetCompanion>,
     pub quest_service: crate::app::hub::dailies::svc::QuestService,
@@ -219,9 +244,20 @@ pub struct SessionConfig {
     pub dcss_host: String,
     pub dcss_port: u16,
     pub dcss_secret: String,
+    /// Brogue door game: reached over SSH like dcss (host `late-brogue`).
+    pub brogue_enabled: bool,
+    pub brogue_host: String,
+    pub brogue_port: u16,
+    pub brogue_secret: String,
     /// Accessor for the account's arcade handle (the public door-game name;
     /// crawl's `-name`), claimed once from the DCSS launcher.
     pub arcade_handle_service: crate::app::door::arcade::ArcadeHandleService,
+    /// Accessor for the account's door rc files (.nethackrc / DCSS init.txt),
+    /// edited from the Games hub config box and pushed to the hosts at launch.
+    pub door_rc_service: crate::app::door::rc::DoorRcService,
+    /// The account's configured door rcs, preloaded at session init. Edits in
+    /// this session update the in-App copy (`App::door_rcs`) alongside the DB.
+    pub initial_door_rcs: Vec<(late_core::models::door_rc::DoorRcGame, String)>,
     /// Usurper door game: reached over SSH like nethack (host `late-usurper`).
     pub usurper_enabled: bool,
     pub usurper_host: String,
@@ -232,6 +268,11 @@ pub struct SessionConfig {
     pub dopewars_host: String,
     pub dopewars_port: u16,
     pub dopewars_secret: String,
+    /// CodeKeep door game: reached through the dedicated `late-codekeep` host.
+    pub codekeep_enabled: bool,
+    pub codekeep_host: String,
+    pub codekeep_port: u16,
+    pub codekeep_secret: String,
     pub session_token: String,
     pub session_registry: Option<SessionRegistry>,
     pub paired_client_registry: Option<PairedClientRegistry>,
@@ -243,25 +284,36 @@ pub struct SessionConfig {
             std::collections::HashMap<String, crate::app::audio::radio_meta::svc::ArtistTitle>,
         >,
     >,
-    /// Process-global World Cup service handle (clone), used to subscribe to
-    /// the snapshot and to mint a viewer guard while on the screen.
-    pub worldcup_service: Option<crate::app::worldcup::svc::WorldCupService>,
     pub active_users: Option<ActiveUsers>,
-    /// AI text generation (the clubhouse tutorial's bartender greeting).
-    /// `None` on headless/test paths; the greeting falls back to a script.
-    pub ai_service: Option<crate::app::ai::svc::AiService>,
     /// Process-global clubhouse presence (seats, walkers, emotes). `None`
     /// on headless/test paths, which keeps the room session-local.
     pub clubhouse_lobby: Option<crate::app::clubhouse::lobby::SharedLobby>,
+    /// Process-global ghost-bot mention cooldown ladders, peeked at composer
+    /// submit for the cooldown banner. Tests pass a fresh instance.
+    pub mention_ladders: crate::app::ai::ladder::MentionLadders,
+    /// Process-global `/pair` intents and shared scratchpad buffers. `None`
+    /// on headless/test paths, which disables `/pair`.
+    pub scratchpad_registry: Option<crate::app::scratchpad::registry::SharedScratchpadRegistry>,
     /// True once this user finished (or skipped) the clubhouse tutorial.
     pub clubhouse_tutorial_done: bool,
     /// Whether the aquarium tray was open when the user last toggled it.
     pub show_aquarium_tray: bool,
+    /// Fingerprint of the SSH key this session authenticated with: the only
+    /// device identity late.sh has, and what per-device settings key off.
+    /// `None` for sessions with no key of their own (ghost bots, tests), which
+    /// then simply follow the account default and persist nothing.
+    pub key_fingerprint: Option<String>,
+    /// This device's stored home rail layout, or `None` when the key has never
+    /// been configured and should follow the account default.
+    pub key_layout: Option<late_core::models::user_ssh_key::KeyLayout>,
     pub afk_users: crate::state::AfkUsers,
     pub username_directory: Option<crate::usernames::UsernameDirectory>,
     /// Live 24h username effects, shared process-wide (snapshot-swap; see
     /// `common/username_effect.rs`).
     pub flair_directory: Option<crate::app::common::username_effect::NameFlairDirectory>,
+    /// Running `/pomodoro` countdowns, shared process-wide (snapshot-swap; see
+    /// `common/pomodoro.rs`).
+    pub pomodoro_directory: Option<PomodoroDirectory>,
     pub activity_feed_rx: Option<broadcast::Receiver<ActivityEvent>>,
     pub initial_announcements: Option<crate::app::announcements::LoginAnnouncements>,
     pub user_id: Uuid,
@@ -281,7 +333,10 @@ pub struct SessionConfig {
 
     /// Display config
     pub initial_theme_id: String,
-    /// Initial audio source for the paired browser, loaded from
+    /// The user's saved interaction mode (keyboard / mouse / hybrid), or `None`
+    /// if they've never chosen one - which triggers the first-run prompt.
+    pub initial_interaction_mode: Option<late_core::models::user::InteractionMode>,
+    /// Initial audio source for the paired client, loaded from
     /// `users.settings.audio_source` (default `Icecast`). v+x mutates this and
     /// persists the new value.
     pub initial_audio_source: late_core::models::user::AudioSource,
@@ -307,6 +362,18 @@ pub struct App {
     /// Free-running frame counter (advances every world tick) used to animate
     /// the bumped-room marquee in the room rail.
     pub(crate) marquee_tick: usize,
+    /// Wall-clock origin for `marquee_tick`: the counter is derived as
+    /// elapsed/66ms so animation phase stays correct however sparsely the
+    /// adaptive loop ticks.
+    pub(crate) started_at: Instant,
+    /// Set on every handle_input byte; wake_hint holds the hot cadence for
+    /// a short window after input so request -> response interactions
+    /// (menu loads, chat send echo) land at typing latency.
+    pub(crate) last_input_at: Instant,
+    /// Second-boundary edge state for the shared 1Hz block in tick():
+    /// None = never fired (fire immediately so first frames have presence,
+    /// directory, and clock state).
+    pub(crate) last_one_hz_index: Option<usize>,
     pub(crate) splash_hint: String,
     pub(crate) show_quit_confirm: bool,
     pub(crate) show_help: bool,
@@ -320,9 +387,13 @@ pub struct App {
     pub(crate) show_bonsai_v2_modal: bool,
     pub(crate) show_lobby_modal: bool,
     pub(crate) show_ultimate_modal: bool,
+    /// Edge detector for the cooldown label's ready flip: the countdown is
+    /// minute-granularity (rides the per-minute global frame), so only the
+    /// running -> ready transition needs its own one-shot frame.
+    pub(crate) ultimate_cooldown_was_running: bool,
     pub(crate) login_announcements: Option<crate::app::announcements::LoginAnnouncements>,
     pub(crate) help_modal_state: help_modal::state::HelpModalState,
-    pub(crate) hub_state: hub::state::HubState,
+    pub(crate) leaderboard_page: crate::app::leaderboard::state::LeaderboardPageState,
     pub(crate) aquarium_state: hub::aquarium::state::AquariumState,
     pub(crate) mod_modal_state: mod_modal::state::ModModalState,
     pub(crate) pending_escape: bool,
@@ -330,14 +401,13 @@ pub struct App {
     pub(crate) vt_input: crate::app::input::VtInputParser,
 
     /// Terminal / rendering
-    pub(super) terminal: Terminal<CrosstermBackend<SharedBuffer>>,
+    pub(super) terminal: Terminal<CrosstermBackend<io::BufWriter<SharedBuffer>>>,
     pub(super) shared: SharedBuffer,
-    pub(super) visualizer: Visualizer,
-    pub(super) viz_frame_buffer: VecDeque<VizFrame>,
-    pub(super) last_viz_frame_at: Option<Instant>,
 
     /// Session / connection
-    pub(super) connect_url: String,
+    /// Public site base (`LATE_WEB_URL`), no trailing slash. Profile links and
+    /// the listen-page URL in the guide are built from it.
+    pub(super) web_url: String,
     pub(super) session_registry: Option<SessionRegistry>,
     pub(super) paired_client_registry: Option<PairedClientRegistry>,
     pub(super) session_token: String,
@@ -349,16 +419,6 @@ pub struct App {
             std::collections::HashMap<String, crate::app::audio::radio_meta::svc::ArtistTitle>,
         >,
     >,
-    /// Live World Cup snapshot feed (process-global service, demand-gated).
-    pub(super) worldcup_rx: Option<
-        tokio::sync::watch::Receiver<std::sync::Arc<crate::app::worldcup::model::WorldCupSnapshot>>,
-    >,
-    /// Handle used to mint the viewer guard while on the World Cup screen.
-    pub(super) worldcup_service: Option<crate::app::worldcup::svc::WorldCupService>,
-    /// Present only while this session is on the World Cup screen; dropping it
-    /// releases the poll gate.
-    pub(crate) worldcup_viewer: Option<crate::app::worldcup::svc::WorldCupViewer>,
-    pub(crate) worldcup: crate::app::worldcup::state::State,
     /// Admin-gated clubhouse tavern (page `0`): avatar, crowd, animations.
     pub(crate) clubhouse: crate::app::clubhouse::state::State,
     /// Chips backend, kept for the clubhouse's on-the-house welcome pour.
@@ -367,6 +427,7 @@ pub struct App {
     /// tutorial's bartender greeting.
     pub(crate) clubhouse_bartender_id: Option<Uuid>,
     pub(crate) clubhouse_graybeard_id: Option<Uuid>,
+    pub(crate) clubhouse_bot_id: Option<Uuid>,
     /// Per-author drunk levels (1-4) copied from the shared lobby about once
     /// a second; chat author labels tint from this owned map, never the mutex.
     pub(crate) drunk_levels: HashMap<Uuid, u8>,
@@ -374,8 +435,28 @@ pub struct App {
     /// about once a second (which also steps shimmer); renderers read this
     /// owned map, never the directory mutex.
     pub(crate) name_styles: HashMap<Uuid, crate::app::common::username_effect::NameStyle>,
+    /// Per-peer `/pomodoro` badges, rebuilt from the pomodoro directory on the
+    /// same ~1s cadence; chat author labels read this owned map, never the
+    /// directory mutex.
+    pub(crate) peer_pomodoros: HashMap<Uuid, String>,
+    /// Human headcount and connected-friend names, recomputed on the same
+    /// ~1s cadence; renderers read these owned values instead of locking the
+    /// shared `active_users` map every frame.
+    pub(crate) online_count: usize,
+    pub(crate) active_friend_names: Vec<String>,
+    /// Last rendered sidebar clock text, compared on the ~1s tick so minute
+    /// rollovers count as a render-visible change.
+    pub(super) last_sidebar_clock: String,
+    /// App-owned author-context epoch for the chat row caches: bumps when
+    /// AFK, drunk levels, name styles, or the username directory change.
+    /// Pairs with `ChatState::context_epoch` in `ChatRowsVersions`.
+    pub(crate) chat_ctx_epoch: u64,
+    /// Last username-directory snapshot, kept for the pointer-equality change
+    /// check that feeds `chat_ctx_epoch` (the directory swaps its `Arc` on
+    /// every real change).
+    pub(super) last_username_directory: Option<Arc<HashMap<Uuid, String>>>,
     pub(super) flair_directory: Option<crate::app::common::username_effect::NameFlairDirectory>,
-    pub(super) ai_service: Option<crate::app::ai::svc::AiService>,
+    pub(super) pomodoro_directory: Option<PomodoroDirectory>,
     pub(super) active_users: Option<ActiveUsers>,
     pub(super) afk_users: crate::state::AfkUsers,
     pub(super) username_directory: Option<crate::usernames::UsernameDirectory>,
@@ -388,6 +469,13 @@ pub struct App {
     pub(crate) last_pet_strip_pet_rect: std::cell::Cell<Option<Rect>>,
     pub(crate) last_pet_strip_food_rect: std::cell::Cell<Option<Rect>>,
     pub(crate) last_pet_strip_water_rect: std::cell::Cell<Option<Rect>>,
+    /// Wander travel width of the pet strip drawn last frame; `None` when the
+    /// strip was not drawn. Gates the strip animation's frame cost in tick.
+    pub(crate) last_pet_strip_travel: std::cell::Cell<Option<usize>>,
+    /// Where the top-border "N unread mentions" text was drawn last frame,
+    /// for the HUD click hit test; `None` when nothing is unread. Only the
+    /// mentions segment is clickable, not the voice/chips text after it.
+    pub(crate) last_mentions_hud_rect: std::cell::Cell<Option<Rect>>,
     pub(crate) audio: crate::app::audio::state::AudioState,
     pub(crate) voice: crate::app::voice::state::VoiceState,
     pub(crate) voice_service: crate::app::voice::svc::VoiceService,
@@ -412,15 +500,20 @@ pub struct App {
     pub(crate) house_chat_rows_cache: chat::ui::ChatRowsCache,
     pub(crate) poll_modal_state: chat::polls::state::PollModalState,
     pub(crate) room_search_modal_state: crate::app::room_search_modal::state::RoomSearchModalState,
+    pub(crate) room_info_modal_state: crate::app::room_info_modal::state::RoomInfoModalState,
     pub(crate) booth_modal_state: crate::app::audio::booth::state::BoothModalState,
     /// Server-authoritative audio source for the paired playback surface.
     /// Mirrors `users.settings.audio_source`. v+x flips this, persists it to
-    /// the DB, and pushes `SetPlaybackSource` to browsers and YouTube-capable
-    /// CLI control-plane clients. On browser pair-up the current value is
-    /// replayed so a refresh lands in the right mode.
-    pub(crate) paired_browser_source: late_core::models::user::AudioSource,
+    /// the DB, and pushes `SetPlaybackSource` to the paired CLI and its
+    /// webview helper. On pair-up the current value is replayed so a
+    /// reconnect lands in the right mode.
+    pub(crate) paired_source: late_core::models::user::AudioSource,
     pub(crate) selected_icecast_stream: late_core::models::user::IcecastStream,
     pub(crate) selected_radio_station: late_core::models::user::RadioStation,
+
+    /// How this session is driven (keyboard / mouse / hybrid). Gates whether the
+    /// mouse is live; editable in settings.
+    pub(crate) interaction_mode: late_core::models::user::InteractionMode,
 
     pub(crate) music_prefix_armed: bool,
     pub(crate) room_section_prefix_armed: bool,
@@ -432,6 +525,14 @@ pub struct App {
 
     /// Profile
     pub(crate) profile_state: profile::state::ProfileState,
+    /// Home rail layout for *this device*: the layout stored on the SSH key
+    /// this session authenticated with, or `None` to follow the live account
+    /// profile. `\` and the two Ctrl+O rail rows write it, so a phone and a
+    /// desktop on one linked account stop overwriting each other. Read through
+    /// [`App::rail_modes`]; render resolves `Auto` against terminal width.
+    pub(crate) device_rails: Option<late_core::models::user_ssh_key::KeyLayout>,
+    /// The key `device_rails` persists to; `None` for keyless sessions.
+    pub(crate) key_fingerprint: Option<String>,
     pub(crate) profile_modal_state: profile_modal::state::ProfileModalState,
     pub(crate) settings_modal_state: settings_modal::state::SettingsModalState,
     pub(crate) sheet_modal_state: sheet_modal::state::SheetModalState,
@@ -446,7 +547,6 @@ pub struct App {
     pub(crate) bonsai_v2_state: crate::app::bonsai_v2::state::BonsaiV2State,
     /// Recent input grants Dynamic Bonsai passive-growth credit for a short
     /// active window. Idle open sessions should not grow the tree.
-    pub(crate) bonsai_v2_activity_ticks_remaining: usize,
 
     /// Cat companion
     pub(crate) pet_state: crate::app::pet::state::PetState,
@@ -454,7 +554,6 @@ pub struct App {
     /// Hub Shop
     pub(crate) quest_state: crate::app::hub::dailies::state::QuestState,
     pub(crate) shop_state: crate::app::hub::shop::state::ShopState,
-    pub(crate) hub_admin_state: crate::app::hub::admin::state::AdminState,
     pub(crate) ultimate_service: crate::app::ultimates::UltimateService,
     pub(crate) ultimate_state: crate::app::ultimates::UltimateState,
 
@@ -464,10 +563,12 @@ pub struct App {
     pub(crate) door_delete_confirm: bool,
     pub(crate) lateania_service: crate::app::door::lateania::svc::LateaniaService,
     pub(crate) greendragon_service: crate::app::door::greendragon::svc::GreenDragonService,
+    pub(crate) darkroom_service: crate::app::door::darkroom::svc::DarkroomService,
     /// Games hub (Screen::Games): the dedicated landing for the door games.
     pub(crate) games_hub_state: crate::app::door::hub::state::State,
     pub(crate) lateania_state: Option<crate::app::door::lateania::state::State>,
     pub(crate) greendragon_state: Option<crate::app::door::greendragon::state::State>,
+    pub(crate) darkroom_state: Option<crate::app::door::darkroom::state::State>,
     pub(crate) rebels_state: Option<crate::app::door::rebels::state::State>,
     /// Per-session TERM string (from the PTY request), used to size the rebels
     /// PTY.
@@ -497,7 +598,24 @@ pub struct App {
     pub(crate) dcss_host: String,
     pub(crate) dcss_port: u16,
     pub(crate) dcss_secret: String,
+    pub(crate) brogue_state: Option<crate::app::door::brogue::state::State>,
+    /// Per-session TERM string (from the PTY request), forwarded to the Brogue
+    /// host so curses gets a real terminfo entry.
+    pub(crate) brogue_term: String,
+    /// Brogue door game: enable flag + host connection details (global Config).
+    pub(crate) brogue_enabled: bool,
+    pub(crate) brogue_host: String,
+    pub(crate) brogue_port: u16,
+    pub(crate) brogue_secret: String,
     pub(crate) arcade_handle_service: crate::app::door::arcade::ArcadeHandleService,
+    pub(crate) door_rc_service: crate::app::door::rc::DoorRcService,
+    /// The account's door rc files (.nethackrc / DCSS init.txt), keyed by
+    /// game. Session-local copy of the DB truth: preloaded at init, updated by
+    /// the hub config box, read at door launch. Another session's edits are
+    /// not reflected until reconnect.
+    pub(crate) door_rcs: std::collections::HashMap<late_core::models::door_rc::DoorRcGame, String>,
+    /// Which game's rc config box is open over the Games hub, if any.
+    pub(crate) door_rc_modal: Option<late_core::models::door_rc::DoorRcGame>,
     pub(crate) usurper_state: Option<crate::app::door::usurper::state::State>,
     /// Per-session TERM string (from the PTY request); the Usurper host pins
     /// the child's TERM itself, this only sizes the request.
@@ -516,6 +634,12 @@ pub struct App {
     pub(crate) dopewars_host: String,
     pub(crate) dopewars_port: u16,
     pub(crate) dopewars_secret: String,
+    pub(crate) codekeep_state: Option<crate::app::door::codekeep::state::State>,
+    pub(crate) codekeep_term: String,
+    pub(crate) codekeep_enabled: bool,
+    pub(crate) codekeep_host: String,
+    pub(crate) codekeep_port: u16,
+    pub(crate) codekeep_secret: String,
     /// Render-loop wakeup, set by the active transport. Threaded into the rebels
     /// proxy so new remote output repaints promptly. `None` in headless/test
     /// paths (no render loop).
@@ -544,6 +668,14 @@ pub struct App {
     /// `Option` → the underlying client, so the seat is released on logout
     /// or connection loss.
     pub(crate) dartboard_state: Option<crate::app::artboard::state::State>,
+    /// Process-global `/pair` registry handle. `None` on headless/test paths.
+    pub(crate) scratchpad_registry:
+        Option<crate::app::scratchpad::registry::SharedScratchpadRegistry>,
+    /// `Some` while this session is inside a paired scratchpad. Constructed
+    /// once both sides have run `/pair @other` and dropped on leave;
+    /// `ScratchpadState`'s own `Drop` impl notifies the partner even on a
+    /// hard disconnect.
+    pub(crate) scratchpad: Option<crate::app::scratchpad::state::ScratchpadState>,
     /// `true` while the dedicated Artboard screen is in editing mode.
     /// View mode stays connected to the shared board but reserves global
     /// screen hotkeys like `1-4` and `Tab`.
@@ -592,16 +724,13 @@ pub struct App {
     pub(crate) inline_image_symbol_mode: InlineImageSymbolMode,
     pub(crate) terminal_image_render_state: TerminalImageRenderState,
 
-    /// True when the client is kitty specifically. kitty desyncs its cursor from
-    /// ratatui's cell-width model on regional-indicator flags, which splits the
-    /// flags in the World Cup overview's rightmost column; that one column drops
-    /// flags for kitty. Seeded from TERM, refined by the XTVERSION reply.
-    pub(crate) terminal_is_kitty: bool,
-
-    /// Desktop-notification domain: producers (chat, daily) push through
-    /// cloned `notifier` handles; render drains `notify_outbox` into OSC
-    /// bytes.
+    /// Desktop-notification domain: producers (chat, daily, this session's
+    /// own tick-driven events like Pomodoro completion) push through cloned
+    /// `notifier` handles; render drains `notify_outbox` into OSC bytes.
+    pub(crate) notifier: crate::app::notify::Notifier,
     pub(crate) notify_outbox: crate::app::notify::Outbox,
+    /// The running `/pomodoro` countdown, if any. `None` when idle.
+    pub(crate) pomodoro: Option<PomodoroTimer>,
 
     /// Last background color sent to the terminal via OSC 11 (if any).
     pub(crate) last_terminal_bg: Option<ratatui::style::Color>,
@@ -627,13 +756,84 @@ pub struct App {
     pub(crate) pending_chat_profile_open: Option<super::input::PendingChatProfileOpen>,
 }
 
+/// Public listen page for a site base url. Static and shareable: it carries no
+/// session token, because it follows the same global streams and YouTube queue
+/// for everyone. Takes the base rather than `&App` so callers can build it
+/// while other fields of `App` are mutably borrowed.
+pub(super) fn listen_url(web_url: &str) -> String {
+    format!("{web_url}/listen")
+}
+
 impl App {
     pub fn is_running(&self) -> bool {
         self.running
     }
 
+    /// Publish this session's countdown to the process-shared directory so
+    /// peers' chat author labels can paint it. Every place that changes
+    /// `pomodoro` calls this right after, which is also how a stop and an
+    /// expiry retire the peer badge.
+    pub(crate) fn publish_pomodoro(&self) {
+        if let Some(directory) = &self.pomodoro_directory {
+            crate::app::common::pomodoro::set_user(directory, self.user_id, self.pomodoro.as_ref());
+        }
+    }
+
     pub(crate) fn use_bonsai_v2(&self) -> bool {
         self.shop_state.dynamic_bonsai_enabled()
+    }
+
+    /// The rail modes this session renders from: this device's stored layout if
+    /// its key has one, else the live account profile. The single read path for
+    /// rail visibility, so render, input, and the settings modal can never
+    /// disagree about which layout is in force.
+    pub(crate) fn rail_modes(&self) -> (RoomListMode, RightSidebarMode) {
+        device_rails_or_profile(self.device_rails, self.profile_state.profile())
+    }
+
+    /// Cycle this device through the rail layouts: both rails, room list
+    /// hidden, sidebar hidden, both hidden, then `Auto` (terminal width
+    /// decides). Persists onto the SSH key, never onto the account, so the
+    /// other device's layout is untouched. Returns the new modes for the banner.
+    pub(crate) fn cycle_device_rails(&mut self) -> (RoomListMode, RightSidebarMode) {
+        const CYCLE: [(RoomListMode, RightSidebarMode); 5] = [
+            (RoomListMode::On, RightSidebarMode::On),
+            (RoomListMode::Off, RightSidebarMode::On),
+            (RoomListMode::On, RightSidebarMode::Off),
+            (RoomListMode::Off, RightSidebarMode::Off),
+            (RoomListMode::Auto, RightSidebarMode::Auto),
+        ];
+        let current = self.rail_modes();
+        let idx = CYCLE
+            .iter()
+            .position(|modes| *modes == current)
+            .unwrap_or(0);
+        let next = CYCLE[(idx + 1) % CYCLE.len()];
+        self.set_device_rails(next);
+        next
+    }
+
+    /// Adopt the two rail rows from the settings-modal draft as this device's
+    /// layout. A no-op when they already match, so unrelated tweaks in the same
+    /// modal do not write to the key.
+    pub(crate) fn sync_device_rails_from_settings(&mut self) {
+        let edited = self.settings_modal_state.device_rails();
+        if edited != self.rail_modes() {
+            self.set_device_rails(edited);
+        }
+    }
+
+    fn set_device_rails(&mut self, modes: (RoomListMode, RightSidebarMode)) {
+        let layout = KeyLayout {
+            room_list_mode: modes.0,
+            right_sidebar_mode: modes.1,
+        };
+        self.device_rails = Some(layout);
+        // Keyless sessions (ghost bots, tests) have no device to remember: the
+        // layout still applies for the rest of the session, it just isn't saved.
+        if let Some(fingerprint) = self.key_fingerprint.clone() {
+            self.profile_state.set_device_rails(fingerprint, layout);
+        }
     }
 
     pub fn skip_splash_for_tests(&mut self) {
@@ -718,7 +918,7 @@ impl App {
         tracing::debug!(cols, rows, "initializing app");
 
         let shared = SharedBuffer::default();
-        let backend = CrosstermBackend::new(shared.clone());
+        let backend = CrosstermBackend::new(frame_writer(&shared));
         let viewport = Viewport::Fixed(Rect::new(0, 0, cols, rows));
         let terminal = Terminal::with_options(backend, TerminalOptions { viewport })
             .context("failed to create terminal backend")?;
@@ -729,7 +929,6 @@ impl App {
             protocol_from_term(&config.term)
         };
         let inline_image_symbol_mode = InlineImageSymbolMode::from_identity(&config.term);
-        let terminal_is_kitty = identity_is_kitty(&config.term);
         let pending_terminal_commands = Vec::new();
         let (notifier, notify_outbox) = crate::app::notify::channel();
 
@@ -852,11 +1051,13 @@ impl App {
         let artboard_snapshot_service = config.artboard_snapshot_service.clone();
         let username = config.username.clone();
 
+        let initial_bonsai_decay_protection = config.initial_bonsai_decay_protection;
         let bonsai_state = if let Some(tree) = config.initial_bonsai_tree {
             crate::app::bonsai::state::BonsaiState::new(
                 config.user_id,
                 config.bonsai_service.clone(),
                 tree,
+                initial_bonsai_decay_protection,
             )
         } else {
             // Fallback: create a default dead-ish state (should not happen in practice)
@@ -873,6 +1074,7 @@ impl App {
                     seed: config.user_id.as_u128() as i64,
                     is_alive: true,
                 },
+                initial_bonsai_decay_protection,
             )
         };
         let bonsai_care_state = config
@@ -898,6 +1100,7 @@ impl App {
                     config.user_id,
                     config.bonsai_service.clone(),
                     tree,
+                    initial_bonsai_decay_protection,
                 )
             })
             .unwrap_or_else(|| {
@@ -945,10 +1148,6 @@ impl App {
             config.shop_service.clone(),
             config.shop_snapshot_rx,
         );
-        let hub_admin_state = crate::app::hub::admin::state::AdminState::new(
-            config.quest_service.clone(),
-            config.shop_service.clone(),
-        );
         let aquarium_area = aquarium_area_for_terminal(cols, rows);
         let mut aquarium_state =
             crate::app::hub::aquarium::state::AquariumState::default_for_area(aquarium_area)?;
@@ -969,7 +1168,11 @@ impl App {
             config.feed_service.clone(),
             config.user_id,
         );
-        settings_modal_state.open_from_profile(&initial_profile);
+        let device_rails = config.key_layout;
+        settings_modal_state.open_from_profile(
+            &initial_profile,
+            device_rails_or_profile(device_rails, &initial_profile),
+        );
         // Everyone lands in the clubhouse by default: the tavern is the front
         // door of late.sh (and the first-visit tutorial starts there). The
         // "Land on Home page" tweak sends returning users straight to the
@@ -989,6 +1192,9 @@ impl App {
             show_splash: true,
             splash_ticks: 0,
             marquee_tick: 0,
+            started_at: Instant::now(),
+            last_input_at: Instant::now(),
+            last_one_hz_index: None,
             splash_hint,
             show_quit_confirm: false,
             show_help: false,
@@ -1002,9 +1208,10 @@ impl App {
             show_bonsai_v2_modal: false,
             show_lobby_modal: false,
             show_ultimate_modal: false,
+            ultimate_cooldown_was_running: false,
             login_announcements: config.initial_announcements,
             help_modal_state: help_modal::state::HelpModalState::new(),
-            hub_state: hub::state::HubState::new(),
+            leaderboard_page: crate::app::leaderboard::state::LeaderboardPageState::new(),
             aquarium_state,
             mod_modal_state: mod_modal::state::ModModalState::new(),
             pending_escape: false,
@@ -1012,23 +1219,13 @@ impl App {
             vt_input: crate::app::input::VtInputParser::default(),
             terminal,
             shared,
-            visualizer: Visualizer::new(),
-            viz_frame_buffer: VecDeque::new(),
-            last_viz_frame_at: None,
-            connect_url: format!("{}/{}", config.web_url, config.session_token),
+            web_url: config.web_url.trim_end_matches('/').to_string(),
             session_registry: config.session_registry,
             paired_client_registry: config.paired_client_registry,
             session_token: config.session_token.clone(),
             session_rx: config.session_rx,
             now_playing_rx: config.now_playing_rx,
             radio_meta_rx: config.radio_meta_rx,
-            worldcup_rx: config
-                .worldcup_service
-                .as_ref()
-                .map(|svc| svc.subscribe_state()),
-            worldcup_service: config.worldcup_service,
-            worldcup_viewer: None,
-            worldcup: crate::app::worldcup::state::State::default(),
             clubhouse: crate::app::clubhouse::state::State::new(
                 config.clubhouse_lobby.clone(),
                 config.user_id,
@@ -1038,10 +1235,20 @@ impl App {
             chip_service: config.chip_service,
             clubhouse_bartender_id: None,
             clubhouse_graybeard_id: None,
+            clubhouse_bot_id: None,
             drunk_levels: HashMap::new(),
             name_styles: HashMap::new(),
+            peer_pomodoros: HashMap::new(),
+            online_count: active_users
+                .as_ref()
+                .map(crate::state::online_human_count)
+                .unwrap_or(0),
+            active_friend_names: Vec::new(),
+            last_sidebar_clock: String::new(),
+            chat_ctx_epoch: 0,
+            last_username_directory: None,
             flair_directory: config.flair_directory,
-            ai_service: config.ai_service.clone(),
+            pomodoro_directory: config.pomodoro_directory,
             active_users: active_users.clone(),
             afk_users: afk_users.clone(),
             username_directory: config.username_directory,
@@ -1049,6 +1256,8 @@ impl App {
             last_pet_strip_pet_rect: std::cell::Cell::new(None),
             last_pet_strip_food_rect: std::cell::Cell::new(None),
             last_pet_strip_water_rect: std::cell::Cell::new(None),
+            last_pet_strip_travel: std::cell::Cell::new(None),
+            last_mentions_hud_rect: std::cell::Cell::new(None),
             audio: crate::app::audio::state::AudioState::new(config.audio_service, config.user_id),
             voice: crate::app::voice::state::VoiceState::new(config.voice_service),
             voice_service,
@@ -1073,6 +1282,7 @@ impl App {
                 config.permissions,
                 active_users.clone(),
                 notifier.clone(),
+                config.mention_ladders.clone(),
             ),
             afk_user_ids: crate::state::afk_users_snapshot(&afk_users),
             dashboard_chat_rows_cache: chat::ui::ChatRowsCache::default(),
@@ -1082,10 +1292,13 @@ impl App {
             poll_modal_state: chat::polls::state::PollModalState::new(),
             room_search_modal_state:
                 crate::app::room_search_modal::state::RoomSearchModalState::default(),
+            room_info_modal_state: crate::app::room_info_modal::state::RoomInfoModalState::default(
+            ),
             booth_modal_state: crate::app::audio::booth::state::BoothModalState::default(),
-            paired_browser_source: config.initial_audio_source,
+            paired_source: config.initial_audio_source,
             selected_icecast_stream: config.initial_icecast_stream,
             selected_radio_station: config.initial_radio_station,
+            interaction_mode: config.initial_interaction_mode.unwrap_or_default(),
             music_prefix_armed: false,
             room_section_prefix_armed: false,
             afk: None,
@@ -1095,6 +1308,8 @@ impl App {
                 config.user_id,
                 config.initial_theme_id,
             ),
+            device_rails,
+            key_fingerprint: config.key_fingerprint,
             profile_modal_state: profile_modal::state::ProfileModalState::new(
                 config.profile_service.clone(),
                 config.showcase_service.clone(),
@@ -1102,16 +1317,25 @@ impl App {
             ),
             settings_modal_state,
             sheet_modal_state: sheet_modal::state::SheetModalState::new(),
+            // Seed from what is already published. `watch::Sender::subscribe`
+            // marks the current value as seen, so the `has_changed()` gate in
+            // `tick.rs` is false against a snapshot sitting right there: without
+            // this the session renders empty leaderboard panels until the next
+            // refresh lands, up to `REFRESH_INTERVAL` later. Deliberately does
+            // not touch `chip_balance` — that is loaded accurately at login, and
+            // this snapshot may predate it.
+            leaderboard: config
+                .leaderboard_rx
+                .as_ref()
+                .map(|rx| rx.borrow().clone())
+                .unwrap_or_default(),
             leaderboard_rx: config.leaderboard_rx,
-            leaderboard: Arc::new(LeaderboardData::default()),
             bonsai_state,
             bonsai_care_state,
             bonsai_v2_state,
-            bonsai_v2_activity_ticks_remaining: 0,
             pet_state,
             quest_state,
             shop_state,
-            hub_admin_state,
             ultimate_service: config.ultimate_service,
             ultimate_state: crate::app::ultimates::UltimateState::with_cooldowns(
                 config.initial_ultimate_cooldowns,
@@ -1122,8 +1346,10 @@ impl App {
             games_hub_state: crate::app::door::hub::state::State::default(),
             lateania_service: config.lateania_service,
             greendragon_service: config.greendragon_service,
+            darkroom_service: config.darkroom_service,
             lateania_state: None,
             greendragon_state: None,
+            darkroom_state: None,
             rebels_state: None,
             rebels_term: config.term.clone(),
             rebels_enabled: config.rebels_enabled,
@@ -1143,7 +1369,16 @@ impl App {
             dcss_host: config.dcss_host,
             dcss_port: config.dcss_port,
             dcss_secret: config.dcss_secret,
+            brogue_state: None,
+            brogue_term: config.term.clone(),
+            brogue_enabled: config.brogue_enabled,
+            brogue_host: config.brogue_host,
+            brogue_port: config.brogue_port,
+            brogue_secret: config.brogue_secret,
             arcade_handle_service: config.arcade_handle_service,
+            door_rc_service: config.door_rc_service,
+            door_rcs: config.initial_door_rcs.into_iter().collect(),
+            door_rc_modal: None,
             usurper_state: None,
             usurper_term: config.term.clone(),
             usurper_enabled: config.usurper_enabled,
@@ -1156,6 +1391,12 @@ impl App {
             dopewars_host: config.dopewars_host,
             dopewars_port: config.dopewars_port,
             dopewars_secret: config.dopewars_secret,
+            codekeep_state: None,
+            codekeep_term: config.term.clone(),
+            codekeep_enabled: config.codekeep_enabled,
+            codekeep_host: config.codekeep_host,
+            codekeep_port: config.codekeep_port,
+            codekeep_secret: config.codekeep_secret,
             repaint_signal: None,
             lobby: crate::app::lobby::state::LobbyState::new(&daily),
             daily,
@@ -1175,6 +1416,8 @@ impl App {
             minesweeper_state,
             traffic_state,
             dartboard_state: None,
+            scratchpad_registry: config.scratchpad_registry,
+            scratchpad: None,
             directory_state: crate::app::directory::state::DirectoryState::new(),
             pinstar_state: None,
             pinstar_browser: crate::app::pinstar::browser::DiagramBrowser::default(),
@@ -1194,8 +1437,9 @@ impl App {
             terminal_images_disabled,
             inline_image_symbol_mode,
             terminal_image_render_state: TerminalImageRenderState::default(),
-            terminal_is_kitty,
+            notifier,
             notify_outbox,
+            pomodoro: None,
             is_draining: config.is_draining,
             icon_picker_open: false,
             icon_picker_state: super::icon_picker::IconPickerState::default(),
@@ -1285,6 +1529,26 @@ impl App {
         self.greendragon_state = None;
     }
 
+    pub(crate) fn enter_darkroom(&mut self) {
+        if self.darkroom_state.is_some() {
+            return;
+        }
+        // The session's connect time is what bounds how much elapsed time the
+        // game may credit, so the door has to be told when the session began,
+        // not when the door was opened.
+        let session_start = chrono::Utc::now()
+            - chrono::Duration::from_std(self.started_at.elapsed()).unwrap_or_default();
+        self.darkroom_state = Some(crate::app::door::darkroom::state::State::new(
+            self.darkroom_service.clone(),
+            self.user_id,
+            session_start,
+        ));
+    }
+
+    pub(crate) fn leave_darkroom(&mut self) {
+        self.darkroom_state = None;
+    }
+
     /// Store the active transport's render-loop wakeup so the rebels proxy can
     /// repaint promptly on new remote output.
     pub(crate) fn set_repaint_signal(
@@ -1314,6 +1578,11 @@ impl App {
         self.rebels_state = None;
     }
 
+    /// The session-local rc content for one door ("" when unconfigured).
+    fn door_rc(&self, game: late_core::models::door_rc::DoorRcGame) -> String {
+        self.door_rcs.get(&game).cloned().unwrap_or_default()
+    }
+
     pub(crate) fn enter_nethack(&mut self) {
         if self.nethack_state.is_some() {
             return;
@@ -1328,11 +1597,13 @@ impl App {
             self.repaint_signal.clone(),
             self.nethack_awards.clone(),
             Some(self.arcade_handle_service.clone()),
+            self.door_rc(late_core::models::door_rc::DoorRcGame::Nethack),
         ));
     }
 
-    fn leave_nethack(&mut self) {
-        // Dropping the State drops the process, which kills the child nethack.
+    pub(crate) fn leave_nethack(&mut self) {
+        // Dropping the State drops the process; the host then SIGHUP-saves any
+        // live child nethack so the run resumes next launch.
         self.nethack_state = None;
     }
 
@@ -1349,13 +1620,38 @@ impl App {
             self.dcss_enabled,
             self.repaint_signal.clone(),
             Some(self.arcade_handle_service.clone()),
+            self.door_rc(late_core::models::door_rc::DoorRcGame::Dcss),
         ));
     }
 
-    fn leave_dcss(&mut self) {
+    pub(crate) fn leave_dcss(&mut self) {
         // Dropping the State drops the process; the host then SIGHUP-saves the
         // child crawl so the run resumes next launch.
         self.dcss_state = None;
+    }
+
+    pub(crate) fn enter_brogue(&mut self) {
+        if self.brogue_state.is_some() {
+            return;
+        }
+        self.brogue_state = Some(crate::app::door::brogue::state::State::new(
+            crate::app::door::brogue::state::StateConfig {
+                user_id: self.user_id,
+                host: self.brogue_host.clone(),
+                port: self.brogue_port,
+                secret: self.brogue_secret.clone(),
+                term: self.brogue_term.clone(),
+                enabled: self.brogue_enabled,
+                repaint: self.repaint_signal.clone(),
+                handle_svc: Some(self.arcade_handle_service.clone()),
+            },
+        ));
+    }
+
+    pub(crate) fn leave_brogue(&mut self) {
+        // Dropping the State drops the process; the host then SIGHUP-saves the
+        // child brogue so the run resumes next launch.
+        self.brogue_state = None;
     }
 
     pub(crate) fn enter_usurper(&mut self) {
@@ -1398,6 +1694,27 @@ impl App {
     fn leave_dopewars(&mut self) {
         // Dropping the State drops the process, which kills the child dopewars.
         self.dopewars_state = None;
+    }
+
+    pub(crate) fn enter_codekeep(&mut self) {
+        if self.codekeep_state.is_some() {
+            return;
+        }
+        self.codekeep_state = Some(crate::app::door::codekeep::state::State::new(
+            self.user_id,
+            self.codekeep_host.clone(),
+            self.codekeep_port,
+            self.codekeep_secret.clone(),
+            self.codekeep_term.clone(),
+            self.codekeep_enabled,
+            self.repaint_signal.clone(),
+        ));
+    }
+
+    fn leave_codekeep(&mut self) {
+        // Dropping the proxy closes the host session; the host SIGHUP-saves the
+        // upstream game before releasing this account's single-session lease.
+        self.codekeep_state = None;
     }
 
     pub(crate) fn activate_artboard_interaction(&mut self) -> bool {
@@ -1567,7 +1884,6 @@ impl App {
             self.show_mod_modal = false;
             self.show_bonsai_v2_modal = false;
         }
-        self.hub_state.ensure_visible_tab(self.is_admin);
     }
 
     pub fn set_artboard_banned_for_tests(&mut self, banned: bool) {
@@ -1588,6 +1904,16 @@ impl App {
         self.artboard_ban_expires_at = None;
     }
 
+    /// Detach from the running roguelike under the cursor: hop to the next
+    /// stop on the backtick workspace cycle (another live dungeon, a waiting
+    /// board or seat, or Home chat) while `set_screen` keeps the running door
+    /// state alive. Falls back to the Games hub if the cycle has no opinion.
+    fn detach_door_game(&mut self) {
+        if !crate::app::lobby::workspace::cycle_game_workspace(self) {
+            self.set_screen(Screen::Games);
+        }
+    }
+
     pub(crate) fn set_screen(&mut self, screen: Screen) {
         if self.screen == screen {
             if screen == Screen::Rebels {
@@ -1599,11 +1925,17 @@ impl App {
             if screen == Screen::Dcss {
                 self.enter_dcss();
             }
+            if screen == Screen::Brogue {
+                self.enter_brogue();
+            }
             if screen == Screen::Usurper {
                 self.enter_usurper();
             }
             if screen == Screen::Dopewars {
                 self.enter_dopewars();
+            }
+            if screen == Screen::Codekeep {
+                self.enter_codekeep();
             }
             if screen == Screen::Artboard {
                 self.enter_dartboard();
@@ -1624,18 +1956,59 @@ impl App {
             self.force_full_repaint();
         }
 
+        // Leaving the Games hub drops its transient prompts. Esc handles the
+        // ordinary path, but a reserved chord (e.g. Ctrl+G into a lobby game)
+        // can switch screens with the rc config modal or the reset prompt
+        // still up; without this they would silently reappear next visit.
+        if self.screen == Screen::Games {
+            self.door_rc_modal = None;
+            self.door_delete_confirm = false;
+        }
+
         if self.screen == Screen::Rebels {
             self.leave_rebels();
             self.force_full_repaint();
         }
 
-        if self.screen == Screen::Nethack {
+        // The three roguelike doors detach instead of tearing down: a running
+        // game keeps its state (and its SSH connection to the door host, which
+        // the host would otherwise SIGHUP-save) while the player is elsewhere,
+        // and resumes instantly from the hub card or the backtick cycle. A
+        // non-running state (launcher, claim prompt) still drops as before;
+        // the idle shutdown in each door's `tick` reaps forgotten games.
+        if self.screen == Screen::Nethack
+            && !self
+                .nethack_state
+                .as_ref()
+                .is_some_and(|state| state.is_running())
+        {
             self.leave_nethack();
+        }
+        if self.screen == Screen::Nethack {
             self.force_full_repaint();
         }
 
-        if self.screen == Screen::Dcss {
+        if self.screen == Screen::Dcss
+            && !self
+                .dcss_state
+                .as_ref()
+                .is_some_and(|state| state.is_running())
+        {
             self.leave_dcss();
+        }
+        if self.screen == Screen::Dcss {
+            self.force_full_repaint();
+        }
+
+        if self.screen == Screen::Brogue
+            && !self
+                .brogue_state
+                .as_ref()
+                .is_some_and(|state| state.is_running())
+        {
+            self.leave_brogue();
+        }
+        if self.screen == Screen::Brogue {
             self.force_full_repaint();
         }
 
@@ -1646,6 +2019,11 @@ impl App {
 
         if self.screen == Screen::Dopewars {
             self.leave_dopewars();
+            self.force_full_repaint();
+        }
+
+        if self.screen == Screen::Codekeep {
+            self.leave_codekeep();
             self.force_full_repaint();
         }
 
@@ -1661,6 +2039,16 @@ impl App {
 
         if self.screen == Screen::HouseTable && screen != Screen::HouseTable {
             self.house.close();
+            self.force_full_repaint();
+        }
+
+        if self.screen == Screen::Scratchpad && screen != Screen::Scratchpad {
+            // Dropping `scratchpad` here (rather than an explicit
+            // `leave_scratchpad` method) runs `ScratchpadState`'s `Drop`
+            // impl, which notifies the registry so the partner sees
+            // "left the pairing" on their next sync, the same RAII
+            // teardown Artboard uses for its color slot.
+            self.scratchpad = None;
             self.force_full_repaint();
         }
 
@@ -1683,11 +2071,17 @@ impl App {
         if self.screen == Screen::Dcss {
             self.enter_dcss();
         }
+        if self.screen == Screen::Brogue {
+            self.enter_brogue();
+        }
         if self.screen == Screen::Usurper {
             self.enter_usurper();
         }
         if self.screen == Screen::Dopewars {
             self.enter_dopewars();
+        }
+        if self.screen == Screen::Codekeep {
+            self.enter_codekeep();
         }
         if self.screen == Screen::Pinstar {
             self.enter_directory();
@@ -1695,19 +2089,37 @@ impl App {
         if self.screen == Screen::Clubhouse {
             self.clubhouse.enter_screen();
         }
-        // Hold a viewer guard only while on the World Cup screen; this both
-        // wakes the demand-gated poller on entry and (by dropping the prior
-        // guard) releases it on exit.
-        self.worldcup_viewer = if self.screen == Screen::WorldCup {
-            self.worldcup_service.as_ref().map(|svc| svc.viewer())
-        } else {
-            None
-        };
+        // The first-visit tour advances on page entry, so digits and Tab
+        // both move it along.
+        self.clubhouse.tutorial_screen_entered(screen);
         self.sync_visible_chat_room();
     }
 
     fn set_cursor_shape(&mut self, sequence: &[u8]) {
         self.pending_terminal_commands.push(sequence.to_vec());
+    }
+
+    /// Change the interaction mode: flip terminal mouse reporting live if the
+    /// mouse-enabled state changed (so keyboard mode restores native selection
+    /// immediately), and persist the choice. No-op if the mode is unchanged.
+    pub(crate) fn set_interaction_mode(&mut self, mode: late_core::models::user::InteractionMode) {
+        if self.interaction_mode == mode {
+            return;
+        }
+        let was_mouse = self.interaction_mode.mouse_enabled();
+        self.interaction_mode = mode;
+        if mode.mouse_enabled() != was_mouse {
+            // 1000/1003/1006 h = enable, l = disable the mouse-tracking triplet.
+            let seq: &[u8] = if mode.mouse_enabled() {
+                b"\x1b[?1000h\x1b[?1003h\x1b[?1006h"
+            } else {
+                b"\x1b[?1006l\x1b[?1003l\x1b[?1000l"
+            };
+            self.pending_terminal_commands.push(seq.to_vec());
+        }
+        self.profile_state
+            .service()
+            .set_interaction_mode(self.user_id, mode);
     }
 
     pub(crate) fn apply_terminal_env_hint(&mut self, name: &str, value: &str) {
@@ -1728,11 +2140,6 @@ impl App {
             "terminal xtversion reply"
         );
         self.apply_inline_image_symbol_mode(InlineImageSymbolMode::from_identity(value));
-        // The XTVERSION payload identifies the terminal precisely (kitty vs the
-        // rest of the kitty-graphics family), refining the TERM-based seed.
-        if identity_is_kitty(value) {
-            self.terminal_is_kitty = true;
-        }
         if self.terminal_images_disabled {
             return;
         }
@@ -1800,7 +2207,7 @@ impl App {
         // with a `Viewport::Fixed` is pure state construction and never
         // touches the backend, and `force_full_repaint` supplies the client
         // clear + full redraw that `Terminal::resize` used to perform.
-        let backend = CrosstermBackend::new(self.shared.clone());
+        let backend = CrosstermBackend::new(frame_writer(&self.shared));
         let viewport = Viewport::Fixed(Rect::new(0, 0, cols, rows));
         self.terminal = Terminal::with_options(backend, TerminalOptions { viewport })?;
         self.force_full_repaint();
@@ -1809,8 +2216,13 @@ impl App {
 
     pub fn handle_input(&mut self, data: &[u8]) {
         if !data.is_empty() {
-            self.bonsai_v2_activity_ticks_remaining = BONSAI_V2_ACTIVITY_WINDOW_TICKS;
+            self.last_input_at = Instant::now();
         }
+        /// Backtick, the workspace-cycle key, matched as a whole input chunk
+        /// (like the doors' F1 remap): inside a running roguelike it detaches
+        /// instead of reaching the game. DCSS's own ` (repeat previous
+        /// command) is the accepted casualty.
+        const DOOR_DETACH_KEY: &[u8] = b"`";
         // While the proxied rebels game is running, every byte (keys + mouse)
         // goes straight to the remote; late.sh parses nothing. Exit is by
         // quitting rebels itself (Esc/Ctrl-C), which closes the channel.
@@ -1823,12 +2235,16 @@ impl App {
         }
         // Same passthrough for the locally-hosted nethack process, except F1,
         // which late.sh remaps to nethack's own `?` help (so the raw F1 escape
-        // never leaks into the game as stray commands).
+        // never leaks into the game as stray commands), and `, which detaches:
+        // the game keeps running while the backtick workspace cycle hops to
+        // the next live dungeon or back to chat.
         if self.screen == crate::app::common::primitives::Screen::Nethack
             && let Some(state) = self.nethack_state.as_mut()
             && state.is_running()
         {
-            if !state.intercept_input(data) {
+            if data == DOOR_DETACH_KEY {
+                self.detach_door_game();
+            } else if !state.intercept_input(data) {
                 state.forward_input(data);
             }
             return;
@@ -1843,19 +2259,43 @@ impl App {
         {
             return;
         }
-        // DCSS: same raw passthrough + F1->`?` remap as nethack (both are
-        // roguelikes hosted the same way), and the same post-exit input grace.
+        // DCSS: same raw passthrough + F1->`?` remap + ` detach as nethack
+        // (both are roguelikes hosted the same way), and the same post-exit
+        // input grace. Note ` costs crawl its own repeat-previous-command
+        // binding; players can macro another key to it in-game.
         if self.screen == crate::app::common::primitives::Screen::Dcss
             && let Some(state) = self.dcss_state.as_mut()
             && state.is_running()
         {
-            if !state.intercept_input(data) {
+            if data == DOOR_DETACH_KEY {
+                self.detach_door_game();
+            } else if !state.intercept_input(data) {
                 state.forward_input(data);
             }
             return;
         }
         if self.screen == crate::app::common::primitives::Screen::Dcss
             && let Some(state) = self.dcss_state.as_ref()
+            && state.in_exit_grace()
+        {
+            return;
+        }
+        // Brogue: same raw passthrough + F1->`?` remap + ` detach as dcss
+        // (both are roguelikes hosted the same way), and the same post-exit
+        // input grace.
+        if self.screen == crate::app::common::primitives::Screen::Brogue
+            && let Some(state) = self.brogue_state.as_mut()
+            && state.is_running()
+        {
+            if data == DOOR_DETACH_KEY {
+                self.detach_door_game();
+            } else if !state.intercept_input(data) {
+                state.forward_input(data);
+            }
+            return;
+        }
+        if self.screen == crate::app::common::primitives::Screen::Brogue
+            && let Some(state) = self.brogue_state.as_ref()
             && state.in_exit_grace()
         {
             return;
@@ -1894,6 +2334,15 @@ impl App {
         {
             return;
         }
+        // CodeKeep is another network PTY door. Ink owns every key while the
+        // game is live; Ctrl-C triggers upstream's graceful save-and-exit.
+        if self.screen == crate::app::common::primitives::Screen::Codekeep
+            && let Some(state) = self.codekeep_state.as_ref()
+            && state.is_running()
+        {
+            state.forward_input(data);
+            return;
+        }
         crate::app::input::handle(self, data)
     }
 
@@ -1904,15 +2353,14 @@ impl App {
         registry.send_control(&self.session_token, PairControlMessage::ToggleMute)
     }
 
-    /// Advance the clubhouse animation clock every tick and, while the
-    /// screen is up, sync the shared lobby with the active-users map about
-    /// once a second and pull a fresh crowd snapshot every tick. Bots stay
-    /// out of the seat pool; the two staff bots (@bartender, @graybeard)
-    /// only toggle their fixed spots.
+    /// Sync the clubhouse animation clock to the wall-clock world tick and,
+    /// while the screen is up, sync the shared lobby with the active-users
+    /// map about once a second and pull a fresh crowd snapshot every tick.
+    /// Bots stay out of the seat pool; the two staff bots (@bartender,
+    /// @graybeard) only toggle their fixed spots.
     pub(crate) fn tick_clubhouse(&mut self) {
-        let on_screen = self.screen == Screen::Clubhouse;
-        self.clubhouse.tick(on_screen);
-        if !on_screen {
+        self.clubhouse.tick(self.marquee_tick as u64);
+        if self.screen != Screen::Clubhouse {
             return;
         }
 
@@ -1920,6 +2368,7 @@ impl App {
             let mut roster = Vec::new();
             let mut graybeard = None;
             let mut bartender = None;
+            let mut bot = None;
             if let Some(active_users) = &self.active_users {
                 let active_users = active_users.lock_recover();
                 for (user_id, user) in active_users.iter() {
@@ -1929,6 +2378,7 @@ impl App {
                         match user.username.as_str() {
                             "graybeard" => graybeard = Some(*user_id),
                             "bartender" => bartender = Some(*user_id),
+                            "bot" => bot = Some(*user_id),
                             _ => {}
                         }
                         continue;
@@ -1943,8 +2393,10 @@ impl App {
             }
             self.clubhouse.graybeard_online = graybeard.is_some();
             self.clubhouse.bartender_online = bartender.is_some();
+            self.clubhouse.bot_online = bot.is_some();
             self.clubhouse_graybeard_id = graybeard;
             self.clubhouse_bartender_id = bartender;
+            self.clubhouse_bot_id = bot;
             self.clubhouse.refresh_roster(roster);
         }
 
@@ -1986,47 +2438,41 @@ impl App {
         self.show_profile_modal = true;
     }
 
-    /// The tutorial's @bartender welcome: a real #lounge message, so the
-    /// newcomer's first bartender line demonstrates the room being live.
-    /// AI-generated in his voice when the AI service is up, with a scripted
-    /// fallback (see `ghost::bartender_tutorial_greeting`).
-    pub(crate) fn send_clubhouse_bartender_greeting(&self) {
-        let Some(bartender_id) = self.clubhouse_bartender_id else {
-            return;
-        };
-        let Some(lounge_id) = self.chat.lounge_room_id() else {
-            return;
-        };
-        // Reaching the bar is the tutorial's finish line: the welcome round is
-        // on the house, so lock the walkthrough in as done and comp the pour.
-        self.persist_clubhouse_tutorial_done();
+    /// The hidden treasure at the end of the tour: a scripted @bartender
+    /// welcome pinned in the newcomer's own bartender banner (see
+    /// `ghost::bartender_tutorial_greeting`) plus the comped first pour. It
+    /// stays on this client, so #lounge is not made to watch every
+    /// first-timer collect their free drink. Fires on the first walk up to
+    /// the counter in the tour session (`State::welcome_pour_due`); the
+    /// once-ever guarantee is the DB insert behind the comp.
+    pub(crate) fn show_clubhouse_bartender_welcome(&mut self) {
         let username = self.profile_state.profile().username.clone();
-        let chat_service = self.chat.service.clone();
-        let ai_service = self.ai_service.clone();
+        self.clubhouse.show_local_bartender_line(
+            crate::app::ai::ghost::bartender_tutorial_greeting(&username),
+        );
+
         let chip_service = self.chip_service.clone();
         let lobby = self.clubhouse.lobby_handle();
         let target = self.user_id;
         tokio::spawn(async move {
-            // Comp the welcome drink first so the newcomer is already glowing
-            // when the bartender's line lands. A failed comp is non-fatal: the
-            // greeting still goes out, just without the buzz.
+            // The line is already on screen; the buzz catches up. A failed comp
+            // is non-fatal, it just costs the newcomer their first drink.
             match chip_service
                 .grant_free_drink(target, late_core::models::drinks::WELCOME_DRINK_POINTS)
                 .await
             {
-                Ok(drinks) => {
+                Ok(Some(drinks)) => {
                     if let Some(lobby) = lobby {
                         lobby.record_drink(target, drinks.drunk_points, drinks.last_drink_at);
                     }
                 }
+                // They have drunk before (a tour rerun after a mid-tour
+                // disconnect): the line is just flavor, nothing to glow.
+                Ok(None) => {}
                 Err(err) => {
                     tracing::warn!(error = ?err, user_id = %target, "welcome drink comp failed");
                 }
             }
-            let body =
-                crate::app::ai::ghost::bartender_tutorial_greeting(ai_service.as_ref(), &username)
-                    .await;
-            chat_service.send_bot_reply_task(bartender_id, lounge_id, body, Some(target));
         });
     }
 
@@ -2092,32 +2538,20 @@ impl App {
         registry.send_control(&self.session_token, PairControlMessage::VolumeDown)
     }
 
-    /// Push the currently-stored audio source to all paired entries. Called
-    /// when a browser registers so every playback surface reflects the
-    /// persisted choice plus the current surface policy: browser Icecast only
-    /// when no CLI is paired, and embedded CLI webview only when no real
-    /// browser is paired.
-    pub fn replay_paired_browser_source(&self) {
-        let Some(registry) = self.paired_client_registry.as_ref() else {
-            return;
-        };
-        registry.broadcast_playback_source_for_token(&self.session_token);
-    }
-
     /// Flip the per-user audio source preference. Persisted server-side; the
     /// `persist_audio_source` task then pushes `SetPlaybackSource` to every
-    /// paired entry (CLI and browser) for this user. Works whether a browser
-    /// is paired or not — the preference is meaningful even with only a CLI,
-    /// because the CLI gates its Icecast decoder on the received source.
+    /// paired entry for this user. Meaningful with only a CLI paired: the CLI
+    /// gates its direct-stream decoder on the received source and starts or
+    /// stops its webview helper for YouTube.
     pub fn toggle_paired_playback_source(&mut self) -> late_core::models::user::AudioSource {
         use late_core::models::user::AudioSource;
         // Dock order in the sidebar music stage: radio → youtube → icecast.
-        let next = match self.paired_browser_source {
+        let next = match self.paired_source {
             AudioSource::Radio => AudioSource::Youtube,
             AudioSource::Youtube => AudioSource::Icecast,
             AudioSource::Icecast => AudioSource::Radio,
         };
-        self.paired_browser_source = next;
+        self.paired_source = next;
         if let Some(active_users) = &self.active_users
             && let Some(active) = active_users.lock_recover().get_mut(&self.user_id)
         {
@@ -2199,10 +2633,15 @@ impl App {
         });
     }
 
-    pub(crate) fn drain_voice_join_results(&mut self) {
+    /// Returns true when any join result was drained (banner or voice state
+    /// change), so the tick can report the frame as changed.
+    pub(crate) fn drain_voice_join_results(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(result) = self.voice_join_rx.try_recv() {
             self.handle_voice_join_result(result);
+            changed = true;
         }
+        changed
     }
 
     fn handle_voice_join_result(&mut self, result: VoiceJoinTaskResult) {
@@ -2381,7 +2820,10 @@ impl App {
         self.terminal_image_render_state = TerminalImageRenderState::default();
     }
 
-    pub fn enter_alt_screen() -> Vec<u8> {
+    /// Terminal setup bytes. `mouse` gates the mouse-tracking DECSET sequences:
+    /// in keyboard-only mode they're withheld so the terminal keeps its own text
+    /// selection and copy. Bracketed paste stays on regardless.
+    pub fn enter_alt_screen(mouse: bool) -> Vec<u8> {
         let mut buf = Vec::new();
         // If a prior session was killed mid-OSC image payload, recover the
         // terminal parser before sending normal alt-screen setup.
@@ -2400,8 +2842,12 @@ impl App {
         // 1003h = any-event mouse tracking (motion reports with or without a
         // button held). Dartboard needs drag + hover parity with standalone.
         // 1006h = SGR extended encoding (ESC[< sequences instead of legacy X11)
-        // 2004h = bracketed paste mode (ESC[200~ ... ESC[201~)
-        buf.extend_from_slice(b"\x1b[?1000h\x1b[?1003h\x1b[?1006h\x1b[?2004h");
+        // Withheld in keyboard-only mode so native terminal selection survives.
+        if mouse {
+            buf.extend_from_slice(b"\x1b[?1000h\x1b[?1003h\x1b[?1006h");
+        }
+        // 2004h = bracketed paste mode (ESC[200~ ... ESC[201~) - always on.
+        buf.extend_from_slice(b"\x1b[?2004h");
         buf.extend_from_slice(&crate::app::files::terminal_image::xtversion_probe());
         buf.extend_from_slice(&iterm2_capabilities_probe());
         // DA1 last: nearly every terminal answers it, and replies arrive in

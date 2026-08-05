@@ -1,8 +1,54 @@
 use super::{
-    compare_span, fit, inventory_item_tag, line_rows, meter, rarity_color, scroll_offset,
-    star_rating, wrapped_rows,
+    compare_span, fit, hug_poi_arrows, inventory_item_tag, line_rows, meter, rarity_color,
+    scroll_offset, star_rating, wrapped_rows,
 };
+use crate::app::door::lateania::worldmap::{MapArrow, Tile};
 use ratatui::style::Color;
+
+#[test]
+fn poi_arrows_hug_the_explored_cluster_with_boss_priority() {
+    // A 10x10 canvas whose explored cluster occupies rows/cols 4..=5.
+    let mut canvas = vec![vec![Tile::Empty; 10]; 10];
+    canvas[4][4] = Tile::Room(1);
+    canvas[5][5] = Tile::Room(2);
+
+    let arrows = vec![
+        // A tame arrow far away on the widget border...
+        MapArrow {
+            row: 0,
+            col: 9,
+            glyph: '\u{2197}',
+            boss: false,
+        },
+        // ...and a boss arrow that clamps onto the same cluster-edge cell.
+        MapArrow {
+            row: 2,
+            col: 9,
+            glyph: '\u{2192}',
+            boss: true,
+        },
+    ];
+    let hugged = hug_poi_arrows(arrows, &canvas);
+
+    // Both collapse onto the cluster's north-east corner cell (3, 6); the boss
+    // outranks the tame arrow there.
+    assert_eq!(hugged.len(), 1);
+    assert_eq!((hugged[0].row, hugged[0].col), (3, 6));
+    assert!(hugged[0].boss, "a boss arrow outranks a tame on one cell");
+
+    // An empty canvas (nothing explored) leaves arrows untouched.
+    let empty = vec![vec![Tile::Empty; 10]; 10];
+    let kept = hug_poi_arrows(
+        vec![MapArrow {
+            row: 0,
+            col: 9,
+            glyph: '\u{2197}',
+            boss: false,
+        }],
+        &empty,
+    );
+    assert_eq!((kept[0].row, kept[0].col), (0, 9));
+}
 
 #[test]
 fn rarity_color_uses_the_standard_rpg_palette() {
@@ -128,4 +174,227 @@ fn equipped_inventory_tags_show_the_slot() {
     assert_eq!(inventory_item_tag(true, Some("weapon")), " [worn weapon]");
     assert_eq!(inventory_item_tag(true, Some("chest")), " [worn chest]");
     assert_eq!(inventory_item_tag(false, Some("ring")), " (ring)");
+}
+
+use super::super::svc::{LogKind, LogLine, empty_player_view};
+use super::recent_log_tail;
+
+fn line_text(line: &Line) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+fn log_view(entries: &[&str]) -> super::PlayerView {
+    let mut view = empty_player_view();
+    view.log = entries
+        .iter()
+        .map(|text| LogLine {
+            text: (*text).to_string(),
+            kind: LogKind::Normal,
+        })
+        .collect();
+    view
+}
+
+#[test]
+fn recent_log_reads_oldest_top_newest_bottom() {
+    // view.log is chronological (oldest first). The feed must render the same
+    // way: oldest at the top, newest resting on the bottom row, like any MUD
+    // scrollback. This is the exact regression fix/mud-log-order corrects.
+    let view = log_view(&["first", "second", "third"]);
+    // Wide enough that nothing wraps, tall enough that all three fit.
+    let rendered: Vec<String> = recent_log_tail(&view, 40, 8)
+        .iter()
+        .map(line_text)
+        .collect();
+
+    let index_of = |needle: &str| {
+        rendered
+            .iter()
+            .position(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("{needle:?} missing from {rendered:?}"))
+    };
+    assert!(index_of("first") < index_of("second"));
+    assert!(index_of("second") < index_of("third"));
+    assert!(
+        rendered.last().is_some_and(|line| line.contains("third")),
+        "newest event must rest on the bottom row, got {rendered:?}"
+    );
+}
+
+#[test]
+fn recent_log_trims_oldest_when_it_overflows_height() {
+    // Five events into a window that only fits two under the "Recent" header:
+    // the two newest survive, in order, and the three oldest fall off the top.
+    let view = log_view(&["e1", "e2", "e3", "e4", "e5"]);
+    let rendered: Vec<String> = recent_log_tail(&view, 40, 3)
+        .iter()
+        .map(line_text)
+        .collect();
+    let joined = rendered.join("\n");
+
+    for dropped in ["e1", "e2", "e3"] {
+        assert!(
+            !joined.contains(dropped),
+            "oldest event {dropped:?} should have been trimmed, got {rendered:?}"
+        );
+    }
+    assert!(joined.contains("e4") && joined.contains("e5"));
+    assert!(
+        rendered.last().is_some_and(|line| line.contains("e5")),
+        "newest event must rest on the bottom row, got {rendered:?}"
+    );
+}
+
+#[test]
+fn the_xp_meter_stays_on_the_character_sheet_under_a_pile_of_titles() {
+    // The bug: the full-screen character sheet is three fixed-height columns
+    // with no scroll of its own (`[`/`]` only reach the narrow side panel), and
+    // the right column listed every earned title *before* Experience. Enough
+    // titles and the XP bar walked off the bottom with no way to reach it.
+    let mut view = empty_player_view();
+    view.level = 30;
+    view.xp_into_level = 120;
+    view.xp_for_next = 400;
+    view.titles = (0..30).map(|i| format!("Champion of Zone {i}")).collect();
+
+    let lines = super::sheet_derived(&view, ratatui::style::Color::White);
+    let text: Vec<String> = lines.iter().map(line_text).collect();
+    let xp_row = text
+        .iter()
+        .position(|l| l.contains("to next"))
+        .expect("the sheet shows the xp meter");
+
+    // The sheet only draws when the area is at least 18 rows tall, minus the
+    // block border: the meter has to land inside that.
+    assert!(
+        xp_row < 16,
+        "xp meter fell to row {xp_row}, off a 16-row column: {text:?}"
+    );
+    assert!(
+        text.iter().any(|l| l.contains("+26 more")),
+        "the title list is summarised rather than unbounded: {text:?}"
+    );
+}
+
+// ---- combat action bar (mouse) --------------------------------------------
+
+fn view_with_abilities(slots: &[u8]) -> super::PlayerView {
+    use super::super::svc::AbilityView;
+    let mut view = super::super::svc::empty_player_view();
+    view.classed = true;
+    view.abilities = slots
+        .iter()
+        .map(|&slot| AbilityView {
+            slot,
+            name: format!("Ability{slot}"),
+            cost: 5,
+            ready: true,
+            effect: String::new(),
+        })
+        .collect();
+    view
+}
+
+#[test]
+fn action_bar_always_offers_attack_quaff_and_flee() {
+    use super::super::state::ClickAction;
+    let view = view_with_abilities(&[1, 2, 3]);
+    let chips = super::combat_chips(&view, 80);
+    let actions: Vec<ClickAction> = chips.iter().map(|c| c.action).collect();
+    assert_eq!(
+        actions.first(),
+        Some(&ClickAction::Attack),
+        "attack leads the bar"
+    );
+    // Quaff then Flee anchor the end - the two a wounded player reaches for.
+    assert_eq!(actions[actions.len() - 2], ClickAction::Quaff);
+    assert_eq!(actions[actions.len() - 1], ClickAction::Flee);
+    assert!(
+        actions.contains(&ClickAction::Ability(2)),
+        "an ability slot in the middle is clickable"
+    );
+}
+
+#[test]
+fn action_bar_slot_ten_is_labelled_with_the_zero_key() {
+    let view = view_with_abilities(&[10]);
+    let chips = super::combat_chips(&view, 80);
+    let slot_chip = chips
+        .iter()
+        .find(|c| c.action == super::super::state::ClickAction::Ability(10))
+        .expect("slot 10 chip present");
+    assert!(
+        slot_chip.label.starts_with("0 "),
+        "slot 10 casts with `0`, so its chip shows 0: {:?}",
+        slot_chip.label
+    );
+}
+
+#[test]
+fn action_bar_drops_abilities_before_crowding_out_quaff_and_flee() {
+    use super::super::state::ClickAction;
+    // A narrow bar can't fit every ability, but Quaff and Flee must survive.
+    let view = view_with_abilities(&[1, 2, 3, 4, 5, 6, 7, 8]);
+    let chips = super::combat_chips(&view, 24);
+    let actions: Vec<ClickAction> = chips.iter().map(|c| c.action).collect();
+    assert_eq!(actions.first(), Some(&ClickAction::Attack));
+    assert!(
+        actions.contains(&ClickAction::Quaff),
+        "quaff kept on a narrow bar"
+    );
+    assert!(
+        actions.contains(&ClickAction::Flee),
+        "flee kept on a narrow bar"
+    );
+    let abilities = actions
+        .iter()
+        .filter(|a| matches!(a, ClickAction::Ability(_)))
+        .count();
+    assert!(
+        abilities < 8,
+        "some abilities are dropped when they don't fit"
+    );
+}
+
+#[test]
+fn room_panel_makes_each_foe_a_clickable_row() {
+    use super::super::svc::{MobView, empty_player_view};
+    use crate::usernames::UsernameLookup;
+    use std::collections::HashMap;
+
+    let foe = |id: u32, name: &str, targeted: bool| MobView {
+        id,
+        name: name.to_string(),
+        hp: 5,
+        max_hp: 10,
+        level: 3,
+        rank: "common".to_string(),
+        boss: false,
+        targeted,
+    };
+    let mut view = empty_player_view();
+    view.classed = true;
+    view.mobs = vec![foe(11, "Goblin", false), foe(22, "Ogre", true)];
+
+    let names: HashMap<uuid::Uuid, String> = HashMap::new();
+    let usernames = UsernameLookup::new(&names, None);
+    let (lines, hits) = super::room_panel(&view, &usernames, 30);
+
+    assert_eq!(hits.len(), 2, "one clickable row per foe");
+    for (idx, id) in &hits {
+        let want = if *id == 11 { "Goblin" } else { "Ogre" };
+        assert!(
+            line_text(&lines[*idx]).contains(want),
+            "recorded row {idx} should be the {want} row"
+        );
+    }
+    // The foe you're locked onto is flagged with » so a click's effect shows.
+    let ogre_row = hits.iter().find(|(_, id)| *id == 22).unwrap().0;
+    assert!(
+        line_text(&lines[ogre_row]).contains('\u{00bb}'),
+        "the targeted foe is marked with »"
+    );
 }

@@ -31,7 +31,6 @@ reqwest = { workspace = true, features = ["blocking"] }
 ringbuf.workspace = true
 russh.workspace = true
 rustls.workspace = true
-rustfft.workspace = true
 shlex.workspace = true
 symphonia = { workspace = true, features = ["mp3"] }
 tokio-tungstenite = { workspace = true, features = ["rustls-tls-native-roots"] }
@@ -53,3 +52,6 @@ image.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "windows"))'.dependencies]
 livekit.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+mpris-server = { version = "0.10.0", features = ["tokio"] }

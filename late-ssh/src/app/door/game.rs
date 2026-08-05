@@ -11,6 +11,7 @@ use crate::app::{
 pub enum DoorGameId {
     Lateania,
     GreenDragon,
+    Darkroom,
 }
 
 impl DoorGameId {
@@ -18,6 +19,7 @@ impl DoorGameId {
         match self {
             Self::Lateania => "lateania",
             Self::GreenDragon => "greendragon",
+            Self::Darkroom => "darkroom",
         }
     }
 }
@@ -65,6 +67,13 @@ pub trait DoorGame {
     fn handle_key(&self, app: &mut App, byte: u8) -> bool;
 
     fn handle_arrow(&self, app: &mut App, key: u8) -> bool;
+
+    /// Handle a mouse event (click/scroll). Doors that don't use the mouse keep
+    /// the default no-op; Lateania overrides it to run its clickable action bar.
+    fn handle_mouse(&self, app: &mut App, mouse: crate::app::input::MouseEvent) -> bool {
+        let _ = (app, mouse);
+        false
+    }
 
     fn leave_active(&self, app: &mut App) -> bool;
 

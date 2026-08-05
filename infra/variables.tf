@@ -52,8 +52,18 @@ variable "DOPEWARS_IMAGE_TAG" {
   type        = string
 }
 
+variable "CODEKEEP_IMAGE_TAG" {
+  description = "Docker image for late-codekeep, the CodeKeep door host."
+  type        = string
+}
+
 variable "DCSS_IMAGE_TAG" {
   description = "Docker image for late-dcss, the DCSS door host (e.g., ghcr.io/org/late-dcss:sha-abc123)."
+  type        = string
+}
+
+variable "BROGUE_IMAGE_TAG" {
+  description = "Docker image for late-brogue, the Brogue door host (e.g., ghcr.io/org/late-brogue:sha-abc123)."
   type        = string
 }
 
@@ -204,6 +214,17 @@ variable "DOPEWARS_ENABLED" {
   }
 }
 
+variable "CODEKEEP_ENABLED" {
+  description = "Enable the CodeKeep door game client. Empty defaults to on; the dedicated host remains deployed."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "0", "1", "true", "false", "yes", "no", "on", "off"], lower(trimspace(var.CODEKEEP_ENABLED)))
+    error_message = "CODEKEEP_ENABLED must be a boolean-like string: 1/0, true/false, yes/no, or on/off."
+  }
+}
+
 variable "DCSS_ENABLED" {
   description = "Enable the DCSS door game CLIENT (service-ssh reaches the late-dcss host over SSH; the host pod is always deployed). Empty defaults to on."
   type        = string
@@ -212,6 +233,17 @@ variable "DCSS_ENABLED" {
   validation {
     condition     = contains(["", "0", "1", "true", "false", "yes", "no", "on", "off"], lower(trimspace(var.DCSS_ENABLED)))
     error_message = "DCSS_ENABLED must be a boolean-like string: 1/0, true/false, yes/no, or on/off."
+  }
+}
+
+variable "BROGUE_ENABLED" {
+  description = "Enable the Brogue door game CLIENT (service-ssh reaches the late-brogue host over SSH; the host pod is always deployed). Empty defaults to on."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "0", "1", "true", "false", "yes", "no", "on", "off"], lower(trimspace(var.BROGUE_ENABLED)))
+    error_message = "BROGUE_ENABLED must be a boolean-like string: 1/0, true/false, yes/no, or on/off."
   }
 }
 
@@ -234,11 +266,6 @@ variable "AI_API_KEY" {
   description = "Gemini API key for AI features (ghost chat, URL extraction)."
   type        = string
   sensitive   = true
-}
-
-variable "AI_MODEL" {
-  description = "Gemini model name."
-  type        = string
 }
 
 variable "AI_ENABLED" {

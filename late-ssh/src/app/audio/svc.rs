@@ -12,7 +12,6 @@ use late_core::{
     models::{
         audio_ban::AudioBan,
         media_history_item::MediaHistoryItem,
-        media_history_vote::MediaHistoryVote,
         media_queue_item::MediaQueueItem,
         media_queue_vote::{CastVoteOutcome, MediaQueueVote},
         media_source::MediaSource,
@@ -187,14 +186,6 @@ pub enum AudioEvent {
         votes: u32,
         threshold: u32,
     },
-    BoothHistoryVoteApplied {
-        user_id: Uuid,
-        score: i32,
-    },
-    BoothHistoryVoteFailed {
-        user_id: Uuid,
-        message: String,
-    },
     BoothHistoryRequeued {
         user_id: Uuid,
         position: i64,
@@ -269,8 +260,6 @@ pub struct HistoryItemView {
     pub is_stream: bool,
     pub play_count: i32,
     pub last_played_at_ms: i64,
-    #[serde(default)]
-    pub vote_score: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -339,6 +328,13 @@ impl AudioService {
 
     pub fn subscribe_snapshot(&self) -> watch::Receiver<QueueSnapshot> {
         self.snapshot_tx.subscribe()
+    }
+
+    /// The last published queue snapshot, straight from memory. Unlike
+    /// [`Self::snapshot`] this never touches the DB, so it is safe to call on
+    /// every request of a public HTTP route.
+    pub fn current_snapshot(&self) -> QueueSnapshot {
+        self.snapshot_tx.borrow().clone()
     }
 
     /// True once the YouTube Data API key is configured. Server-side YouTube
@@ -514,6 +510,9 @@ impl AudioService {
                 if recent >= MAX_SUBMISSIONS_PER_WINDOW {
                     anyhow::bail!("submission rate limit exceeded");
                 }
+            }
+            if MediaQueueItem::youtube_is_active(&client, &video.video_id).await? {
+                anyhow::bail!("track is already in the queue");
             }
 
             MediaQueueItem::insert_youtube(
@@ -827,53 +826,6 @@ impl AudioService {
         Ok(score)
     }
 
-    pub async fn cast_history_vote(
-        &self,
-        user_id: Uuid,
-        history_item_id: Uuid,
-        value: i16,
-    ) -> Result<i32> {
-        if value != 1 && value != -1 {
-            anyhow::bail!("invalid vote value");
-        }
-
-        let client = self.db.get().await?;
-        if AudioBan::is_active_for_user(&client, user_id).await? {
-            anyhow::bail!("audio ban: voting blocked");
-        }
-        if MediaHistoryItem::find_by_id(&client, history_item_id)
-            .await?
-            .is_none()
-        {
-            anyhow::bail!("history item not found");
-        }
-        let score = MediaHistoryVote::upsert(&client, user_id, history_item_id, value).await?;
-        drop(client);
-
-        let mut state = self.state.lock().await;
-        self.publish_queue_update_with_guard(&mut state).await?;
-        Ok(score)
-    }
-
-    pub async fn clear_history_vote(&self, user_id: Uuid, history_item_id: Uuid) -> Result<i32> {
-        let client = self.db.get().await?;
-        if AudioBan::is_active_for_user(&client, user_id).await? {
-            anyhow::bail!("audio ban: voting blocked");
-        }
-        if MediaHistoryItem::find_by_id(&client, history_item_id)
-            .await?
-            .is_none()
-        {
-            anyhow::bail!("history item not found");
-        }
-        let score = MediaHistoryVote::delete_vote(&client, user_id, history_item_id).await?;
-        drop(client);
-
-        let mut state = self.state.lock().await;
-        self.publish_queue_update_with_guard(&mut state).await?;
-        Ok(score)
-    }
-
     pub async fn requeue_history_item(
         &self,
         user_id: Uuid,
@@ -893,6 +845,9 @@ impl AudioService {
             let history = MediaHistoryItem::find_by_id(&client, history_item_id)
                 .await?
                 .ok_or_else(|| anyhow::anyhow!("history item not found"))?;
+            if MediaQueueItem::youtube_is_active(&client, &history.external_id).await? {
+                anyhow::bail!("track is already in the queue");
+            }
             MediaQueueItem::insert_youtube(
                 &client,
                 user_id,
@@ -1092,43 +1047,6 @@ impl AudioService {
                     service.publish_event(AudioEvent::BoothVoteFailed {
                         user_id,
                         message: booth_vote_error_message(&err),
-                    });
-                }
-            }
-        });
-    }
-
-    pub fn cast_history_vote_task(&self, user_id: Uuid, history_item_id: Uuid, value: i16) {
-        let service = self.clone();
-        tokio::spawn(async move {
-            match service
-                .cast_history_vote(user_id, history_item_id, value)
-                .await
-            {
-                Ok(score) => {
-                    service.publish_event(AudioEvent::BoothHistoryVoteApplied { user_id, score });
-                }
-                Err(err) => {
-                    service.publish_event(AudioEvent::BoothHistoryVoteFailed {
-                        user_id,
-                        message: booth_history_error_message(&err),
-                    });
-                }
-            }
-        });
-    }
-
-    pub fn clear_history_vote_task(&self, user_id: Uuid, history_item_id: Uuid) {
-        let service = self.clone();
-        tokio::spawn(async move {
-            match service.clear_history_vote(user_id, history_item_id).await {
-                Ok(score) => {
-                    service.publish_event(AudioEvent::BoothHistoryVoteApplied { user_id, score });
-                }
-                Err(err) => {
-                    service.publish_event(AudioEvent::BoothHistoryVoteFailed {
-                        user_id,
-                        message: booth_history_error_message(&err),
                     });
                 }
             }
@@ -1847,7 +1765,7 @@ impl AudioService {
     async fn load_snapshot(&self, mode: AudioMode) -> Result<QueueSnapshot> {
         let client = self.db.get().await?;
         let items = MediaQueueItem::list_snapshot(&client, QUEUE_SNAPSHOT_LIMIT).await?;
-        let history_items = MediaHistoryItem::list_ranked(&client, HISTORY_LIMIT).await?;
+        let history_items = MediaHistoryItem::list_recent(&client, HISTORY_LIMIT).await?;
         let user_ids = items
             .iter()
             .map(|(item, _)| item.submitter_id)
@@ -1869,10 +1787,7 @@ impl AudioService {
             audio_mode: mode,
             current,
             queue,
-            history: history_items
-                .into_iter()
-                .map(|(item, score)| history_item_view(item, score))
-                .collect(),
+            history: history_items.into_iter().map(history_item_view).collect(),
             skip_progress: None,
         })
     }
@@ -2108,6 +2023,8 @@ fn booth_submit_error_message(err: &anyhow::Error) -> String {
     let text = format!("{err:#}").to_ascii_lowercase();
     if text.contains("audio ban") {
         "Banned from submitting audio".to_string()
+    } else if is_duplicate_track_error(&text) {
+        "Already in the queue".to_string()
     } else if text.contains("invalid url")
         || (text.contains("youtube") && text.contains("not found"))
     {
@@ -2173,6 +2090,8 @@ fn booth_history_error_message(err: &anyhow::Error) -> String {
     let text = format!("{err:#}").to_ascii_lowercase();
     if text.contains("audio ban") {
         "Banned from audio history actions".to_string()
+    } else if is_duplicate_track_error(&text) {
+        "Already in the queue".to_string()
     } else if text.contains("rate limit") || text.contains("submission rate limit") {
         "Slow down - too many submissions".to_string()
     } else if text.contains("history item not found") {
@@ -2193,10 +2112,19 @@ fn booth_history_delete_error_message(err: &anyhow::Error) -> String {
     }
 }
 
+/// The queue holds a track once. The app-level guard produces the message;
+/// a submission that loses the race to `idx_media_queue_active_track` gets
+/// the same banner from the constraint violation.
+fn is_duplicate_track_error(text: &str) -> bool {
+    text.contains("already in the queue") || text.contains("idx_media_queue_active_track")
+}
+
 fn trusted_submit_error_message(err: &anyhow::Error) -> String {
     let text = format!("{err:#}").to_ascii_lowercase();
     if text.contains("audio ban") {
         "Banned from submitting audio".to_string()
+    } else if is_duplicate_track_error(&text) {
+        "Already in the queue".to_string()
     } else if text.contains("invalid url")
         || text.contains("unsupported youtube url")
         || text.contains("invalid youtube video id")
@@ -2275,7 +2203,7 @@ fn queue_item_view(
     }
 }
 
-fn history_item_view(item: MediaHistoryItem, vote_score: i32) -> HistoryItemView {
+fn history_item_view(item: MediaHistoryItem) -> HistoryItemView {
     HistoryItemView {
         id: item.id,
         video_id: item.external_id,
@@ -2285,7 +2213,6 @@ fn history_item_view(item: MediaHistoryItem, vote_score: i32) -> HistoryItemView
         is_stream: item.is_stream,
         play_count: item.play_count,
         last_played_at_ms: item.last_played_at.timestamp_millis(),
-        vote_score,
     }
 }
 

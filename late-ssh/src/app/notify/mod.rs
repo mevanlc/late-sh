@@ -94,6 +94,17 @@ impl Notification {
             body: question.to_string(),
         }
     }
+
+    /// Reuses `GameEvents` rather than adding a dedicated `Kind`/settings row:
+    /// this is the same "something you started needs your attention" bucket
+    /// as the daily/house your-turn alerts.
+    pub(crate) fn pomodoro_done(label: &str) -> Self {
+        Self {
+            kind: Kind::GameEvents,
+            title: format!("{label} done"),
+            body: "your /pomodoro timer finished".to_string(),
+        }
+    }
 }
 
 /// Create the session's notification channel. Clone the [`Notifier`] into any
@@ -126,6 +137,13 @@ pub(crate) struct Outbox {
 }
 
 impl Outbox {
+    /// True when notifications are queued for the next drain. The render
+    /// gate forces a frame on pending notifications because `drain` only
+    /// runs during render.
+    pub(crate) fn has_pending(&self) -> bool {
+        !self.rx.is_empty()
+    }
+
     /// Drain pending notifications into at most one terminal payload per
     /// call. Notifications during cooldown or with disabled kinds are
     /// dropped, not queued.

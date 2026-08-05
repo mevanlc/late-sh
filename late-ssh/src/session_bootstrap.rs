@@ -1,3 +1,4 @@
+use late_core::models::user_ssh_key::{KeyLayout, UserSshKey};
 use late_core::models::{artboard_ban::ArtboardBan, user::User};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -19,6 +20,9 @@ pub struct SessionBootstrapInputs {
     pub session_token: String,
     pub session_rx: Option<mpsc::Receiver<SessionMessage>>,
     pub activity_feed_rx: Option<broadcast::Receiver<ActivityEvent>>,
+    /// Fingerprint of the SSH key this session authenticated with, for
+    /// per-device settings. `None` for sessions without a key of their own.
+    pub key_fingerprint: Option<String>,
 }
 
 pub struct ArcadeSessionPreloads {
@@ -225,6 +229,32 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
     }
 }
 
+/// This device's stored home rail layout, keyed by the SSH key the session
+/// authenticated with. `None` for a keyless session, a key with nothing stored,
+/// or a failed read: all three follow the account default, which is why a
+/// failure here is logged and swallowed rather than failing the connection.
+pub async fn load_device_rails(
+    state: &State,
+    user_id: Uuid,
+    key_fingerprint: Option<&str>,
+) -> Option<KeyLayout> {
+    let fingerprint = key_fingerprint?;
+    let client = match state.db.get().await {
+        Ok(client) => client,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to get db client for device rail layout");
+            return None;
+        }
+    };
+    match UserSshKey::layout_for(&client, user_id, fingerprint).await {
+        Ok(layout) => layout,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to load device rail layout");
+            None
+        }
+    }
+}
+
 pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs) -> SessionConfig {
     let SessionBootstrapInputs {
         user,
@@ -235,6 +265,7 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         session_token,
         session_rx,
         activity_feed_rx,
+        key_fingerprint,
     } = inputs;
 
     let user_id = user.id;
@@ -257,12 +288,12 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         initial_solitaire_games,
         initial_minesweeper_games,
     } = load_arcade_session_preloads(state, user_id).await;
-    let (initial_bonsai_tree, initial_bonsai_care) =
+    let (initial_bonsai_tree, initial_bonsai_care, initial_bonsai_decay_protection) =
         match state.bonsai_service.ensure_tree_with_care(user_id).await {
-            Ok((tree, care)) => (Some(tree), Some(care)),
+            Ok((tree, care, protection)) => (Some(tree), Some(care), protection),
             Err(e) => {
                 tracing::warn!(error = ?e, "failed to load/create bonsai tree");
-                (None, None)
+                (None, None, None)
             }
         };
     let shop_snapshot_rx = state.shop_service.subscribe_snapshot(user_id);
@@ -345,10 +376,22 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         }
     };
 
+    let initial_door_rcs = match state.door_rc_service.list(user_id).await {
+        Ok(rcs) => rcs,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to load door rc files");
+            Vec::new()
+        }
+    };
+
+    let key_layout = load_device_rails(state, user_id, key_fingerprint.as_deref()).await;
+
     SessionConfig {
         cols,
         rows,
         term,
+        key_fingerprint,
+        key_layout,
         audio_service: state.audio_service.clone(),
         voice_service: state.voice_service.clone(),
         chat_service: state.chat_service.clone(),
@@ -385,7 +428,10 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         initial_minesweeper_games,
         lateania_service: state.lateania_service.clone(),
         greendragon_service: state.greendragon_service.clone(),
+        darkroom_service: state.darkroom_service.clone(),
         arcade_handle_service: state.arcade_handle_service.clone(),
+        door_rc_service: state.door_rc_service.clone(),
+        initial_door_rcs,
         daily_service: state.daily_service.clone(),
         house_registry: state.house_registry.clone(),
         dartboard_server: state.dartboard_server.clone(),
@@ -396,6 +442,7 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         initial_bonsai_tree,
         initial_bonsai_care,
         initial_bonsai_v2_tree,
+        initial_bonsai_decay_protection,
         pet_service: state.pet_service.clone(),
         initial_pet,
         quest_service: state.quest_service.clone(),
@@ -429,6 +476,10 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         dcss_host: state.config.dcss_host.clone(),
         dcss_port: state.config.dcss_port,
         dcss_secret: state.config.dcss_secret.clone(),
+        brogue_enabled: state.config.brogue_enabled,
+        brogue_host: state.config.brogue_host.clone(),
+        brogue_port: state.config.brogue_port,
+        brogue_secret: state.config.brogue_secret.clone(),
         usurper_enabled: state.config.usurper_enabled,
         usurper_host: state.config.usurper_host.clone(),
         usurper_port: state.config.usurper_port,
@@ -437,16 +488,20 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         dopewars_host: state.config.dopewars_host.clone(),
         dopewars_port: state.config.dopewars_port,
         dopewars_secret: state.config.dopewars_secret.clone(),
+        codekeep_enabled: state.config.codekeep_enabled,
+        codekeep_host: state.config.codekeep_host.clone(),
+        codekeep_port: state.config.codekeep_port,
+        codekeep_secret: state.config.codekeep_secret.clone(),
         session_token,
         session_registry: Some(state.session_registry.clone()),
         paired_client_registry: Some(state.paired_client_registry.clone()),
         session_rx,
         now_playing_rx: Some(state.now_playing_rx.clone()),
         radio_meta_rx: Some(state.radio_meta_rx.clone()),
-        worldcup_service: Some(state.worldcup_service.clone()),
         active_users: Some(state.active_users.clone()),
-        ai_service: Some(state.ai_service.clone()),
         clubhouse_lobby: Some(state.clubhouse_lobby.clone()),
+        mention_ladders: state.mention_ladders.clone(),
+        scratchpad_registry: Some(state.scratchpad_registry.clone()),
         clubhouse_tutorial_done: late_core::models::user::extract_clubhouse_tutorial_done(
             &user.settings,
         ),
@@ -454,6 +509,7 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         afk_users: state.afk_users.clone(),
         username_directory: Some(state.username_directory.clone()),
         flair_directory: Some(state.flair_directory.clone()),
+        pomodoro_directory: Some(state.pomodoro_directory.clone()),
         activity_feed_rx,
         initial_announcements,
         user_id,
@@ -465,6 +521,7 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         land_on_home: late_core::models::user::extract_land_on_home(&user.settings),
         initial_theme_id: late_core::models::user::extract_theme_id(&user.settings)
             .unwrap_or_else(|| theme::DEFAULT_ID.to_string()),
+        initial_interaction_mode: late_core::models::user::extract_interaction_mode(&user.settings),
         initial_audio_source: late_core::models::user::extract_audio_source(&user.settings),
         initial_icecast_stream: late_core::models::user::extract_icecast_stream(&user.settings),
         initial_radio_station: late_core::models::user::extract_radio_station(&user.settings),

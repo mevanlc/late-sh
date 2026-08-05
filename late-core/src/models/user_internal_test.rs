@@ -163,14 +163,16 @@ fn extract_right_sidebar_components_preserves_order_and_backfills() {
             { "key": "music", "enabled": true },
             { "key": "bogus", "enabled": true },
             { "key": "activity", "enabled": true },
+            { "key": "visualizer", "enabled": true },
         ]
     });
     let components = extract_right_sidebar_components(&settings);
-    // Stored order kept for known entries, unknown dropped (including
-    // the retired "pet" and "activity" keys), missing (daily,
-    // visualizer) backfilled ENABLED at the end in ALL order: an existing
-    // user's stored list predates newer panels, so they should appear
-    // rather than silently stay hidden.
+    // Stored order kept for known entries, unknown dropped (including the
+    // retired "pet", "activity", and "visualizer" keys — the visualizer
+    // now renders inline atop Music instead of as its own panel, see
+    // `common/sidebar.rs`), missing (daily) backfilled ENABLED at the end
+    // in ALL order: an existing user's stored list predates newer panels,
+    // so they should appear rather than silently stay hidden.
     assert_eq!(
         components,
         vec![
@@ -184,10 +186,6 @@ fn extract_right_sidebar_components_preserves_order_and_backfills() {
             },
             RightSidebarComponentSetting {
                 component: RightSidebarComponent::Daily,
-                enabled: true,
-            },
-            RightSidebarComponentSetting {
-                component: RightSidebarComponent::Visualizer,
                 enabled: true,
             },
         ]
@@ -246,4 +244,30 @@ fn sanitize_username_input_collapses_repeated_separators() {
 fn truncate_to_boundary_respects_char_boundaries() {
     assert_eq!(truncate_to_boundary("abcdef", 4), "abcd");
     assert_eq!(truncate_to_boundary("żółw", 3), "żół");
+}
+
+#[test]
+fn interaction_mode_absent_signals_first_run() {
+    // No key = never chosen = show the onboarding prompt.
+    assert_eq!(extract_interaction_mode(&json!({})), None);
+}
+
+#[test]
+fn interaction_mode_round_trips_and_gates_the_mouse() {
+    for (stored, mode, mouse) in [
+        ("keyboard", InteractionMode::Keyboard, false),
+        ("mouse", InteractionMode::Mouse, true),
+        ("hybrid", InteractionMode::Hybrid, true),
+    ] {
+        let settings = json!({ "interaction_mode": stored });
+        assert_eq!(extract_interaction_mode(&settings), Some(mode));
+        assert_eq!(mode.as_str(), stored);
+        assert_eq!(mode.mouse_enabled(), mouse, "mouse gate for {stored}");
+    }
+    // Unknown / garbage falls back to the safe both-work default.
+    assert_eq!(
+        extract_interaction_mode(&json!({ "interaction_mode": "wat" })),
+        Some(InteractionMode::Hybrid)
+    );
+    assert!(InteractionMode::default().mouse_enabled());
 }

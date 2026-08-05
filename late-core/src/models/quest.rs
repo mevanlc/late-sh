@@ -3,18 +3,14 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::Result;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
 use serde_json::Value;
 use tokio_postgres::{Client, GenericClient};
 use uuid::Uuid;
 
-use super::chips::{CHIP_USER_CHANGED_CHANNEL, INITIAL_CHIP_BALANCE};
+use super::chips::{ChipMove, UserChips};
 
-pub const QUEST_REWARD_REASON: &str = "quest_reward";
-pub const QUEST_SOURCE_KIND: &str = "quest_assignment";
-pub const DAILY_QUEST_STREAK_REWARD_REASON: &str = "daily_quest_streak_reward";
-pub const DAILY_QUEST_STREAK_SOURCE_KIND: &str = "daily_quest_streak";
 pub const QUEST_USER_CHANGED_CHANNEL: &str = "quest_user_changed";
 pub const QUEST_ASSIGNMENTS_CHANGED_CHANNEL: &str = "quest_assignments_changed";
 pub const MAX_DAILY_QUEST_STREAK_BONUS_LEVEL: i32 = 5;
@@ -40,62 +36,6 @@ pub struct QuestTemplate {
     pub active: bool,
     pub starts_at: Option<DateTime<Utc>>,
     pub ends_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Clone, Debug)]
-pub struct RewardTemplateAdminRow {
-    pub id: Uuid,
-    pub key: String,
-    pub title: String,
-    pub description: String,
-    pub cadence: Option<String>,
-    pub bucket: Option<String>,
-    pub domain: String,
-    pub difficulty: Option<String>,
-    pub kind: String,
-    pub params: Value,
-    pub target: i32,
-    pub reward_chips: i64,
-    pub weight: i32,
-    pub is_quest: bool,
-    pub claim_policy: String,
-    pub cooldown_seconds: Option<i32>,
-    pub active: bool,
-}
-
-impl From<tokio_postgres::Row> for RewardTemplateAdminRow {
-    fn from(row: tokio_postgres::Row) -> Self {
-        Self {
-            id: row.get("id"),
-            key: row.get("key"),
-            title: row.get("title"),
-            description: row.get("description"),
-            cadence: row.get("cadence"),
-            bucket: row.get("bucket"),
-            domain: row.get("domain"),
-            difficulty: row.get("difficulty"),
-            kind: row.get("kind"),
-            params: row.get("params"),
-            target: row.get("target"),
-            reward_chips: row.get("reward_chips"),
-            weight: row.get("weight"),
-            is_quest: row.get("is_quest"),
-            claim_policy: row.get("claim_policy"),
-            cooldown_seconds: row.get("cooldown_seconds"),
-            active: row.get("active"),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct RewardTemplateAdminUpdate {
-    pub id: Uuid,
-    pub title: String,
-    pub description: String,
-    pub target: i32,
-    pub reward_chips: i64,
-    pub weight: i32,
-    pub active: bool,
 }
 
 impl From<tokio_postgres::Row> for QuestTemplate {
@@ -242,83 +182,6 @@ pub async fn listen_for_quest_changes(client: &Client) -> Result<()> {
         ))
         .await?;
     Ok(())
-}
-
-pub async fn list_reward_templates_for_admin(
-    client: &impl deadpool_postgres::GenericClient,
-) -> Result<Vec<RewardTemplateAdminRow>> {
-    let rows = client
-        .query(
-            "SELECT
-                 id, key, title, description, cadence, bucket, domain,
-                 difficulty, kind, params, target, reward_chips, weight,
-                 is_quest, claim_policy, cooldown_seconds, active
-             FROM reward_templates
-             ORDER BY
-                 CASE
-                     WHEN is_quest = true AND cadence = 'daily' THEN 0
-                     WHEN is_quest = true AND cadence = 'weekly' THEN 1
-                     WHEN is_quest = false AND domain = 'puzzle' THEN 2
-                     ELSE 3
-                 END,
-                 domain ASC,
-                 key ASC",
-            &[],
-        )
-        .await?;
-    Ok(rows.into_iter().map(RewardTemplateAdminRow::from).collect())
-}
-
-pub async fn update_reward_template_for_admin(
-    client: &impl deadpool_postgres::GenericClient,
-    update: RewardTemplateAdminUpdate,
-) -> Result<RewardTemplateAdminRow> {
-    ensure!(!update.title.trim().is_empty(), "title cannot be empty");
-    ensure!(
-        !update.description.trim().is_empty(),
-        "description cannot be empty"
-    );
-    ensure!(update.target > 0, "target must be greater than 0");
-    ensure!(update.reward_chips >= 0, "reward must be 0 or greater");
-    ensure!(update.weight > 0, "weight must be greater than 0");
-
-    let row = client
-        .query_opt(
-            "UPDATE reward_templates
-             SET
-                 title = $2,
-                 description = $3,
-                 target = $4,
-                 reward_chips = $5,
-                 weight = $6,
-                 active = $7,
-                 updated = current_timestamp
-             WHERE id = $1
-             RETURNING
-                 id, key, title, description, cadence, bucket, domain,
-                 difficulty, kind, params, target, reward_chips, weight,
-                 is_quest, claim_policy, cooldown_seconds, active",
-            &[
-                &update.id,
-                &update.title.trim(),
-                &update.description.trim(),
-                &update.target,
-                &update.reward_chips,
-                &update.weight,
-                &update.active,
-            ],
-        )
-        .await?;
-    let row = row
-        .map(RewardTemplateAdminRow::from)
-        .with_context(|| format!("reward template {} not found", update.id))?;
-    client
-        .execute(
-            "SELECT pg_notify($1, $2)",
-            &[&QUEST_ASSIGNMENTS_CHANGED_CHANNEL, &row.key],
-        )
-        .await?;
-    Ok(row)
 }
 
 pub fn daily_period(date: NaiveDate) -> (NaiveDate, NaiveDate) {
@@ -775,8 +638,7 @@ pub async fn apply_progress_event(
             &tx,
             user_id,
             rewarded_chips,
-            QUEST_REWARD_REASON,
-            QUEST_SOURCE_KIND,
+            ChipMove::QuestReward,
             &assignment_id.to_string(),
         )
         .await?;
@@ -872,8 +734,7 @@ async fn record_daily_quest_streak_if_complete(
             client,
             user_id,
             advance.reward_chips,
-            DAILY_QUEST_STREAK_REWARD_REASON,
-            DAILY_QUEST_STREAK_SOURCE_KIND,
+            ChipMove::DailyQuestStreakReward,
             &completion_date.to_string(),
         )
         .await?;
@@ -891,40 +752,13 @@ async fn credit_chip_reward(
     client: &impl GenericClient,
     user_id: Uuid,
     amount: i64,
-    reason: &str,
-    source_kind: &str,
+    chip_move: ChipMove,
     source_ref: &str,
 ) -> Result<()> {
-    client
-        .execute(
-            "INSERT INTO user_chips (user_id, balance)
-             VALUES ($1, $2)
-             ON CONFLICT (user_id) DO NOTHING",
-            &[&user_id, &INITIAL_CHIP_BALANCE],
-        )
-        .await?;
-    client
-        .execute(
-            "UPDATE user_chips
-             SET balance = balance + $2, updated = current_timestamp
-             WHERE user_id = $1",
-            &[&user_id, &amount],
-        )
-        .await?;
-    client
-        .execute(
-            "INSERT INTO chip_ledger (user_id, delta, reason, source_kind, source_ref)
-             VALUES ($1, $2, $3, $4, $5)",
-            &[&user_id, &amount, &reason, &source_kind, &source_ref],
-        )
-        .await?;
-    client
-        .execute(
-            "SELECT pg_notify($1, $2)",
-            &[&CHIP_USER_CHANGED_CHANNEL, &user_id.to_string()],
-        )
-        .await?;
-    Ok(())
+    match UserChips::apply(client, user_id, chip_move, amount, Some(source_ref)).await? {
+        Some(_) => Ok(()),
+        None => anyhow::bail!("quest chip credit returned no row"),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

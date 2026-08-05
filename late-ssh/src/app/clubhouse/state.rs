@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use late_core::models::chat_message::ChatMessage;
 use uuid::Uuid;
 
+use crate::app::common::primitives::Screen;
+
 use super::lobby::{Emote, LobbySnapshot, SharedLobby};
 use super::map;
 
@@ -69,31 +71,62 @@ pub struct DoorEvent {
     pub until_tick: u64,
 }
 
+/// Where a banner line's text comes from. `Lounge` lines are his real #lounge
+/// messages, resolved against the tail at draw time; `Local` lines are client
+/// side only (the tutorial welcome), so nobody else in the tavern sees them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BannerLine {
+    Lounge(Uuid),
+    Local(String),
+}
+
 /// The bartender line currently pinned in the banner.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct BannerEntry {
-    message_id: Uuid,
+    line: BannerLine,
     shown_tick: u64,
 }
 
-/// The first-visit walkthrough. `Pending` arms it until the screen is first
-/// opened; it ends by walking up to the bartender (no Esc skip, so a stray
-/// keypress can't cut it short), and `Done` is persisted once.
+/// The first-visit tour. `Pending` arms it until the screen is first opened;
+/// then the tour is FORCED: while it runs, the input gate in `app/input.rs`
+/// (`handle_tour_gate`) swallows everything except the single key the
+/// current box names (`State::tutorial_forced_step`) and the quit keys. The
+/// route walks every top-level page in number order, ends back in the
+/// tavern, and `Done` is persisted once on the homecoming Enter. The
+/// bartender is deliberately absent from the route: his comped welcome pour
+/// stays a hidden treasure for whoever walks up to the glowing bar after
+/// the send-off (see [`State::welcome_pour_due`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tutorial {
     /// Nothing to run (returning user).
     Off,
     /// Armed, fires on the first clubhouse entry this session.
     Pending,
-    /// Box over your head at the door: how to walk, go see the bartender.
+    /// Centered box at the door: what late.sh is, then `1`.
     Welcome,
-    /// Walking; a hint points at the bar until you reach it.
-    GoToBar,
-    /// At the bar: the chat lesson popup.
-    BarLesson,
-    /// Last box: the landmarks and Ctrl+O, then you're on your own.
-    SendOff,
+    /// On Home: the chat pitch, then `2`.
+    VisitChat,
+    /// On The Arcade: dailies and high scores, then `3`.
+    VisitArcade,
+    /// On the Games hub: the heavy-door pitch, then `4`.
+    VisitGames,
+    /// On the Artboard: the shared canvas, then `5`.
+    VisitArtboard,
+    /// On the Directory: people and profiles, then `6`.
+    VisitDirectory,
+    /// On the Leaderboards: the last stop, then `0` home.
+    VisitLeaderboard,
+    /// Back in the tavern: the send-off box, Enter sets them free.
+    Homecoming,
     Done,
+}
+
+/// The one input the forced tour accepts right now: a page digit and the
+/// screen it leads to, or Enter on the homecoming box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TourStep {
+    Page(u8, Screen),
+    Enter,
 }
 
 #[derive(Debug)]
@@ -108,6 +141,7 @@ pub struct State {
     username: String,
     pub graybeard_online: bool,
     pub bartender_online: bool,
+    pub bot_online: bool,
     last_roster_tick: u64,
     force_roster_refresh: bool,
     /// Roster ids from the last refresh, for arrival/departure diffs.
@@ -117,11 +151,15 @@ pub struct State {
     seen_primed: bool,
     pub door_events: VecDeque<DoorEvent>,
     pub tutorial: Tutorial,
+    /// The hidden welcome pour fired this session, so walking back to the
+    /// bar doesn't repeat the bartender's scripted welcome. The once-ever
+    /// guarantee lives in the DB (`UserDrinks::record_welcome_pour`).
+    welcome_pour_claimed: bool,
     /// The bartender banner plays his lines one at a time: the pinned line,
     /// the ids waiting their turn, and the newest `created` already taken
     /// from the tail (so each line enqueues exactly once).
     banner_current: Option<BannerEntry>,
-    banner_queue: VecDeque<Uuid>,
+    banner_queue: VecDeque<BannerLine>,
     banner_watermark: Option<chrono::DateTime<chrono::Utc>>,
     /// Clickable avatar/label boxes from the last render, for opening
     /// profiles on click. Interior-mutable so `ui::draw` can publish it
@@ -146,6 +184,7 @@ impl State {
             username,
             graybeard_online: false,
             bartender_online: false,
+            bot_online: false,
             last_roster_tick: 0,
             force_roster_refresh: false,
             seen: HashSet::new(),
@@ -155,6 +194,7 @@ impl State {
             banner_queue: VecDeque::new(),
             banner_watermark: None,
             hit_layout: RefCell::new(Vec::new()),
+            welcome_pour_claimed: false,
             tutorial: if tutorial_pending {
                 Tutorial::Pending
             } else {
@@ -163,10 +203,14 @@ impl State {
         }
     }
 
-    /// Advance the animation clock and expire door ambience. Called every
-    /// world tick.
-    pub fn tick(&mut self, _on_screen: bool) {
-        self.anim_tick = self.anim_tick.wrapping_add(1);
+    /// Sync the animation clock to the wall-clock world tick (66ms units,
+    /// `App::marquee_tick`) and expire door ambience. Called every world
+    /// tick. The clock must come from wall time, not a per-call increment:
+    /// the adaptive loop ticks sparsely, so counting calls would tie
+    /// animation speed to the tick cadence (walking held the hot cadence
+    /// and visibly sped the room up 4x).
+    pub fn tick(&mut self, wall_tick: u64) {
+        self.anim_tick = wall_tick;
         let now = self.anim_tick;
         self.door_events.retain(|e| e.until_tick > now);
     }
@@ -281,7 +325,7 @@ impl State {
             if age_ms > BANNER_ENQUEUE_MAX_AGE_MS {
                 continue;
             }
-            self.banner_queue.push_back(message.id);
+            self.banner_queue.push_back(BannerLine::Lounge(message.id));
         }
         while self.banner_queue.len() > BANNER_QUEUE_MAX {
             self.banner_queue.pop_front();
@@ -296,16 +340,26 @@ impl State {
             }
         };
         if advance {
-            self.banner_current = self.banner_queue.pop_front().map(|message_id| BannerEntry {
-                message_id,
+            self.banner_current = self.banner_queue.pop_front().map(|line| BannerEntry {
+                line,
                 shown_tick: self.anim_tick,
             });
         }
     }
 
+    /// Pin a client-side line in the bartender banner, ahead of whatever is
+    /// queued: the tutorial welcome is the reason the walker is standing at the
+    /// bar, so it must not wait behind another patron's answer.
+    pub fn show_local_bartender_line(&mut self, line: String) {
+        self.banner_current = Some(BannerEntry {
+            line: BannerLine::Local(line),
+            shown_tick: self.anim_tick,
+        });
+    }
+
     /// The bartender line the banner should render right now.
-    pub fn bartender_banner_message_id(&self) -> Option<Uuid> {
-        self.banner_current.map(|e| e.message_id)
+    pub fn bartender_banner_line(&self) -> Option<&BannerLine> {
+        self.banner_current.as_ref().map(|e| &e.line)
     }
 
     fn push_door_event(&mut self, username: String, arrived: bool) {
@@ -325,7 +379,7 @@ impl State {
     }
 
     /// Try to walk one step; the first step frees your seat in the shared
-    /// lobby. Also advances the tutorial off the welcome box.
+    /// lobby.
     pub fn walk(&mut self, dx: i32, dy: i32) {
         if let Some(lobby) = &self.lobby {
             let (x, y) = lobby.walk(self.user_id, &self.username, dx, dy);
@@ -339,9 +393,6 @@ impl State {
                 self.player_x = nx;
                 self.player_y = ny;
             }
-        }
-        if self.tutorial == Tutorial::Welcome {
-            self.tutorial = Tutorial::GoToBar;
         }
     }
 
@@ -419,36 +470,73 @@ impl State {
             .unwrap_or_default()
     }
 
-    /// GoToBar -> BarLesson when the player reaches the counter. Returns
-    /// true exactly once, so the caller can trigger the bartender greeting.
-    pub fn tutorial_reached_bar(&mut self) -> bool {
-        if self.tutorial == Tutorial::GoToBar && self.nearby() == Some(map::Interactive::Bartender)
+    /// Advance the page tour when a top-level screen is entered. Each stop
+    /// waits for exactly the page it points at; the input gate only lets the
+    /// matching digit through, but the state machine guards the order on its
+    /// own so a stray `set_screen` (a landmark Enter, a slash command) can
+    /// never skip a stop.
+    pub fn tutorial_screen_entered(&mut self, screen: Screen) {
+        self.tutorial = match (self.tutorial, screen) {
+            (Tutorial::Welcome, Screen::Dashboard) => Tutorial::VisitChat,
+            (Tutorial::VisitChat, Screen::Arcade) => Tutorial::VisitArcade,
+            (Tutorial::VisitArcade, Screen::Games) => Tutorial::VisitGames,
+            (Tutorial::VisitGames, Screen::Artboard) => Tutorial::VisitArtboard,
+            (Tutorial::VisitArtboard, Screen::Pinstar) => Tutorial::VisitDirectory,
+            (Tutorial::VisitDirectory, Screen::Leaderboard) => Tutorial::VisitLeaderboard,
+            (Tutorial::VisitLeaderboard, Screen::Clubhouse) => Tutorial::Homecoming,
+            (stage, _) => stage,
+        };
+    }
+
+    /// The single input the forced tour accepts right now, or `None` when
+    /// input is free (no tour, or the tour is done). The gate in
+    /// `app/input.rs` swallows everything else while this is `Some`.
+    pub fn tutorial_forced_step(&self) -> Option<TourStep> {
+        match self.tutorial {
+            Tutorial::Off | Tutorial::Pending | Tutorial::Done => None,
+            Tutorial::Welcome => Some(TourStep::Page(b'1', Screen::Dashboard)),
+            Tutorial::VisitChat => Some(TourStep::Page(b'2', Screen::Arcade)),
+            Tutorial::VisitArcade => Some(TourStep::Page(b'3', Screen::Games)),
+            Tutorial::VisitGames => Some(TourStep::Page(b'4', Screen::Artboard)),
+            Tutorial::VisitArtboard => Some(TourStep::Page(b'5', Screen::Pinstar)),
+            Tutorial::VisitDirectory => Some(TourStep::Page(b'6', Screen::Leaderboard)),
+            Tutorial::VisitLeaderboard => Some(TourStep::Page(b'0', Screen::Clubhouse)),
+            Tutorial::Homecoming => Some(TourStep::Enter),
+        }
+    }
+
+    /// The hidden treasure: the bartender comps a welcome pour the first
+    /// time the newcomer walks up to the counter. Walking only unlocks
+    /// after the homecoming Enter (the gate swallows movement mid-tour), so
+    /// in practice this fires after the send-off. Returns true exactly once
+    /// per session; the once-ever guarantee is the DB insert behind the comp.
+    pub fn welcome_pour_due(&mut self) -> bool {
+        if self.tutorial != Tutorial::Off
+            && !self.welcome_pour_claimed
+            && self.nearby() == Some(map::Interactive::Bartender)
         {
-            self.tutorial = Tutorial::BarLesson;
+            self.welcome_pour_claimed = true;
             return true;
         }
         false
     }
 
-    /// Advance past the current tutorial popup (Enter). Returns true when
-    /// the tutorial just finished and should be persisted.
+    /// The bar sign pulses once the tour has come home and the welcome pour
+    /// is still unclaimed: the only pointer at the hidden treasure.
+    pub fn bar_glow(&self) -> bool {
+        matches!(self.tutorial, Tutorial::Homecoming | Tutorial::Done) && !self.welcome_pour_claimed
+    }
+
+    /// Advance past the homecoming popup (Enter, via the input gate).
+    /// Returns true when the tour just finished and should be persisted.
     pub fn tutorial_advance(&mut self) -> bool {
         match self.tutorial {
-            Tutorial::BarLesson => {
-                self.tutorial = Tutorial::SendOff;
-                false
-            }
-            Tutorial::SendOff => {
+            Tutorial::Homecoming => {
                 self.tutorial = Tutorial::Done;
                 true
             }
             _ => false,
         }
-    }
-
-    /// True while a tutorial popup wants Enter before anything else.
-    pub fn tutorial_capturing_keys(&self) -> bool {
-        matches!(self.tutorial, Tutorial::BarLesson | Tutorial::SendOff)
     }
 }
 

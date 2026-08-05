@@ -2104,7 +2104,7 @@ const PALETTE_ENA: Palette = Palette {
     border_dim: Color::Rgb(41, 95, 247),
     border: Color::Rgb(253, 231, 1),
     border_active: Color::Rgb(227, 207, 182),
-    text_faint: Color::Rgb(41, 95, 247),
+    text_faint: Color::Rgb(130, 150, 210),
     text_dim: Color::Rgb(253, 231, 1),
     text_muted: Color::Rgb(180, 180, 180),
     text: Color::Rgb(209, 209, 209),
@@ -2134,7 +2134,7 @@ const PALETTE_ENA_DREAM_BBQ: Palette = Palette {
     border_dim: Color::Rgb(91, 134, 148),
     border: Color::Rgb(230, 131, 140),
     border_active: Color::Rgb(241, 230, 198),
-    text_faint: Color::Rgb(21, 94, 85),
+    text_faint: Color::Rgb(130, 180, 170),
     text_dim: Color::Rgb(143, 183, 198),
     text_muted: Color::Rgb(209, 209, 209),
     text: Color::Rgb(209, 209, 209),
@@ -2225,7 +2225,7 @@ const PALETTE_FACEBOOK_DARK: Palette = Palette {
     border: Color::Rgb(8, 102, 255),
     border_active: Color::Rgb(255, 255, 255),
     text_faint: Color::Rgb(0, 76, 194),
-    text_dim: Color::Rgb(8, 102, 255),
+    text_dim: Color::Rgb(140, 180, 255),
     text_muted: Color::Rgb(180, 180, 220),
     text: Color::Rgb(230, 230, 250),
     text_bright: Color::Rgb(255, 255, 255),
@@ -2254,7 +2254,7 @@ const PALETTE_TWITTER_DARK: Palette = Palette {
     border_dim: Color::Rgb(20, 100, 160),
     border: Color::Rgb(29, 155, 240),
     border_active: Color::Rgb(255, 255, 255),
-    text_faint: Color::Rgb(20, 100, 160),
+    text_faint: Color::Rgb(140, 180, 220),
     text_dim: Color::Rgb(29, 155, 240),
     text_muted: Color::Rgb(180, 180, 220),
     text: Color::Rgb(230, 230, 250),
@@ -2284,7 +2284,7 @@ const PALETTE_TELEGRAM_DARK: Palette = Palette {
     border_dim: Color::Rgb(25, 110, 155),
     border: Color::Rgb(36, 161, 222),
     border_active: Color::Rgb(255, 255, 255),
-    text_faint: Color::Rgb(25, 110, 155),
+    text_faint: Color::Rgb(140, 185, 215),
     text_dim: Color::Rgb(36, 161, 222),
     text_muted: Color::Rgb(180, 180, 220),
     text: Color::Rgb(230, 230, 250),
@@ -3992,8 +3992,8 @@ const PALETTE_AMOLED_CERULEAN: Palette = Palette {
 
 const PALETTE_TERMINAL: Palette = Palette {
     bg_canvas: Color::Indexed(0),      // Black
-    bg_selection: Color::Indexed(8),   // Bright Black (dark gray)
-    bg_highlight: Color::Indexed(8),   // Bright Black
+    bg_selection: Color::Indexed(4),   // Blue
+    bg_highlight: Color::Indexed(4),   // Blue
     border_dim: Color::Indexed(8),     // Bright Black
     border: Color::Indexed(7),         // White (normal gray)
     border_active: Color::Indexed(4),  // Blue
@@ -4341,21 +4341,21 @@ pub fn BG_HIGHLIGHT() -> Color {
     current_palette().bg_highlight
 }
 
-/// Background tint under a username for the tavern drunk glow: level 1
-/// (tipsy) light green through level 4 (wasted) heavy red, level 0 nothing.
-/// Anchors are blended toward the active canvas so the tint stays quiet on
-/// dark themes and pastel on light ones; "wasted" blends least so it reads
-/// unmistakably. Derived, so no per-palette field is needed.
+/// Foreground for the printed drunk `(word)` beside a name: level 1 (tipsy)
+/// green climbing through gold and orange to level 4 (wasted) red, so the hue
+/// alone reads how far gone a patron is. Level 0 prints no word. Anchors are
+/// blended well toward the active canvas so the aside stays dim next to the
+/// name instead of competing with it. Derived, so no per-palette field is
+/// needed.
 #[allow(non_snake_case)]
-pub fn DRUNK_LABEL_BG(level: u8) -> Option<Color> {
-    let (anchor, toward_canvas) = match level {
-        0 => return None,
-        1 => (Color::Rgb(70, 140, 60), 0.62),
-        2 => (Color::Rgb(180, 150, 40), 0.60),
-        3 => (Color::Rgb(200, 110, 30), 0.55),
-        _ => (Color::Rgb(190, 45, 40), 0.40),
+pub fn DRUNK_WORD_FG(level: u8) -> Color {
+    let anchor = match level {
+        0 | 1 => Color::Rgb(70, 140, 60),
+        2 => Color::Rgb(180, 150, 40),
+        3 => Color::Rgb(200, 110, 30),
+        _ => Color::Rgb(190, 45, 40),
     };
-    Some(blend_toward(anchor, BG_CANVAS(), toward_canvas))
+    blend_toward(anchor, BG_CANVAS(), 0.45)
 }
 
 /// Background tint for the Sudoku cells that share the selected cell's number.
@@ -4365,6 +4365,41 @@ pub fn DRUNK_LABEL_BG(level: u8) -> Option<Color> {
 #[allow(non_snake_case)]
 pub fn SUDOKU_SAME_NUM_BG() -> Color {
     blend_toward(Color::Rgb(210, 180, 90), BG_CANVAS(), 0.72)
+}
+
+/// Background wash for a chat message that mentions you.
+#[allow(non_snake_case)]
+pub fn CHAT_MENTION_BG() -> Color {
+    attention_bg(MENTION())
+}
+
+/// Background wash for a chat message that replies to one of yours. Anchored
+/// on the author color rather than the mention color so a reply and a mention
+/// stay tellable apart at a glance.
+#[allow(non_snake_case)]
+pub fn CHAT_REPLY_BG() -> Color {
+    attention_bg(CHAT_AUTHOR())
+}
+
+/// An accent color blended most of the way to the active canvas, so it reads
+/// as a quiet wash behind body text on dark and light themes alike. Derived,
+/// so no per-palette field is needed. Palettes whose colors are not plain RGB
+/// (the terminal-default theme) fall back to the flat highlight background.
+fn attention_bg(accent: Color) -> Color {
+    const TOWARD_CANVAS: f32 = 0.84;
+    let Some((accent_r, accent_g, accent_b)) = color_rgb(accent) else {
+        return BG_HIGHLIGHT();
+    };
+    let Some((canvas_r, canvas_g, canvas_b)) = color_rgb(BG_CANVAS()) else {
+        return BG_HIGHLIGHT();
+    };
+    let mix =
+        |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * TOWARD_CANVAS).round() as u8;
+    Color::Rgb(
+        mix(accent_r, canvas_r),
+        mix(accent_g, canvas_g),
+        mix(accent_b, canvas_b),
+    )
 }
 
 /// Linear blend `t` of the way from `a` to `b` (0.0 = `a`, 1.0 = `b`).

@@ -1,6 +1,6 @@
 use crate::app::artboard::provenance::ArtboardProvenance;
 use crate::app::chat::notifications::svc::NotificationService;
-use crate::app::chat::svc::{ChatEvent, ChatService};
+use crate::app::chat::svc::{ChatEvent, ChatReactionAction, ChatService};
 use crate::authz::Permissions;
 use crate::dartboard;
 use crate::moderation::command::ServerUserAction;
@@ -273,6 +273,26 @@ async fn emits_message_reactions_updated_when_member_reacts() {
         }
         _ => panic!("expected message reactions updated event"),
     }
+
+    let event = timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("event timeout")
+        .expect("event");
+    match event {
+        ChatEvent::MessageReactionDelta(delta) => {
+            assert_eq!(delta.room_id, room.id);
+            assert_eq!(delta.message_id, message.id);
+            assert_eq!(delta.actor_user_id, reactor.id);
+            assert_eq!(delta.icon, "👀");
+            assert_eq!(delta.action, ChatReactionAction::React);
+            assert_eq!(delta.previous_icon, None);
+            assert_eq!(
+                delta.target_user_ids, None,
+                "public room deltas broadcast; sessions filter by membership"
+            );
+        }
+        _ => panic!("expected message reaction delta event"),
+    }
 }
 
 #[tokio::test]
@@ -323,141 +343,6 @@ async fn emits_send_failed_event_when_non_admin_posts_to_announcements() {
 }
 
 #[tokio::test]
-async fn admin_can_toggle_message_pin() {
-    let test_db = new_test_db().await;
-    let service = ChatService::new(
-        test_db.db.clone(),
-        NotificationService::new(test_db.db.clone()),
-    );
-    let client = test_db.db.get().await.expect("db client");
-
-    let admin = create_test_user(&test_db.db, "pin_admin").await;
-    let room = ChatRoom::ensure_lounge(&client).await.expect("lounge room");
-    let message = ChatMessage::create(
-        &client,
-        ChatMessageParams {
-            room_id: room.id,
-            user_id: admin.id,
-            body: "pin me".to_string(),
-        },
-    )
-    .await
-    .expect("message");
-
-    let (pinned_tx, _pinned_rx) = tokio::sync::watch::channel(Vec::new());
-    service.toggle_message_pin_task(message.id, true, pinned_tx);
-
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let updated = ChatMessage::get(&client, message.id)
-                .await
-                .expect("load message")
-                .expect("message exists");
-            if updated.pinned {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    })
-    .await
-    .expect("pin timeout");
-}
-
-#[tokio::test]
-async fn non_admin_cannot_toggle_message_pin() {
-    let test_db = new_test_db().await;
-    let service = ChatService::new(
-        test_db.db.clone(),
-        NotificationService::new(test_db.db.clone()),
-    );
-    let client = test_db.db.get().await.expect("db client");
-
-    let user = create_test_user(&test_db.db, "pin_non_admin").await;
-    let room = ChatRoom::ensure_lounge(&client).await.expect("lounge room");
-    let message = ChatMessage::create(
-        &client,
-        ChatMessageParams {
-            room_id: room.id,
-            user_id: user.id,
-            body: "do not pin me".to_string(),
-        },
-    )
-    .await
-    .expect("message");
-
-    let (pinned_tx, mut pinned_rx) = tokio::sync::watch::channel(Vec::new());
-    service.toggle_message_pin_task(message.id, false, pinned_tx);
-
-    // The task drops the sender without sending on the admin-only rejection
-    // path, so a closed channel doubles as the task-finished signal.
-    assert!(
-        pinned_rx.changed().await.is_err(),
-        "non-admin pin attempt must not publish a pinned list"
-    );
-    let updated = ChatMessage::get(&client, message.id)
-        .await
-        .expect("load message")
-        .expect("message exists");
-    assert!(!updated.pinned);
-}
-
-#[tokio::test]
-async fn pinned_messages_task_loads_global_pins() {
-    let test_db = new_test_db().await;
-    let service = ChatService::new(
-        test_db.db.clone(),
-        NotificationService::new(test_db.db.clone()),
-    );
-    let (pinned_tx, mut pinned_rx) = tokio::sync::watch::channel(Vec::new());
-    let client = test_db.db.get().await.expect("db client");
-
-    let author = create_test_user(&test_db.db, "pin_author").await;
-    let visible_room = ChatRoom::get_or_create_public_room(&client, "pin-visible")
-        .await
-        .expect("visible room");
-    let hidden_room = ChatRoom::get_or_create_public_room(&client, "pin-hidden")
-        .await
-        .expect("hidden room");
-
-    let visible_message = ChatMessage::create(
-        &client,
-        ChatMessageParams {
-            room_id: visible_room.id,
-            user_id: author.id,
-            body: "visible pin".to_string(),
-        },
-    )
-    .await
-    .expect("visible message");
-    let hidden_message = ChatMessage::create(
-        &client,
-        ChatMessageParams {
-            room_id: hidden_room.id,
-            user_id: author.id,
-            body: "hidden pin".to_string(),
-        },
-    )
-    .await
-    .expect("hidden message");
-    ChatMessage::set_pinned(&client, visible_message.id, true)
-        .await
-        .expect("pin visible");
-    ChatMessage::set_pinned(&client, hidden_message.id, true)
-        .await
-        .expect("pin hidden");
-
-    service.load_pinned_messages_task(pinned_tx);
-
-    timeout(Duration::from_secs(2), pinned_rx.changed())
-        .await
-        .expect("pinned timeout")
-        .expect("pinned changed");
-    let messages = pinned_rx.borrow_and_update().clone();
-    assert!(messages.iter().any(|message| message.body == "visible pin"));
-    assert!(messages.iter().any(|message| message.body == "hidden pin"));
-}
-
-#[tokio::test]
 async fn publishes_summary_with_rooms_and_unread_counts() {
     let test_db = new_test_db().await;
     let service = ChatService::new(
@@ -480,6 +365,9 @@ async fn publishes_summary_with_rooms_and_unread_counts() {
             language_code: None,
             dm_user_a: None,
             dm_user_b: None,
+            topic: None,
+            rules: None,
+            created_by: None,
         },
     )
     .await
@@ -523,7 +411,7 @@ async fn publishes_summary_with_rooms_and_unread_counts() {
     .expect("language message");
 
     let (_room_tx, room_rx) = tokio::sync::watch::channel(Some(lang_room.id));
-    let (mut state_rx, _refresh_tx, refresh_task) =
+    let (mut state_rx, _event_rx, _refresh_tx, refresh_task) =
         service.start_user_refresh_task(target_user.id, room_rx);
 
     timeout(Duration::from_secs(2), state_rx.changed())
@@ -584,6 +472,9 @@ async fn falls_back_to_first_room_when_selected_room_is_none() {
             language_code: None,
             dm_user_a: None,
             dm_user_b: None,
+            topic: None,
+            rules: None,
+            created_by: None,
         },
     )
     .await
@@ -614,7 +505,7 @@ async fn falls_back_to_first_room_when_selected_room_is_none() {
     .expect("lounge message");
 
     let (_room_tx, room_rx) = tokio::sync::watch::channel(None);
-    let (mut state_rx, _refresh_tx, refresh_task) =
+    let (mut state_rx, _event_rx, _refresh_tx, refresh_task) =
         service.start_user_refresh_task(target_user.id, room_rx);
 
     timeout(Duration::from_secs(2), state_rx.changed())
@@ -652,7 +543,6 @@ async fn room_tail_task_loads_favorite_room_history() {
         test_db.db.clone(),
         NotificationService::new(test_db.db.clone()),
     );
-    let mut events = service.subscribe_events();
     let client = test_db.db.get().await.expect("db client");
 
     let target_user = create_test_user(&test_db.db, "favorite_target").await;
@@ -712,6 +602,7 @@ async fn room_tail_task_loads_favorite_room_history() {
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: default_right_sidebar_components(),
             show_room_list_sidebar: true,
+            room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
             land_on_home: false,
@@ -724,6 +615,9 @@ async fn room_tail_task_loads_favorite_room_history() {
     .await
     .expect("update favorites");
 
+    let (_room_tx, room_rx) = tokio::sync::watch::channel(None);
+    let (_snapshot_rx, mut events, _refresh_tx, refresh_task) =
+        service.start_user_refresh_task(target_user.id, room_rx);
     service.load_room_tail_task(target_user.id, favorite_room.id);
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -752,6 +646,7 @@ async fn room_tail_task_loads_favorite_room_history() {
         }
         other => panic!("expected RoomTailLoaded, got {other:?}"),
     }
+    refresh_task.abort();
 }
 
 #[tokio::test]
@@ -781,7 +676,7 @@ async fn publishes_snapshot_with_persisted_ignored_user_ids() {
         .expect("persist ignored user id");
 
     let (_room_tx, room_rx) = tokio::sync::watch::channel(Some(lounge_room.id));
-    let (mut state_rx, _refresh_tx, refresh_task) =
+    let (mut state_rx, _event_rx, _refresh_tx, refresh_task) =
         service.start_user_refresh_task(target_user.id, room_rx);
 
     timeout(Duration::from_secs(2), state_rx.changed())
@@ -853,7 +748,9 @@ async fn discover_task_lists_public_rooms_user_has_not_joined() {
     .await
     .expect("joined message");
 
-    let mut events = service.subscribe_events();
+    let (_room_tx, room_rx) = tokio::sync::watch::channel(None);
+    let (_snapshot_rx, mut events, _refresh_tx, refresh_task) =
+        service.start_user_refresh_task(target_user.id, room_rx);
     service.list_discover_rooms_task(target_user.id);
 
     let event = timeout(Duration::from_secs(2), events.recv())
@@ -871,6 +768,7 @@ async fn discover_task_lists_public_rooms_user_has_not_joined() {
         }
         other => panic!("expected DiscoverRoomsLoaded, got {other:?}"),
     }
+    refresh_task.abort();
 }
 
 #[tokio::test]
@@ -929,9 +827,9 @@ async fn shared_service_refresh_tasks_publish_per_session_snapshots() {
 
     let (room_a_tx, room_a_rx) = tokio::sync::watch::channel(Some(room_a.id));
     let (_room_b_tx, room_b_rx) = tokio::sync::watch::channel(Some(room_b.id));
-    let (mut snapshot_a_rx, refresh_a, task_a) =
+    let (mut snapshot_a_rx, _event_a_rx, refresh_a, task_a) =
         service.start_user_refresh_task(user_a.id, room_a_rx);
-    let (mut snapshot_b_rx, _refresh_b, task_b) =
+    let (mut snapshot_b_rx, _event_b_rx, _refresh_b, task_b) =
         service.start_user_refresh_task(user_b.id, room_b_rx);
 
     timeout(Duration::from_secs(2), snapshot_a_rx.changed())
@@ -1174,7 +1072,7 @@ async fn fill_room_task_rejects_private_room() {
 
     let admin = create_test_user(&test_db.db, "fill_private_admin").await;
     let untouched_user = create_test_user(&test_db.db, "fill_private_untouched").await;
-    let room = ChatRoom::create_private_room(&client, "staff")
+    let room = ChatRoom::create_private_room(&client, "staff", admin.id)
         .await
         .expect("create private room");
 
@@ -1310,15 +1208,19 @@ async fn admin_delete_event_carries_admin_user_id_not_author() {
     }
 
     let audit = ModerationAuditLog::all(&client).await.expect("audit log");
-    let audit_count = audit
+    let entries: Vec<_> = audit
         .iter()
         .filter(|entry| {
             entry.actor_user_id == admin.id
                 && entry.action == "message_delete"
                 && entry.target_id == Some(msg.id)
         })
-        .count();
-    assert_eq!(audit_count, 1);
+        .collect();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(
+        entries[0].metadata["body"], "admin will delete this",
+        "deleted body must survive in the audit log; it is the only pointer to uploaded image urls"
+    );
 }
 
 #[tokio::test]
@@ -3483,7 +3385,6 @@ async fn message_search_respects_membership_scope_and_exclusions() {
         test_db.db.clone(),
         NotificationService::new(test_db.db.clone()),
     );
-    let mut events = service.subscribe_events();
     let client = test_db.db.get().await.expect("db client");
 
     let searcher = create_test_user(&test_db.db, "search_searcher").await;
@@ -3539,6 +3440,9 @@ async fn message_search_respects_membership_scope_and_exclusions() {
         .expect("create message");
     }
 
+    let (_room_tx, room_rx) = tokio::sync::watch::channel(None);
+    let (_snapshot_rx, mut events, _refresh_tx, refresh_task) =
+        service.start_user_refresh_task(searcher.id, room_rx);
     let request_id = Uuid::now_v7();
     service.search_messages_task(
         searcher.id,
@@ -3570,6 +3474,7 @@ async fn message_search_respects_membership_scope_and_exclusions() {
         }
         other => panic!("unexpected search event: {other:?}"),
     }
+    refresh_task.abort();
 }
 
 #[tokio::test]
@@ -3579,7 +3484,6 @@ async fn message_search_scopes_to_room_and_escapes_like_metacharacters() {
         test_db.db.clone(),
         NotificationService::new(test_db.db.clone()),
     );
-    let mut events = service.subscribe_events();
     let client = test_db.db.get().await.expect("db client");
 
     let searcher = create_test_user(&test_db.db, "scoped_searcher").await;
@@ -3613,6 +3517,9 @@ async fn message_search_scopes_to_room_and_escapes_like_metacharacters() {
         .expect("create message");
     }
 
+    let (_room_tx, room_rx) = tokio::sync::watch::channel(None);
+    let (_snapshot_rx, mut events, _refresh_tx, refresh_task) =
+        service.start_user_refresh_task(searcher.id, room_rx);
     let request_id = Uuid::now_v7();
     service.search_messages_task(
         searcher.id,
@@ -3637,6 +3544,7 @@ async fn message_search_scopes_to_room_and_escapes_like_metacharacters() {
         }
         other => panic!("unexpected search event: {other:?}"),
     }
+    refresh_task.abort();
 }
 
 #[tokio::test]
@@ -3698,4 +3606,336 @@ async fn message_context_window_surrounds_hit_chronologically() {
             "context message 8"
         ]
     );
+}
+
+/// Room-info authority: a private room answers to its owner, a public one to
+/// the house. The service is the gate; the UI only decides what to show.
+#[tokio::test]
+async fn only_the_owner_or_a_mod_may_set_room_info() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let mut events = service.subscribe_events();
+    let client = test_db.db.get().await.expect("db client");
+
+    let owner = create_test_user(&test_db.db, "info_owner").await;
+    let member = create_test_user(&test_db.db, "info_member").await;
+    let private = ChatRoom::create_private_room(&client, "parlour", owner.id)
+        .await
+        .expect("create private room");
+    ChatRoomMember::join(&client, private.id, owner.id)
+        .await
+        .expect("owner joins");
+    ChatRoomMember::join(&client, private.id, member.id)
+        .await
+        .expect("member joins");
+
+    service.set_room_info_task(
+        owner.id,
+        false,
+        private.id,
+        Some("cards and tea".to_string()),
+        None,
+    );
+    expect_room_info_updated(&mut events, owner.id).await;
+    assert_eq!(
+        current_topic(&test_db.db, private.id).await.as_deref(),
+        Some("cards and tea")
+    );
+
+    // A member who does not own the room is refused, and nothing is written.
+    service.set_room_info_task(
+        member.id,
+        false,
+        private.id,
+        Some("mine now".to_string()),
+        None,
+    );
+    expect_room_failed(&mut events, member.id).await;
+    assert_eq!(
+        current_topic(&test_db.db, private.id).await.as_deref(),
+        Some("cards and tea"),
+        "a non-owner must not change a private room's info"
+    );
+
+    // Public rooms are hosted: the person who opened it has no say, a mod does.
+    let opener = create_test_user(&test_db.db, "info_opener").await;
+    let public = ChatRoom::get_or_create_public_room(&client, "commons")
+        .await
+        .expect("create public room");
+    ChatRoomMember::join(&client, public.id, opener.id)
+        .await
+        .expect("opener joins");
+    ChatRoom::set_creator(&client, public.id, opener.id)
+        .await
+        .expect("record creator");
+
+    service.set_room_info_task(opener.id, false, public.id, Some("mine".to_string()), None);
+    expect_room_failed(&mut events, opener.id).await;
+    assert_eq!(
+        current_topic(&test_db.db, public.id).await,
+        None,
+        "opening a public room does not grant its topic"
+    );
+
+    service.set_room_info_task(
+        opener.id,
+        true,
+        public.id,
+        Some("the town square".to_string()),
+        None,
+    );
+    expect_room_info_updated(&mut events, opener.id).await;
+    assert_eq!(
+        current_topic(&test_db.db, public.id).await.as_deref(),
+        Some("the town square")
+    );
+}
+
+/// Await the room-info success event for `actor`, skipping unrelated traffic.
+async fn expect_room_info_updated(
+    events: &mut tokio::sync::broadcast::Receiver<ChatEvent>,
+    actor: Uuid,
+) {
+    loop {
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("room info event timeout")
+            .expect("event");
+        match event {
+            ChatEvent::RoomInfoUpdated { user_id, .. } if user_id == actor => return,
+            ChatEvent::RoomFailed { user_id, message } if user_id == actor => {
+                panic!("expected the write to be allowed, got: {message}")
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Await the refusal for `actor`. Waiting on the event the service actually
+/// emits is what makes "nothing was written" assertions deterministic.
+async fn expect_room_failed(
+    events: &mut tokio::sync::broadcast::Receiver<ChatEvent>,
+    actor: Uuid,
+) -> String {
+    loop {
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("room failure event timeout")
+            .expect("event");
+        match event {
+            ChatEvent::RoomFailed { user_id, message } if user_id == actor => return message,
+            ChatEvent::RoomInfoUpdated { user_id, .. } if user_id == actor => {
+                panic!("expected the write to be refused")
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn current_topic(db: &late_core::db::Db, room_id: Uuid) -> Option<String> {
+    let client = db.get().await.expect("db client");
+    ChatRoom::get(&client, room_id)
+        .await
+        .expect("get room")
+        .expect("room exists")
+        .topic
+}
+
+/// Opening a brand-new public room tells two audiences: the creator, in the
+/// room they just opened, and the mods, in #moderators. Neither line carries
+/// the system-feed prefix, so both render as messages instead of being
+/// diverted into the activity ticker.
+#[tokio::test]
+async fn opening_a_new_public_room_asks_the_creator_and_reports_to_moderators() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let client = test_db.db.get().await.expect("db client");
+
+    User::create(
+        &client,
+        late_core::models::user::UserParams {
+            fingerprint: "system-fp-000".to_string(),
+            username: "system".to_string(),
+            settings: serde_json::json!({ "bot": true, "system": true }),
+        },
+    )
+    .await
+    .expect("system user");
+    let staff = create_test_user(&test_db.db, "announce_staff").await;
+    let moderators = ChatRoom::create_private_room(&client, "moderators", staff.id)
+        .await
+        .expect("moderators room");
+    let creator = create_test_user(&test_db.db, "announce_creator").await;
+
+    service.open_public_room_task(creator.id, "greenhouse".to_string());
+
+    let room_id = wait_for_public_room(&test_db.db, "greenhouse").await;
+    let welcome = wait_for_message_containing(&test_db.db, room_id, "greenhouse").await;
+    assert!(
+        !welcome.starts_with('\u{b7}'),
+        "a room notice must not look like a feed line: {welcome}"
+    );
+    assert!(welcome.contains("rules"), "the creator is asked for rules");
+
+    let report = wait_for_message_containing(&test_db.db, moderators.id, "greenhouse").await;
+    assert!(
+        report.contains("announce_creator"),
+        "mods learn who opened it"
+    );
+}
+
+async fn wait_for_public_room(db: &late_core::db::Db, slug: &str) -> Uuid {
+    for _ in 0..50 {
+        let client = db.get().await.expect("db client");
+        let found = ChatRoom::find_topic_room(&client, "public", slug)
+            .await
+            .expect("find room");
+        drop(client);
+        if let Some(room) = found {
+            return room.id;
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("public room was never created");
+}
+
+async fn wait_for_message_containing(
+    db: &late_core::db::Db,
+    room_id: Uuid,
+    needle: &str,
+) -> String {
+    for _ in 0..50 {
+        let client = db.get().await.expect("db client");
+        let messages = ChatMessage::list_recent(&client, room_id, 20)
+            .await
+            .expect("list messages");
+        drop(client);
+        if let Some(found) = messages.iter().find(|m| m.body.contains(needle)) {
+            return found.body.clone();
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+    panic!("no message containing {needle:?} landed in the room");
+}
+
+/// `/kick` in a private room: its owner may remove a regular member, a plain
+/// member may not, and staff are out of reach. The work happens through the
+/// moderation service, so membership, audit trail and session effects are the
+/// same as a mod kick.
+#[tokio::test]
+async fn private_room_owner_can_kick_regulars_but_not_staff() {
+    let test_db = new_test_db().await;
+    let service = ChatService::new(
+        test_db.db.clone(),
+        NotificationService::new(test_db.db.clone()),
+    );
+    let client = test_db.db.get().await.expect("db client");
+
+    let owner = create_test_user(&test_db.db, "kick_owner").await;
+    let guest = create_test_user(&test_db.db, "kick_guest").await;
+    let staff = create_test_user(&test_db.db, "kick_staff").await;
+    User::set_moderator(&client, staff.id, true)
+        .await
+        .expect("promote staff");
+
+    let room = ChatRoom::create_private_room(&client, "study", owner.id)
+        .await
+        .expect("create private room");
+    for member in [owner.id, guest.id, staff.id] {
+        ChatRoomMember::join(&client, room.id, member)
+            .await
+            .expect("join room");
+    }
+
+    let regular = Permissions::new(false, false);
+    let mut events = service.subscribe_events();
+
+    // A member who does not own the room cannot throw anyone out.
+    service.kick_from_room_task(
+        guest.id,
+        regular,
+        "study".to_string(),
+        "kick_owner".to_string(),
+    );
+    expect_kick_failed(&mut events, guest.id).await;
+    assert!(
+        is_member(&test_db.db, room.id, owner.id).await,
+        "a non-owner must not be able to kick"
+    );
+
+    // The owner cannot reach staff either: ownership carries no rank.
+    service.kick_from_room_task(
+        owner.id,
+        regular,
+        "study".to_string(),
+        "kick_staff".to_string(),
+    );
+    expect_kick_failed(&mut events, owner.id).await;
+    assert!(
+        is_member(&test_db.db, room.id, staff.id).await,
+        "an owner must not be able to kick a moderator"
+    );
+
+    // But the owner does keep the door.
+    service.kick_from_room_task(
+        owner.id,
+        regular,
+        "study".to_string(),
+        "kick_guest".to_string(),
+    );
+    expect_kick_succeeded(&mut events, owner.id).await;
+    assert!(
+        !is_member(&test_db.db, room.id, guest.id).await,
+        "the owner may remove a regular member"
+    );
+}
+
+/// Await the kick refusal for `actor`. The event is what makes the
+/// "still a member" assertion below it deterministic.
+async fn expect_kick_failed(events: &mut tokio::sync::broadcast::Receiver<ChatEvent>, actor: Uuid) {
+    loop {
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("kick failure event timeout")
+            .expect("event");
+        match event {
+            ChatEvent::KickFailed { user_id, .. } if user_id == actor => return,
+            ChatEvent::KickSucceeded { user_id, .. } if user_id == actor => {
+                panic!("expected the kick to be refused")
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn expect_kick_succeeded(
+    events: &mut tokio::sync::broadcast::Receiver<ChatEvent>,
+    actor: Uuid,
+) {
+    loop {
+        let event = timeout(Duration::from_secs(2), events.recv())
+            .await
+            .expect("kick success event timeout")
+            .expect("event");
+        match event {
+            ChatEvent::KickSucceeded { user_id, .. } if user_id == actor => return,
+            ChatEvent::KickFailed { user_id, message } if user_id == actor => {
+                panic!("expected the kick to be allowed, got: {message}")
+            }
+            _ => {}
+        }
+    }
+}
+
+async fn is_member(db: &late_core::db::Db, room_id: Uuid, user_id: Uuid) -> bool {
+    let client = db.get().await.expect("db client");
+    ChatRoomMember::is_member(&client, room_id, user_id)
+        .await
+        .expect("membership check")
 }

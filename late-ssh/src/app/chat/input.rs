@@ -1,7 +1,10 @@
+use crate::app::chat::state::PomodoroRequest;
+use crate::app::common::pomodoro::PomodoroTimer;
 use crate::app::common::primitives::Banner;
 use crate::app::common::readline::ctrl_byte_to_input;
 use crate::app::help_modal::data::HelpTopic;
 use crate::app::state::App;
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 fn is_next_room_key(byte: u8) -> bool {
@@ -114,8 +117,9 @@ fn open_settings_modal(app: &mut App) {
     app.show_hub_modal = false;
     app.show_poll_modal = false;
     app.poll_modal_state.close();
+    let device_rails = app.rail_modes();
     app.settings_modal_state
-        .open_from_profile(app.profile_state.profile());
+        .open_from_profile(app.profile_state.profile(), device_rails);
     app.show_settings = true;
 }
 
@@ -215,6 +219,30 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
     if app.chat.take_requested_settings_modal() {
         open_settings_modal(app);
     }
+    if app.chat.take_requested_shop_modal() {
+        crate::app::input::open_shop_modal_globally(app);
+    }
+    if let Some(request) = app.chat.take_requested_room_info_modal() {
+        use crate::app::chat::state::RoomInfoRequest;
+        match request {
+            RoomInfoRequest::Create { slug } => app.room_info_modal_state.open_create(slug),
+            RoomInfoRequest::Edit {
+                room_id,
+                room_label,
+                owner_label,
+                topic,
+                rules,
+            } => {
+                app.room_info_modal_state.open_edit(
+                    room_id,
+                    room_label,
+                    owner_label,
+                    topic.as_deref(),
+                    rules.as_deref(),
+                );
+            }
+        }
+    }
     if app.chat.take_requested_mod_modal() {
         open_mod_modal(app);
     }
@@ -224,20 +252,18 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
     if app.chat.take_requested_ultimate_modal() {
         crate::app::ultimates::open_ultimate_modal(app);
     }
-    if let Some(request) = app.chat.take_requested_daily_challenge() {
-        use crate::app::chat::state::DailyChallengeRequest;
+    if let Some(request) = app.chat.take_requested_pair() {
+        use crate::app::chat::state::PairRequest;
         match request {
-            DailyChallengeRequest::Modal => crate::app::input::open_daily_modal_globally(app),
-            // Success is surfaced from the resulting DailyEvent::ChallengePosted
-            // (and failures from DailyEvent::Error), so a rejected challenge
-            // (self, unknown user, over the entry cap) never flashes success.
-            DailyChallengeRequest::Open(game) => {
-                app.daily.post_open_challenge(game);
-            }
-            DailyChallengeRequest::Directed(username, game) => {
-                app.daily.post_directed_challenge(&username, game);
+            PairRequest::Directed(username) => {
+                crate::app::scratchpad::pair::request_pair(app, &username);
             }
         }
+    }
+    if let Some(request) = app.chat.take_requested_pomodoro() {
+        let banner = apply_pomodoro_request(&mut app.pomodoro, request, Utc::now());
+        app.publish_pomodoro();
+        app.banner = Some(banner);
     }
     if app.chat.take_requested_icon_picker() {
         crate::app::input::try_open_icon_picker(app);
@@ -261,6 +287,39 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
             app.banner = Some(Banner::error(
                 "No paired CLI with clipboard image support. Update and run `late`.",
             ));
+        }
+    }
+}
+
+/// Apply a parsed `/pomodoro` command to the session's timer and produce the
+/// banner to show. Takes the timer slot rather than the whole `App`: this is a
+/// pure state transition over session-local state, with no service to call and
+/// no other field to touch, so `now` comes from the caller the same way
+/// `PomodoroTimer::badge` takes it.
+fn apply_pomodoro_request(
+    timer: &mut Option<PomodoroTimer>,
+    request: PomodoroRequest,
+    now: DateTime<Utc>,
+) -> Banner {
+    match request {
+        PomodoroRequest::Stop => match timer.take() {
+            Some(stopped) => Banner::success(&format!("stopped {}", stopped.label)),
+            None => Banner::error("no pomodoro running, start one with /pomodoro [minutes]"),
+        },
+        PomodoroRequest::Start { minutes, label } => {
+            // A second /pomodoro replaces the running one instead of being
+            // refused: restarting a focus block is the common case, and the
+            // banner says which it was.
+            let verb = if timer.is_some() {
+                "restarted"
+            } else {
+                "started"
+            };
+            *timer = Some(PomodoroTimer {
+                label: label.clone(),
+                ends_at: now + chrono::Duration::minutes(i64::from(minutes)),
+            });
+            Banner::success(&format!("{verb} {label} for {minutes} min"))
         }
     }
 }
@@ -434,16 +493,9 @@ pub fn handle_message_action_in_room(app: &mut App, room_id: Uuid, byte: u8) -> 
     // reap a run of your own messages with repeated presses.
     // `r` enters reply mode and drops the selection.
     // `e` enters edit mode and drops the selection.
-    // `Ctrl-P` toggles the selected message's pinned dashboard status.
     // `p` opens a read-only profile modal for the selected author.
     match byte {
         b'f' | b'F' if app.chat.begin_reaction_leader() => return true,
-        0x10 => {
-            if let Some(b) = app.chat.toggle_pin_selected_message_in_room(room_id) {
-                app.banner = Some(b);
-                return true;
-            }
-        }
         b'd' | b'D' => {
             if let Some(b) = app.chat.delete_selected_message_in_room(room_id) {
                 app.banner = Some(b);

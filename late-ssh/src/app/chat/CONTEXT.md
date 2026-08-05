@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: late.sh SSH chat, synthetic chat entries, and dashboard/room chat surfaces
 - Primary audience: LLM agents working in `late-ssh/src/app/chat`
-- Last updated: 2026-07-15 (message search: `?query` mode in the Ctrl+/ modal with a 4-either-side context window on the selected hit, `/search` command, Mentions Enter opens a single-message preview (Enter again jumps); trigram-indexed ILIKE over joined rooms)
+- Last updated: 2026-08-02 (unread DMs are promoted to their own `unread dms` group directly under Core, held in place while you read them by `ChatState::sticky_unread_dm`; the rail now applies the same ignored-peer DM filter as navigation; the unrendered `RoomSection::Updates` variant and its `u` fold key are gone)
 - Status: Active
 - Parent context: `../../../../CONTEXT.md`
 
@@ -16,8 +16,8 @@ This file owns chat-specific context that used to make the root `CONTEXT.md` too
 Included here:
 - Home chat rooms, DMs, public/private topic rooms, synthetic entries, and game-backed room chat.
 - Home/Dashboard chat center, room rail, and the embedded game-chat surfaces (house tables, daily match boards).
-- Message composer, replies, edits, deletes, reactions, pinned messages, ignores, overlays, and autocomplete.
-- Synthetic chat entries: RSS, News, Mentions/Notifications, and Discover. Voice is not a synthetic room slot: the dedicated `#voice` room is a real, permanent, public chat room pinned at the bottom of Core (above Discover). Any voice-enabled chat/game room (including `#voice`) renders an embedded voice strip and exposes `/voice`/`/mute` controls while you are inside it. Showcase/Projects and Work/Profiles still use chat-adjacent services/state, but their UI is hosted on Directory page 7.
+- Message composer, replies, edits, deletes, reactions, ignores, overlays, and autocomplete.
+- Synthetic chat entries: RSS, News, Mentions/Notifications, and Discover. Voice is not a synthetic room slot: the dedicated `#voice` room is a real, permanent, public chat room pinned at the bottom of Core (above Discover). Any voice-enabled chat/game room (including `#voice`) renders an embedded voice strip and exposes `/voice`/`/mute` controls while you are inside it. Showcase/Projects and Work/Profiles still use chat-adjacent services/state, but their UI is hosted on Directory page 5.
 - Chat service refresh/tail/event contracts, DB model constraints, keybindings, tests, and gotchas.
 
 Global SSH, audio, games, profile, rooms/blackjack, observability, and repo-wide test policy stay in the root context.
@@ -35,13 +35,14 @@ late-ssh/src/app/chat/
 |-- input.rs                     # Home chat input plus shared message actions used by Dashboard and embedded game chat
 |-- ui.rs                        # Home room rail/chat center, dashboard-lounge view, embedded room chat, composer, row cache
 |-- ui_text.rs                   # Message/news/reaction wrapping into ratatui Lines
+|-- slur.rs                      # Pure drunk-text transform applied to outgoing public-room messages
 |-- discover/                    # Synthetic Discover entry: public rooms not yet joined
 |-- feeds/                       # Synthetic RSS entry: private per-user RSS/Atom inbox
 |-- news/                        # Synthetic News entry: articles + #lounge announcement
 |-- notifications/               # Synthetic Mentions entry: mention notifications
 |-- polls/                       # /poll modal state/input/UI
-|-- showcase/                    # Projects service/state/UI reused by Directory page 7
-`-- work/                        # Profiles service/state/UI reused by Directory page 7
+|-- showcase/                    # Projects service/state/UI reused by Directory page 5
+`-- work/                        # Profiles service/state/UI reused by Directory page 5
 ```
 
 Related tests:
@@ -69,7 +70,7 @@ Chat-owned moderation commands also use `room_ban.rs`,
 ## 3. Ownership Split
 
 - `svc.rs` is the async boundary between TUI state, DB models, mention notifications, and broadcast/watch channels.
-- `state.rs` owns local chat data, room/message selection, composer state, reply/edit/reaction/pin state, overlays, synthetic-entry substates, unread/read tracking, and cache inputs.
+- `state.rs` owns local chat data, room/message selection, composer state, reply/edit/reaction state, overlays, synthetic-entry substates, unread/read tracking, and cache inputs.
 - `input.rs` maps Home chat keys to state/service actions. `handle_message_action_in_room` is shared by Home chat and the embedded game-chat panes.
 - `ui.rs` renders Home room rail/chat center surfaces and owns `ChatRowsCache`.
 - `ui_text.rs` centralizes wrapping for normal messages, the small Markdown subset, reply quotes, `---NEWS---` cards, and reaction footers.
@@ -82,17 +83,16 @@ Keep `mod.rs` declaration-only; no `pub use` re-export layer.
 
 `ChatService` channels:
 - Per-session `watch<ChatSnapshot>` for low-frequency room summary data.
-- `broadcast<ChatEvent>` for live message, reaction, room-command, tail, and error events.
-- Shared `watch<Arc<Vec<String>>>` username list for mention autocomplete, refreshed every 30s.
+- `broadcast<ChatEvent>` for live message, reaction, room-command, and error events shared by every session. Single-recipient payload events (`RoomTailLoaded`, `DeltaSynced`, `MessageSearchLoaded`, `MessageContextLoaded`, `DiscoverRoomsLoaded`, and their `*Failed` twins) do NOT ride the broadcast: `ChatService::send_user_event` delivers them point-to-point over a per-session `mpsc<ChatEvent>` registered in `refresh_sessions` (returned by `start_user_refresh_task`), so a 500-message tail is never cloned into every connected session. `ChatState::drain_events` drains the targeted channel ahead of the broadcast; both feed the same event match.
+- Shared `watch<Arc<Vec<String>>>` username list for mention autocomplete, rebuilt every 30s from the in-memory `UsernameDirectory`, not the DB. It used to re-scan all of `users` on that timer, which was 1.9% of all DB execution time; the directory is written through on login/profile save/rename/delete, so this is both free and fresher. Do not point it back at `User::list_all_usernames` (that arm is the no-directory fallback for tests).
 - Plain username display is centralized outside Chat in `State.username_directory` (`Uuid -> username`), loaded at startup, refreshed every 30 minutes, and updated on login/profile save/mod rename/account delete. Chat still owns richer author metadata such as bonsai glyphs, countries, badges, reactions, and unread state.
 - A service-owned refresh scheduler that refreshes registered sessions every 10s and on explicit signals.
-- `read_permits: Semaphore(8)` to cap concurrent snapshot, tail, discover, and pinned-message reads.
+- `read_permits: Semaphore(8)` to cap concurrent snapshot, tail, and discover reads.
 - `send_lounge_message_task` is the shared internal producer for custom `#lounge` announcements. It resolves `#lounge`, optionally joins the author first, then sends through the normal `send_message` path. News uses it with a request id so normal composer-style send success/failure events are preserved.
 
 Important constants in `svc.rs`:
 - `HISTORY_LIMIT = 500`
 - `DELTA_LIMIT = 256`
-- `PINNED_MESSAGES_LIMIT = 100`
 - `CHAT_REFRESH_INTERVAL = 10s`
 - `USERNAME_DIRECTORY_TTL = 30s`
 - `SEARCH_RESULTS_LIMIT = 50`, `SEARCH_MIN_CHARS = 3`, `SEARCH_CONTEXT_EACH_SIDE = 4` (message search)
@@ -100,14 +100,18 @@ Important constants in `svc.rs`:
 Normal display flow:
 1. `ChatState::new` subscribes to chat events/usernames and calls `ChatService::start_user_refresh_task`.
 2. The per-user snapshot loads joined rooms, unread counts, latest-message activity timestamps, `#lounge` id, DM/current-user metadata, bonsai glyphs for those users, and ignored user ids.
+   - `build_chat_snapshot` runs as **two pipelined rounds, not a serial chain**. Round one is `ChatRoom::list_for_user_with_state` plus `User::friend_and_ignored_user_ids`; round two is voice channels, active polls, author metadata, and room owners, all of which need the room or friend set from round one. Each round is a single `tokio::join!` over one pooled connection, and tokio-postgres pipelines concurrent queries on one connection, so a round costs roughly one round trip rather than one per query (same pattern as `late_core::models::leaderboard::fetch_leaderboard_data`). Postgres still executes them in order, so this buys latency, not server CPU. Latency is what matters here because `refresh_registered_sessions` walks every live session sequentially. **Do not reintroduce a serial `.await` per query.**
+   - Rooms, unread counts, and latest-message timestamps come back from **one** query (`list_for_user_with_state`), because all three key off the same `chat_room_members` row. Measured on prod against the heaviest user (157 rooms): 1,452 buffers / 5.2 ms against 1,760 buffers / 8.1 ms for the three separate queries it replaced, plus two fewer planning cycles. There is deliberately no separate `unread_counts_for_user` or `last_message_at_for_rooms` any more; a second copy of that SQL is a drift hazard.
+   - Unread counts are capped at `ChatRoomMember::UNREAD_COUNT_CAP` (100) and the UI renders anything at the cap as `99+` (`ui.rs::format_unread_badge`). Uncapped, a never-opened `#lounge` counted all 127k messages per user per pass and was 43% of all DB execution time. Room ordering only tests `unread > 0`, so the cap is invisible to it. Do not restore an exact count without re-reading SCALE.md Pain Point 7.
+   - The `· ` activity lines are excluded by comparing the author id against the system bot id that `ChatService::set_system_user_id` receives from the #lounge feed task at startup. Do not go back to reading `users.settings->>'system'` per message: that made Postgres hash the whole users table per query.
 3. Snapshots intentionally carry empty message vectors. They do not load history; activity timestamps are summary metadata used for stable room ordering.
 4. Visible-room changes call `App::sync_visible_chat_room()`, which stores `visible_room_id`, marks the room read, and requests a room tail.
 5. `load_room_tail_task` fetches the newest 500 messages, reaction summaries, author usernames, author bonsai glyphs, and the user's room `last_read_at`. Render-time display names prefer the app-wide username directory over this per-session chat cache when both know the same UUID.
-6. Broadcast `MessageCreated`/`MessageEdited`/`MessageDeleted`/reaction events patch local state. Broadcast lag triggers a tail reload for the visible room.
+6. Broadcast `MessageCreated`/`MessageEdited`/`MessageDeleted`/reaction events patch local state; tail/search/discover results arrive on the per-session targeted channel. Broadcast lag triggers a tail reload for the visible room (the targeted mpsc is unbounded and cannot lag).
 
 Room tails carry `last_read_at` so render can insert one synthetic `new messages` divider before the first unread message authored by someone else. The divider is render-only state in the chat row cache; do not persist it or count it as a chat message.
 
-System-feed lines: the `#lounge` activity feed (`app/activity/lounge.rs`) posts persisted messages authored by the `system` bot user (`SYSTEM_USERNAME`) with the `· ` body prefix. A message counts as a system line only when BOTH hold — author is the feed bot and the body parses via `ui_text.rs::parse_system_line` — so neither a human squatting a nick nor a pasted `· ` can spoof it (`state.rs::system_line_text_in`, `ui.rs::is_system_author`, both via `activity/lounge.rs::is_system_username`). The TUI never stores system lines as chat rows: every ingestion point (`push_message`, `merge_room_tail`, snapshot `filter_messages`, with a `note_activity_ticker_from` scan on tails/snapshots) diverts them into `ChatState::activity_ticker`, a newest-first queue of `ActivityTickerEntry` (id/text/at) deduped by message id and capped at `ACTIVITY_TICKER_CAP` (10). The queue renders as the one-row activity ticker (`ui.rs::draw_activity_ticker`) in the composer-gap row of both Home chat surfaces (`draw_dashboard_chat_card` and `draw_chat_center`): events pack left to right, newest first, each as dim italic text plus a faint compact stamp (`format_relative_time_short`: `now`/`5m`/`3h`), `·`-separated, until the row is full; events that don't fit are simply not shown (the cap exists to outfill any sane width), and the newest event always shows (truncated if it must). The gap row always exists, so chrome never moves. Because they never enter room message lists, system lines are not selectable/reactable/replyable in the TUI, cannot trip the unread divider, and scrollback skips them; they remain excluded from unread counts at the SQL layer (`ChatRoomMember::unread_counts_for_user` skips `settings.system` authors), and their bodies never contain `@` so no mentions fire. IRC still projects every line as an ordinary PRIVMSG from the `system` nick, and #lounge history keeps them all. (The legacy authorless-row renderer — `wrap_system_to_lines`, `prev_was_system` stacking in `ensure_chat_rows_cache` — is now unreachable in practice since ingestion diverts every system line before it can enter a room list; it is kept deliberately as the fallback that makes the ticker experiment a one-site revert. Remove it if the ticker sticks.)
+System-feed lines: the `#lounge` activity feed (`app/activity/lounge.rs`) posts persisted messages authored by the `system` bot user (`SYSTEM_USERNAME`) with the `· ` body prefix. A message counts as a system line only when BOTH hold — author is the feed bot and the body parses via `ui_text.rs::parse_system_line` — so neither a human squatting a nick nor a pasted `· ` can spoof it (`state.rs::system_line_text_in`, `ui.rs::is_system_author`, both via `activity/lounge.rs::is_system_username`). The TUI never stores system lines as chat rows: every ingestion point (`push_message`, `merge_room_tail`, snapshot `filter_messages`, with a `note_activity_ticker_from` scan on tails/snapshots) diverts them into `ChatState::activity_ticker`, a newest-first queue of `ActivityTickerEntry` (id/text/at) deduped by message id and capped at `ACTIVITY_TICKER_CAP` (10). The queue renders as the one-row activity ticker (`ui.rs::draw_activity_ticker`) in the composer-gap row of both Home chat surfaces (`draw_dashboard_chat_card` and `draw_chat_center`): events pack left to right, newest first, each as dim italic text plus a faint compact stamp (`format_relative_time_short`: `now`/`5m`/`3h`), `·`-separated, until the row is full; events that don't fit are simply not shown (the cap exists to outfill any sane width), and the newest event always shows (truncated if it must). The gap row always exists, so chrome never moves. Because they never enter room message lists, system lines are not selectable/reactable/replyable in the TUI, cannot trip the unread divider, and scrollback skips them; they remain excluded from unread counts at the SQL layer (`ChatRoom::list_for_user_with_state` skips a `settings.system` author *whose body carries the prefix*, so ordinary system messages such as the new-public-room report to #moderators still light a badge), and their bodies never contain `@` so no mentions fire. IRC still projects every line as an ordinary PRIVMSG from the `system` nick, and #lounge history keeps them all. (The legacy authorless-row renderer — `wrap_system_to_lines`, `prev_was_system` stacking in `ensure_chat_rows_cache` — is now unreachable in practice since ingestion diverts every system line before it can enter a room list; it is kept deliberately as the fallback that makes the ticker experiment a one-site revert. Remove it if the ticker sticks.)
 
 `ChatSnapshot` is summary data. `RoomTailLoaded` is history data. Do not merge those responsibilities back together.
 
@@ -126,6 +130,8 @@ Room model:
 - `lounge` must have slug `lounge`, is public, auto-join, and permanent.
 - `language` rooms are public, opt-in, unique by `language_code`, with slug `lang-{code}`.
 - `topic` rooms are unique by `(visibility, slug)`.
+- `chat_rooms.topic` / `rules` are the room's "about" info, both nullable (NULL = unset; blanks are stored as NULL by `ChatRoom::set_topic_and_rules`). `topic` is projected as the IRC topic, shown in the Discover list, and shown in the room header; `rules` are read on request with `/rules`.
+- `chat_rooms.created_by` is who opened the room, written by the create paths only and never back-filled (NULL for system rooms, DMs, and everything predating migration 125). Ownership in force is **derived**, not stored: `ChatRoom::owner_id` / `owner_ids_for_rooms` return the creator while they are still a member, else the earliest remaining member (ties by user id), so a creator who leaves hands the room on with no write. Only private `topic` rooms are owned; the chat snapshot carries `room_owner_ids` for them alone.
 - `game` rooms require `game_kind + slug`, are unique by `(game_kind, slug)`, and DB constraints require `auto_join = false`. Two flavors: permanent public house-table rooms (slugs `poker`/`blackjack`/`maze`/`tron`, seeded at startup by `HouseTableRegistry::ensure_chat_rooms`), and private two-player daily match chats (slug `daily-{match_id}`, created in the daily claim transaction with both memberships — see `late-ssh/src/app/lobby/daily/CONTEXT.md`). `ChatService::join_game_room` joins public game rooms freely but rejects non-members for private ones (`this match chat is players only`); daily players are already members, so their "join" is only the idempotent re-join that triggers the list/tail refresh chain.
 - DMs canonicalize endpoint UUIDs by text order and are unique by `(dm_user_a, dm_user_b)`.
 
@@ -143,7 +149,6 @@ Messages:
 - Delta queries return ascending after `(created, id)` and are inserted into newest-first local state.
 - `reply_to_message_id` is nullable and uses `ON DELETE SET NULL`.
 - `reply_to_user_id` is nullable and uses `ON DELETE SET NULL`. It records the user a bot/automated reply is responding to, used to filter such replies for viewers who ignore that user. Set only by bot sends.
-- `pinned` is a global message-level flag with a partial pinned index.
 
 Slow modes:
 - `chat_slow_modes` is a per-user throttle, not a ban. `room_id` set means room-scoped; `room_id NULL` means server-scoped. Unique indexes enforce one row per `(room_id, target_user_id)` for room scope and one server row per target. Rows store `interval_secs`, nullable `expires_at` (`NULL` = permanent), actor, and reason.
@@ -170,10 +175,13 @@ Notifications:
 Visual order is defined in `state.rs::visual_order_for_rooms` and mirrored by cozy room-rail rendering in `ui.rs`. The base navigation order is:
 1. Favorite real rooms in `users.settings.favorite_room_ids` order.
 2. Core permanent rooms plus synthetic updates: `lounge`, `announcements`, `suggestions`, `bugs`, Notifications/Mentions, News, RSS when available, the permanent `#voice` room (matched by slug, directly above Discover), and Discover / `+ browse rooms` last. Collapsing Core hides these synthetic update entries too (Discover included). A `#voice` room that is not permanent shows nowhere: Core requires `permanent` and Channels excludes slug `voice`, so promote it with `/create-room voice`.
-3. Other non-DM chat-list rooms/channels, excluding favorites.
-4. DMs, sorted by unread status, then snapshot latest-message activity, then peer display name. Do not derive this order from lazily loaded room tails.
+3. Unread DMs, under an `unread dms` header. At the bottom of the rail DMs were going unnoticed, so any DM with unread messages is promoted here, sorted the same way as the DMs section below. Three rules keep it stable: favorited DMs stay in Favorites (they are already in `pushed_rooms` when the group is built), an ignored peer's DM is promoted nowhere, and the group ignores the DMs collapse toggle, which makes collapsing DMs a way to fold the read ones away without losing the ones waiting on a reply. The header is plain text like the `bumped` strip: no collapse toggle, no `RoomSection` variant, no section shortcut.
+4. Other non-DM chat-list rooms/channels, excluding favorites.
+5. DMs, sorted by unread status, then snapshot latest-message activity, then peer display name. Do not derive this order from lazily loaded room tails.
 
-`RoomSection::Updates` remains only for legacy Directory-hosted Showcase/Work state; collapsing Updates does not affect Home rail entries.
+Reading a DM zeroes its unread count on the same frame (`mark_room_read`), which would drop it out of the promoted group with the cursor still on it. `ChatState::sticky_unread_dm` holds exactly one DM in the group while it is being read: `note_sticky_unread_dm` claims it when an unread DM is marked read, keeps it while that same room is re-marked (every message landing in a visible room does that), and releases it when any other room is read, so it falls back into the DMs section as soon as you open something else. Reading is the only release: `sync_visible_chat_room` marks a room read only when one is visible, so leaving Home for a screen with no chat room (the Arcade, Games) parks the DM in the promoted group, badge-less, until the next room is opened. The decision is the pure `next_sticky_unread_dm`; the promotion predicate `dm_is_promoted_unread` is shared by `visual_order_for_rooms` and the rail so the two mirrors cannot disagree.
+
+`RoomSection` is the closed roster of collapsible rail sections: Favorites, Core, Channels, Dms. Each one is rendered, foldable from its header, and reachable by its `shortcut` key; a variant that no section header draws is dead weight, so add one only alongside the header that renders it. The Showcase/Work feeds moved to Directory page 5 and took the old `Updates` section with them.
 
 Hub Shop room effects add render-time top sections in the cozy room rail. Active `room_bump` effects on non-permanent public topic rooms render first under a dedicated `bumped` section as plain synthetic `join #slug` text rows; the synthetic row never shows glow/spark/pulse/hack/bump suffixes. The real room stays in its normal navigation section if the viewer has it, and pressing Enter on the synthetic row joins/moves through the existing public-room join path. `room_spark`, `room_glow`, and `room_pulse` are one-minute page-level visuals over the selected room content; they must not add top text, promote rooms, or restyle room-list rows. `pinned_vibe` is sold as Hack Room: for one hour it is the only effect allowed to change real room-list text/color, adding the `hacking` suffix for every viewer. Active effects flow through `ChatRoomListView.active_room_effects`. Hit testing uses the same visual slot list, so bumped room clicks stay aligned with rendering.
 
@@ -191,7 +199,7 @@ Game rooms stay in `ChatState.rooms` for the embedded game-chat panes, but `is_c
 Room navigation:
 - `h`/`l`, left/right arrows, `Ctrl+P`/`Ctrl+N` switch room selection.
 - `Space` activates room-jump mode, assigning keys from `ROOM_JUMP_KEYS`. Jumping to the already selected room/synthetic entry still re-runs the entry's read/list side effects so stale unread badges clear.
-- Global `Ctrl+/` opens the room jump modal. Rows include unread counts and synthetic entries for RSS, News, Mentions, and custom room browse. Showcase/Projects and Work/Profiles live on Directory page 7 instead. Results are ordered favorites first, then unread entries, then latest message/activity; typed `@` and `#` prefixes filter to DMs or rooms while keeping that ordering.
+- Global `Ctrl+/` opens the room jump modal. Rows include unread counts and synthetic entries for RSS, News, Mentions, and custom room browse. Showcase/Projects and Work/Profiles live on Directory page 5 instead. Results are ordered favorites first, then unread entries, then latest message/activity; typed `@` and `#` prefixes filter to DMs or rooms while keeping that ordering.
 - A leading `?` flips the same modal into message search (`app/room_search_modal`): `?query` searches every joined room, `?#room query` scopes to one room, `?@user query` to one DM (scope tokens resolve against joined rooms only; an unresolved scope never fires). Searches are debounced 300ms, need `SEARCH_MIN_CHARS` (3) chars, run one-at-a-time latest-wins by request id through `ChatService::search_messages_task` (`read_permits`-gated, `SEARCH_RESULTS_LIMIT` 50 newest hits). The SQL (`ChatMessage::search_for_user`) is a LIKE-escaped ILIKE join on `chat_room_members` (membership is the auth boundary), excluding game rooms, system-feed authors, and the caller's ignored users; migration 114 adds the `pg_trgm` GIN index that makes it indexed. Results live in `ChatState.message_search` (snippets precomputed around the first match at drain time); the modal renders hits plus a fixed-height detail pane showing the full body with a context window of up to 4 messages either side (dim `author: body` rows around the highlighted hit). Context loads lazily per selected hit through `ChatService::load_message_context_task` (`ChatMessage::list_around`: `(created, id)` cursors both directions, membership checked, system-feed and ignored authors excluded), cached by message id with a single in-flight slot so fast scrolling converges instead of fanning out; a failed fetch caches an empty window rather than refiring every tick. The pane uses fixed slots, so the hit row never moves while context fills in. Enter lands in the hit's room and selects the message if it is in the loaded tail, else registers `pending_search_jump`, resolved (or dropped with a banner) when the tail lands. `Ctrl+Y` copies the selected hit. `/search [query]` opens the modal pre-filled with `?query`.
 - While composing on Home, `Ctrl+N`/`Ctrl+P` switch real rooms while preserving draft text and dropping reply/edit state.
 - Synthetic entries are selected with booleans (`news_selected`, `notifications_selected`, `discover_selected`, `showcase_selected`, `work_selected`), not `selected_room_id`.
@@ -201,7 +209,7 @@ Room navigation:
 ## 7. Home Shell And Embedded Chat
 
 There is no top-level `Screen::Chat`. `Screen::Dashboard` renders as Home and owns both the room rail and the chat center:
-- If `chat.selected_room_id` is `#lounge` and no synthetic entry is selected, the center renders `dashboard::ui::draw_dashboard`: pinned row when present, then lounge chat. Pinned messages render whenever present; when vertical space is tight, the pinned strip hides before chat drops below its minimum.
+- If `chat.selected_room_id` is `#lounge` and no synthetic entry is selected, the center renders `chat::ui::draw_dashboard_chat_card`: the lounge chat card, full height.
 - If any other real room or synthetic entry is selected, the center renders `chat::ui::draw_chat_center`.
 - On wide terminals, `chat::ui::draw_room_list_rail` renders a borderless left rail. On narrow terminals, the center owns the available width.
 
@@ -238,7 +246,7 @@ The main composer is a `ratatui_textarea::TextArea<'static>`.
 
 `/members` renders a styled overlay with online members first, offline members second, each group sorted alphabetically. Preserve the fixed status-cell shape so overlay rows do not jump as online state changes.
 
-Directory page 7 uses the Work/Profiles and Showcase/Projects substates from chat. Its local `directory::state` search mode is independent of Home room search: `s` opens a case-insensitive substring search on Profiles or Projects, arrows move the filtered selection, `Enter` selects the underlying Work/Showcase item, and `Esc` exits search.
+Directory page 5 uses the Work/Profiles and Showcase/Projects substates from chat. Its local `directory::state` search mode is independent of Home room search: `s` opens a case-insensitive substring search on Profiles or Projects, arrows move the filtered selection, `Enter` selects the underlying Work/Showcase item, and `Esc` exits search.
 
 Starting compose in a room:
 - Clears message selection.
@@ -265,11 +273,11 @@ User commands:
 - `/binds` opens the Chat help topic.
 - `/aquarium` (alias `/aq`) toggles the Shop-unlocked aquarium tray shown only in the Home Lounge view (carved from the top of the lounge chat column); `/aquarium feed` feeds it. Parsed in `submit_composer`, drained via `take_requested_aquarium_command` in `handle_post_submit_requests`.
 - `/pet` toggles the pet strip (same `show_pet_strip` setting as the settings tweak); `/feed` and `/water` care for the Pet Companion (same strip actions as clicking the bowls/pet; the pet and the food bowl are both feed targets). The strip renders only in the Home Lounge view. Parsed in `submit_composer`, drained via `take_requested_pet_command`.
-- `/challenge [@user] [chess]` routes to daily correspondence chess: bare `/challenge` opens the Daily Games modal, `/challenge chess` posts an open-lobby challenge, `/challenge @user [chess]` posts a directed one. Parsed in `submit_composer`, drained via `take_requested_daily_challenge` in `handle_post_submit_requests` (the composer holds no `DailyService`).
 - `/dm @user` opens/creates a DM.
 - `/exit` opens quit confirm.
 - `/icons` opens the icon picker (same as `Ctrl+]`).
 - `/poll` opens a modal for the currently visible real room. Polls are room-scoped, support two or three options, can run for 10, 20, or 30 minutes, and are limited to one active poll per room. Active polls render at the top of the room message pane; while one is visible, `va`, `vb`, and `vc` vote for poll options. `v1`, `v2`, and `v3` remain music stream/station selectors. Failed starts show the remaining active wait in the banner.
+- `/pomodoro [minutes] [label...]` starts a session-local focus countdown (default 25 minutes, cap 180, label control-stripped and capped at 24 display cells); a leading integer is the duration, so `/pomodoro deep work` is a default-length block named `deep work`. `/pomodoro stop` cancels it, a second start replaces the running one, and the label is echoed in the banner. Parsed in `submit_composer`, drained via `take_requested_pomodoro` in `handle_post_submit_requests`; the timer itself is `App::pomodoro` (in-memory, no DB, dropped on disconnect) because `tick.rs` fires it and the status HUD draws it on every screen. Expiry rides the shared 1Hz edge: it banners and pushes a `GameEvents` desktop notification, and a running timer dirties that edge so the `MM:SS` badge in the top border counts down. The badge is the only width-degrading segment in `status_hud_title`: the right-aligned HUD paints over the left title, so the newcomer sheds its label and then itself when the border is tight (an 80-col terminal with unread mentions + voice + chips has no room for it) rather than eating the page tabs. Expiry still banners and notifies with the badge hidden. Peers see a presence badge instead: every session that changes its timer (start, stop, tick expiry, disconnect teardown in `ssh.rs`) publishes through `App::publish_pomodoro` into the process-shared `common/pomodoro.rs` snapshot-swap directory (same shape as the flair directory), which stores only `ends_at`, never the label; `tick.rs` resolves it once a second into `App::peer_pomodoros` and chat author labels paint the rounded-up whole-minute countdown as a presence badge after AFK. The badge string only changes on minute rollovers, so the chat-row epoch bump is 1/60th the resolve cadence.
 - `/roll [NdM ...]` rolls dice into the current room; bare `/roll` defaults to `d20`, caps are 100 dice per group and 1000 sides.
 - `/search [query]` opens the Ctrl+/ modal in message-search mode, pre-filled with `?query`. Parsed in `submit_composer`, drained via `take_requested_message_search` in `handle_post_submit_requests` (the modal is App-owned).
 - `/voice` joins the enabled voice channel for the active room; `/mute` toggles paired-CLI mic mute.
@@ -291,6 +299,7 @@ User commands:
 - `/public #room` opens or creates an opt-in public room for the caller only (`auto_join=false`).
 - `/sheet [@user]` (room-scoped to `#dnd`) opens the character sheet modal: bare form opens your own sheet editable (name + freeform body, saved per user per room on field submit via `ChatService::save_sheet_task`); targeted form opens another user's sheet read-only, or banners if they have none. Resolution and fetch happen in `ChatService::open_sheet_task`; saves and reads validate the shared `RoomScopedCommand` metadata plus room membership in `ChatService::ensure_room_scoped_command_access`; the modal lives in `app/sheet_modal`.
 - `/settings` opens settings.
+- `/shop` opens the Shop modal (the Shop has no global chord; this and the locked-feature nudges are its only entry points).
 - `/unignore [@user]` removes an ignored user.
 - `/upload <url>` downloads a public image URL server-side, reuploads it to configured public file storage, and inserts the resulting URL into the composer for the user to send.
 
@@ -343,7 +352,7 @@ Image uploads and inline rendering:
 - Pasting raw PNG/JPEG/GIF/WebP bytes into the chat composer starts an upload because there is no stable URL to preview until the bytes are hosted.
 - Pasting an image URL does not upload or rehost it. It is inserted as normal composer text; after send, inline rendering previews that URL best-effort.
 - `/upload <url>` is the explicit URL upload path: it downloads a public image URL server-side, reuploads it to configured public file storage, and inserts the resulting URL into the composer for the user to send and preview.
-- `/paste-image` is the explicit paired-CLI clipboard path. It requires an updated `late` paired client, not just browser pairing or plain `ssh`.
+- `/paste-image` is the explicit paired-CLI clipboard path. It requires an updated `late` paired client, not plain `ssh`.
 - Non-admin uploads use a per-session `ChatState` cooldown. This is intentionally lightweight, not a server-side quota.
 - URL downloads for upload and inline rendering must go through `files::image_upload::download_url_bytes`: validate `http(s)`, reject localhost/private/link-local/reserved resolved IPs, pin reqwest DNS to the validated addresses, disable redirects, and stream with a hard byte cap. Do not add new ad hoc `reqwest.get(url).bytes()` paths for chat images. Fetchers that must follow redirects (RSS feeds) use `download_url_bytes_following_redirects`, which re-validates every hop.
 - Paired clipboard uploads are request-gated: `PairedClientRegistry::request_clipboard_image` records an outstanding request per token, and the pair WS handler drops any inbound `clipboard_image`/`clipboard_image_failed` payload whose token has no outstanding request (`take_clipboard_request`). This keeps a rogue paired client from queuing multi-MB decoded images into the bounded per-session channel.
@@ -369,13 +378,12 @@ Keys:
 - `f` again while reaction leader is active opens reaction-owner overlay.
 - Digits `1..9` while reaction leader is active toggle quick reactions, exit reaction leader mode, and keep the message selected.
 - Digit `0` while reaction leader is active opens the icon picker for a custom reaction.
-- `Ctrl+P` toggles selected-message pin state; admin only.
 
 Selection deltas are message-based, not row-based. Positive means older, negative means newer.
 
 ---
 
-## 10. Reactions, Pins, Ignores
+## 10. Reactions, Ignores
 
 Reactions:
 - One reaction per `(message_id, user_id)`.
@@ -385,18 +393,12 @@ Reactions:
 - Reaction summaries live in `message_reactions: HashMap<Uuid, Vec<ChatMessageReactionSummary>>`.
 - Reaction-owner overlay waits for a matching `ReactionOwnersListed` event keyed by `pending_reaction_owners_message_id`.
 
-Pins:
-- `chat_messages.pinned` is global, not scoped to a room or user.
-- Only admins can toggle pins.
-- Toggling pin does not optimistically update local pinned dashboard state.
-- Home pinned stack comes from `load_pinned_messages_task` through a separate watch channel, not from the 10s summary snapshot.
-
 Ignores:
 - `users.settings.ignored_user_ids` stores UUIDs, not usernames.
 - `users.settings.friend_user_ids` stores private one-way friend marks as UUIDs.
 - `/ignore @user` and `/unignore @user` resolve usernames at command time.
 - A message is hidden if its author is ignored, OR if `chat_messages.reply_to_user_id` is an ignored user. The latter hides bot/automated replies directed at an ignored user so they cannot be heard by proxy through `@bot`/`@graybeard`/`@bartender`. Only bots set `reply_to_user_id` (via `ChatService::send_bot_reply_task`); human replies use `reply_to_message_id`. The shared filter helper is `state::message_is_ignored_in`.
-- Ignore filtering applies to DMs too. An ignored peer's DM messages are filtered, and the DM room is hidden from the room rail/navigation while the peer is ignored (`visual_order_for_rooms` skips DMs whose `dm_peer_id` is ignored), so a new DM from the ignored user can't resurface the room or its unread badge. Unignoring restores the DM on the next render/snapshot.
+- Ignore filtering applies to DMs too. An ignored peer's DM messages are filtered, and the DM room is hidden from the room rail/navigation while the peer is ignored (both mirrors skip DMs whose `dm_peer_id` is ignored: `visual_order_for_rooms` and the rail's own DM filter, via the shared `dm_peer_is_ignored`), so a new DM from the ignored user can't resurface the room or its unread badge. Unignoring restores the DM on the next render/snapshot.
 - `IgnoreListUpdated` refilters local messages in place (all rooms, including DMs and `reply_to_user_id` matches) with no DB refetch, then refreshes the Mentions list/unread count.
 - `unignore` does not retroactively restore already-filtered local messages until a future tail/snapshot naturally reloads them.
 
@@ -455,7 +457,11 @@ Synthetic entries are selected from the room list but are not normal `ChatRoom`s
 - `DiscoverRoomsLoaded { user_id, rooms }` and `DiscoverRoomsFailed { user_id, message }` are user-targeted.
 - `start_loading()` clears stale rows until results arrive; empty loaded state is distinct from loading.
 - Enter joins the selected public room.
-- Rooms render one dense line each (`ITEM_HEIGHT = 1` in `discover/ui.rs`): `#slug`, member/message counts, and last activity on a single row so the list shows many rooms at once.
+- Rooms render two rows each (`ITEM_HEIGHT = 2` in `discover/ui.rs`): `#slug` plus the room's topic when a mod has set one (clipped to the row), then member/message counts and last activity. The preview pane repeats the topic in full under the room's stats, since that is where someone decides whether to join.
+
+### Room Header
+
+`ui.rs::draw_room_header` owns everything between the room rail and the messages, and returns the area left for messages. Each content row pairs live state on the left with the keys or commands that act on it flushed right (`primitives::row_with_hint`): the voice row (`voice::ui::voice_strip_line`, present only for voice-enabled rooms), a dim full-width rule when voice and a topic are both present, the topic row with a `/rules` hint when the room has rules, and a closing rule that separates the block from the conversation. A room with neither voice nor a topic keeps the full height for messages, and the whole header yields if it would leave fewer than two rows for them.
 - `/` opens an inline substring filter over room slugs (footer shows the live query); typing edits it, `selected`/`visible_items` track the filtered subset, and `Esc` clears+closes it. While `discover.is_filtering()`, `app::input::handle_byte_event` and `chat::input::handle_byte` route every byte (digits, `space`, `h`/`l`) into the filter so it captures an unrestricted query; arrows still navigate. `start_slash_command_composer` excludes Discover so `/` never starts a slash command there.
 
 ---
@@ -470,7 +476,7 @@ Home chat center:
 Home lounge dashboard chat:
 - Uses `DashboardChatView`.
 - Composer is capped at 5 visible lines.
-- Lounge chrome is controlled by the user's Dashboard Header setting, then by vertical priority: pinned row always renders when present, and the top activity/quest/shop strip drops before chat when space is tight.
+- Lounge chrome is controlled by the user's Dashboard Header setting, then by vertical priority: the top activity/quest/shop strip drops before chat when space is tight.
 
 Embedded game chat:
 - Uses `EmbeddedRoomChatView`.
@@ -484,9 +490,9 @@ Message rendering:
 - Highlighted reply targets get background styling across the whole row range.
 - Message wrapping is word-aware and uses Unicode display width, not codepoint count; hard splits are only valid for a single word longer than width.
 - Display author labels are plain usernames without leading `@`; mention syntax still uses `@username`.
-- Author labels render as `username [profile awards] [special...] [bonsai] [badge] [flag] [brb]`. Special badges come from a hardcoded per-username allowlist in `chat/special_badges.rs` and must stay in `mod`, `developer`, `artist` order. The bonsai glyph comes from `bonsai_glyphs` keyed by user_id. Profile award badges come from `profile_award_badges` keyed by user_id: top-3 last-completed-UTC-month leaderboard awards plus the best rankless Lateania boss achievement badge (`LAD` unless `LFK` is also present, then `LFK`), ordered by rank and then category priority, rendered as one bracketed group. Equipped store badge and flag are split for separate hit targets and rendered badge before flag. The `/brb` moon badge is derived from shared `ActiveSession.afk`, not message metadata, so it is visible to all viewers while the author is away. Two Shop-driven decorations share the bare-username range in `AuthorTint`, on different style axes so they compose instead of colliding: the bartender drink tint paints the background, and a bought 24h username effect (Name Glow/Gradient/Shimmer, see `hub/CONTEXT.md`) paints the foreground per character via `App.name_styles` — the effect fg deliberately overrides own-amber/friend-gold/default author fg while keeping bg and modifiers. The resolved `NameStyle` is hashed into the chat-rows cache fingerprint, so shimmer repaints at most once a second. Migration 104's retired Bot Username Color remains the cautionary tale: it was per-viewer; these are globally visible. Do not add a third decoration on the author label without retiring one of these.
+- Author labels render as `username [profile awards] [special...] [bonsai] [badge] [flag] [brb]`. Special badges come from a hardcoded per-username allowlist in `chat/special_badges.rs` and must stay in `mod`, `developer`, `artist` order. The bonsai glyph comes from `bonsai_glyphs` keyed by user_id. Profile award badges come from `profile_award_badges` keyed by user_id: top-3 last-completed-UTC-month leaderboard awards plus the best rankless Lateania boss achievement badge (`LAD` unless `LFK` is also present, then `LFK`), ordered by rank and then category priority, rendered as one bracketed group. Equipped store badge and flag are split for separate hit targets and rendered badge before flag. The `/brb` moon badge is derived from shared `ActiveSession.afk`, not message metadata, so it is visible to all viewers while the author is away. Two Shop-driven decorations share the bare-username range in `AuthorTint`, on different style axes so they compose instead of colliding: the bartender drink tint paints the background, and a bought 24h username effect (Name Glow/Gradient/Shimmer, see `hub/CONTEXT.md`) paints the foreground per character via `App.name_styles` — the effect fg deliberately overrides own-amber/friend-gold/default author fg while keeping bg and modifiers. Resolved `NameStyle` changes bump `App::chat_ctx_epoch` (1Hz value compare in `tick.rs`), so shimmer repaints at most once a second. Migration 104's retired Bot Username Color remains the cautionary tale: it was per-viewer; these are globally visible. Do not add a third decoration on the author label without retiring one of these.
 - Author badge glyphs are separated by `AUTHOR_BADGE_SEPARATOR` (` `). The separator was intentionally returned to a plain space after dot separators failed to prevent terminal-cell drift.
-- Investigation note: if a known author glyph is missing on a newly rendered message but appears after terminal resize, first suspect Ratatui/crossterm diff rendering of wide emoji cells, not author metadata. Sent-message events reload author metadata before `push_message`, chat row fingerprints include `bonsai_glyphs`, `chat_badges`, `profile_award_badges`, and AFK state, and resize forces a full terminal clear/redraw. A prior workaround forced full repaint on message-selection scroll, but it was removed because it caused visible flicker; prefer a targeted ratatui/backend fix for wide/VS16 emoji cell drift.
+- Investigation note: if a known author glyph is missing on a newly rendered message but appears after terminal resize, first suspect Ratatui/crossterm diff rendering of wide emoji cells, not author metadata. Sent-message events reload author metadata before `push_message`, chat row cache counters cover `bonsai_glyphs`, `chat_badges`, `profile_award_badges`, and AFK state, and resize forces a full terminal clear/redraw. A prior workaround forced full repaint on message-selection scroll, but it was removed because it caused visible flicker; prefer a targeted ratatui/backend fix for wide/VS16 emoji cell drift.
 - Ratatui wide/VS16 investigation detail: Ratatui owns the buffer diff model: it renders widgets into a buffer, diffs current vs previous, then writes only changed cells to the backend. Official docs describe that flow at `https://ratatui.rs/concepts/rendering/under-the-hood/`. In this app's failure mode, `ratatui-core` emits extra trailing-cell updates for wide VS16 emoji, while `ratatui-crossterm` prints `cell.symbol()` but tracks the last position as if every printed symbol advances exactly 1 cell. A glyph like `🛡️` is one visible grapheme but 2 terminal cells wide, so the backend's "next update is adjacent, no `MoveTo` needed" optimization can become wrong after wide glyphs. This should be treated first as a Ratatui backend/diff issue, not a `crossterm` crate issue: crossterm is printing what Ratatui asks it to print, while Ratatui's backend decides when cursor moves are needed.
 - Proposed upstream path: build a tiny repro outside late.sh that renders rows with `🛡️ 🔨️ 🌼`, then shifts/swaps rows like chat scrolling or room switching; add a Ratatui regression test around wide VS16 glyph diff/backend output; then patch either `ratatui-crossterm` cursor accounting or `ratatui-core`'s VS16 trailing-cell strategy. The naive backend fix is to track printed width instead of cell count, but test it carefully because Ratatui's explicit trailing-cell update may also need adjustment. A failing test/repro first will make the PR easier to get accepted.
 - The small Markdown subset supports headings, bold, italic, inline code, blockquotes, and simple `- ` list items.
@@ -494,7 +500,11 @@ Message rendering:
 
 Cache:
 - `ChatRowsCache` stores wrapped rows plus selected/highlighted row ranges.
-- Its fingerprint includes width, current user, current minute, message fields, usernames, countries, shop badges/flags, monthly award badges, bonsai glyphs, active `/brb` state, and reactions.
+- Validity is an O(1) counter compare, not a content hash. The key (`ChatRowsCacheKey`) is `ChatRowsVersions` (rendered `room_id`, that room's `room_version`, `ChatState::context_epoch`, `App::chat_ctx_epoch`) plus width, theme, current minute, unread marker, current user, and flag-fallback. Nothing hashes message bodies per frame anymore.
+- `room_version` bumps on any message-store change for that room: `push_message`, `remove_message`, `replace_message` (edits/pins), `merge_room_tail`, reaction updates, and snapshot merges whose `(id, updated)` sequence differs.
+- `ChatState::context_epoch` bumps when author context actually changes: usernames (`note_username`/`extend_usernames`), countries, friends, ignore refilters, glyphs/badges (`set_context_value`), inline image cache changes, and snapshot applies with real diffs. Snapshots arrive every 10s regardless of change, so every snapshot write compares before bumping.
+- `App::chat_ctx_epoch` covers App-owned inputs: AFK set and username directory (Arc pointer compare in `render.rs`), drunk levels and resolved name styles (value compare in the 1Hz `tick.rs` block).
+- When adding a new render input to chat rows, either put it in `ChatRowsCacheKey` directly (cheap values) or bump one of the counters at its mutation site; a missed bump is a stale-rows bug.
 - Composer wrapped rows are cached separately in `ChatState`; invalidate when text or width changes.
 
 ---
@@ -527,7 +537,6 @@ Cache:
 | `f` then `1..9` | Quick-react to selected message |
 | `f` then `0` | Open icon picker for a custom reaction |
 | `f` then `f` | Open reaction-owner overlay |
-| `Ctrl+P` | Admin toggle selected-message pin |
 | `Ctrl+]` | Open icon picker; inserts only into main chat composer |
 | Double-click composer bar | Enter compose mode (same as `i`). Dashboard + embedded game chat only. |
 | Click message body | Move message selection to that block (same as `j`/`k` landing on it). |
@@ -579,7 +588,7 @@ modals and the icon picker). Username profile-opens are debounced via
 | Mentions | `j/k` navigate, Enter open the Ctrl+/ single-message preview (Enter again jumps to the room) |
 | Discover | `j/k` navigate, Enter join selected public room, `/` open slug filter (type to narrow, Enter join, `Esc` clear) |
 
-Directory Projects and Profiles reshuffle their listing on page/tab entry. News keeps its chronological order — only mine-only filtering applies. The slash-command composer in `app/input.rs` skips itself when News is selected so `/` reaches the synthetic-entry handler; Directory page 7 routes `/` directly to Projects/Profiles filtering.
+Directory Projects and Profiles reshuffle their listing on page/tab entry. News keeps its chronological order — only mine-only filtering applies. The slash-command composer in `app/input.rs` skips itself when News is selected so `/` reaches the synthetic-entry handler; Directory page 5 routes `/` directly to Projects/Profiles filtering.
 
 When changing keybindings, update root `CONTEXT.md`'s keybinding checklist plus the relevant input handler, help modal, footer hints, and tests.
 
@@ -599,6 +608,17 @@ When changing keybindings, update root `CONTEXT.md`'s keybinding checklist plus 
 
 `target_user_ids = None` means public event. `Some(ids)` means scoped event. Consumers rely on this for privacy and notifications.
 
+### Drunk Text
+
+A patron deep enough into the tavern's drinks types like it. `ChatService::slurred_body` runs `chat/slur.rs` over the body as the last step of `send_message`, immediately before the row is written.
+
+- **Stored, not rendered.** The slurred text *is* the message body, so IRC, search, replies, and every viewer agree on one version. This is deliberate: the drunk level is decay-based, so a render-time transform would re-evaluate against the reader's *current* level and quietly sober up an old message hours later. The level at the moment of typing is the only one that ever made sense. The cost is that the original is unrecoverable, including for moderation.
+- **Public rooms only** (`room.visibility == "public"`). DMs and private rooms can carry something that genuinely needs reading. The `UserDrinks::find` level lookup only runs where it can matter, and sober users and the ghost bots (who never drink) short-circuit to an unchanged body.
+- **Runs last**, so report markers, `contains_link` cooldown, and slow mode all judged the sober text. `create_mentions_task` gets the slurred body so the notification preview matches the room.
+- **Readability rests on one rule:** a word's first and last character never move. Only interior letters are reordered (never added or dropped), which is the typoglycemia effect and is why level 4 stays legible at all. Two dials climb per level: what share of words get scrambled (6/32/60/85%) and how far each goes (one swap, one swap, one-or-two swaps, full interior shuffle). Tipsy and buzzed deliberately share a depth: the same fumble, just far more often. The change in *kind* lands at sloshed. Measured over ordinary prose that is roughly 3/21/33/58% of *all* words visibly changed, since short words are ineligible; `each_drink_reads_harder_than_the_last` pins those bands.
+- **Protected tokens are never touched:** `@mentions` (they drive notifications and the mention wash), `#slugs`, URLs, backtick code spans, `---NEWS---`-family markers, the leading `> ` reply quote line (someone else's words), and anything non-ASCII (so CJK and emoji pass through whole). The level-4 `*hic*` only widens an existing gap and respects the same exclusions.
+- `slur(body, level, seed)` is pure with a caller-supplied seed; `svc.rs::slur_seed` supplies a fresh one per message. Tests live in `slur_test.rs`.
+
 ### Tail And Delta Recovery
 
 1. Visible-room changes request a tail.
@@ -609,12 +629,15 @@ When changing keybindings, update root `CONTEXT.md`'s keybinding checklist plus 
 
 ### Room Membership Commands
 
-1. `/public #room` gets or creates a public topic room, forces `auto_join=false`, and joins only caller.
-2. `/private #room` creates a private topic room and joins caller.
-3. `/invite @user` requires caller membership and rejects DMs.
-4. `/leave` rejects permanent rooms.
-5. Admin `/fill-room #room` works only for public rooms, bulk-adds all users, and sets `auto_join=true`.
-6. DMs always preserve canonical endpoints; sending repairs membership for both endpoints.
+1. `/public #room` gets or creates a public topic room, forces `auto_join=false`, and joins only caller. Public rooms are hosted, not owned: opening one grants nothing, and a brand-new one posts two plain system-bot lines (deliberately without the system-line prefix, so they render as messages), one in the room asking the creator to describe it and one in #moderators reporting it.
+2. `/private #room` opens the room-info form (`app/room_info_modal`) and creates the room with its topic/rules and `created_by` in one go.
+3. `/roominfo` opens the same form for the selected room. Authority is decided once in `ChatService::set_room_info`: mods for any room, otherwise the derived owner of a private topic room. `ChatState::room_info_authority` mirrors the rule for what the UI offers (and what the refusal banner says); DMs and game rooms have no info at all. A successful write broadcasts `RoomInfoUpdated`, which banners for the editor and refreshes the room list of every session sitting in that room, so no header waits on the 10s snapshot.
+4. `/rules` shows the selected room's rules in the shared overlay (`Overlay`, the same surface `/active` uses), titled `#slug rules`, one entry per stored line: rules are multi-line and a banner is one line. A room with no rules answers with a banner instead of an empty overlay.
+5. `/kick @user` runs the moderation service's room kick (`ModerationService::kick_from_room` then `room_action`), so membership removal, voice removal, audit log and the target's live session behave exactly as from the mod surface. A private room's owner is granted `Caps::KICK_FROM_ROOM` for that one room via `Permissions::as_room_owner`, which leaves the tier alone so staff stay out of reach.
+6. `/invite @user` requires caller membership and rejects DMs.
+7. `/leave` rejects permanent rooms.
+8. Admin `/fill-room #room` works only for public rooms, bulk-adds all users, and sets `auto_join=true`.
+9. DMs always preserve canonical endpoints; sending repairs membership for both endpoints.
 
 ### Notifications
 
@@ -636,7 +659,7 @@ Landed/scoped-loading state:
 Message search stays cheap by construction: debounce + 3-char minimum + one in-flight latest-wins request per session + `read_permits` + `LIMIT 50` + the migration-114 trigram index. Do not add unbounded result paging; refining the query is the pagination.
 
 Known risks:
-- `ChatRowsCache` fingerprint still hashes visible message bodies and metadata. Keep row cache invalidation correct if changing wrapping/reactions/badges/AFK state.
+- `ChatRowsCache` validity is counter-based (`ChatRowsVersions`); any new mutation path that changes rendered rows must bump the room version or a context epoch, or rows go stale.
 - Summary snapshot merge clones preserved message vectors for rooms with empty incoming message lists.
 - Unread count SQL counts rows newer than `last_read_at`; if message volume grows, run `EXPLAIN ANALYZE`.
 - Tail reload is the recovery path for lagged broadcasts, so keep it bounded and membership-protected.
@@ -654,7 +677,7 @@ Repo-wide rule from root context still applies:
 
 Existing DB-backed coverage:
 - `src/app/announcements_test.rs`: login #announcements loading, read cursor behavior, paging.
-- `svc_test.rs`: send, reactions, pins, summaries, room tails, ignored users, discover listing/joining, public room create/fill, delete events, ignore/unignore, message search (membership/game-room/ignored exclusions, room scoping, LIKE-metacharacter escaping, context-window ordering).
+- `svc_test.rs`: send, reactions, summaries, room tails, ignored users, discover listing/joining, public room create/fill, delete events, ignore/unignore, message search (membership/game-room/ignored exclusions, room scoping, LIKE-metacharacter escaping, context-window ordering).
 - `news/svc_test.rs`: article snapshots, empty list, author resolution, duplicate URL failure, direct DB inserts appearing after list refresh.
 - `sheet_test.rs`: character sheet model/upsert plus `open_sheet_task`/`save_sheet_task` room-scoped authorization.
 - `showcase/svc_test.rs`: create event/snapshot, non-owner update failure, admin delete, unread cursor behavior.
@@ -688,10 +711,9 @@ Test gaps:
 - Ignore filtering covers all rooms including DMs, and also hides bot replies whose `reply_to_user_id` is ignored. DMs with an ignored peer are hidden from the room rail entirely.
 - `#announcements` admin-only currently depends on the provided `room_slug`; stale/missing slug is a fragile path.
 - Login `#announcements` modal marks `chat_room_members.last_read_at` only when dismissed; do not add a separate announcement-read table unless the room model itself changes.
-- Reaction and pin tasks are async; UI should not assume optimistic success.
+- Reaction tasks are async; UI should not assume optimistic success.
 - Poll create/vote tasks are async; `ChatEvent::PollUpdated` patches the local active-poll map and `ChatSnapshot.active_polls` refreshes authoritative visibility. Successful poll creation spawns a sleep-until-expiry finalizer that atomically claims the expired poll in Postgres, marks it inactive, and posts compact results into the room as the poll creator. `ChatService::start_poll_finalizer_recovery_task` runs a coarse 10-minute recovery scan for expired active polls so restarts/redeploys do not strand result posts; the DB claim is the cross-replica duplicate guard.
 - Poll vote shortcuts use `va/vb/vc` when the selected/visible real room has an active poll, leaving music `v1/v2/v3` selectors available.
-- Pinned messages are loaded separately from summary snapshots and chat events.
 - Room visual order must stay consistent between state and UI hit-testing/row-building.
 - Mouse hit-testing reconstructs a temporary `ChatRenderInput`; room-list layout changes must keep hit tests in sync.
 - Chat-scroll mouse hit-testing is driven by `ChatRowsCache` extras (`row_message`, `row_kind`, `header_segments`) and a per-frame `ChatHitLayout` published into `ChatState::last_chat_hit_layout`. If you change how author headers, inline images, or reaction footers contribute rows in `ensure_chat_rows_cache` / `wrap_chat_entry_to_lines`, update both the parallel `row_*` vectors and the segment math in `build_author_prefix_and_segments` so a click still resolves to the right message/segment.

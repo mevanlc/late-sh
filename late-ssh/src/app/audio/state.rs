@@ -5,6 +5,13 @@ use uuid::Uuid;
 use super::svc::{AudioEvent, AudioService, QueueSnapshot};
 use crate::app::common::primitives::Banner;
 
+pub struct AudioTick {
+    pub banner: Option<Banner>,
+    /// True when the shared queue snapshot moved this tick: the booth modal
+    /// and the sidebar music stage draw straight from it.
+    pub changed: bool,
+}
+
 pub struct AudioState {
     pub(crate) service: AudioService,
     user_id: Uuid,
@@ -89,15 +96,6 @@ impl AudioState {
         self.service.toggle_unskippable_task(self.user_id, item_id);
     }
 
-    pub fn booth_history_vote(&self, item_id: Uuid, value: i16) {
-        self.service
-            .cast_history_vote_task(self.user_id, item_id, value);
-    }
-
-    pub fn booth_history_clear_vote(&self, item_id: Uuid) {
-        self.service.clear_history_vote_task(self.user_id, item_id);
-    }
-
     pub fn booth_history_requeue(&self, item_id: Uuid) {
         self.service
             .requeue_history_item_task(self.user_id, item_id);
@@ -124,7 +122,13 @@ impl AudioState {
             .persist_radio_station_task(self.user_id, station);
     }
 
-    pub fn tick(&mut self) -> Option<Banner> {
+    pub fn tick(&mut self) -> AudioTick {
+        // Mark the queue snapshot seen so the peek only fires once per
+        // publish; renders keep reading it through `queue_snapshot()`.
+        let changed = self.snapshot_rx.has_changed().unwrap_or(false);
+        if changed {
+            let _ = self.snapshot_rx.borrow_and_update();
+        }
         let mut banner = None;
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
@@ -205,18 +209,6 @@ impl AudioState {
                         "Skip vote registered ({votes}/{threshold})"
                     )));
                 }
-                AudioEvent::BoothHistoryVoteApplied { user_id, score }
-                    if user_id == self.user_id =>
-                {
-                    banner = Some(Banner::success(&format!(
-                        "History vote registered (score {score})"
-                    )));
-                }
-                AudioEvent::BoothHistoryVoteFailed { user_id, message }
-                    if user_id == self.user_id =>
-                {
-                    banner = Some(Banner::error(&message));
-                }
                 AudioEvent::BoothHistoryRequeued { user_id, position }
                     if user_id == self.user_id =>
                 {
@@ -247,6 +239,6 @@ impl AudioState {
                 _ => {}
             }
         }
-        banner
+        AudioTick { banner, changed }
     }
 }

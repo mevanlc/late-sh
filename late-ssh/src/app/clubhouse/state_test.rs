@@ -61,9 +61,11 @@ fn door_events_expire_with_the_clock() {
     state.refresh_roster(vec![occupant(1, "me")]);
     state.refresh_roster(vec![occupant(1, "me"), occupant(2, "alice")]);
     assert_eq!(state.door_events.len(), 1);
-    for _ in 0..=DOOR_EVENT_TICKS {
-        state.tick(true);
-    }
+    // The clock is wall-driven: a sparse tick jumps straight to the wall
+    // tick it is given, and expiry follows wall time, not call count.
+    state.tick(DOOR_EVENT_TICKS - 1);
+    assert_eq!(state.door_events.len(), 1);
+    state.tick(DOOR_EVENT_TICKS);
     assert!(state.door_events.is_empty());
 }
 
@@ -82,31 +84,84 @@ fn walking_moves_and_respects_walls() {
 }
 
 #[test]
-fn tutorial_runs_welcome_to_done() {
+fn tutorial_tours_every_page_then_comes_home() {
     let mut state = state_with_lobby(true);
     assert_eq!(state.tutorial, Tutorial::Pending);
+    assert_eq!(state.tutorial_forced_step(), None);
     state.enter_screen();
     assert_eq!(state.tutorial, Tutorial::Welcome);
     assert_eq!((state.player_x, state.player_y), map::SPAWN);
 
-    state.walk(0, -1);
-    assert_eq!(state.tutorial, Tutorial::GoToBar);
+    // Every stop forces exactly one key, and its screen advances the route.
+    for (expected_key, screen, next_stage) in [
+        (b'1', Screen::Dashboard, Tutorial::VisitChat),
+        (b'2', Screen::Arcade, Tutorial::VisitArcade),
+        (b'3', Screen::Games, Tutorial::VisitGames),
+        (b'4', Screen::Artboard, Tutorial::VisitArtboard),
+        (b'5', Screen::Pinstar, Tutorial::VisitDirectory),
+        (b'6', Screen::Leaderboard, Tutorial::VisitLeaderboard),
+        (b'0', Screen::Clubhouse, Tutorial::Homecoming),
+    ] {
+        assert_eq!(
+            state.tutorial_forced_step(),
+            Some(TourStep::Page(expected_key, screen))
+        );
+        // A wrong page never advances a stop; the route waits for its page.
+        state.tutorial_screen_entered(Screen::Games);
+        state.tutorial_screen_entered(screen);
+        assert_eq!(state.tutorial, next_stage);
+    }
 
-    // Not at the bar yet: no transition.
-    assert!(!state.tutorial_reached_bar());
-
-    // Teleport next to the counter (test-only shortcut via the lobby).
-    state.player_x = 28;
-    state.player_y = 12;
-    assert!(state.tutorial_reached_bar());
-    assert_eq!(state.tutorial, Tutorial::BarLesson);
-    // Only fires once.
-    assert!(!state.tutorial_reached_bar());
-
-    assert!(!state.tutorial_advance());
-    assert_eq!(state.tutorial, Tutorial::SendOff);
+    // The homecoming box forces Enter, and it finishes the tour.
+    assert_eq!(state.tutorial_forced_step(), Some(TourStep::Enter));
     assert!(state.tutorial_advance());
     assert_eq!(state.tutorial, Tutorial::Done);
+    assert_eq!(state.tutorial_forced_step(), None);
+}
+
+#[test]
+fn bar_glows_after_homecoming_until_the_pour_is_claimed() {
+    let mut state = state_with_lobby(true);
+    state.enter_screen();
+    // Mid-tour: nothing pours at a distance, and the bar does not glow yet.
+    assert!(!state.welcome_pour_due());
+    assert!(!state.bar_glow());
+    for screen in [
+        Screen::Dashboard,
+        Screen::Arcade,
+        Screen::Games,
+        Screen::Artboard,
+        Screen::Pinstar,
+        Screen::Leaderboard,
+        Screen::Clubhouse,
+    ] {
+        state.tutorial_screen_entered(screen);
+    }
+    assert_eq!(state.tutorial, Tutorial::Homecoming);
+    assert!(state.bar_glow());
+    assert!(state.tutorial_advance());
+    // Done, pour unclaimed: the glow keeps pointing at the treasure.
+    assert!(state.bar_glow());
+
+    // Teleport to the edge of the bar's approach apron (test-only
+    // shortcut): three rows off the counter is close enough to pour.
+    state.player_x = 28;
+    state.player_y = 15;
+    assert!(state.welcome_pour_due());
+    // Only fires once per session, and claiming kills the glow.
+    assert!(!state.welcome_pour_due());
+    assert!(!state.bar_glow());
+}
+
+#[test]
+fn returning_users_never_pour_or_glow() {
+    let mut state = state_with_lobby(false);
+    state.enter_screen();
+    assert_eq!(state.tutorial, Tutorial::Off);
+    state.player_x = 28;
+    state.player_y = 12;
+    assert!(!state.welcome_pour_due());
+    assert!(!state.bar_glow());
 }
 
 const BARTENDER: u128 = 9;
@@ -116,12 +171,21 @@ fn lounge_msg(n: u128, author: u128, created: chrono::DateTime<chrono::Utc>) -> 
         id: Uuid::from_u128(n),
         created,
         updated: created,
-        pinned: false,
         reply_to_message_id: None,
         reply_to_user_id: None,
         room_id: Uuid::from_u128(99),
         user_id: Uuid::from_u128(author),
         body: format!("line {n}"),
+    }
+}
+
+/// The #lounge message currently in the banner. These tests only feed real
+/// lounge lines, so a local line surfacing here is a bug in the code under test.
+fn banner_id(state: &State) -> Option<Uuid> {
+    match state.bartender_banner_line() {
+        None => None,
+        Some(BannerLine::Lounge(id)) => Some(*id),
+        Some(BannerLine::Local(line)) => panic!("unexpected local banner line: {line}"),
     }
 }
 
@@ -139,25 +203,20 @@ fn bartender_banner_queues_a_burst_and_plays_it_in_order() {
     ];
     state.update_bartender_banner(bartender, &tail, now);
     assert_eq!(
-        state.bartender_banner_message_id(),
+        banner_id(&state),
         Some(Uuid::from_u128(1)),
         "the oldest answer of the burst shows first"
     );
 
     // The pinned line survives the dwell window even with lines waiting.
-    for _ in 0..BANNER_QUEUE_DWELL_TICKS - 1 {
-        state.tick(true);
-        state.update_bartender_banner(bartender, &tail, now);
-    }
-    assert_eq!(
-        state.bartender_banner_message_id(),
-        Some(Uuid::from_u128(1))
-    );
+    state.tick(BANNER_QUEUE_DWELL_TICKS - 1);
+    state.update_bartender_banner(bartender, &tail, now);
+    assert_eq!(banner_id(&state), Some(Uuid::from_u128(1)));
 
-    state.tick(true);
+    state.tick(BANNER_QUEUE_DWELL_TICKS);
     state.update_bartender_banner(bartender, &tail, now);
     assert_eq!(
-        state.bartender_banner_message_id(),
+        banner_id(&state),
         Some(Uuid::from_u128(2)),
         "dwell elapsed with a queue waiting: next answer takes the banner"
     );
@@ -170,24 +229,19 @@ fn bartender_banner_holds_a_lone_line_for_the_full_window_then_clears() {
     let bartender = Some(Uuid::from_u128(BARTENDER));
     let tail = vec![lounge_msg(1, BARTENDER, now)];
     state.update_bartender_banner(bartender, &tail, now);
-    assert_eq!(
-        state.bartender_banner_message_id(),
-        Some(Uuid::from_u128(1))
-    );
+    assert_eq!(banner_id(&state), Some(Uuid::from_u128(1)));
 
-    for _ in 0..BANNER_FULL_TICKS - 1 {
-        state.tick(true);
-        state.update_bartender_banner(bartender, &tail, now);
-    }
+    state.tick(BANNER_FULL_TICKS - 1);
+    state.update_bartender_banner(bartender, &tail, now);
     assert_eq!(
-        state.bartender_banner_message_id(),
+        banner_id(&state),
         Some(Uuid::from_u128(1)),
         "nothing queued: the line keeps the full reading window"
     );
 
-    state.tick(true);
+    state.tick(BANNER_FULL_TICKS);
     state.update_bartender_banner(bartender, &tail, now);
-    assert_eq!(state.bartender_banner_message_id(), None);
+    assert_eq!(banner_id(&state), None);
 }
 
 #[test]
@@ -202,7 +256,7 @@ fn bartender_banner_skips_stale_backlog_and_caps_the_queue() {
         now - chrono::Duration::seconds(60),
     )];
     state.update_bartender_banner(bartender, &stale, now);
-    assert_eq!(state.bartender_banner_message_id(), None);
+    assert_eq!(banner_id(&state), None);
 
     // A flood wider than the cap drops the oldest answers.
     let mut state = state_with_lobby(false);
@@ -218,10 +272,43 @@ fn bartender_banner_skips_stale_backlog_and_caps_the_queue() {
         .collect();
     state.update_bartender_banner(bartender, &flood, now);
     assert_eq!(
-        state.bartender_banner_message_id(),
+        banner_id(&state),
         Some(Uuid::from_u128(4)),
         "three oldest of eleven dropped, the fourth heads the banner"
     );
+}
+
+#[test]
+fn tutorial_welcome_takes_the_banner_ahead_of_a_queued_answer() {
+    let mut state = state_with_lobby(true);
+    let now = chrono::Utc::now();
+    let bartender = Some(Uuid::from_u128(BARTENDER));
+    let tail = vec![
+        lounge_msg(2, BARTENDER, now),
+        lounge_msg(1, BARTENDER, now - chrono::Duration::seconds(1)),
+    ];
+    state.update_bartender_banner(bartender, &tail, now);
+    assert_eq!(banner_id(&state), Some(Uuid::from_u128(1)));
+
+    state.show_local_bartender_line("@me first one's on the house.".to_string());
+    assert_eq!(
+        state.bartender_banner_line(),
+        Some(&BannerLine::Local(
+            "@me first one's on the house.".to_string()
+        )),
+        "the welcome cuts the queue: it is why the newcomer walked to the bar"
+    );
+
+    // It holds its own dwell, then the queued answer resumes as usual.
+    state.tick(1);
+    state.update_bartender_banner(bartender, &tail, now);
+    assert!(matches!(
+        state.bartender_banner_line(),
+        Some(BannerLine::Local(_))
+    ));
+    state.tick(BANNER_QUEUE_DWELL_TICKS);
+    state.update_bartender_banner(bartender, &tail, now);
+    assert_eq!(banner_id(&state), Some(Uuid::from_u128(2)));
 }
 
 #[test]

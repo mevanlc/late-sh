@@ -3,6 +3,7 @@ use rand_core::{OsRng, RngCore};
 use uuid::Uuid;
 
 use late_core::models::bonsai::{MAX_GROWTH_POINTS, Tree};
+use late_core::models::bonsai_decay_protection::BonsaiDecayProtection;
 
 use super::{
     care::{BonsaiCareState, branch_targets_for},
@@ -11,9 +12,6 @@ use super::{
 
 pub(crate) const STAGE_GROWTH_POINTS: i32 = 100;
 pub(crate) const WRONG_CUT_GROWTH_LOSS: i32 = 10;
-
-/// How many ticks between passive growth grants (1 point per ~10 minutes at 15fps)
-const GROWTH_TICK_INTERVAL: usize = 15 * 60 * 10; // 15fps * 600s = 9000 ticks
 
 pub struct BonsaiState {
     pub user_id: Uuid,
@@ -27,15 +25,22 @@ pub struct BonsaiState {
     pub age_days: i64,
     pub created_date: NaiveDate,
 
-    // Tick counter for passive growth
-    ticks_since_growth: usize,
-
     // Whether water was pressed this session (for UI feedback)
     pub watered_this_session: bool,
+
+    /// The user's live Bonsai Decay Shield window, if any. Consulted by the
+    /// in-session death check in `tick()` so it agrees with the login-time
+    /// check in `BonsaiService::ensure_tree_with_care`.
+    pub decay_protection: Option<BonsaiDecayProtection>,
 }
 
 impl BonsaiState {
-    pub fn new(user_id: Uuid, svc: BonsaiService, tree: Tree) -> Self {
+    pub fn new(
+        user_id: Uuid,
+        svc: BonsaiService,
+        tree: Tree,
+        decay_protection: Option<BonsaiDecayProtection>,
+    ) -> Self {
         let today = chrono::Utc::now().date_naive();
         let created_date = tree.created.date_naive();
         let age_days = (today - created_date).num_days().max(0);
@@ -49,31 +54,31 @@ impl BonsaiState {
             is_alive: tree.is_alive,
             age_days,
             created_date,
-            ticks_since_growth: 0,
             watered_this_session: false,
+            decay_protection,
         }
     }
 
-    pub fn tick(&mut self) {
+    /// Returns true when the tree visibly changed (death during a live
+    /// session). Growth comes from watering only; there is no passive
+    /// time-based growth.
+    pub fn tick(&mut self) -> bool {
         if !self.is_alive {
-            return;
+            return false;
         }
 
         // Check death during live session (not just on login)
         let reference_date = self.last_watered.unwrap_or(self.created_date);
-        if should_die(reference_date, BonsaiService::today()) {
+        if should_die(
+            reference_date,
+            BonsaiService::today(),
+            self.decay_protection,
+        ) {
             self.is_alive = false;
             // Fire-and-forget: the next login will also detect this and record the graveyard entry
-            return;
+            return true;
         }
-
-        self.ticks_since_growth += 1;
-        if self.ticks_since_growth >= GROWTH_TICK_INTERVAL {
-            self.ticks_since_growth = 0;
-            if self.add_growth_locally(1) > 0 {
-                self.svc.add_growth_task(self.user_id, 1);
-            }
-        }
+        false
     }
 
     /// Water the tree. Returns growth points granted, or None if already watered today or dead.
@@ -199,8 +204,16 @@ impl BonsaiState {
     }
 }
 
-fn should_die(reference_date: NaiveDate, today: NaiveDate) -> bool {
-    (today - reference_date).num_days() >= 7
+fn should_die(
+    reference_date: NaiveDate,
+    today: NaiveDate,
+    decay_protection: Option<BonsaiDecayProtection>,
+) -> bool {
+    let days_since = (today - reference_date).num_days();
+    let protected_days = decay_protection
+        .map(|protection| protection.protected_days_between(reference_date, today))
+        .unwrap_or(0);
+    (days_since - protected_days) >= 7
 }
 
 pub fn stage_for(is_alive: bool, growth_points: i32) -> Stage {

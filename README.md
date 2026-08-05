@@ -22,21 +22,22 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 
 - SSH TUI with dashboard, chat, profile, news, and arcade screens
 - Real-time global chat and shared activity feed
-- Audio streaming via Icecast/Liquidsoap with browser and CLI pairing
+- Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire
-- Web frontend for landing, connect flow, and paired-client experiences
+- Web frontend for landing, profiles, and the token-less `/listen` page
 - Companion CLI for local audio playback and synced visualizer data
 
 ## Workspace
 
-This is a Rust workspace with four crates:
+This is a Rust workspace with five crates:
 
 | Crate | Role |
 |-------|------|
 | `late-cli` | Companion CLI for local audio playback, paired controls, and visualizer sync |
 | `late-core` | Shared domain code, database layer, migrations, and infrastructure helpers |
 | `late-ssh` | SSH server and terminal UI application |
-| `late-web` | Web server, landing page, connect flow, and browser pairing |
+| `late-web` | Web server, landing page, profiles/gallery, stream proxy, and the public `/listen` page |
+| `late-webview` | Helper process hosting the official YouTube IFrame Player for the CLI |
 
 The stack is backed by PostgreSQL, Icecast, and Liquidsoap.
 
@@ -47,6 +48,10 @@ Try the live service:
 ```bash
 ssh late.sh
 ```
+
+The SSH login name is discarded rather than used as a public handle. On the
+first connection, a new account receives a random modifier-and-noun username;
+the username can still be changed later in Settings.
 
 Run it yourself (requires Docker):
 
@@ -138,23 +143,21 @@ Use `mise install` to get the expected Rust toolchain, `mold` linker, and
 
 ## Verification
 
-Run the fast local gate while iterating:
+Run the local gate before opening a PR:
 
 ```bash
 make check
 ```
 
-This runs `cargo fmt --check`, `cargo clippy`, and `cargo nextest`.
+This runs `cargo fmt --check` for first-party packages, `cargo clippy` across the
+whole workspace with `--features otel`, and `cargo nextest` across the whole
+workspace. It is the full pre-merge sweep and the only place the otel
+(telemetry) build is exercised, since CI skips otel to stay fast; otel breakage
+is caught here or at the release build, never in prod.
 The local check starts a dedicated checkout-scoped Compose Postgres project on
 port `55433` and points DB-backed tests at it via `TEST_DATABASE_URL`.
 Override `CHECK_INSTANCE` or `CHECK_PG_HOST_PORT` if you need a parallel check
 database.
-
-Run the broader PR-style gate before opening a PR:
-
-```bash
-make checkci
-```
 
 ## Contributing
 

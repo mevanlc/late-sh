@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use unicode_width::UnicodeWidthStr;
 
 use super::theme;
 #[derive(Debug, Clone)]
@@ -64,12 +65,15 @@ pub enum Screen {
     Rebels,
     Nethack,
     Dcss,
+    Brogue,
     Dopewars,
+    Codekeep,
     Usurper,
     GreenDragon,
+    Darkroom,
     Artboard,
     Pinstar,
-    WorldCup,
+    Leaderboard,
     Clubhouse,
     /// Full-screen daily-match board. Entered only from the Daily Games
     /// modal, absent from the Tab cycle; Esc returns to the modal.
@@ -78,11 +82,14 @@ pub enum Screen {
     /// from the Lobby modal, absent from the Tab cycle; Esc returns to the
     /// modal.
     HouseTable,
+    /// Paired live coding scratchpad. Entered only once both users have run
+    /// `/pair @other`, absent from the Tab cycle; Esc leaves the pairing.
+    Scratchpad,
 }
 
 impl Screen {
     /// Tab cycles the top-level pages, Clubhouse (`0`, the landing screen)
-    /// through World Cup (`6`). The door games (Lateania, Rebels, Nethack,
+    /// through Leaderboards (`6`). The door games (Lateania, Rebels, Nethack,
     /// Green Dragon) are reached through the Games hub, not the tab bar, so
     /// they are absent from the cycle; if one is somehow current,
     /// `next`/`prev` fall back to the hub that owns them.
@@ -93,40 +100,70 @@ impl Screen {
             Screen::Arcade => Screen::Games,
             Screen::Games => Screen::Artboard,
             Screen::Artboard => Screen::Pinstar,
-            Screen::Pinstar => Screen::WorldCup,
-            Screen::WorldCup => Screen::Clubhouse,
+            Screen::Pinstar => Screen::Leaderboard,
+            Screen::Leaderboard => Screen::Clubhouse,
             Screen::Lateania
             | Screen::Rebels
             | Screen::Nethack
             | Screen::Dcss
+            | Screen::Brogue
             | Screen::Dopewars
+            | Screen::Codekeep
             | Screen::Usurper
-            | Screen::GreenDragon => Screen::Games,
+            | Screen::GreenDragon
+            | Screen::Darkroom => Screen::Games,
             Screen::DailyMatch => Screen::Dashboard,
             Screen::HouseTable => Screen::Dashboard,
+            Screen::Scratchpad => Screen::Dashboard,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Screen::Clubhouse => Screen::WorldCup,
+            Screen::Clubhouse => Screen::Leaderboard,
             Screen::Dashboard => Screen::Clubhouse,
             Screen::Arcade => Screen::Dashboard,
             Screen::Games => Screen::Arcade,
             Screen::Artboard => Screen::Games,
             Screen::Pinstar => Screen::Artboard,
-            Screen::WorldCup => Screen::Pinstar,
+            Screen::Leaderboard => Screen::Pinstar,
             Screen::Lateania
             | Screen::Rebels
             | Screen::Nethack
             | Screen::Dcss
+            | Screen::Brogue
             | Screen::Dopewars
+            | Screen::Codekeep
             | Screen::Usurper
-            | Screen::GreenDragon => Screen::Games,
+            | Screen::GreenDragon
+            | Screen::Darkroom => Screen::Games,
             Screen::DailyMatch => Screen::Dashboard,
             Screen::HouseTable => Screen::Dashboard,
+            Screen::Scratchpad => Screen::Dashboard,
         }
     }
+}
+
+/// One row with `left` at the start and `right` flushed to the right edge, for
+/// header rows that pair live status with the keys that act on it. The right
+/// side is a hint, so a row too tight to hold both keeps the left side and
+/// drops the hint rather than wrapping or colliding.
+pub fn row_with_hint(
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    width: usize,
+) -> Line<'static> {
+    let span_width =
+        |spans: &[Span<'static>]| -> usize { spans.iter().map(|s| s.content.width()).sum() };
+    let left_width = span_width(&left);
+    let right_width = span_width(&right);
+    if right_width == 0 || left_width + right_width + 2 > width {
+        return Line::from(left);
+    }
+    let mut spans = left;
+    spans.push(Span::raw(" ".repeat(width - left_width - right_width)));
+    spans.extend(right);
+    Line::from(spans)
 }
 
 pub fn format_duration_mmss(duration: Duration) -> String {
@@ -144,16 +181,20 @@ pub fn draw_tabs(frame: &mut Frame, area: Rect, current: Screen) {
         Screen::Rebels => "Rebels",
         Screen::Nethack => "NetHack",
         Screen::Dcss => "DCSS",
+        Screen::Brogue => "Brogue",
         Screen::Dopewars => "dopewars",
+        Screen::Codekeep => "CodeKeep",
         Screen::Usurper => "Usurper",
         Screen::GreenDragon => "Green Dragon",
+        Screen::Darkroom => crate::app::door::darkroom::data::TITLE,
         Screen::Arcade => "Arcade",
         Screen::Artboard => "Artboard",
         Screen::Pinstar => "Directory",
-        Screen::WorldCup => "World Cup",
+        Screen::Leaderboard => "Leaderboards",
         Screen::Clubhouse => "Clubhouse",
         Screen::DailyMatch => "Daily Match",
         Screen::HouseTable => "House Table",
+        Screen::Scratchpad => "Scratchpad",
     };
 
     let current_line = Paragraph::new(Line::from(vec![
@@ -241,4 +282,23 @@ pub(crate) fn hint_line(hints: &[(&str, &str)]) -> Line<'static> {
         spans.push(Span::styled(format!(" {desc}"), desc_style));
     }
     Line::from(spans)
+}
+
+/// Group digits with commas: `10000` → `"10,000"`. The shared formatter for
+/// every chip, score, and progress figure, so numbers read the same on all
+/// surfaces.
+pub(crate) fn thousands(value: i64) -> String {
+    let raw = value.to_string();
+    let (sign, digits) = raw
+        .strip_prefix('-')
+        .map_or(("", raw.as_str()), |rest| ("-", rest));
+    let mut out = String::with_capacity(sign.len() + digits.len() + digits.len() / 3);
+    out.push_str(sign);
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }

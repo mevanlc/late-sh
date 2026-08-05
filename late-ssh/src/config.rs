@@ -9,14 +9,6 @@ use crate::app::voice::svc::VoiceConfig;
 pub struct AiConfig {
     pub enabled: bool,
     pub api_key: Option<String>,
-    pub model: String,
-}
-
-#[derive(Clone, Debug)]
-pub struct WebTunnelConfig {
-    pub token: String,
-    pub username: String,
-    pub fingerprint: String,
 }
 
 /// Embedded ircd settings; see devdocs/FRD-IRCD.md. All env vars are optional
@@ -62,7 +54,6 @@ pub struct Config {
     pub max_conns_per_ip: usize,
     pub ssh_idle_timeout: u64,
     pub server_key_path: PathBuf,
-    pub allowed_origins: Vec<String>,
     pub frame_drop_log_every: u64,
     pub ssh_max_attempts_per_ip: usize,
     pub ssh_rate_limit_window_secs: u64,
@@ -70,7 +61,6 @@ pub struct Config {
     pub ssh_proxy_trusted_cidrs: Vec<IpNet>,
     pub ws_pair_max_attempts_per_ip: usize,
     pub ws_pair_rate_limit_window_secs: u64,
-    pub web_tunnel: WebTunnelConfig,
     pub ai: AiConfig,
     pub youtube_api_key: Option<String>,
     pub voice: VoiceConfig,
@@ -89,6 +79,12 @@ pub struct Config {
     pub dcss_host: String,
     pub dcss_port: u16,
     pub dcss_secret: String,
+    /// Brogue door game: reached over SSH like dcss. `enabled` gates only
+    /// the client; the host (`late-brogue`) is deployed unconditionally.
+    pub brogue_enabled: bool,
+    pub brogue_host: String,
+    pub brogue_port: u16,
+    pub brogue_secret: String,
     /// Usurper door game: reached over SSH like nethack. `enabled` gates only
     /// the client; the host (`late-usurper`) is deployed unconditionally.
     pub usurper_enabled: bool,
@@ -101,6 +97,11 @@ pub struct Config {
     pub dopewars_host: String,
     pub dopewars_port: u16,
     pub dopewars_secret: String,
+    /// CodeKeep: The Pale door game (host `late-codekeep`).
+    pub codekeep_enabled: bool,
+    pub codekeep_host: String,
+    pub codekeep_port: u16,
+    pub codekeep_secret: String,
 }
 
 fn required(key: &str) -> anyhow::Result<String> {
@@ -172,7 +173,7 @@ impl Config {
         tracing::info!(
             icecast_url = %self.icecast_url,
             web_url = %self.web_url,
-            "audio: Icecast status endpoint and web pairing URL"
+            "audio: Icecast status endpoint and public web URL"
         );
         tracing::info!(
             max_global = self.max_conns_global,
@@ -198,7 +199,7 @@ impl Config {
         );
         tracing::info!(
             ai_enabled = self.ai.enabled,
-            ai_model = %self.ai.model,
+            ai_model = crate::app::ai::svc::AI_MODEL,
             has_key = self.ai.api_key.is_some(),
             "ai: @bot chat responder model and status"
         );
@@ -212,11 +213,6 @@ impl Config {
             room = %self.voice.room_name,
             has_key = self.voice.api_key.is_some(),
             "voice: LiveKit RTC status"
-        );
-        tracing::info!(
-            username = %self.web_tunnel.username,
-            token_len = self.web_tunnel.token.len(),
-            "web-tunnel: browser TUI display route"
         );
         tracing::info!(
             enabled = self.irc.enabled,
@@ -248,6 +244,13 @@ impl Config {
             "dcss: DCSS door-game host (late-dcss) target and status"
         );
         tracing::info!(
+            enabled = self.brogue_enabled,
+            host = %self.brogue_host,
+            port = self.brogue_port,
+            has_secret = !self.brogue_secret.is_empty(),
+            "brogue: Brogue door-game host (late-brogue) target and status"
+        );
+        tracing::info!(
             enabled = self.usurper_enabled,
             host = %self.usurper_host,
             port = self.usurper_port,
@@ -260,6 +263,13 @@ impl Config {
             port = self.dopewars_port,
             has_secret = !self.dopewars_secret.is_empty(),
             "dopewars: dopewars door-game host (late-dopewars) target and status"
+        );
+        tracing::info!(
+            enabled = self.codekeep_enabled,
+            host = %self.codekeep_host,
+            port = self.codekeep_port,
+            has_secret = !self.codekeep_secret.is_empty(),
+            "codekeep: CodeKeep door-game host (late-codekeep) target and status"
         );
     }
 
@@ -282,10 +292,6 @@ impl Config {
             dbname: required("LATE_DB_NAME")?,
             max_pool_size: required_parse("LATE_DB_POOL_SIZE")?,
         };
-        let web_tunnel_token = required("LATE_WEB_TUNNEL_TOKEN")?;
-        if web_tunnel_token.trim().is_empty() {
-            anyhow::bail!("LATE_WEB_TUNNEL_TOKEN must not be empty");
-        }
         let voice = if optional_bool("LATE_VOICE_ENABLED", false)? {
             VoiceConfig::enabled(
                 required("LATE_LIVEKIT_URL")?,
@@ -320,6 +326,13 @@ impl Config {
         } else {
             optional("LATE_DCSS_SECRET").unwrap_or_default()
         };
+        let brogue_enabled = optional_bool("LATE_BROGUE_ENABLED", false)?;
+        let brogue_secret = if brogue_enabled {
+            optional("LATE_BROGUE_SECRET")
+                .context("LATE_BROGUE_SECRET must be set when LATE_BROGUE_ENABLED is true")?
+        } else {
+            optional("LATE_BROGUE_SECRET").unwrap_or_default()
+        };
 
         let usurper_enabled = optional_bool("LATE_USURPER_ENABLED", false)?;
         let usurper_secret = if usurper_enabled {
@@ -337,6 +350,14 @@ impl Config {
             optional("LATE_DOPEWARS_SECRET").unwrap_or_default()
         };
 
+        let codekeep_enabled = optional_bool("LATE_CODEKEEP_ENABLED", false)?;
+        let codekeep_secret = if codekeep_enabled {
+            optional("LATE_CODEKEEP_SECRET")
+                .context("LATE_CODEKEEP_SECRET must be set when LATE_CODEKEEP_ENABLED is true")?
+        } else {
+            optional("LATE_CODEKEEP_SECRET").unwrap_or_default()
+        };
+
         Ok(Self {
             ssh_port: required_parse("LATE_SSH_PORT")?,
             api_port: required_parse("LATE_API_PORT")?,
@@ -349,10 +370,6 @@ impl Config {
             max_conns_per_ip: required_parse("LATE_MAX_CONNS_PER_IP")?,
             ssh_idle_timeout: required_parse("LATE_SSH_IDLE_TIMEOUT")?,
             server_key_path: PathBuf::from(required("LATE_SSH_KEY_PATH")?),
-            allowed_origins: required("LATE_ALLOWED_ORIGINS")?
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect(),
             frame_drop_log_every: required_parse("LATE_FRAME_DROP_LOG_EVERY")?,
             ssh_max_attempts_per_ip: required_parse("LATE_SSH_MAX_ATTEMPTS_PER_IP")?,
             ssh_rate_limit_window_secs: required_parse("LATE_SSH_RATE_LIMIT_WINDOW_SECS")?,
@@ -369,17 +386,9 @@ impl Config {
                 .collect::<anyhow::Result<Vec<_>>>()?,
             ws_pair_max_attempts_per_ip: required_parse("LATE_WS_PAIR_MAX_ATTEMPTS_PER_IP")?,
             ws_pair_rate_limit_window_secs: required_parse("LATE_WS_PAIR_RATE_LIMIT_WINDOW_SECS")?,
-            web_tunnel: WebTunnelConfig {
-                token: web_tunnel_token,
-                username: optional("LATE_WEB_TUNNEL_USERNAME")
-                    .unwrap_or_else(|| "web-demo".to_string()),
-                fingerprint: optional("LATE_WEB_TUNNEL_FINGERPRINT")
-                    .unwrap_or_else(|| "web-tunnel-demo".to_string()),
-            },
             ai: AiConfig {
                 enabled: ai_enabled,
                 api_key: ai_api_key,
-                model: required("LATE_AI_MODEL")?,
             },
             youtube_api_key: optional("LATE_YOUTUBE_API_KEY"),
             voice,
@@ -443,6 +452,10 @@ impl Config {
             dcss_host: optional("LATE_DCSS_HOST").unwrap_or_else(|| "127.0.0.1".to_string()),
             dcss_port: optional_parse("LATE_DCSS_PORT", 2325)?,
             dcss_secret,
+            brogue_enabled,
+            brogue_host: optional("LATE_BROGUE_HOST").unwrap_or_else(|| "127.0.0.1".to_string()),
+            brogue_port: optional_parse("LATE_BROGUE_PORT", 2327)?,
+            brogue_secret,
             usurper_enabled,
             usurper_host: optional("LATE_USURPER_HOST").unwrap_or_else(|| "127.0.0.1".to_string()),
             usurper_port: optional_parse("LATE_USURPER_PORT", 2326)?,
@@ -452,6 +465,11 @@ impl Config {
                 .unwrap_or_else(|| "127.0.0.1".to_string()),
             dopewars_port: optional_parse("LATE_DOPEWARS_PORT", 2324)?,
             dopewars_secret,
+            codekeep_enabled,
+            codekeep_host: optional("LATE_CODEKEEP_HOST")
+                .unwrap_or_else(|| "127.0.0.1".to_string()),
+            codekeep_port: optional_parse("LATE_CODEKEEP_PORT", 2328)?,
+            codekeep_secret,
         })
     }
 }

@@ -2,34 +2,27 @@
 
 ## Metadata
 - Scope: `late-ssh/src/app/hub`
-- Last updated: 2026-06-17
-- Purpose: local working context for the Hub domain: global modal, leaderboard, quests, admin reward-template/shop-item editing, shop, Shop-unlocked aquarium, and future event surfaces.
+- Last updated: 2026-08-01 (Admin tab deleted with its `admin/` module, tab state, and admin-gated service helpers; reward-template and marketplace edits are direct DB/migration work now. Earlier: Hub modal reduced to the Shop, opened by `/shop`, no chord; Leaderboard tab replaced by the top-level Leaderboards page fed by roster-generated boards; Quests tab replaced by the Arcade-top strip; Events tab deleted)
+- Purpose: local working context for the Hub domain: the Shop modal, the leaderboard data/service behind the top-level Leaderboards page, the quest service behind the Arcade strip, and the Shop-unlocked aquarium.
 - Parent context: `../../../../CONTEXT.md`
 
 ## Scope
 
-`late-ssh/src/app/hub` owns the global Hub modal opened with reserved global `Ctrl+G` (except active Artboard editing) and the cross-product domains surfaced inside it: Shop, Leaderboard, Quests, Events, and the admin-only reward-template/shop-item editor. Former Guide content now lives in the global `?` guide's Economy topic under `late-ssh/src/app/help_modal/hub_guide.rs`. Hub also owns the Shop-unlocked Aquarium tray toggled with the `/aquarium` composer command (alias `/aq`).
+`late-ssh/src/app/hub` owns the Shop modal (opened with the `/shop` composer command or a locked-feature nudge; there is no global chord) and the cross-product services that outgrew it: `LeaderboardService` feeding the top-level Leaderboards page (`late-ssh/src/app/leaderboard/`, screen `6`) and `QuestService` feeding the quest strip at the top of The Arcade lobby. Former Guide content lives in the global `?` guide's Economy topic under `late-ssh/src/app/help_modal/hub_guide.rs`. Hub also owns the Shop-unlocked Aquarium tray toggled with the `/aquarium` composer command (alias `/aq`).
 
-Hub is a cross-product domain surface. It may render Arcade, Lobby, economy, marketplace, and event information, but it must not own those runtimes. Arcade game state stays under `late-ssh/src/app/arcade`; the Lobby's game runtimes stay under `late-ssh/src/app/lobby`; generic chip earn/spend primitives stay in `late-core/src/models/chips.rs`. Hub-owned marketplace state and entitlement projections live under `hub/shop`.
+Hub is a cross-product domain surface. Its services may summarize Arcade, Lobby, economy, and marketplace information, but it must not own those runtimes. Arcade game state stays under `late-ssh/src/app/arcade`; the Lobby's game runtimes stay under `late-ssh/src/app/lobby`; generic chip earn/spend primitives stay in `late-core/src/models/chips.rs`. Hub-owned marketplace state and entitlement projections live under `hub/shop`.
 
 Keep `mod.rs` declaration-only. Do not add `pub use` re-export layers.
 
 ## Source Map
 
-- `state.rs`: selected Hub tab and tab cycling.
-- `input.rs`: Hub-only key routing (`Tab`/arrows cycle, `1 Quests`, `2 Shop`, `3 Leaderboard`, `4 Events`, `5 Admin` for admins, `Esc/q` close).
-- `ui.rs`: modal frame, tabs, footer, and tab dispatch.
-- `leaderboard.rs`: compact leaderboard panels.
-- `admin/`:
-  - `state.rs`: admin reward-template and shop-item catalogs, editable draft state, cursor-aware inline edit buffer, async load/save result drain.
-  - `input.rs`: Admin-tab row/category/field navigation, inline text edits with Left/Right/Home/End cursor movement, numeric/toggle edits, save/reload actions.
-  - `ui.rs`: admin-only two-pane reward-template/shop-item editor.
-- `dailies.rs`: module root for the Quests surface.
+- `input.rs`: Hub-only key routing (`Tab`/arrows switch Shop categories, `Esc/q` close).
+- `ui.rs`: modal frame (titled " Shop "), footer, and Shop dispatch.
+- `dailies.rs`: module root for the quest surface.
 - `dailies/`:
   - `svc.rs`: `QuestService`, current assignment generation, Activity-driven progress matching, per-user watch snapshots including daily streak state, completion banners, and Postgres LISTEN/NOTIFY refresh listener.
-  - `state.rs`: snapshot/event drains for the Quests tab.
-  - `ui.rs`: two daily quests, daily streak status, plus one weekly quest progress rendering.
-- `events.rs`: placeholder product surface.
+  - `state.rs`: snapshot/event drains for the quest strip and completion banners.
+  - `ui.rs`: `draw_arcade_strip`, the quest strip at the top of The Arcade lobby: a heading with the 6-slot daily-streak meter (`▰▱`, day 6 caps the bonus) and next-bonus chips, then Daily and Weekly sections, each with a done count, the open-chip sum, and a reset note. Items show a status glyph, colored difficulty tag (easy/medium/hard), reward, and a progress bar for multi-step quests on terminals at least 70 cols wide. Height is dynamic via `arcade_strip_height`; the lobby drops the strip when fewer than 13 rows would remain below it.
 - `aquarium/`: animated ambient aquarium tray adapted from Reefs.
   - `state.rs`: embedded aquarium runtime state, per-frame movement, resize binding, and initial entity spawn.
   - `ui.rs`: top tray and aquarium renderer.
@@ -43,20 +36,20 @@ Keep `mod.rs` declaration-only. Do not add `pub use` re-export layers.
   - `ui.rs`: Shop tab rendering.
 - `svc.rs`: `LeaderboardService`, a shared watch-backed leaderboard refresh task.
 
-## Tabs
+## The modal
 
-- `Shop`: functional marketplace surface. Pet Companion is the durable companion unlock.
-- `Leaderboard`: functional compact leaderboard view.
-- `Quests`: functional daily/weekly quest surface.
-- `Events`: placeholder for seasonal/monthly event surfaces.
-- `Admin`: admin-only editor for quest titles/descriptions/requirements/rewards/weights/active state, fixed reward payouts, and Shop item names/descriptions/prices/sort order/active state.
-- Former `Guide`: moved to the global guide's Economy topic.
+The modal is the Shop and nothing else: a functional marketplace surface where Pet Companion is the durable companion unlock. It has no tab strip and no tab state; `Tab`/arrows switch the Shop's own category tabs. It is opened by the `/shop` composer command (`ChatState` request drained in `chat/input.rs`, calling `input::open_shop_modal_globally`) and by locked pet/aquarium nudges; there is no global chord.
 
-Hub opens on Quests. Tab order and jump keys are `1 Quests`, `2 Shop`, `3 Leaderboard`, `4 Events`, and `5 Admin` for admins. If another tab is added, update `HubTab::ALL`, `HubTab::PUBLIC` if visibility differs, `HubTab::label`, `input.rs`, `ui.rs` dispatch, footer jump copy, and this file.
+Former tabs, for archaeology:
+- `Leaderboard`: replaced by the top-level Leaderboards page (screen `6`, `late-ssh/src/app/leaderboard/`).
+- `Quests`: replaced by the strip at the top of The Arcade lobby (`dailies/ui.rs::draw_arcade_strip`).
+- `Admin` (reward-template/shop-item editor): deleted; those edits are direct DB/migration work (§ Known Gaps).
+- `Events`: deleted; the events pillar is parked (DRAGON.md graveyard note).
+- `Guide`: moved to the global guide's Economy topic.
 
 ## Aquarium
 
-Aquarium is a Shop unlock, not an admin/mod preview. The Aquarium feature costs 10,000 chips, lives in the Companions Shop category, and unlocks Aquarium ownership/use. The Aquarium Shop category is fish-only and browseable before unlock so users can preview fish, but fish purchases and active-count changes are blocked until the Aquarium feature is owned. The `/aquarium` composer command (alias `/aq`) toggles the owned user's 11-row tray, rendered only in the Home Lounge view where it is carved from the top of the lounge chat column (sidebars and other screens are untouched); the open/closed state persists in user settings (`show_aquarium_tray`); locked users are sent to Hub Shop with a banner. `carve_top_tray` skips the tray entirely when the chat column cannot also hold `dashboard::ui::MIN_CHAT_HEIGHT_WITH_LOUNGE` rows below it — since `/aquarium` is typed into the composer, a tray that eats the composer would strand an owner on a short terminal with no way to hide it. `/aquarium feed` replaces the old `Ctrl+F` feed chord. `show_aquarium_tray` defaults to true, so buying the Aquarium reveals the tray with no purchase hook, exactly as `show_pet_strip` reveals the pet strip on unlock; rendering ANDs the setting with `has_aquarium()`, so the default stays inert until the feature is owned and no code force-closes the tray when the entitlement is absent.
+Aquarium is a Shop unlock, not an admin/mod preview. The Aquarium feature costs 10,000 chips, lives in the Companions Shop category, and unlocks Aquarium ownership/use. The Aquarium Shop category is fish-only and browseable before unlock so users can preview fish, but fish purchases and active-count changes are blocked until the Aquarium feature is owned. The `/aquarium` composer command (alias `/aq`) toggles the owned user's 11-row tray, rendered only in the Home Lounge view where it is carved from the top of the lounge chat column (sidebars and other screens are untouched); the open/closed state persists in user settings (`show_aquarium_tray`); locked users are sent to the Shop modal with a banner. `carve_top_tray` skips the tray entirely when the chat column cannot also hold `dashboard::ui::MIN_CHAT_HEIGHT_WITH_LOUNGE` rows below it — since `/aquarium` is typed into the composer, a tray that eats the composer would strand an owner on a short terminal with no way to hide it. `/aquarium feed` replaces the old `Ctrl+F` feed chord. `show_aquarium_tray` defaults to true, so buying the Aquarium reveals the tray with no purchase hook, exactly as `show_pet_strip` reveals the pet strip on unlock; rendering ANDs the setting with `has_aquarium()`, so the default stays inert until the feature is owned and no code force-closes the tray when the entitlement is absent.
 
 The runtime is ambient-only for now:
 - Fish ownership and active counts persist through `marketplace_items` / `user_purchases`.
@@ -71,14 +64,29 @@ Assets live under `late-ssh/assets/aquarium`. The source was adapted from `githu
 
 ## Leaderboard Data
 
-`hub::svc::LeaderboardService` refreshes `LeaderboardData` from DB every 30 seconds and publishes it through a `watch::Receiver<Arc<LeaderboardData>>`.
+`hub::svc::LeaderboardService` refreshes `LeaderboardData` from DB every 5 minutes, and only while at least one session is subscribed, publishing it through a `watch::Receiver<Arc<LeaderboardData>>`. The cadence is deliberately coarse: the old fourteen-query pass was 13% of all DB execution time at 30s (SCALE.md DB Cost Ranking); the roster rewrite brought the pass down to nine queries while adding the per-game boards, because each board family is one union query ranked with `PARTITION BY game`. Do not make it hot again without re-reading that ranking.
 
-Current compact boards:
-- `Top Chips`: monthly net chip delta from `chip_ledger`, excluding `floor_restore` and `shop_purchase`. Betting losses offset betting wins; Shop spending does not reduce this rank.
-- `Arcade Wins`: monthly weighted daily-puzzle completions across Sudoku, Nonogram, Solitaire, Minesweeper, Le Word, and Rubik's Cube.
-- `Lateris`, `2048`, `Snake`: each score-game panel shows monthly score events and all-time high scores.
+Two rules keep that coarse cadence from reading as a broken screen:
 
-Monthly windows use UTC calendar months. Score all-time boards persist.
+- **Sessions seed, they do not wait.** `App::new` copies the currently published snapshot out of the receiver with `borrow()`. `watch::Sender::subscribe` marks the current value as already seen, so the `has_changed()` gate in `app/tick.rs` is false against a snapshot that is sitting right there — a session that only waited for the gate would render empty panels for up to a full `REFRESH_INTERVAL`. The seed deliberately does not touch `chip_balance`, which is loaded accurately at login and may be newer than the snapshot.
+- **A connect can buy one refresh.** `subscribe` wakes the refresh loop through a `Notify`, and `should_refresh` (a pure function, unit-tested in `svc_test.rs`) grants the pass only when the published snapshot is already older than `REFRESH_INTERVAL`. This covers the quiet-server case, where the subscriber gate skipped every pass and the first session back would otherwise seed from whatever the last session left behind. The age bound is what keeps a connect storm on a busy server from putting the pass back on the hot path.
+
+The data model is roster-generated (`late-core/src/models/leaderboard.rs`):
+- `DailyPuzzle` (Sudoku, Nonogram, Minesweeper, Solitaire, LeWord, RubiksCube) is the daily-puzzle roster. Iterating `ALL` generates the SQL for every derived surface: the per-puzzle monthly/all-time win-count boards, Arcade Wins points, today's champions, and per-user daily completion statuses. Adding a variant enrolls the game in all four at once; the compiler walks you through `key`, `title`, `wins_table`, `points_sql`, and `status_difficulty_sql`.
+- `ScoreGame` (Lateris, TwentyFortyEight, Snake, Traffic) is the score-game roster: monthly boards union `game_score_events` with legacy best-score rows touched this month; all-time boards read only the legacy tables of record.
+- Both per-game families land in `BoardWindows { monthly, all_time }` maps keyed by roster variant; every roster key is present after a fetch, empty boards included.
+- `Top Chips` (monthly net chip delta from `chip_ledger`, exclusions derived from `ChipMove::excluded_earning_reasons()`) and `Arcade Wins` stay bespoke monthly-only boards.
+- Arcade Wins weights come from `Difficulty::points` in `late-core/src/models/chips.rs` (easy 1 / medium 3 / hard 5; solitaire draw-1 scores Easy points, draw-3 Hard; Le Word fixed Easy, Rubik's fixed Medium). The same enum's `chips()` is the daily-win payout tier display, so points and payouts cannot drift apart in string-matched copies. Unknown difficulty keys score 0, never a default.
+- The Le Word win-streak board was deliberately dropped (the gaps-and-islands query was the most expensive in the pass; every board is now uniformly monthly + all-time).
+
+Monthly windows use UTC calendar months. All-time daily boards read the `daily_win_totals` rollup (migration 131): each win insert bumps its `(game, user_id)` row in the same statement via `leaderboard.rs::bump_daily_win_total_sql`, gated to fresh inserts so same-day replays never double-count, which keeps the refresh O(players) as win history grows. All-time score boards read the legacy best-score tables, one row per player by construction. No refresh query scans full history.
+
+An empty local database renders every panel as "no scores yet", which makes the
+responsive widths impossible to eyeball. `make seed-leaderboard`
+(`scripts/seed_leaderboard_test_data.{sh,sql}`) fills the Compose database with
+48 synthetic players spread across every board. Local development only: it owns
+the `seed:leaderboard:` fingerprints, prefixes their usernames with `lb_` to
+clear the unique index on real handles, and rewrites their stats on every rerun.
 
 Monthly profile awards:
 - Migration `077_create_profile_awards.sql` adds `profile_awards`, one permanent row per user/category/month placement. Migration `081_limit_profile_awards_to_top_three.sql` removes old rank 4/5 rows and enforces top-3 awards.
@@ -116,15 +124,14 @@ Current user-facing chip amounts:
 Daily/weekly quests are DB-backed and Hub-owned, with durable models in `late_core::models::quest`.
 
 Implemented:
-- `reward_templates` stores the admin-editable reward catalog. Rows with `is_quest = true` are eligible for daily/weekly assignment; non-quest rows describe always-available fixed payouts and their claim policy. The Hub Admin tab can edit title, description, target requirement, chip reward, draw weight, and active state. Migration `056_create_quests.sql` seeds the initial catalog.
+- `reward_templates` stores the reward catalog. Rows with `is_quest = true` are eligible for daily/weekly assignment; non-quest rows describe always-available fixed payouts and their claim policy. Migration `056_create_quests.sql` seeds the initial catalog; edits since the Admin tab's deletion go through migrations.
 - `quest_assignments` stores globally drawn quests per UTC period. Daily assigns two slots; weekly assigns one slot. Assignment generation is deterministic and protected by a Postgres advisory transaction lock.
 - Assigned quests are arcade-only for now (owner decision 2026-07-13, see `devdocs/FRD-LOBBY-CONSOLIDATION.md`): every slot draws from Arcade-source templates (`daily_puzzle_win`, `arcade_score`, `arcade_level` — score/level runs plus the daily puzzles), split by difficulty: daily slot 1 easy, daily slot 2 medium, weekly slot hard (`quest.rs::slot_difficulty_preference`). The room-game templates (`room_rounds_played`/`room_wins`) were deactivated by migration 110; their match arms in `hub/dailies/svc.rs` die with the Rooms demolition (phase 3).
 - `user_quest_progress` tracks per-user progress, completion, and reward payment. `quest_progress_events` deduplicates per assignment/event id.
 - Rewards write `chip_ledger` with reason `quest_reward`, source kind `quest_assignment`, and the assignment id as `source_ref`.
 - `user_daily_quest_streaks` tracks per-user daily streaks. Completing at least one daily quest for a UTC day advances the streak; weekly quests do not count. The first streak day records day 1 with no streak bonus. Consecutive streak days then pay +100 chips at streak level 1 on day 2, +200 at level 2 on day 3, up to +500 at level 5; later consecutive days keep paying +500. Streak bonus ledger rows use reason `daily_quest_streak_reward` and source kind `daily_quest_streak`.
 - `QuestService` subscribes to the global Activity channel and matches structured `ActivityKind` values against active templates. It publishes per-user `QuestSnapshot` values through watch channels and completion banners through a broadcast channel.
-- `QuestService::start_listener_task` listens on `quest_user_changed` and `quest_assignments_changed` for cross-process refreshes.
-- `QuestService` also exposes admin-gated reward-template list/update helpers used by the Hub Admin tab. Template edits notify `quest_assignments_changed`, so active quest snapshots refresh without rerolling the assignment rows.
+- `QuestService::start_listener_task` listens on `quest_user_changed` and `quest_assignments_changed` for cross-process refreshes, so reward-template edits (migrations, manual SQL) refresh active quest snapshots without rerolling the assignment rows as long as the edit notifies `quest_assignments_changed`.
 
 Supported template kinds:
 - `daily_puzzle_win`: params `{ "game": "...", "difficulty": "..." }`.
@@ -160,12 +167,11 @@ Durable marketplace ownership lives here with the Hub domain context.
 
 Implemented:
 - `late-core` owns durable data models in `late_core::models::marketplace`.
-- `marketplace_items` defines curated purchasable items; `user_purchases` records durable per-user ownership.
-- The Hub Admin tab can edit existing marketplace item names, descriptions, chip prices, sort order, and active state. It does not add SKUs or edit item kind/slot/payload/start/end windows.
+- `marketplace_items` defines curated purchasable items; `user_purchases` records durable per-user ownership. Catalog edits go through migrations (§ Known Gaps).
 - Purchases debit `user_chips`, write `chip_ledger` with reason `shop_purchase`, then insert `user_purchases` in one transaction.
 - `ShopService` publishes per-user `ShopSnapshot` values through watch channels. UI/input reads the current snapshot and does not query the DB per keypress/render.
 - `ShopService::start_listener_task` opens a dedicated long-lived Postgres connection (outside the pool) and `LISTEN`s on marketplace channels via `late_core::models::marketplace::listen_for_shop_changes` and the generic chip channel via `late_core::models::chips::listen_for_chip_changes`; all SQL stays in `late-core`. `shop_user_changed` and `chip_user_changed` carry a `user_id` payload and refresh that user's snapshot when active; `shop_catalog_changed` refreshes every active user.
-- `purchase_durable_item_by_sku` notifies `shop_user_changed` inside the purchase transaction so it fires on COMMIT. The buyer's own snapshot is already updated by a direct `refresh_user` call, so that notification is the cross-process / external-mutation path and is redundant in a single process. Generic chip balance mutations notify `chip_user_changed`, which keeps Shop balances fresh after daily puzzle rewards, bonsai rewards, and room-game chip settlement. Chat room consumable purchases activate their `shop_consumable_effects` row in the same transaction as the chip debit and notify `shop_catalog_changed` on COMMIT so every SSH replica refreshes active room-effect projections.
+- `purchase_durable_item_by_sku` notifies `shop_user_changed` inside the purchase transaction so it fires on COMMIT. The buyer's own snapshot is already updated by a direct `refresh_user` call, so that notification is the cross-process / external-mutation path and is redundant in a single process. Chip balance mutations notify `chip_user_changed` via the `user_chips` triggers (migration 128, fires on any balance change including gifts), which keeps Shop balances fresh after daily puzzle rewards, bonsai rewards, gifts, and room-game chip settlement. Chat room consumable purchases activate their `shop_consumable_effects` row in the same transaction as the chip debit and notify `shop_catalog_changed` on COMMIT so every SSH replica refreshes active room-effect projections.
 - Pet Companion is the companion unlock. Current code uses `PET_COMPANION_SKU` (`pet_companion`) and `ShopEntitlements::has_pet_companion()`; migration 065 renames the legacy `cat_companion` seed item/table to pet terminology. It gates the pet strip above the chat composer (see `app/pet`). `show_pet_strip` defaults to true and `render.rs` ANDs it with `has_pet_companion()`, so buying the pet reveals the strip with no purchase hook; `show_aquarium_tray` works the same way (§ Aquarium). Neither surface is force-closed when its entitlement is absent, because the render gate already hides it, and a force-close would stamp the setting to false and defeat the default.
 - Dynamic Bonsai is a `feature_unlock` in Companions with slot `bonsai_variant`; buying auto-equips it, and pressing Enter on the owned/equipped item clears the slot and returns the user to classic Bonsai.
 - Chat and companion consumables are repeatable Shop purchases. Migration 071 seeds `chat_consumable` rows for Bot Username Color, Room Spark, Room Glow, Room Pulse, Hack Room, and Room Bump, plus `companion_consumable` rows for Cat/Dog Food and Aquarium Food. Migration 104 retires Bot Username Color (`chat_bot_username_color_day`, deactivated rather than deleted so `user_purchases` and `shop_consumable_effects.source_sku` keep their history), leaving Chat consumables room-targeted only. Catalog payloads carry `effect_kind`, optional `target = "room"`, optional `duration_secs`, and optional `daily_limit = true`. Room-targeted Chat consumables open a confirmation dialog before purchase/activation; the dialog names the current target room, effect, price, and daily limit, and accepts `Enter`/`y` to confirm or `Esc`/`n` to cancel. Bought Cat/Dog Food is inventory; `/feed` (or clicking the food bowl or the pet in the strip) consumes one food once per UTC day, updates `last_fed`, and starts a 30-minute session-local full-screen stroll. Feeding is the only pet-food sink, so the food bowl renders `?` and its `/feed` label turns amber while the inventory is empty, and a feed attempt with no food opens the Shop. Bought Aquarium Food is inventory; `/aquarium feed` while the tray is open consumes one food, updates persisted `user_aquarium_care.last_fed`, and shows falling food flakes. Migration 103 restates the four companion item descriptions (`pet_companion`, `pet_food`, `aquarium`, `aquarium_food`) in terms of the composer commands that run them; the seeded copy in 071 still describes the removed pet care modal and the old `Ctrl+Q`/`Ctrl+F` chords, so edit 103 (or add a later migration), never 071.
@@ -180,7 +186,7 @@ Future Shop work:
 - Keep user-provided free text and uploads out of MVP; use curated pools to avoid moderation load.
 - Cosmetic render hooks should read purchase/equip state, not duplicate marketplace state in chat/profile/game modules.
 
-Future Events work:
+Future Events work (the tab is deleted; these hold for whenever events return):
 - Add event/season-specific award categories on top of the monthly leaderboard-award table.
 - Do not delete source ledger/event rows; monthly boards naturally re-window.
 - Monthly placement should remain a permanent profile/status badge, not a chip bonus.
@@ -193,9 +199,8 @@ Future Events work:
 
 ## Known Gaps
 
-- `Events` is still a placeholder.
-- Hub Admin edits existing reward-template and marketplace item presentation/economy fields only; adding new quest templates or Shop SKUs, changing JSON params/payload/kind/cadence/slot/windows, and rerolling current assignments still require direct DB/migration work.
+- There is no in-app editor for reward templates or marketplace items (the Admin tab was deleted): every catalog change (presentation, economy fields, new quest templates or Shop SKUs, JSON params/payload/kind/cadence/slot/windows, rerolling current assignments) is direct DB/migration work.
 - Shop has implemented categories for Companions, Chat, Aquarium, Badges, Flags, and Ultimates; keep this context in sync when adding another category or changing unlock gates.
-- Leaderboard refresh is polling-based, so Activity events can appear before leaderboard panels catch up. Quest and Shop snapshots refresh on session init, local mutations, and Postgres notifications.
-- There is no paginated detail view yet; compact panels only show top rows plus an around-you tail where implemented.
-- Events-specific awards are not implemented.
+- Leaderboard refresh is polling-based, so Activity events can appear before the Leaderboards page catches up: a score set at minute 0 shows up on the board within 5 minutes, not at once. Sessions seed from the published snapshot at construction and a connect refreshes a stale one, so the boards are never *empty*, just up to one interval behind. Quest and Shop snapshots refresh on session init, local mutations, and Postgres notifications; the leaderboard has no equivalent notify path.
+- The Leaderboards page has no scrolling inside a board's standings beyond the around-you tail; a board deeper than the pane clips.
+- Door games (DCSS, NetHack attempts, Lateania level, Green Dragon) have no boards yet: each needs its own fact table/ingestion before it can join a roster.

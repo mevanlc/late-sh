@@ -19,6 +19,7 @@ pub mod birthday;
 mod birthday_test;
 pub mod blackjack;
 pub mod bonsai;
+pub mod bonsai_decay_protection;
 #[cfg(test)]
 mod bonsai_test;
 pub mod character_sheet;
@@ -38,6 +39,10 @@ pub mod chips;
 #[cfg(test)]
 mod chips_test;
 pub mod daily_match;
+pub mod darkroom_save;
+pub mod door_rc;
+#[cfg(test)]
+mod door_rc_test;
 pub mod drinks;
 #[cfg(test)]
 mod drinks_test;
@@ -56,11 +61,14 @@ pub mod le_word;
 #[cfg(test)]
 mod le_word_test;
 pub mod leaderboard;
+#[cfg(test)]
+mod leaderboard_test;
 pub mod marketplace;
 #[cfg(test)]
 mod marketplace_test;
 pub mod media_history_item;
-pub mod media_history_vote;
+#[cfg(test)]
+mod media_history_item_test;
 pub mod media_queue_item;
 pub mod media_queue_vote;
 pub mod media_source;
@@ -108,6 +116,9 @@ pub mod traffic;
 pub mod twenty_forty_eight;
 pub mod ultimate_cooldown;
 pub mod user;
+pub mod user_ssh_key;
+#[cfg(test)]
+mod user_ssh_key_test;
 #[cfg(test)]
 mod user_test;
 pub mod username_effect;

@@ -4,10 +4,9 @@ use getrandom::SysRng;
 use russh::keys::signature::rand_core::UnwrapErr;
 use russh::{
     ChannelMsg, client,
-    keys::{PrivateKey, PrivateKeyWithHashAlg},
+    keys::{HashAlg, PrivateKey, PrivateKeyWithHashAlg},
 };
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{Duration, timeout};
@@ -56,6 +55,66 @@ impl client::Handler for TestClient {
     ) -> Result<bool, Self::Error> {
         Ok(true)
     }
+}
+
+#[tokio::test]
+async fn new_account_uses_generated_name_instead_of_ssh_login() {
+    let test_db = new_test_db().await;
+    let config = test_config(test_db.db.config().clone());
+    let state = test_app_state(test_db.db.clone(), config);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = tokio::spawn(async move {
+        let _ = run_with_listener(listener, state, None).await;
+    });
+
+    let ssh_login = "private-local-login";
+    let key = Arc::new(
+        PrivateKey::random(
+            &mut UnwrapErr(SysRng),
+            russh::keys::ssh_key::Algorithm::Ed25519,
+        )
+        .expect("generate client key"),
+    );
+    let fingerprint = key.public_key().fingerprint(HashAlg::Sha256).to_string();
+    let mut client = client::connect(Arc::new(client::Config::default()), addr, TestClient)
+        .await
+        .expect("connect client");
+    let auth = client
+        .authenticate_publickey(
+            ssh_login,
+            PrivateKeyWithHashAlg::new(
+                key,
+                client
+                    .best_supported_rsa_hash()
+                    .await
+                    .expect("rsa hash")
+                    .flatten(),
+            ),
+        )
+        .await
+        .expect("authenticate")
+        .success();
+    assert!(auth, "public-key auth should succeed");
+
+    let db_client = test_db.db.get().await.expect("db client");
+    let user = late_core::models::user::User::find_by_fingerprint(&db_client, &fingerprint)
+        .await
+        .expect("user lookup")
+        .expect("new account");
+    assert_ne!(user.username, ssh_login);
+    assert!(
+        crate::usernames::is_curated_base_username(&user.username),
+        "new account should use a curated modifier+noun name, got {}",
+        user.username
+    );
+
+    client
+        .disconnect(russh::Disconnect::ByApplication, "", "en")
+        .await
+        .expect("disconnect client");
+    handle.abort();
 }
 
 #[tokio::test]
@@ -205,19 +264,35 @@ async fn closing_token_exec_channel_does_not_close_interactive_shell() {
         .await
         .expect("request shell");
     expect_shell_data(&mut shell_channel).await;
-    drain_shell_data(&mut shell_channel).await;
 
     token_channel.close().await.expect("close token channel");
     shell_channel
-        .data(&b" "[..])
+        .data(&b"\x1b"[..])
+        .await
+        .expect("dismiss splash after token close");
+    expect_shell_data_contains(&mut shell_channel, b"welcome to the late lounge").await;
+
+    // A brand-new account runs the forced tour: only the named digit works,
+    // so follow the route (1 chat, 2 arcade, ...).
+    shell_channel
+        .data(&b"1"[..])
         .await
         .expect("send shell input after token close");
-    expect_shell_data(&mut shell_channel).await;
-    // The clubhouse animates, so the frame above arrives ~66ms after the
-    // close and proves little on its own. Watch the channel for the full
-    // drain budget: a Close propagating from the token-channel teardown
-    // panics inside the helper.
-    drain_shell_data(&mut shell_channel).await;
+    shell_channel
+        .data(&b"2"[..])
+        .await
+        .expect("send shell input after token close");
+    expect_shell_data_contains(&mut shell_channel, b"The Arcade").await;
+
+    // A further post-close interaction proves the first frame was not merely
+    // the render loop's final draw while shutting down.
+    for key in [&b"3"[..], b"4", b"5"] {
+        shell_channel
+            .data(key)
+            .await
+            .expect("send tour input after token close");
+    }
+    expect_shell_data_contains(&mut shell_channel, b"Directory").await;
 
     client
         .disconnect(russh::Disconnect::ByApplication, "", "en")
@@ -238,20 +313,31 @@ async fn expect_shell_data(channel: &mut russh::Channel<client::Msg>) {
     }
 }
 
-/// Swallow the intro frame burst so a later `expect_shell_data` asserts on
-/// fresh output. Returns on a 100ms quiet gap, or after an overall budget:
-/// the shell lands on the Clubhouse, which animates forever (fire, candles,
-/// jukebox, avatars), so idle frames never stop and the quiet gap may never
-/// come. The budget keeps the drain from looping indefinitely.
-async fn drain_shell_data(channel: &mut russh::Channel<client::Msg>) {
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while Instant::now() < deadline {
-        match timeout(Duration::from_millis(100), channel.wait()).await {
-            Ok(Some(ChannelMsg::Data { .. })) => {}
-            Ok(Some(ChannelMsg::Close)) => panic!("interactive shell closed unexpectedly"),
-            Ok(Some(_)) => {}
-            Ok(None) => panic!("interactive shell channel ended unexpectedly"),
-            Err(_) => return,
+async fn expect_shell_data_contains(channel: &mut russh::Channel<client::Msg>, needle: &[u8]) {
+    let mut received = Vec::new();
+    let found = timeout(Duration::from_secs(15), async {
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Data { data }) => {
+                    received.extend_from_slice(data.as_ref());
+                    if received
+                        .windows(needle.len())
+                        .any(|window| window == needle)
+                    {
+                        return;
+                    }
+                }
+                Some(ChannelMsg::Close) => panic!("interactive shell closed unexpectedly"),
+                Some(_) => {}
+                None => panic!("interactive shell channel ended unexpectedly"),
+            }
         }
-    }
+    })
+    .await;
+    assert!(
+        found.is_ok(),
+        "timed out waiting for interactive shell data containing {:?}; received={:?}",
+        String::from_utf8_lossy(needle),
+        String::from_utf8_lossy(&received)
+    );
 }

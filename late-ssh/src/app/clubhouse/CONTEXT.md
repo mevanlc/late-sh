@@ -2,7 +2,7 @@
 
 ## Metadata
 - Domain: the Late Lounge tavern, top-level screen `0`, the landing screen for every session
-- Last updated: 2026-07-03 (bartender sells drinks for Late Chips: grounded JSON order flow in `ai/ghost.rs`, floor-guarded debit + `user_drinks` buzz tracking, drunk-level glow under username labels here and on chat author labels)
+- Last updated: 2026-08-03 (the first-visit page tour is now FORCED: while it runs, an input gate in `app/input.rs` swallows every input except the single key the current centered box names, plus quitting; the route walks pages 1-6 then 0 home, ends in the tavern, and the bartender's comped welcome pour stays the hidden treasure behind the pulsing bar sign, guarded once-ever in the DB)
 - Status: Active
 
 ## 1. Summary
@@ -47,9 +47,11 @@ room is the chat surface, and the full history lives in #lounge on Home.
   windows (`EMOTE_MS`, `DOG_PET_MS`), so every session plays them.
 - **Drunk glow:** the lobby also carries per-user drunk state (raw
   `drunk_points` + `last_drink_at`, mirrored from the `user_drinks` table).
-  `Presence.drunk_level` (0 sober .. 4 wasted, decayed at read time via
-  `late_core::models::drinks`) tints the background of the username label
-  (`theme::DRUNK_LABEL_BG`, light green -> yellow -> orange -> red).
+  `Presence.drunk_level` (0 sober .. 4 wasted, decayed at read time against
+  wall clock via `late_core::models::drinks`, so a drinker sobers up while
+  logged out) drives the walker's wobble and the passed-out figure here, and
+  the printed `(word)` beside the name on chat author labels. There is no
+  background tint anymore.
   `GhostService` seeds the map from DB every 60s (`run_drunk_glow_task`) and
   bumps the buyer instantly after a pour; the same map feeds chat author
   label tinting everywhere via `App.drunk_levels` (copied ~1/s in
@@ -82,8 +84,15 @@ room is the chat surface, and the full history lives in #lounge on Home.
   `App::tick_clubhouse`): each line holds ~6s while more wait, ~14s solo;
   lines older than 15s never enqueue and the queue caps at 8, oldest
   dropped. Graybeard bubbles normally.
-  `App.clubhouse_bartender_id`/`clubhouse_graybeard_id` are captured from
-  `active_users` during roster refresh.
+  `App.clubhouse_bartender_id`/`clubhouse_graybeard_id`/`clubhouse_bot_id`
+  are captured from `active_users` during roster refresh.
+- `@bot` stands at `map::BOT_SPOT`, a fixed aisle cell between the arcade
+  cabinet and the poker table (not a `Seat`: no furniture glyph there, he
+  just stands, same rendering as the bartender's stick figure). He bubbles
+  normally like graybeard rather than using the pinned banner, so a bubble
+  only appears when he is the author of a fresh #lounge message; replies he
+  posts to other rooms (any room he is mentioned in, per `ai/ghost.rs`) do
+  not surface here since `lounge_messages` is #lounge-only.
 - **Drinks cost chips:** `@bartender` mentions (from anywhere, but usually
   `t` at the bar) run an ungrounded, schema-enforced JSON decision in `ai/ghost.rs`
   (`pour`/`offer`/`chat`): the prompt carries the patron's live balance and
@@ -98,25 +107,38 @@ room is the chat surface, and the full history lives in #lounge on Home.
   them. The lounge is still pinned as the visible chat room for read cursors
   (`sync_visible_chat_room`).
 
-## 5. First-visit tutorial
+## 5. First-visit tour
 
 - Armed by `!extract_clubhouse_tutorial_done(user.settings)`
   (`users.settings.clubhouse_tutorial_done`, late-core). Fires once on the
-  first clubhouse entry: spawns the player at the door (`Tutorial::Welcome`),
-  advances to `GoToBar` on first step (bar sign pulses, small pinned hint),
-  reaching the counter triggers `BarLesson` plus a one-shot @bartender
-  greeting posted to #lounge (`App::send_clubhouse_bartender_greeting`):
-  AI-generated in his voice when the AI service is up, falling back to a
-  scripted line on disabled AI, errors, or a 6s timeout
-  (`ghost::bartender_tutorial_greeting`); either way it must tell them to
-  press `i`. Then `SendOff` lists the walkable landmarks (arcade 2, heavy
-  door 3, easel 4) plus Ctrl+Q (the Lobby modal) and Ctrl+G (the hub); its
-  Enter finishes the tour and drops the player onto the dashboard (#lounge
-  on Home, page 1) so they land in the chat.
-- Enter advances popups (`tutorial_capturing_keys`); Esc anywhere skips
-  (arm in `dispatch_escape`). Completion persists once via
-  `ProfileService::set_clubhouse_tutorial_done` (fire-and-forget, failure
-  only logged: worst case the tour runs again next session).
+  first clubhouse entry: a centered box at the door pitches what late.sh is
+  (`Tutorial::Welcome`), then the tour walks every top-level page in number
+  order: `VisitChat` (1) -> `VisitArcade` (2) -> `VisitGames` (3) ->
+  `VisitArtboard` (4) -> `VisitDirectory` (5) -> `VisitLeaderboard` (6) ->
+  `Homecoming` (0, back in the tavern). Each stop draws a centered pitch
+  box over the real page (`ui::draw_tour_overlay`, called from `render.rs`)
+  ending in the next key; `Homecoming`'s Enter finishes the tour in place
+  and frees input: the player stays in the tavern.
+- **The tour is forced.** While `State::tutorial_forced_step` is `Some`,
+  `handle_tour_gate` in `app/input.rs` (sitting above the reserved chords,
+  below the quit-confirm modal) swallows every input, mouse and chords
+  included, except the named digit (which runs `set_screen`; the stage
+  advances in `State::tutorial_screen_entered`, hooked there), the
+  homecoming Enter, and `q` (quitting always works; Esc's lone-byte path
+  can still arm the quit confirm). There is no skip. Completion persists
+  once via `ProfileService::set_clubhouse_tutorial_done` (fire-and-forget,
+  failure only logged: worst case the tour runs again next session).
+- **The hidden treasure:** the bartender is deliberately absent from the
+  route. His scripted welcome (`ghost::bartender_tutorial_greeting`, local
+  banner only, never posted to #lounge) plus the comped welcome pour fire
+  the first time the newcomer walks up to the counter
+  (`State::welcome_pour_due`); since walking is gated until the homecoming
+  Enter, in practice that is after the send-off. The homecoming box ends
+  with a whispered pointer at it, and the bar sign pulses until the pour is
+  claimed (`State::bar_glow`). The once-ever guarantee is
+  `UserDrinks::record_welcome_pour`, an insert-only comp that returns
+  `None` for anyone who has ever drunk, so tour reruns after a mid-tour
+  disconnect can't double-comp.
 - The Ctrl+O profile nudge lives here on purpose: the old
   "open settings on connect" behavior was removed in favor of this beat.
 

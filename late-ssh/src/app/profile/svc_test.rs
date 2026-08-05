@@ -11,7 +11,7 @@ use crate::test_helpers::new_test_db;
 use late_core::models::{
     artboard_ban::ArtboardBan,
     chat_room::ChatRoom,
-    chips::{INITIAL_CHIP_BALANCE, UserChips},
+    chips::{ChipMove, INITIAL_CHIP_BALANCE, UserChips},
     moderation_audit_log::ModerationAuditLog,
     profile::{Profile, ProfileParams},
     room_ban::RoomBan,
@@ -73,9 +73,10 @@ async fn find_profile_publishes_stored_chip_balance() {
     UserChips::ensure(&client, user.id)
         .await
         .expect("ensure chips");
-    let chips = UserChips::add_bonus(&client, user.id, 250)
+    let chips = UserChips::apply(&**client, user.id, ChipMove::Credit, 250, None)
         .await
-        .expect("add chips");
+        .expect("add chips")
+        .expect("credited");
 
     let service = ProfileService::new(test_db.db.clone(), default_active_users());
     let mut snapshot_rx = service.subscribe_snapshot(user.id);
@@ -133,6 +134,7 @@ async fn edit_profile_emits_saved_event_and_refreshes_snapshot() {
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: default_right_sidebar_components(),
             show_room_list_sidebar: true,
+            room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
             land_on_home: false,
@@ -205,6 +207,7 @@ async fn edit_profile_normalizes_username_before_persisting() {
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: default_right_sidebar_components(),
             show_room_list_sidebar: true,
+            room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
             land_on_home: false,
@@ -272,6 +275,7 @@ async fn edit_profile_preserves_unrelated_settings_keys() {
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: default_right_sidebar_components(),
             show_room_list_sidebar: true,
+            room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
             land_on_home: false,
@@ -551,6 +555,7 @@ async fn edit_profile_snapshots_stay_per_user() {
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: default_right_sidebar_components(),
             show_room_list_sidebar: true,
+            room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
             land_on_home: false,

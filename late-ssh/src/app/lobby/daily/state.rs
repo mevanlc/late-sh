@@ -20,6 +20,7 @@ use crate::app::{
 use super::{
     backgammon::{self, DailyBackgammonState},
     battleship::DailyBattleshipState,
+    briscola::DailyBriscolaState,
     checkers::DailyCheckersState,
     connect4::DailyConnect4State,
     games::DailyGame,
@@ -52,6 +53,13 @@ impl ChallengeDraft {
 /// Per-session daily-games UI state: the modal, the lobby glow, and the
 /// full-screen board. The system of record is `DailyService`'s snapshot;
 /// everything here is presentation plus the in-flight optimistic move.
+/// Outcome of one daily tick: the banner to surface plus whether anything
+/// drained may have changed render-visible state.
+pub struct DailyTick {
+    pub banner: Option<Banner>,
+    pub changed: bool,
+}
+
 pub struct DailyState {
     user_id: Uuid,
     svc: DailyService,
@@ -120,6 +128,7 @@ pub enum DailyGameDetail {
     Reversi(ReversiDetail),
     Checkers(CheckersDetail),
     Backgammon(BackgammonDetail),
+    Briscola(BriscolaDetail),
 }
 
 impl DailyGameDetail {
@@ -132,6 +141,7 @@ impl DailyGameDetail {
             Self::Reversi(_) => DailyGame::Reversi,
             Self::Checkers(_) => DailyGame::Checkers,
             Self::Backgammon(_) => DailyGame::Backgammon,
+            Self::Briscola(_) => DailyGame::Briscola,
         }
     }
 }
@@ -189,6 +199,13 @@ pub struct BackgammonDetail {
     pub move_in_flight: bool,
 }
 
+pub struct BriscolaDetail {
+    pub state: DailyBriscolaState,
+    /// A card left this session and hasn't come back via reload yet; blocks
+    /// playing again until the canonical row lands.
+    pub play_in_flight: bool,
+}
+
 impl ChessDetail {
     fn from_row(row: &DailyMatch) -> Result<Self, String> {
         let state = DailyChessState::parse(&row.state).map_err(|e| e.to_string())?;
@@ -241,6 +258,10 @@ impl DailyMatchDetail {
                 pending: Vec::new(),
                 selected: None,
                 move_in_flight: false,
+            }),
+            Some(DailyGame::Briscola) => DailyGameDetail::Briscola(BriscolaDetail {
+                state: DailyBriscolaState::parse(&row.state).map_err(|e| e.to_string())?,
+                play_in_flight: false,
             }),
             None => return Err(format!("unknown daily game: {}", row.game_kind)),
         };
@@ -296,6 +317,13 @@ impl DailyMatchDetail {
         }
     }
 
+    pub fn briscola(&self) -> Option<&BriscolaDetail> {
+        match &self.game {
+            DailyGameDetail::Briscola(briscola) => Some(briscola),
+            _ => None,
+        }
+    }
+
     pub fn color_of(&self, user_id: Uuid) -> Option<ChessColor> {
         self.chess().and_then(|chess| chess.state.color_of(user_id))
     }
@@ -329,12 +357,16 @@ impl DailyState {
     }
 
     /// Drain the snapshot watch, the event feed, and any board load in
-    /// flight. Returns a banner for events targeted at this user.
-    pub fn tick(&mut self) -> Option<Banner> {
+    /// flight. Returns a banner for events targeted at this user plus
+    /// whether anything drained may have changed render-visible state
+    /// (board, lobby glow, turn markers).
+    pub fn tick(&mut self) -> DailyTick {
         let mut banner = None;
+        let mut changed = !self.event_rx.is_empty();
         if self.snapshot_rx.has_changed().unwrap_or(false) {
             self.snapshot = self.snapshot_rx.borrow_and_update().clone();
             self.notify_turn_edges();
+            changed = true;
         }
         loop {
             match self.event_rx.try_recv() {
@@ -346,12 +378,15 @@ impl DailyState {
                 Err(broadcast::error::TryRecvError::Empty) => break,
                 Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
                     tracing::warn!(skipped, "daily event feed lagged");
+                    changed = true;
                 }
                 Err(broadcast::error::TryRecvError::Closed) => break,
             }
         }
-        self.poll_board_load();
-        banner
+        if self.poll_board_load() {
+            changed = true;
+        }
+        DailyTick { banner, changed }
     }
 
     fn apply_event(&mut self, event: DailyEvent) -> Option<Banner> {
@@ -684,6 +719,8 @@ impl DailyState {
                 // A visual slot on the 2x14 board grid: bottom row, in the
                 // player's own home quadrant.
                 DailyGame::Backgammon => backgammon::SLOT_COLS + 9,
+                // The briscola cursor is a slot in your own hand.
+                DailyGame::Briscola => 0,
             },
             selected: None,
             piece_render_mode: ChessPieceRenderMode::Graphics,
@@ -766,13 +803,16 @@ impl DailyState {
         board.load_rx = Some(rx);
     }
 
-    fn poll_board_load(&mut self) {
+    /// Returns true when a board load completed (or its channel closed),
+    /// mutating the rendered board.
+    fn poll_board_load(&mut self) -> bool {
         let Some(board) = &mut self.board else {
-            return;
+            return false;
         };
         let Some(rx) = &mut board.load_rx else {
-            return;
+            return false;
         };
+        let mut changed = true;
         match rx.try_recv() {
             Ok(Ok(Some(row))) => {
                 board.load_rx = None;
@@ -793,7 +833,9 @@ impl DailyState {
                 board.load_rx = None;
                 board.load_error = Some(message);
             }
-            Err(oneshot::error::TryRecvError::Empty) => {}
+            Err(oneshot::error::TryRecvError::Empty) => {
+                changed = false;
+            }
             Err(oneshot::error::TryRecvError::Closed) => {
                 board.load_rx = None;
             }
@@ -805,6 +847,7 @@ impl DailyState {
         {
             self.request_board_reload();
         }
+        changed
     }
 
     pub fn board_orientation(&self) -> ChessColor {
@@ -827,6 +870,7 @@ impl DailyState {
 
     pub fn board_move_cursor(&mut self, dx: isize, dy: isize) {
         let orientation = self.board_orientation();
+        let user_id = self.user_id;
         let Some(board) = &mut self.board else {
             return;
         };
@@ -854,6 +898,12 @@ impl DailyState {
                 let row = (board.cursor / super::reversi::SIZE) as isize - dy;
                 let max = size - 1;
                 board.cursor = (row.clamp(0, max) * size + col.clamp(0, max)) as usize;
+            }
+            Some(DailyGameDetail::Briscola(briscola)) => {
+                // One-dimensional: the cursor walks your own hand, which
+                // shrinks once the stock runs dry.
+                let max = briscola.state.hand_of(user_id).len().saturating_sub(1) as isize;
+                board.cursor = (board.cursor as isize + dx).clamp(0, max) as usize;
             }
             Some(DailyGameDetail::Backgammon(_)) => {
                 // The 2x14 visual slot grid (points, bar, off tray); "up"
@@ -918,6 +968,7 @@ impl DailyState {
             DailyGame::Reversi => Self::reversi_place(board, user_id, &svc),
             DailyGame::Checkers => Self::checkers_select(board, user_id, &svc),
             DailyGame::Backgammon => Self::backgammon_select(board, user_id, &svc),
+            DailyGame::Briscola => Self::briscola_play(board, user_id, &svc),
         }
     }
 
@@ -1210,6 +1261,47 @@ impl DailyState {
         }
     }
 
+    /// Play the card under the cursor. Applies optimistically: the whole deal
+    /// lives in session memory, so the trick, the draws, and the score are
+    /// known locally. `play_in_flight` blocks a second card until the reload
+    /// reconciles.
+    fn briscola_play(board: &mut DailyBoardState, user_id: Uuid, svc: &DailyService) {
+        let detail = board.detail.as_mut().expect("checked by caller");
+        let row_turn = detail.row.turn_user_id;
+        let DailyGameDetail::Briscola(briscola) = &mut detail.game else {
+            return;
+        };
+        if briscola.play_in_flight || row_turn != Some(user_id) {
+            return;
+        }
+        let Some(seat) = briscola.state.seat_of(user_id) else {
+            return;
+        };
+        let table = briscola.state.table();
+        if table.turn != seat {
+            return;
+        }
+        // The cursor can sit past the end of a shrunken hand, e.g. after a
+        // click on one of the fixed slots a card no longer fills; reel it
+        // back onto the hand instead of leaving the marker on nothing.
+        let Some(&card) = table.hands[seat].get(board.cursor) else {
+            board.cursor = table.hands[seat].len().saturating_sub(1);
+            return;
+        };
+        if briscola.state.apply_play(card).is_err() {
+            return;
+        }
+        briscola.play_in_flight = true;
+        // Taking the trick brings the turn straight back, so read the next
+        // mover off the state instead of assuming it passes.
+        let next_turn = briscola.state.turn_user();
+        let remaining = briscola.state.table().hands[seat].len();
+        detail.row.turn_user_id = Some(next_turn);
+        board.cursor = board.cursor.min(remaining.saturating_sub(1));
+        let card_id = card.id() as usize;
+        svc.play_move_task(user_id, board.match_id, card_id, card_id);
+    }
+
     fn apply_optimistic_move(detail: &mut DailyMatchDetail, from: usize, to: usize) {
         let Some(chess) = detail.chess_mut() else {
             return;
@@ -1224,9 +1316,12 @@ impl DailyState {
         let mut board = board;
         board.play(mv);
         chess.state.fen = format!("{board}");
+        // The resolved move's own squares, not the clicked pair: a castle
+        // played as a two-square king push records as the king-captures-rook
+        // encoding every other castle in the history uses.
         chess.state.move_history.push(super::svc::DailyMoveRecord {
-            from,
-            to,
+            from: mv.from as usize,
+            to: mv.to as usize,
             label,
             at: Utc::now(),
         });
@@ -1336,6 +1431,7 @@ pub fn result_phrase(result: &str) -> &'static str {
         DailyMatch::RESULT_MOST_DISCS => "most discs",
         DailyMatch::RESULT_NO_MOVES => "no moves left",
         DailyMatch::RESULT_BORNE_OFF => "borne off",
+        DailyMatch::RESULT_MOST_POINTS => "most points",
         _ => "finished",
     }
 }

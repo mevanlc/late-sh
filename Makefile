@@ -33,7 +33,6 @@ LATE_SSH_PROXY_PROTOCOL ?= 0                                # Parse PROXY protoc
 LATE_SSH_PROXY_TRUSTED_CIDRS ?=                             # Comma-separated trusted proxy CIDRs (e.g. 10.42.0.0/16)
 LATE_WS_PAIR_MAX_ATTEMPTS_PER_IP ?= 30                      # Max WebSocket pair requests per IP before rate-limited
 LATE_WS_PAIR_RATE_LIMIT_WINDOW_SECS ?= 60                   # Rolling window for WS pair rate limiting
-LATE_ALLOWED_ORIGINS ?= http://localhost:$(LATE_WEB_PORT)   # Comma-separated list of allowed CORS origins
 
 # --- Database ---
 LATE_DB_HOST ?= postgres                                    # PostgreSQL hostname (docker service name)
@@ -93,6 +92,11 @@ LATE_DOPEWARS_HOST ?= service-dopewars                      # late-dopewars host
 LATE_DOPEWARS_PORT ?= 2324                                  # late-dopewars SSH port
 LATE_DOPEWARS_SECRET ?= $(shell openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n') # Shared secret authorizing late-ssh -> late-dopewars
 LATE_DOPEWARS_SCORE_FILE ?= /tmp/late-dopewars.sco          # Shared high-score file on the dopewars host (a PVC path in prod)
+LATE_CODEKEEP_ENABLED ?= 1                                  # Enable CodeKeep: The Pale (1=on, 0=off)
+LATE_CODEKEEP_HOST ?= service-codekeep                      # late-codekeep host (compose service name; 127.0.0.1 for a bare run)
+LATE_CODEKEEP_PORT ?= 2328                                  # late-codekeep SSH port
+LATE_CODEKEEP_SECRET ?= $(shell openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n') # Shared secret authorizing late-ssh -> late-codekeep
+LATE_CODEKEEP_DATA_DIR ?= /var/lib/late-codekeep             # Per-account CodeKeep HOME roots
 LATE_DCSS_ENABLED ?= 1                                      # Enable the DCSS door game (1=on, 0=off)
 LATE_DCSS_HOST ?= service-dcss                              # late-dcss host (compose service name; 127.0.0.1 for a bare run)
 LATE_DCSS_PORT ?= 2325                                      # late-dcss SSH port
@@ -101,20 +105,21 @@ LATE_USURPER_ENABLED ?= 1                                   # Enable the Usurper
 LATE_USURPER_HOST ?= service-usurper                        # late-usurper host (compose service name; 127.0.0.1 for a bare run)
 LATE_USURPER_PORT ?= 2326                                   # late-usurper SSH port
 LATE_USURPER_SECRET ?= $(shell openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n') # Shared secret authorizing late-ssh -> late-usurper
+LATE_BROGUE_ENABLED ?= 1                                    # Enable the Brogue door game (1=on, 0=off)
+LATE_BROGUE_HOST ?= service-brogue                          # late-brogue host (compose service name; 127.0.0.1 for a bare run)
+LATE_BROGUE_PORT ?= 2327                                    # late-brogue SSH port
+LATE_BROGUE_SECRET ?= $(shell openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n') # Shared secret authorizing late-ssh -> late-brogue
 
 # --- Web ---
 LATE_WEB_PORT ?= 3000                                       # Web server listen port
 LATE_WEB_URL ?= http://localhost:$(LATE_WEB_PORT)           # Public web URL (used by SSH server)
 LATE_SSH_INTERNAL_URL ?= http://service-ssh:$(LATE_API_PORT) # Internal SSH API URL (used by web server)
-LATE_SSH_PUBLIC_URL ?= localhost:$(LATE_API_PORT)           # Public SSH API URL (used by browser for WS)
 LATE_AUDIO_URL ?= http://icecast:8000                       # Upstream audio URL used by late-web /stream proxy
-LATE_WEB_TUNNEL_TOKEN ?= dev-web-tunnel                     # Local-only shared token for /play web terminal
 LATE_YOUTUBE_API_KEY ?=
 
 # --- AI (Gemini - used for @bot and @graybeard chat + URL extraction) ---
 LATE_AI_ENABLED ?= 1                                        # Enable AI-powered features
 LATE_AI_API_KEY ?=                                              # Gemini API key for AI features
-LATE_AI_MODEL ?= gemini-3.1-pro-preview                     # Gemini model to use
 
 # --- Files / uploads (optional; blank disables uploads) ---
 LATE_FILES_S3_ENDPOINT ?= https://8ecfba101ed3834cf19fd86e68fc325b.r2.cloudflarestorage.com # S3/R2 endpoint URL
@@ -153,7 +158,6 @@ LATE_FILES_S3_SECRET_ACCESS_KEY ?=  								                        # S3/R2 secr
 	@echo "LATE_SSH_PROXY_TRUSTED_CIDRS=$(LATE_SSH_PROXY_TRUSTED_CIDRS)" >> .env
 	@echo "LATE_WS_PAIR_MAX_ATTEMPTS_PER_IP=$(LATE_WS_PAIR_MAX_ATTEMPTS_PER_IP)" >> .env
 	@echo "LATE_WS_PAIR_RATE_LIMIT_WINDOW_SECS=$(LATE_WS_PAIR_RATE_LIMIT_WINDOW_SECS)" >> .env
-	@echo "LATE_ALLOWED_ORIGINS=$(LATE_ALLOWED_ORIGINS)" >> .env
 	@echo "LATE_DB_HOST=$(LATE_DB_HOST)" >> .env
 	@echo "LATE_DB_PORT=$(LATE_DB_PORT)" >> .env
 	@echo "LATE_DB_USER=$(LATE_DB_USER)" >> .env
@@ -201,6 +205,11 @@ LATE_FILES_S3_SECRET_ACCESS_KEY ?=  								                        # S3/R2 secr
 	@echo "LATE_DOPEWARS_PORT=$(LATE_DOPEWARS_PORT)" >> .env
 	@echo "LATE_DOPEWARS_SECRET=$(LATE_DOPEWARS_SECRET)" >> .env
 	@echo "LATE_DOPEWARS_SCORE_FILE=$(LATE_DOPEWARS_SCORE_FILE)" >> .env
+	@echo "LATE_CODEKEEP_ENABLED=$(LATE_CODEKEEP_ENABLED)" >> .env
+	@echo "LATE_CODEKEEP_HOST=$(LATE_CODEKEEP_HOST)" >> .env
+	@echo "LATE_CODEKEEP_PORT=$(LATE_CODEKEEP_PORT)" >> .env
+	@echo "LATE_CODEKEEP_SECRET=$(LATE_CODEKEEP_SECRET)" >> .env
+	@echo "LATE_CODEKEEP_DATA_DIR=$(LATE_CODEKEEP_DATA_DIR)" >> .env
 	@echo "LATE_DCSS_ENABLED=$(LATE_DCSS_ENABLED)" >> .env
 	@echo "LATE_DCSS_HOST=$(LATE_DCSS_HOST)" >> .env
 	@echo "LATE_DCSS_PORT=$(LATE_DCSS_PORT)" >> .env
@@ -209,16 +218,17 @@ LATE_FILES_S3_SECRET_ACCESS_KEY ?=  								                        # S3/R2 secr
 	@echo "LATE_USURPER_HOST=$(LATE_USURPER_HOST)" >> .env
 	@echo "LATE_USURPER_PORT=$(LATE_USURPER_PORT)" >> .env
 	@echo "LATE_USURPER_SECRET=$(LATE_USURPER_SECRET)" >> .env
+	@echo "LATE_BROGUE_ENABLED=$(LATE_BROGUE_ENABLED)" >> .env
+	@echo "LATE_BROGUE_HOST=$(LATE_BROGUE_HOST)" >> .env
+	@echo "LATE_BROGUE_PORT=$(LATE_BROGUE_PORT)" >> .env
+	@echo "LATE_BROGUE_SECRET=$(LATE_BROGUE_SECRET)" >> .env
 	@echo "LATE_WEB_PORT=$(LATE_WEB_PORT)" >> .env
 	@echo "LATE_WEB_URL=$(LATE_WEB_URL)" >> .env
 	@echo "LATE_SSH_INTERNAL_URL=$(LATE_SSH_INTERNAL_URL)" >> .env
-	@echo "LATE_SSH_PUBLIC_URL=$(LATE_SSH_PUBLIC_URL)" >> .env
 	@echo "LATE_AUDIO_URL=$(LATE_AUDIO_URL)" >> .env
-	@echo "LATE_WEB_TUNNEL_TOKEN=$(LATE_WEB_TUNNEL_TOKEN)" >> .env
 	@echo "LATE_YOUTUBE_API_KEY=$(LATE_YOUTUBE_API_KEY)" >> .env
 	@echo "LATE_AI_ENABLED=$(LATE_AI_ENABLED)" >> .env
 	@echo "LATE_AI_API_KEY=$(LATE_AI_API_KEY)" >> .env
-	@echo "LATE_AI_MODEL=$(LATE_AI_MODEL)" >> .env
 	@echo "LATE_FILES_S3_ENDPOINT=$(LATE_FILES_S3_ENDPOINT)" >> .env
 	@echo "LATE_FILES_S3_BUCKET=$(LATE_FILES_S3_BUCKET)" >> .env
 	@echo "LATE_FILES_PUBLIC_BASE_URL=$(LATE_FILES_PUBLIC_BASE_URL)" >> .env
@@ -291,6 +301,13 @@ remove-instance2:
 keys:
 	@if [ ! -f server_key ]; then ssh-keygen -t ed25519 -f server_key -N "" -q; fi
 
+# Fill the local Compose database with synthetic players so the Leaderboards
+# page renders populated boards. Local development only: it owns the users whose
+# fingerprints start with seed:leaderboard: and rewrites their stats on rerun.
+.PHONY: seed-leaderboard
+seed-leaderboard:
+	scripts/seed_leaderboard_test_data.sh
+
 .PHONY: check-db
 check-db:
 	$(CHECK_DB_START)
@@ -312,23 +329,21 @@ test-llm: .env
 	$(CHECK_DB_START); \
 	TEST_DATABASE_URL="$(CHECK_TEST_DATABASE_URL)" $(CHECK_CARGO_ENV) systemd-run --user --scope -q -p MemoryHigh=$(TEST_LLM_MEM_HIGH) -p MemoryMax=$(TEST_LLM_MEM_MAX) cargo nextest run --build-jobs $(CHECK_BUILD_JOBS) --no-fail-fast --failure-output final $(ARGS)
 
+# Full pre-merge sweep, and the only place the otel feature is exercised:
+# clippy + tests run the whole workspace WITH --features otel, so the real
+# telemetry/metrics code (the config prod ships) is compiled and linted here.
+# CI deliberately skips otel to stay cheap (see .github/workflows/ci.yml), so
+# this is where otel breakage is caught before release. fmt stays scoped to
+# first-party packages: `cargo fmt --all` also reaches vendored path deps like
+# vendor/irc-proto, whose upstream style is not rustfmt-clean here.
 .PHONY: check
 check: .env
 	@set -e; \
 	trap 'status=$$?; $(CHECK_DB_STOP); exit $$status' EXIT; \
 	$(CHECK_DB_START); \
 	cargo fmt $(CHECK_PACKAGES) -- --check; \
-	$(CHECK_CARGO_ENV) cargo clippy -j $(CHECK_BUILD_JOBS) $(CHECK_PACKAGES) --all-targets --no-deps -- -D warnings; \
-	TEST_DATABASE_URL="$(CHECK_TEST_DATABASE_URL)" $(CHECK_CARGO_ENV) cargo nextest run --build-jobs $(CHECK_BUILD_JOBS) $(CHECK_PACKAGES) --all-targets --no-fail-fast --failure-output final
-
-.PHONY: checkci
-checkci: .env
-	@set -e; \
-	trap 'status=$$?; $(CHECK_DB_STOP); exit $$status' EXIT; \
-	$(CHECK_DB_START); \
-	cargo fmt --all -- --check; \
-	$(CHECK_CARGO_ENV) cargo clippy --workspace --all-targets --features otel -- -D warnings; \
-	TEST_DATABASE_URL="$(CHECK_TEST_DATABASE_URL)" $(CHECK_CARGO_ENV) cargo nextest run --workspace --all-targets --failure-output final
+	$(CHECK_CARGO_ENV) cargo clippy -j $(CHECK_BUILD_JOBS) --workspace --all-targets --features otel -- -D warnings; \
+	TEST_DATABASE_URL="$(CHECK_TEST_DATABASE_URL)" $(CHECK_CARGO_ENV) cargo nextest run --build-jobs $(CHECK_BUILD_JOBS) --workspace --all-targets --no-fail-fast --failure-output final
 
 .PHONY: start startm down stop remove
 start: .env keys

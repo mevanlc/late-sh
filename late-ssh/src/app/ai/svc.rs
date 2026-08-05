@@ -3,11 +3,16 @@ use late_core::telemetry::TracedExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
+/// The model backing @bot's grounded chat/news replies. Gemini 3.6 Flash beats
+/// 3.1 Pro on coding/agentic benchmarks while costing less and running faster;
+/// Pro only keeps an edge on the hardest reasoning benchmarks, which this bot
+/// doesn't need.
+pub const AI_MODEL: &str = "gemini-3.6-flash";
+
 #[derive(Debug, Clone)]
 pub struct AiService {
     client: Client,
     api_key: Option<String>,
-    model: String,
     enabled: bool,
 }
 
@@ -75,12 +80,45 @@ struct GeminiResponsePart {
     text: Option<String>,
 }
 
+/// How much of an unusable Gemini body to log. Enough to carry `finishReason`,
+/// `promptFeedback`, and the safety ratings; short enough that a response
+/// padded with grounding metadata can't flood the log.
+const RAW_RESPONSE_LOG_LIMIT: usize = 4096;
+
+/// Pull the reply text out of a Gemini response body, logging the raw body
+/// whenever there isn't one.
+///
+/// By the time a `None` reaches a caller it is indistinguishable from "AI is
+/// switched off", so an API-side refusal arrives as silence: the news pipeline
+/// reported `AI failed to return extraction` from eight frames away, naming no
+/// cause. The body holds the answer (`finishReason`, `promptFeedback`) and was
+/// previously parsed and dropped. This is the only place that can still see it.
+fn first_text(call: &str, body_text: &str) -> Result<Option<String>> {
+    let body: GeminiResponse = serde_json::from_str(body_text)?;
+    if let Some(candidates) = body.candidates
+        && let Some(first) = candidates.into_iter().next()
+        && let Some(content) = first.content
+        && let Some(parts) = content.parts
+        && let Some(part) = parts.into_iter().next()
+        && let Some(text) = part.text
+    {
+        return Ok(Some(text));
+    }
+
+    tracing::warn!(
+        call = %call,
+        model = %AI_MODEL,
+        raw_response = %body_text.chars().take(RAW_RESPONSE_LOG_LIMIT).collect::<String>(),
+        "gemini returned no usable text"
+    );
+    Ok(None)
+}
+
 impl AiService {
-    pub fn new(enabled: bool, api_key: Option<String>, model: String) -> Self {
+    pub fn new(enabled: bool, api_key: Option<String>) -> Self {
         Self {
             client: Client::new(),
             api_key,
-            model,
             enabled,
         }
     }
@@ -90,7 +128,7 @@ impl AiService {
     }
 
     pub fn model(&self) -> &str {
-        &self.model
+        AI_MODEL
     }
 
     pub async fn generate_reply(
@@ -134,7 +172,7 @@ impl AiService {
         let api_key = self.api_key.as_ref().context("missing api key")?;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, api_key
+            AI_MODEL, api_key
         );
 
         let req = GeminiRequest {
@@ -171,17 +209,7 @@ impl AiService {
             raw_response_len = body_text.len(),
             "received Gemini API response"
         );
-        let body: GeminiResponse = serde_json::from_str(&body_text)?;
-        if let Some(candidates) = body.candidates
-            && let Some(first) = candidates.into_iter().next()
-            && let Some(content) = first.content
-            && let Some(parts) = content.parts
-            && let Some(part) = parts.into_iter().next()
-        {
-            return Ok(part.text);
-        }
-
-        Ok(None)
+        first_text("generate", &body_text)
     }
 
     pub async fn generate_json_with_search(
@@ -196,7 +224,7 @@ impl AiService {
         let api_key = self.api_key.as_ref().context("missing api key")?;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, api_key
+            AI_MODEL, api_key
         );
 
         let req = GeminiRequest {
@@ -228,17 +256,7 @@ impl AiService {
 
         let body_text = res.text().await?;
         tracing::debug!(raw_response = %body_text, "Full Gemini API response");
-        let body: GeminiResponse = serde_json::from_str(&body_text)?;
-        if let Some(candidates) = body.candidates
-            && let Some(first) = candidates.into_iter().next()
-            && let Some(content) = first.content
-            && let Some(parts) = content.parts
-            && let Some(part) = parts.into_iter().next()
-        {
-            return Ok(part.text);
-        }
-
-        Ok(None)
+        first_text("generate_json_with_search", &body_text)
     }
 
     /// A JSON reply Gemini must conform to `schema`, ungrounded (no Google
@@ -248,8 +266,13 @@ impl AiService {
     /// answer from their own prompt rather than the live web. The cap is
     /// generous so a thinking model's reasoning tokens don't crowd out the
     /// (small) JSON payload.
+    ///
+    /// `model` is explicit rather than defaulting to `AI_MODEL`: callers on
+    /// this path (e.g. the bartender's order flow) may need a different model
+    /// tier than @bot's chat/news model.
     pub async fn generate_json(
         &self,
+        model: &str,
         system_prompt: &str,
         prompt: &str,
         schema: serde_json::Value,
@@ -261,7 +284,7 @@ impl AiService {
         let api_key = self.api_key.as_ref().context("missing api key")?;
         let url = format!(
             "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
-            self.model, api_key
+            model, api_key
         );
 
         let req = GeminiRequest {
@@ -291,16 +314,10 @@ impl AiService {
 
         let body_text = res.text().await?;
         tracing::debug!(raw_response = %body_text, "Full Gemini API response");
-        let body: GeminiResponse = serde_json::from_str(&body_text)?;
-        if let Some(candidates) = body.candidates
-            && let Some(first) = candidates.into_iter().next()
-            && let Some(content) = first.content
-            && let Some(parts) = content.parts
-            && let Some(part) = parts.into_iter().next()
-        {
-            return Ok(part.text);
-        }
-
-        Ok(None)
+        first_text("generate_json", &body_text)
     }
 }
+
+#[cfg(test)]
+#[path = "svc_test.rs"]
+mod svc_test;

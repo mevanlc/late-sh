@@ -2,11 +2,13 @@ use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use late_core::models::account_link;
 use late_core::models::bonsai::{BonsaiV2Tree, Tree};
+use late_core::models::bonsai_decay_protection::BonsaiDecayProtection;
 use late_core::models::irc_token::IrcToken;
 use late_core::models::marketplace;
 use late_core::models::profile::{Profile, ProfileParams};
 use late_core::models::profile_award::{ProfileAward, list_profile_awards_for_user};
 use late_core::models::user::{User, sanitize_username_input};
+use late_core::models::user_ssh_key::{KeyLayout, UserSshKey};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -40,6 +42,7 @@ pub struct ProfileSnapshot {
     pub chip_balance: Option<i64>,
     pub bonsai: Option<Tree>,
     pub bonsai_v2: Option<BonsaiV2Tree>,
+    pub bonsai_decay_protection: Option<BonsaiDecayProtection>,
     pub dynamic_bonsai_selected: bool,
     pub aquarium_fish: Vec<(String, usize)>,
     pub profile_awards: Vec<ProfileAward>,
@@ -256,6 +259,7 @@ impl ProfileService {
         let profile = Profile::load_with_chip_balance(&client, user_id).await?;
         let bonsai = Tree::find_by_user_id(&client, user_id).await?;
         let bonsai_v2 = BonsaiV2Tree::find_by_user_id(&client, user_id).await?;
+        let bonsai_decay_protection = BonsaiDecayProtection::for_user(&client, user_id).await?;
         let dynamic_bonsai_selected =
             marketplace::is_dynamic_bonsai_selected(&client, user_id).await?;
         let aquarium_fish = marketplace::active_aquarium_fish_for_user(&client, user_id).await?;
@@ -268,6 +272,7 @@ impl ProfileService {
                 chip_balance: Some(profile.chip_balance),
                 bonsai,
                 bonsai_v2,
+                bonsai_decay_protection,
                 dynamic_bonsai_selected,
                 aquarium_fish,
                 profile_awards,
@@ -408,6 +413,27 @@ impl ProfileService {
         );
     }
 
+    /// Fire-and-forget: persist one device's home rail layout onto the SSH key
+    /// the session authenticated with. No event on success; a failure is only
+    /// logged, since the layout already applies for the rest of the session and
+    /// the cost of losing the write is one un-remembered preference.
+    pub fn set_key_layout(&self, user_id: Uuid, fingerprint: String, layout: KeyLayout) {
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let result = async {
+                    let client = service.db.get().await?;
+                    UserSshKey::set_layout(&client, user_id, &fingerprint, layout).await
+                }
+                .await;
+                if let Err(e) = result {
+                    tracing::warn!(error = ?e, "failed to persist device rail layout");
+                }
+            }
+            .instrument(info_span!("profile.device_rails_task", user_id = %user_id)),
+        );
+    }
+
     /// Fire-and-forget: persist whether the aquarium tray is open so the
     /// next session starts in the same state. No event on success; a failure
     /// is only logged (the tray would simply start closed next session).
@@ -425,6 +451,28 @@ impl ProfileService {
                 }
             }
             .instrument(info_span!("profile.show_aquarium_tray_task", user_id = %user_id)),
+        );
+    }
+
+    /// Persist the chosen interaction mode (keyboard / mouse / hybrid).
+    pub fn set_interaction_mode(
+        &self,
+        user_id: Uuid,
+        mode: late_core::models::user::InteractionMode,
+    ) {
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let result = async {
+                    let client = service.db.get().await?;
+                    User::set_interaction_mode(&client, user_id, mode).await
+                }
+                .await;
+                if let Err(e) = result {
+                    tracing::warn!(error = ?e, "failed to persist interaction mode");
+                }
+            }
+            .instrument(info_span!("profile.interaction_mode_task", user_id = %user_id)),
         );
     }
 

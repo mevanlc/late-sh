@@ -65,11 +65,11 @@ resource "kubernetes_deployment_v1" "service_ssh" {
           resources {
             limits = {
               cpu    = "8000m"
-              memory = "4Gi"
+              memory = "8Gi"
             }
             requests = {
               cpu    = "1000m"
-              memory = "512Mi"
+              memory = "2Gi"
             }
           }
 
@@ -109,6 +109,23 @@ resource "kubernetes_deployment_v1" "service_ssh" {
           env {
             name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
             value = "http://otel-collector.monitoring.svc.cluster.local:4317"
+          }
+          # Per-pod telemetry identity: without service.instance.id every pod
+          # exports the same otel series and they clobber each other on scrape
+          # (fatal once service-ssh runs multiple replicas). $(POD_NAME) is the
+          # downward-API pod name; the SDK's env resource detector reads
+          # OTEL_RESOURCE_ATTRIBUTES, the collector turns it into a metric label.
+          env {
+            name = "POD_NAME"
+            value_from {
+              field_ref {
+                field_path = "metadata.name"
+              }
+            }
+          }
+          env {
+            name  = "OTEL_RESOURCE_ATTRIBUTES"
+            value = "service.instance.id=$(POD_NAME)"
           }
           env {
             name  = "LATE_SSH_PORT"
@@ -166,19 +183,6 @@ resource "kubernetes_deployment_v1" "service_ssh" {
           env {
             name  = "LATE_WEB_URL"
             value = "https://${var.DOMAIN}"
-          }
-          env {
-            name  = "LATE_ALLOWED_ORIGINS"
-            value = "https://${var.DOMAIN}"
-          }
-          env {
-            name = "LATE_WEB_TUNNEL_TOKEN"
-            value_from {
-              secret_key_ref {
-                name = kubernetes_secret_v1.web_tunnel_token.metadata[0].name
-                key  = "token"
-              }
-            }
           }
 
           # --- Door games ---
@@ -254,6 +258,30 @@ resource "kubernetes_deployment_v1" "service_ssh" {
             }
           }
 
+          # CodeKeep runs in the isolated late-codekeep host. The shared secret
+          # authorizes late-ssh; the SSH username is the stable account save key.
+          env {
+            name  = "LATE_CODEKEEP_ENABLED"
+            value = local.codekeep_enabled
+          }
+          env {
+            name  = "LATE_CODEKEEP_HOST"
+            value = local.codekeep_service_host
+          }
+          env {
+            name  = "LATE_CODEKEEP_PORT"
+            value = local.codekeep_port
+          }
+          env {
+            name = "LATE_CODEKEEP_SECRET"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret_v1.codekeep_identity_secret.metadata[0].name
+                key  = "secret"
+              }
+            }
+          }
+
           # DCSS is served by the late-dcss host pod (service-dcss.tf);
           # late-ssh connects to it over SSH. HOST/PORT target that Service and
           # SECRET (shared with the host) authorizes the connection.
@@ -274,6 +302,31 @@ resource "kubernetes_deployment_v1" "service_ssh" {
             value_from {
               secret_key_ref {
                 name = kubernetes_secret_v1.dcss_identity_secret.metadata[0].name
+                key  = "secret"
+              }
+            }
+          }
+
+          # Brogue is served by the late-brogue host pod (service-brogue.tf);
+          # late-ssh connects to it over SSH. HOST/PORT target that Service and
+          # SECRET (shared with the host) authorizes the connection.
+          env {
+            name  = "LATE_BROGUE_ENABLED"
+            value = local.brogue_enabled
+          }
+          env {
+            name  = "LATE_BROGUE_HOST"
+            value = local.brogue_service_host
+          }
+          env {
+            name  = "LATE_BROGUE_PORT"
+            value = local.brogue_port
+          }
+          env {
+            name = "LATE_BROGUE_SECRET"
+            value_from {
+              secret_key_ref {
+                name = kubernetes_secret_v1.brogue_identity_secret.metadata[0].name
                 key  = "secret"
               }
             }
@@ -449,11 +502,6 @@ resource "kubernetes_deployment_v1" "service_ssh" {
               }
             }
           }
-          env {
-            name  = "LATE_AI_MODEL"
-            value = var.AI_MODEL
-          }
-
           # --- YouTube Data API ---
           env {
             name = "LATE_YOUTUBE_API_KEY"

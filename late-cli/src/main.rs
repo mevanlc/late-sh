@@ -12,6 +12,7 @@ mod clipboard;
 
 mod config;
 mod identity;
+mod mpris;
 mod pty;
 mod raw_mode;
 mod ssh;
@@ -25,7 +26,8 @@ use identity::ensure_client_identity_at;
 use raw_mode::{RawModeGuard, enable_ansi_output_if_tty};
 use ssh::{SshProcess, flush_stdin_input_queue, forward_resize_events, spawn_ssh};
 use ws::{
-    PairClientInfo, PlaybackState, WebviewPlaybackController, client_platform_label, run_viz_ws,
+    PairClientInfo, PairRuntime, PlaybackState, WebviewPlaybackController, client_platform_label,
+    run_pair_ws,
 };
 
 #[tokio::main]
@@ -282,7 +284,6 @@ async fn run_ws_pairing(config: &Config, token: String, audio: &AudioRuntime) {
     let played_samples = Arc::clone(&audio.played_samples);
     let muted = Arc::clone(&audio.muted);
     let volume_percent = Arc::clone(&audio.volume_percent);
-    let icecast_output_available = Arc::clone(&audio.icecast_output_available);
     let source_is_icecast = Arc::clone(&audio.source_is_icecast);
     let native_source_selected = Arc::clone(&audio.native_source_selected);
     let stream_url = Arc::clone(&audio.stream_url);
@@ -291,16 +292,19 @@ async fn run_ws_pairing(config: &Config, token: String, audio: &AudioRuntime) {
     let icecast_stream_url = audio.icecast_stream_url.clone();
     // Copy scalar state before entering the long-lived pair loop.
     let sample_rate = audio.sample_rate;
-    let mut frames = audio.analyzer_tx.subscribe();
     let mut webview = WebviewPlaybackController::new(api_base_url.clone(), token.clone());
     let mut voice = voice::VoiceRuntimeState::default();
+    let (mut desktop_media, mut desktop_commands) =
+        mpris::DesktopMedia::new(mpris::AudioControls {
+            muted: Arc::clone(&muted),
+            volume_percent: Arc::clone(&volume_percent),
+        });
 
     let playback = PlaybackState {
         played_samples: &played_samples,
         sample_rate,
         muted: &muted,
         volume_percent: &volume_percent,
-        icecast_output_available: &icecast_output_available,
         source_is_icecast: &source_is_icecast,
         native_source_selected: &native_source_selected,
         stream_url: &stream_url,
@@ -311,14 +315,17 @@ async fn run_ws_pairing(config: &Config, token: String, audio: &AudioRuntime) {
     let mut retries = 0;
     const MAX_RETRIES: usize = 10;
     loop {
-        if let Err(err) = run_viz_ws(
+        if let Err(err) = run_pair_ws(
             &api_base_url,
             &token,
             &client,
-            &mut frames,
             &playback,
-            &mut webview,
-            &mut voice,
+            PairRuntime {
+                webview: &mut webview,
+                voice: &mut voice,
+                desktop_media: &mut desktop_media,
+                desktop_commands: &mut desktop_commands,
+            },
         )
         .await
         {

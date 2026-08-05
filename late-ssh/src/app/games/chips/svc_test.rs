@@ -1,11 +1,6 @@
 use crate::app::games::chips::svc::ChipService;
 use late_core::{
-    models::{
-        chips::{
-            CHIP_GIFT_RECEIVED_REASON, CHIP_GIFT_SENT_REASON, DRINK_PURCHASE_REASON, UserChips,
-        },
-        drinks::UserDrinks,
-    },
+    models::chips::{ChipMove, UserChips},
     test_utils::create_test_user,
 };
 
@@ -45,17 +40,23 @@ async fn transfer_chips_records_atomic_gift_ledgers() {
             &[
                 &sender.id,
                 &recipient.id,
-                &CHIP_GIFT_SENT_REASON,
-                &CHIP_GIFT_RECEIVED_REASON,
+                &ChipMove::GiftSent.reason(),
+                &ChipMove::GiftReceived.reason(),
             ],
         )
         .await
         .expect("ledger rows");
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].get::<_, i64>("delta"), -500);
-    assert_eq!(rows[0].get::<_, &str>("reason"), CHIP_GIFT_SENT_REASON);
+    assert_eq!(
+        rows[0].get::<_, &str>("reason"),
+        ChipMove::GiftSent.reason()
+    );
     assert_eq!(rows[1].get::<_, i64>("delta"), 500);
-    assert_eq!(rows[1].get::<_, &str>("reason"), CHIP_GIFT_RECEIVED_REASON);
+    assert_eq!(
+        rows[1].get::<_, &str>("reason"),
+        ChipMove::GiftReceived.reason()
+    );
 }
 
 #[tokio::test]
@@ -130,66 +131,14 @@ async fn transfer_chips_insufficient_funds_leaves_balances_and_ledger_untouched(
             &[
                 &sender.id,
                 &recipient.id,
-                &CHIP_GIFT_SENT_REASON,
-                &CHIP_GIFT_RECEIVED_REASON,
+                &ChipMove::GiftSent.reason(),
+                &ChipMove::GiftReceived.reason(),
             ],
         )
         .await
         .expect("ledger count")
         .get::<_, i32>("count");
     assert_eq!(ledger_count, 0);
-}
-
-#[tokio::test]
-async fn buy_drink_for_charges_payer_and_buzzes_recipient() {
-    let test_db = new_test_db().await;
-    let payer = create_test_user(&test_db.db, "drink-gift-payer").await;
-    let recipient = create_test_user(&test_db.db, "drink-gift-recipient").await;
-    let client = test_db.db.get().await.expect("db client");
-    UserChips::ensure(&client, payer.id)
-        .await
-        .expect("payer chips");
-    drop(client);
-
-    let chips = ChipService::new(test_db.db.clone());
-    let purchase = chips
-        .buy_drink_for(payer.id, recipient.id, 300, "Kernel Panic Punch")
-        .await
-        .expect("gift drink succeeds")
-        .expect("poured");
-    assert_eq!(purchase.balance, 700);
-    assert_eq!(purchase.drunk_points, 300);
-
-    let client = test_db.db.get().await.expect("db client");
-    let payer_balance = client
-        .query_one(
-            "SELECT balance FROM user_chips WHERE user_id = $1",
-            &[&payer.id],
-        )
-        .await
-        .expect("payer balance")
-        .get::<_, i64>("balance");
-    assert_eq!(payer_balance, 700);
-
-    let recipient_drinks = UserDrinks::find(&client, recipient.id)
-        .await
-        .expect("recipient drinks")
-        .expect("recipient got buzz");
-    assert_eq!(recipient_drinks.drunk_points, 300);
-    assert_eq!(recipient_drinks.lifetime_spent, 300);
-
-    let ledger = client
-        .query_one(
-            "SELECT user_id, delta, reason, source_ref
-             FROM chip_ledger
-             WHERE user_id = $1 AND reason = $2",
-            &[&payer.id, &DRINK_PURCHASE_REASON],
-        )
-        .await
-        .expect("ledger row");
-    assert_eq!(ledger.get::<_, uuid::Uuid>("user_id"), payer.id);
-    assert_eq!(ledger.get::<_, i64>("delta"), -300);
-    assert_eq!(ledger.get::<_, String>("source_ref"), "Kernel Panic Punch");
 }
 
 #[tokio::test]
@@ -234,4 +183,67 @@ async fn transfer_chips_leaves_unrelated_users_untouched() {
         .expect("bystander ledger")
         .get(0);
     assert_eq!(ledger_rows, 0);
+}
+
+#[tokio::test]
+async fn welcome_pour_comps_only_the_first_drink_ever() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "welcome-pour").await;
+    let chips = ChipService::new(test_db.db.clone());
+
+    let first = chips
+        .grant_free_drink(user.id, late_core::models::drinks::WELCOME_DRINK_POINTS)
+        .await
+        .expect("first comp succeeds")
+        .expect("first comp pours");
+    assert_eq!(
+        first.drunk_points,
+        late_core::models::drinks::WELCOME_DRINK_POINTS
+    );
+    assert_eq!(first.lifetime_spent, 0);
+
+    // A tour rerun after a mid-tour disconnect: the welcome is spent.
+    let second = chips
+        .grant_free_drink(user.id, late_core::models::drinks::WELCOME_DRINK_POINTS)
+        .await
+        .expect("second comp succeeds");
+    assert!(second.is_none());
+
+    // The comp stayed off the tab: one drink, no lifetime spend.
+    let client = test_db.db.get().await.expect("db client");
+    let row = client
+        .query_one(
+            "SELECT drunk_points, lifetime_spent, drink_count
+             FROM user_drinks WHERE user_id = $1",
+            &[&user.id],
+        )
+        .await
+        .expect("drinks row");
+    assert_eq!(
+        row.get::<_, i64>("drunk_points"),
+        late_core::models::drinks::WELCOME_DRINK_POINTS
+    );
+    assert_eq!(row.get::<_, i64>("lifetime_spent"), 0);
+    assert_eq!(row.get::<_, i64>("drink_count"), 1);
+}
+
+#[tokio::test]
+async fn welcome_pour_never_comps_a_prior_drinker() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "welcome-pour-veteran").await;
+    let client = test_db.db.get().await.expect("db client");
+    late_core::models::drinks::UserDrinks::record_purchase(&client, user.id, 200)
+        .await
+        .expect("paid drink");
+    drop(client);
+
+    let chips = ChipService::new(test_db.db.clone());
+    let comp = chips
+        .grant_free_drink(user.id, late_core::models::drinks::WELCOME_DRINK_POINTS)
+        .await
+        .expect("comp call succeeds");
+    assert!(
+        comp.is_none(),
+        "a prior drinker never gets the welcome pour"
+    );
 }

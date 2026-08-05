@@ -8,7 +8,7 @@
 //!
 //! Bodies never contain `@`, so the mention pipeline stays quiet, and the
 //! system author is excluded from unread counts at the SQL layer
-//! (`ChatRoomMember::unread_counts_for_user`).
+//! (`ChatRoom::list_for_user_with_state`).
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -32,7 +32,7 @@ use super::filter::lounge_includes;
 
 /// The system feed's author row. Same lazily-ensured bot pattern as the
 /// ghost users; `settings.system` additionally marks it for the unread-count
-/// exclusion in `ChatRoomMember::unread_counts_for_user`.
+/// exclusion in `ChatRoom::list_for_user_with_state`.
 ///
 /// Prod note: `system` was squatted by a real zero-message account until
 /// 2026-07-12, when the owner renamed it to `system-9` to free the nick.
@@ -76,6 +76,9 @@ pub fn start_lounge_feed_task(
                 return;
             }
         };
+        // Chat snapshots need this id to exclude `· ` activity lines from
+        // unread counts without joining `users` per message.
+        chat.set_system_user_id(system_user_id);
         let mut recent: HashMap<String, Instant> = HashMap::new();
         loop {
             let event = match rx.recv().await {
@@ -164,7 +167,12 @@ async fn ensure_system_user(db: &Db, username_directory: &UsernameDirectory) -> 
     let user =
         if let Some(existing) = User::find_by_fingerprint(&client, SYSTEM_FINGERPRINT).await? {
             User::update_settings(&client, existing.id, &settings).await?;
-            User::ensure_ssh_key(&client, existing.id, SYSTEM_FINGERPRINT).await?;
+            late_core::models::user_ssh_key::UserSshKey::ensure(
+                &client,
+                existing.id,
+                SYSTEM_FINGERPRINT,
+            )
+            .await?;
             existing
         } else {
             let created = User::create(
@@ -176,7 +184,12 @@ async fn ensure_system_user(db: &Db, username_directory: &UsernameDirectory) -> 
                 },
             )
             .await?;
-            User::ensure_ssh_key(&client, created.id, SYSTEM_FINGERPRINT).await?;
+            late_core::models::user_ssh_key::UserSshKey::ensure(
+                &client,
+                created.id,
+                SYSTEM_FINGERPRINT,
+            )
+            .await?;
             created
         };
 

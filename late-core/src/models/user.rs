@@ -41,6 +41,52 @@ impl AudioSource {
     }
 }
 
+/// How a session is driven. Chosen on first entry (see the onboarding prompt),
+/// then editable in settings. The key behavioural lever is whether the terminal
+/// mouse reporting is turned on: off in `Keyboard` so native selection/copy keep
+/// working; on in `Mouse` and `Hybrid`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionMode {
+    /// Keyboard only, the classic terminal/programmer experience; mouse
+    /// reporting stays off so the terminal's own text selection works.
+    Keyboard,
+    /// Mouse-first, Discord-like: everything is clickable, mouse reporting on.
+    Mouse,
+    /// Both keyboard shortcuts and the mouse work. The safe default.
+    #[default]
+    Hybrid,
+}
+
+impl InteractionMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keyboard => "keyboard",
+            Self::Mouse => "mouse",
+            Self::Hybrid => "hybrid",
+        }
+    }
+
+    pub fn from_settings_str(value: &str) -> Self {
+        match value {
+            "keyboard" => Self::Keyboard,
+            "mouse" => Self::Mouse,
+            _ => Self::Hybrid,
+        }
+    }
+
+    /// Whether the terminal's mouse reporting should be enabled in this mode.
+    pub fn mouse_enabled(self) -> bool {
+        matches!(self, Self::Mouse | Self::Hybrid)
+    }
+
+    /// Whether keyboard shortcuts are the primary/expected input (for which set
+    /// of on-screen hints to show). Both keyboard-only and hybrid say yes.
+    pub fn keyboard_primary(self) -> bool {
+        matches!(self, Self::Keyboard | Self::Hybrid)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IcecastStream {
@@ -123,10 +169,16 @@ pub const USERNAME_MAX_LEN: usize = 32;
 /// Master on/off for the global right sidebar. The sidebar only appears on the
 /// first three top-level screens (Home, Arcade, Rooms); which panels show and
 /// in what order is governed by the component list, not by this mode.
+///
+/// `Auto` hands the decision to the terminal: the sidebar shows only when the
+/// session is wide enough to spare the columns, so one account works on both a
+/// phone and a desktop. The width thresholds live in `late-ssh`'s render layer,
+/// which is the only place that knows the live terminal size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RightSidebarMode {
     On,
     Off,
+    Auto,
 }
 
 impl RightSidebarMode {
@@ -134,26 +186,75 @@ impl RightSidebarMode {
         match self {
             Self::On => "on",
             Self::Off => "off",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim() {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            "auto" => Some(Self::Auto),
+            _ => None,
         }
     }
 
     pub fn cycle(self, _forward: bool) -> Self {
         match self {
             Self::On => Self::Off,
-            Self::Off => Self::On,
+            Self::Off => Self::Auto,
+            Self::Auto => Self::On,
+        }
+    }
+}
+
+/// Master on/off for the Home room-list rail, the left column. Mirrors
+/// [`RightSidebarMode`], including `Auto`: the rail folds away on terminals too
+/// narrow to carry three columns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RoomListMode {
+    On,
+    Off,
+    Auto,
+}
+
+impl RoomListMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::On => "on",
+            Self::Off => "off",
+            Self::Auto => "auto",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim() {
+            "on" => Some(Self::On),
+            "off" => Some(Self::Off),
+            "auto" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    pub fn cycle(self, _forward: bool) -> Self {
+        match self {
+            Self::On => Self::Off,
+            Self::Off => Self::Auto,
+            Self::Auto => Self::On,
         }
     }
 }
 
 /// Number of reorderable/toggleable panels in the right sidebar (the clock is
 /// always pinned at the top and is not part of this list).
-pub const RIGHT_SIDEBAR_COMPONENT_COUNT: usize = 4;
+pub const RIGHT_SIDEBAR_COMPONENT_COUNT: usize = 3;
 
 /// A right-sidebar panel the user can reorder and toggle. The clock is not
-/// listed here — it is always pinned at the top of the sidebar.
+/// listed here — it is always pinned at the top of the sidebar. The
+/// visualizer is not a panel of its own: it renders inline at the top of
+/// `Music`, see `common/sidebar.rs`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RightSidebarComponent {
-    Visualizer,
     Music,
     Bonsai,
     Daily,
@@ -162,15 +263,14 @@ pub enum RightSidebarComponent {
 impl RightSidebarComponent {
     /// Default order, top to bottom. Used when a user has no stored list and
     /// to backfill any panels missing from a stored list. Space cuts by
-    /// shrink priority (the visualizer goes first); Bonsai is the one
-    /// flexible panel and absorbs leftover rows. Stale stored keys (e.g. the
-    /// retired "activity" panel) are dropped on read by `from_key`.
+    /// shrink priority; Bonsai is the one flexible panel and absorbs leftover
+    /// rows. Stale stored keys (e.g. the retired "activity" and "visualizer"
+    /// panels) are dropped on read by `from_key`.
     pub const ALL: [RightSidebarComponent; RIGHT_SIDEBAR_COMPONENT_COUNT] =
-        [Self::Daily, Self::Visualizer, Self::Music, Self::Bonsai];
+        [Self::Daily, Self::Music, Self::Bonsai];
 
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Visualizer => "visualizer",
             Self::Music => "music",
             Self::Bonsai => "bonsai",
             Self::Daily => "daily",
@@ -179,7 +279,6 @@ impl RightSidebarComponent {
 
     pub fn from_key(key: &str) -> Option<Self> {
         match key.trim() {
-            "visualizer" => Some(Self::Visualizer),
             "music" => Some(Self::Music),
             "bonsai" => Some(Self::Bonsai),
             "daily" => Some(Self::Daily),
@@ -189,7 +288,6 @@ impl RightSidebarComponent {
 
     pub fn label(self) -> &'static str {
         match self {
-            Self::Visualizer => "Visualizer",
             Self::Music => "Audio playback",
             Self::Bonsai => "Bonsai",
             Self::Daily => "Lobby",
@@ -253,6 +351,7 @@ pub fn normalize_right_sidebar_components(
 
 const IGNORED_USER_IDS_KEY: &str = "ignored_user_ids";
 const FRIEND_USER_IDS_KEY: &str = "friend_user_ids";
+const INTERACTION_MODE_KEY: &str = "interaction_mode";
 const THEME_ID_KEY: &str = "theme_id";
 const AUDIO_SOURCE_KEY: &str = "audio_source";
 const ICECAST_STREAM_KEY: &str = "icecast_stream";
@@ -269,6 +368,7 @@ const RIGHT_SIDEBAR_COMPONENTS_KEY: &str = "right_sidebar_components";
 const SHOW_AQUARIUM_TRAY_KEY: &str = "show_aquarium_tray";
 const SHOW_PET_STRIP_KEY: &str = "show_pet_strip";
 const SHOW_ROOM_LIST_SIDEBAR_KEY: &str = "show_room_list_sidebar";
+const ROOM_LIST_MODE_KEY: &str = "room_list_mode";
 const KEEP_COMPOSER_FOCUSED_KEY: &str = "keep_composer_focused";
 const START_WITH_MUSIC_MUTED_KEY: &str = "start_with_music_muted";
 const LAND_ON_HOME_KEY: &str = "land_on_home";
@@ -308,36 +408,6 @@ impl User {
         Ok(row.map(Self::from))
     }
 
-    pub async fn ensure_ssh_key(
-        client: &impl GenericClient,
-        user_id: Uuid,
-        fingerprint: &str,
-    ) -> Result<()> {
-        client
-            .execute(
-                "INSERT INTO user_ssh_keys (user_id, fingerprint)
-                 VALUES ($1, $2)
-                 ON CONFLICT (fingerprint) DO UPDATE
-                 SET user_id = EXCLUDED.user_id,
-                     last_seen = current_timestamp,
-                     updated = current_timestamp",
-                &[&user_id, &fingerprint],
-            )
-            .await?;
-        Ok(())
-    }
-
-    pub async fn touch_ssh_key(client: &Client, fingerprint: &str) -> Result<()> {
-        client
-            .execute(
-                "UPDATE user_ssh_keys
-                 SET last_seen = current_timestamp, updated = current_timestamp
-                 WHERE fingerprint = $1",
-                &[&fingerprint],
-            )
-            .await?;
-        Ok(())
-    }
     pub async fn update_last_seen(&mut self, client: &Client) -> Result<()> {
         self.last_seen = Utc::now();
         client
@@ -658,6 +728,22 @@ impl User {
         Ok(extract_uuid_ids(&settings, FRIEND_USER_IDS_KEY))
     }
 
+    /// Friends and ignores from one read. Both lists live in the same
+    /// `users.settings` document and the chat snapshot needs both on every
+    /// pass, so calling the two single-list helpers fetched the identical row
+    /// twice: 11.1M `SELECT settings` calls in an 18-day window, exactly 2.006
+    /// per snapshot.
+    pub async fn friend_and_ignored_user_ids(
+        client: &Client,
+        user_id: Uuid,
+    ) -> Result<(Vec<Uuid>, Vec<Uuid>)> {
+        let settings = Self::settings_for_user(client, user_id).await?;
+        Ok((
+            extract_uuid_ids(&settings, FRIEND_USER_IDS_KEY),
+            extract_uuid_ids(&settings, IGNORED_USER_IDS_KEY),
+        ))
+    }
+
     pub async fn favorite_room_ids(client: &Client, user_id: Uuid) -> Result<Vec<Uuid>> {
         let settings = Self::settings_for_user(client, user_id).await?;
         Ok(extract_favorite_room_ids(&settings))
@@ -702,6 +788,28 @@ impl User {
                      updated = current_timestamp
                  WHERE id = $3",
                 &[&AUDIO_SOURCE_KEY, &value, &user_id],
+            )
+            .await?;
+        if updated == 0 {
+            bail!("user not found");
+        }
+        Ok(())
+    }
+
+    /// Persist the chosen interaction mode (keyboard / mouse / hybrid).
+    pub async fn set_interaction_mode(
+        client: &Client,
+        user_id: Uuid,
+        mode: InteractionMode,
+    ) -> Result<()> {
+        let value = mode.as_str();
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object($1::text, $2::text),
+                     updated = current_timestamp
+                 WHERE id = $3",
+                &[&INTERACTION_MODE_KEY, &value, &user_id],
             )
             .await?;
         if updated == 0 {
@@ -1049,6 +1157,17 @@ pub fn extract_birthday(settings: &Value) -> Option<String> {
         .and_then(crate::models::birthday::normalize_birthday)
 }
 
+/// The chosen interaction mode, or `None` if the user has never picked one -
+/// which is the signal to show the first-run onboarding prompt.
+pub fn extract_interaction_mode(settings: &Value) -> Option<InteractionMode> {
+    settings
+        .get(INTERACTION_MODE_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(InteractionMode::from_settings_str)
+}
+
 pub fn extract_theme_id(settings: &Value) -> Option<String> {
     settings
         .get(THEME_ID_KEY)
@@ -1169,6 +1288,7 @@ pub fn extract_right_sidebar_mode(settings: &Value) -> RightSidebarMode {
         .map(str::trim)
     {
         Some("off") => RightSidebarMode::Off,
+        Some("auto") => RightSidebarMode::Auto,
         // Legacy per-screen `"custom"` collapses to On now that visibility is
         // governed by the global component list.
         Some("on" | "custom") => RightSidebarMode::On,
@@ -1215,6 +1335,24 @@ pub fn extract_show_room_list_sidebar(settings: &Value) -> bool {
         .get(SHOW_ROOM_LIST_SIDEBAR_KEY)
         .and_then(Value::as_bool)
         .unwrap_or(true)
+}
+
+/// The account default for the room-list rail. Mirrors
+/// `extract_right_sidebar_mode`, including its legacy bool fallback: accounts
+/// that predate the mode key only stored `show_room_list_sidebar`, and the bool
+/// is still written alongside the mode so a rollback keeps working.
+pub fn extract_room_list_mode(settings: &Value) -> RoomListMode {
+    match settings
+        .get(ROOM_LIST_MODE_KEY)
+        .and_then(Value::as_str)
+        .map(str::trim)
+    {
+        Some("off") => RoomListMode::Off,
+        Some("auto") => RoomListMode::Auto,
+        Some("on") => RoomListMode::On,
+        _ if extract_show_room_list_sidebar(settings) => RoomListMode::On,
+        _ => RoomListMode::Off,
+    }
 }
 
 /// Tweak: when true, pressing Enter in the chat composer sends the message

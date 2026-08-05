@@ -36,8 +36,10 @@ jobs:
       web_image_tag: ${{ steps.web_image.outputs.image_tag }}
       nethack_image_tag: ${{ steps.nethack_image.outputs.image_tag }}
       dopewars_image_tag: ${{ steps.dopewars_image.outputs.image_tag }}
+      codekeep_image_tag: ${{ steps.codekeep_image.outputs.image_tag }}
       dcss_image_tag: ${{ steps.dcss_image.outputs.image_tag }}
       usurper_image_tag: ${{ steps.usurper_image.outputs.image_tag }}
+      brogue_image_tag: ${{ steps.brogue_image.outputs.image_tag }}
     steps:
       - name: setup_kubectl
         uses: azure/setup-kubectl@v5
@@ -71,6 +73,12 @@ jobs:
           tag=$(kubectl get deployment late-dopewars -n default -o jsonpath='{.spec.template.spec.containers[0].image}')
           echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
 
+      - name: get_codekeep_image_tag
+        id: codekeep_image
+        run: |
+          tag=$(kubectl get deployment late-codekeep -n default -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
       - name: get_dcss_image_tag
         id: dcss_image
         run: |
@@ -81,6 +89,12 @@ jobs:
         id: usurper_image
         run: |
           tag=$(kubectl get deployment late-usurper -n default -o jsonpath='{.spec.template.spec.containers[0].image}')
+          echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: get_brogue_image_tag
+        id: brogue_image
+        run: |
+          tag=$(kubectl get deployment late-brogue -n default -o jsonpath='{.spec.template.spec.containers[0].image}')
           echo "image_tag=$tag" >> "$GITHUB_OUTPUT"
 
   terraform:
@@ -96,8 +110,10 @@ jobs:
       web_image_tag: ${{ needs.get_images.outputs.web_image_tag }}
       nethack_image_tag: ${{ needs.get_images.outputs.nethack_image_tag }}
       dopewars_image_tag: ${{ needs.get_images.outputs.dopewars_image_tag }}
+      codekeep_image_tag: ${{ needs.get_images.outputs.codekeep_image_tag }}
       dcss_image_tag: ${{ needs.get_images.outputs.dcss_image_tag }}
       usurper_image_tag: ${{ needs.get_images.outputs.usurper_image_tag }}
+      brogue_image_tag: ${{ needs.get_images.outputs.brogue_image_tag }}
       environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || (github.event.release.prerelease == true && 'staging' || 'production') }}
       source_ref: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref }}
 

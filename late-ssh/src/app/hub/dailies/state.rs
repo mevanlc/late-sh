@@ -5,7 +5,9 @@ use crate::app::common::primitives::Banner;
 
 use super::svc::{QuestEvent, QuestService, QuestSnapshot};
 
-pub(crate) struct QuestState {
+/// `pub` (not `pub(crate)`) because the public `ArcadeHubView` carries a
+/// reference to it for the arcade quest strip.
+pub struct QuestState {
     user_id: Uuid,
     snapshot_rx: watch::Receiver<QuestSnapshot>,
     event_rx: broadcast::Receiver<QuestEvent>,
@@ -14,6 +16,7 @@ pub(crate) struct QuestState {
 
 pub(crate) struct QuestTick {
     pub banner: Option<Banner>,
+    pub snapshot_changed: bool,
 }
 
 impl QuestState {
@@ -64,7 +67,10 @@ impl QuestState {
             }
         }
 
-        QuestTick { banner }
+        QuestTick {
+            banner,
+            snapshot_changed,
+        }
     }
 
     pub(crate) fn snapshot(&self) -> &QuestSnapshot {

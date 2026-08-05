@@ -5,8 +5,8 @@ use axum::{
         ConnectInfo, Query, State as AxumState, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
+    http::HeaderMap,
     http::StatusCode,
-    http::{HeaderMap, HeaderValue},
     middleware::{self},
     response::IntoResponse,
     routing::get,
@@ -15,19 +15,19 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use late_core::api_types::{NowPlayingResponse, StatusResponse, Track};
 use late_core::telemetry::http_telemetry_middleware;
 use late_core::{MutexRecover, audio::VizFrame};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
+    collections::BTreeMap,
     net::{IpAddr, SocketAddr},
     time::Duration,
 };
 use tokio::{net::TcpListener, sync::broadcast};
-use tower_http::cors::Any;
-use tower_http::cors::CorsLayer;
 
 use crate::{
     app::audio::{
         client_state::{ClientAudioState, ClientKind, ClientPlatform, ClientSshMode},
-        svc::PlayerStateReport,
+        stations,
+        svc::{AudioMode, PlayerStateReport, QueueItemView},
     },
     app::voice::svc::VoiceClientState,
     metrics,
@@ -65,9 +65,16 @@ enum WsPayload {
         capabilities: Vec<String>,
         muted: bool,
         volume_percent: u8,
-        #[serde(default = "default_icecast_output_available")]
-        icecast_output_available: bool,
     },
+    /// Audio control initiated on a paired client (the CLI's desktop MPRIS
+    /// surface: a widget's play/pause, media keys, a volume slider). The
+    /// server fans it back out to every paired client on the token, exactly
+    /// like a TUI keypress, so the CLI, the webview helper, and the sidebar
+    /// all converge on the same state.
+    #[serde(rename = "set_muted")]
+    SetMuted { muted: bool },
+    #[serde(rename = "set_volume")]
+    SetVolume { volume_percent: u8 },
     #[serde(rename = "clipboard_image")]
     ClipboardImage {
         data_base64: String,
@@ -95,8 +102,72 @@ enum WsPayload {
     },
 }
 
-const fn default_icecast_output_available() -> bool {
-    true
+/// How many upcoming tracks `/api/listen` exposes. The listen page shows a
+/// short "up next" list, not the whole 50-item snapshot.
+const PUBLIC_QUEUE_LIMIT: usize = 10;
+
+/// One YouTube track on the public listen route. Deliberately a separate type
+/// from `QueueItemView`: this is a published contract, so internal fields
+/// (`submitter_id`, vote score, unskippable) stay out of it and in-app churn
+/// cannot silently reshape the response.
+#[derive(Serialize)]
+struct PublicTrack {
+    video_id: String,
+    title: Option<String>,
+    channel: Option<String>,
+    duration_ms: Option<i32>,
+    /// Wall-clock start of the current track, so a listener joining mid-song
+    /// seeks into it instead of restarting it.
+    started_at_ms: Option<i64>,
+    is_stream: bool,
+    /// The username who queued it. Drives the credit line on the listen page.
+    submitter: String,
+}
+
+impl From<QueueItemView> for PublicTrack {
+    fn from(item: QueueItemView) -> Self {
+        Self {
+            video_id: item.video_id,
+            title: item.title,
+            channel: item.channel,
+            duration_ms: item.duration_ms,
+            started_at_ms: item.started_at_ms,
+            is_stream: item.is_stream,
+            submitter: item.submitter,
+        }
+    }
+}
+
+/// What is currently on air for one Icecast mount or one Nightride station.
+#[derive(Serialize)]
+struct PublicAir {
+    artist: Option<String>,
+    title: String,
+    /// Present for Nightride stations, whose audio the client fetches
+    /// directly. Icecast mounts are served through late-web's own `/stream`
+    /// proxy, so that URL belongs to late-web, not here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_url: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct PublicYoutube {
+    current: Option<PublicTrack>,
+    queue: Vec<PublicTrack>,
+}
+
+/// Everything the public listen page renders, in one in-memory read. Serving
+/// this as a single route keeps the page to one poll instead of fanning out
+/// across now-playing, radio-meta, and queue.
+#[derive(Serialize)]
+struct ListenResponse {
+    listeners: usize,
+    audio_mode: AudioMode,
+    /// Icecast mounts, keyed by mount name (`chill`, `classical`).
+    streams: BTreeMap<String, PublicAir>,
+    /// Nightride stations, keyed by station name.
+    stations: BTreeMap<String, PublicAir>,
+    youtube: PublicYoutube,
 }
 
 pub async fn run_api_server(
@@ -118,25 +189,17 @@ pub async fn run_api_server_with_listener(
     state: State,
     shutdown: Option<late_core::shutdown::CancellationToken>,
 ) -> Result<()> {
-    let origins = state.config.allowed_origins.clone();
-    let cors = CorsLayer::new()
-        .allow_origin(
-            origins
-                .iter()
-                .map(|s| parse_allowed_origin(s))
-                .collect::<Vec<_>>(),
-        )
-        .allow_methods(Any)
-        .allow_headers(Any);
-
+    // No CORS layer: the only browser that ever called this API directly was
+    // the connect page, and browser pairing is gone. late-web reaches these
+    // routes server-side over the internal URL, and the CLI and webview helper
+    // are not subject to CORS.
     let app = Router::new()
         .route("/api/health", get(get_health))
         .route("/api/now-playing", get(get_now_playing))
         .route("/api/radio-meta", get(get_radio_meta))
+        .route("/api/listen", get(get_listen))
         .route("/api/status", get(get_status))
         .route("/api/ws/pair", get(ws_handler))
-        .route("/api/ws/tunnel", get(crate::web_tunnel::ws_handler))
-        .layer(cors)
         .layer(middleware::from_fn(http_telemetry_middleware))
         .with_state(state);
 
@@ -152,12 +215,6 @@ pub async fn run_api_server_with_listener(
     .context("API server failed")?;
 
     Ok(())
-}
-
-fn parse_allowed_origin(origin: &str) -> HeaderValue {
-    origin.parse::<HeaderValue>().unwrap_or_else(|err| {
-        panic!("invalid LATE_ALLOWED_ORIGINS entry '{origin}': {err}");
-    })
 }
 
 #[derive(Deserialize)]
@@ -204,6 +261,65 @@ async fn get_radio_meta(
     AxumState(state): AxumState<State>,
 ) -> Json<std::collections::HashMap<String, crate::app::audio::radio_meta::svc::ArtistTitle>> {
     Json(state.radio_meta_rx.borrow().clone())
+}
+
+/// Everything the public listen page needs, for listeners who are not paired
+/// to an SSH session. Every field is read from an in-memory watch, so polling
+/// this route costs no DB work.
+async fn get_listen(AxumState(state): AxumState<State>) -> Json<ListenResponse> {
+    let snapshot = state.audio_service.current_snapshot();
+
+    let streams = state
+        .now_playing_rx
+        .borrow()
+        .iter()
+        .map(|(mount, np)| {
+            (
+                mount.clone(),
+                PublicAir {
+                    artist: np.track.artist.clone(),
+                    title: np.track.title.clone(),
+                    stream_url: None,
+                },
+            )
+        })
+        .collect();
+
+    // The Nightride feed carries more stations than late.sh offers; the
+    // strict lookup drops the rest rather than listing a station with no way
+    // to play it.
+    let stations = state
+        .radio_meta_rx
+        .borrow()
+        .iter()
+        .filter_map(|(station, meta)| {
+            let stream_url = stations::radio_station_url_by_key(station)?;
+            Some((
+                station.clone(),
+                PublicAir {
+                    artist: Some(meta.artist.clone()),
+                    title: meta.title.clone(),
+                    stream_url: Some(stream_url),
+                },
+            ))
+        })
+        .collect();
+
+    Json(ListenResponse {
+        listeners: active_user_count(&state.active_users),
+        audio_mode: snapshot.audio_mode,
+        streams,
+        stations,
+        youtube: PublicYoutube {
+            current: snapshot.current.map(PublicTrack::from),
+            queue: snapshot
+                .queue
+                .into_iter()
+                .take(PUBLIC_QUEUE_LIMIT)
+                .map(PublicTrack::from)
+                .collect(),
+        },
+    })
 }
 
 async fn get_health(AxumState(state): AxumState<State>) -> (StatusCode, &'static str) {
@@ -290,12 +406,58 @@ async fn ws_handler(
     }
     ws.max_message_size(PAIR_WS_MAX_MESSAGE_BYTES)
         .max_frame_size(PAIR_WS_MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move { handle_socket(socket, params.token, state).await })
+        .on_upgrade(move |socket| async move {
+            handle_socket(socket, params.token, state, client_ip).await
+        })
 }
 
-async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
+/// Decrements the per-IP pair socket count on drop, covering every exit path
+/// out of `handle_socket`.
+struct PairWsIpGuard {
+    state: State,
+    ip: IpAddr,
+}
+
+impl Drop for PairWsIpGuard {
+    fn drop(&mut self) {
+        let mut counts = self.state.pair_ws_counts.lock_recover();
+        if let Some(count) = counts.get_mut(&self.ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                counts.remove(&self.ip);
+            }
+        }
+    }
+}
+
+fn try_acquire_pair_ws_slot(state: &State, ip: IpAddr) -> Option<PairWsIpGuard> {
+    {
+        let mut counts = state.pair_ws_counts.lock_recover();
+        let count = counts.entry(ip).or_insert(0);
+        if *count >= state.config.max_conns_per_ip {
+            return None;
+        }
+        *count += 1;
+    }
+    Some(PairWsIpGuard {
+        state: state.clone(),
+        ip,
+    })
+}
+
+async fn handle_socket(mut socket: WebSocket, token: String, state: State, client_ip: IpAddr) {
     let token_hint = token_hint(&token);
-    let (control_tx, mut control_rx) = tokio::sync::mpsc::unbounded_channel();
+    let Some(_ip_guard) = try_acquire_pair_ws_slot(&state, client_ip) else {
+        tracing::warn!(
+            ip = %client_ip,
+            token_hint = %token_hint,
+            limit = state.config.max_conns_per_ip,
+            "ws pair rejected: per-ip pair socket limit reached"
+        );
+        return;
+    };
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::channel(crate::paired_clients::PAIR_CONTROL_QUEUE_CAP);
     // The session must still be live (we just checked `has_session`). The
     // race window where the SSH session disconnects between the check and
     // this lookup is closed by giving up the WS upgrade if user_for returns
@@ -329,10 +491,17 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
         Err(_) => false,
     };
     let mut applied_initial_mute = false;
-    let registration_id =
+    let Some(registration_id) =
         state
             .paired_client_registry
-            .register(token.clone(), control_tx, user_id, audio_source);
+            .register(token.clone(), control_tx, user_id, audio_source)
+    else {
+        tracing::warn!(
+            token_hint = %token_hint,
+            "ws pair rejected: token at paired-client capacity"
+        );
+        return;
+    };
     state
         .paired_client_registry
         .set_stream_preferences(user_id, icecast_stream, radio_station);
@@ -357,10 +526,6 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
                 .as_ref()
                 .map(|selection| selection.url.clone()),
             station: stream_selection.map(|selection| selection.station.to_string()),
-            web_icecast_enabled: state.paired_client_registry.web_icecast_enabled(&token),
-            embedded_webview_enabled: state
-                .paired_client_registry
-                .embedded_webview_enabled(&token),
         },
         &token_hint,
         "initial playback source",
@@ -456,9 +621,12 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
                                 capabilities,
                                 muted,
                                 volume_percent,
-                                icecast_output_available,
                             } => {
-                                let result = state.paired_client_registry.update_state_and_enforce_mute_policy(
+                                // No source rebroadcast here. `SetPlaybackSource`
+                                // depends only on the user's persisted source, so
+                                // who else is paired cannot change what this
+                                // client should be playing.
+                                if let Some(kind) = state.paired_client_registry.update_state_and_enforce_mute_policy(
                                     &token,
                                     registration_id,
                                     ClientAudioState {
@@ -468,36 +636,9 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
                                         capabilities,
                                         muted,
                                         volume_percent,
-                                        icecast_output_available,
                                     },
-                                );
-                                if let Some(update) = result {
-                                    last_client_kind = update.new_kind;
-                                    if (update.previous_kind == ClientKind::Cli)
-                                        != (update.new_kind == ClientKind::Cli)
-                                        || update.previous_claimed_icecast_output
-                                            != update.new_claims_icecast_output
-                                    {
-                                        state
-                                            .paired_client_registry
-                                            .broadcast_playback_source_for_token(&token);
-                                    }
-                                    if update.new_kind == ClientKind::Browser
-                                        && update.previous_kind != ClientKind::Browser
-                                    {
-                                        // Best-effort nudge: a stalled session
-                                        // channel only costs the browser one
-                                        // source replay; it must not tear down
-                                        // the pair socket.
-                                        let _ = route_session_message(
-                                            &state,
-                                            &token,
-                                            &token_hint,
-                                            SessionMessage::BrowserPaired,
-                                            "browser paired",
-                                        )
-                                        .await;
-                                    }
+                                ) {
+                                    last_client_kind = kind;
                                 }
                                 if !applied_initial_mute {
                                     // Webview helpers align to the session's
@@ -506,7 +647,7 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
                                     // controls), not the boot preference: a
                                     // helper respawn or reconnect mid-session
                                     // must not unmute a muted session.
-                                    let desired_muted = if ssh_mode == ClientSshMode::Webview {
+                                    let desired_muted = if client_kind == ClientKind::Webview {
                                         state
                                             .paired_client_registry
                                             .cli_muted(&token)
@@ -527,6 +668,22 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
                                         applied_initial_mute = true;
                                     }
                                 }
+                                continue;
+                            }
+                            WsPayload::SetMuted { muted } => {
+                                state.paired_client_registry.send_control(
+                                    &token,
+                                    crate::paired_clients::PairControlMessage::SetMuted { muted },
+                                );
+                                continue;
+                            }
+                            WsPayload::SetVolume { volume_percent } => {
+                                state.paired_client_registry.send_control(
+                                    &token,
+                                    crate::paired_clients::PairControlMessage::SetVolume {
+                                        volume_percent: volume_percent.min(100),
+                                    },
+                                );
                                 continue;
                             }
                             WsPayload::ClipboardImage {
@@ -642,8 +799,7 @@ async fn handle_socket(mut socket: WebSocket, token: String, state: State) {
 }
 
 /// Drop a paired-client registration and refresh the remaining clients'
-/// playback-source view. CLI presence controls browser Icecast, and real
-/// browser presence controls the embedded CLI webview fallback.
+/// playback-source view.
 fn release_pair_registration(state: &State, token: &str, registration_id: u64) {
     state
         .paired_client_registry

@@ -19,57 +19,74 @@ async fn make_app_harness() -> (late_core::test_utils::TestDb, crate::app::state
 }
 
 #[tokio::test]
-async fn question_mark_opens_pair_guide_first() {
+async fn guide_routing_preserves_dashboard_content_input_and_lateania_context() {
     let (_test_db, mut app) = make_app_harness().await;
+
+    wait_for_render_contains(&mut app, " Home ").await;
+
+    app.handle_input(b"\x12");
+    let frame = render_plain(&mut app);
+    assert!(!frame.contains("Install `late` / Listen Anywhere"));
+    assert!(!frame.contains("Browser pairing"));
+
+    // The old terminal FAQ byte no longer opens a standalone modal; those
+    // topics now live in the guide.
+    app.handle_input(b"\x0c");
+    assert!(
+        !render_plain(&mut app).contains("Why copy sometimes silently fails"),
+        "the legacy help byte must remain inert"
+    );
 
     app.handle_input(b"b");
     assert!(
-        !render_plain(&mut app).contains("Install `late` / Pair Browser"),
+        !render_plain(&mut app).contains("Install `late` / Listen Anywhere"),
         "lowercase b should not open the guide"
     );
 
     app.handle_input(b"?");
-    wait_for_render_contains(&mut app, "Install `late` / Pair Browser").await;
+    wait_for_render_contains(&mut app, "Install `late` / Listen Anywhere").await;
     wait_for_render_contains(&mut app, "https://cli.late.sh/install.sh | bash").await;
     wait_for_render_contains(&mut app, "https://cli.late.sh/install.ps1 | iex").await;
     wait_for_render_contains(&mut app, "What `late` unlocks").await;
-}
-
-#[tokio::test]
-async fn mouse_move_does_not_close_pair_guide() {
-    let (_test_db, mut app) = make_app_harness().await;
-
-    app.handle_input(b"?");
-    wait_for_render_contains(&mut app, "Install `late` / Pair Browser").await;
+    wait_for_render_contains(&mut app, "CLI YouTube").await;
+    wait_for_render_contains(&mut app, "?/Esc/q close").await;
 
     app.handle_input(b"\x1b[<35;20;5M");
-    wait_for_render_contains(&mut app, "Install `late` / Pair Browser").await;
-
-    app.handle_input(b"q");
-    assert!(!render_plain(&mut app).contains("Install `late` / Pair Browser"));
-}
-
-#[tokio::test]
-async fn ctrl_r_no_longer_opens_pairing_qr_on_home() {
-    let (_test_db, mut app) = make_app_harness().await;
-
-    app.handle_input(b"\x12");
-    let frame = render_plain(&mut app);
-    assert!(!frame.contains("Install `late` / Pair Browser"));
-    assert!(!frame.contains("Browser pairing"));
-}
-
-#[tokio::test]
-async fn guide_pair_section_contains_pairing_qr_on_home() {
-    let (_test_db, mut app) = make_app_harness().await;
+    wait_for_render_contains(&mut app, "Install `late` / Listen Anywhere").await;
 
     app.handle_input(b"?");
-    wait_for_render_contains(&mut app, "Install `late` / Pair Browser").await;
+    assert!(
+        !render_plain(&mut app).contains("Install `late` / Listen Anywhere"),
+        "? should close the guide"
+    );
+
+    app.handle_input(b"?");
+    wait_for_render_contains(&mut app, "Install `late` / Listen Anywhere").await;
     for _ in 0..30 {
         app.handle_input(b"j");
     }
-    wait_for_render_contains(&mut app, "Open this link on any device").await;
+    wait_for_render_contains(&mut app, "Listen without the CLI").await;
     wait_for_render_contains(&mut app, "█▀▀▀▀▀█").await;
+
+    app.handle_input(b"q");
+    assert!(
+        !render_plain(&mut app).contains("Listen without the CLI"),
+        "q should close the guide"
+    );
+
+    // Lateania has no top-level key: open Games and launch its default card,
+    // then verify that ? selects the screen-specific guide section.
+    app.handle_input(b"3");
+    wait_for_render_contains(&mut app, " Games ").await;
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, " Lateania ").await;
+
+    app.handle_input(b"?");
+    wait_for_render_contains(&mut app, "Lateania is the persistent BBS-style world").await;
+    assert!(
+        !render_plain(&mut app).contains("Install `late` / Listen Anywhere"),
+        "Lateania should select its own guide section"
+    );
 }
 
 #[tokio::test]

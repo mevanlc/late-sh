@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use late_core::models::user::RightSidebarMode;
+use late_core::models::user::{RightSidebarMode, RoomListMode};
 
 use crate::app::common::{markdown::render_body_to_lines, theme};
 
@@ -686,6 +686,9 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Startup subsection heading
         Constraint::Length(1),                // land on home row
+        Constraint::Length(1),                // breathing
+        Constraint::Length(1),                // Input subsection heading
+        Constraint::Length(1),                // interaction mode row
         Constraint::Min(0),                   // flex spacer
         Constraint::Length(gem_strip_height), // gem
     ])
@@ -720,7 +723,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             TweakRow::RightSidebar,
             width,
             "Right sidebar",
-            right_sidebar_mode_span(state.draft().right_sidebar_mode),
+            right_sidebar_mode_span(state.device_rails().1),
         )),
         sections[3],
     );
@@ -730,7 +733,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             TweakRow::RoomListSidebar,
             width,
             "Room list",
-            toggle_span(state.draft().show_room_list_sidebar),
+            room_list_mode_span(state.device_rails().0),
         )),
         sections[4],
     );
@@ -793,12 +796,24 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         sections[17],
     );
 
+    frame.render_widget(Paragraph::new(section_heading("Input")), sections[19]);
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::InteractionMode,
+            width,
+            "Interaction mode",
+            interaction_mode_span(state.interaction_mode()),
+        )),
+        sections[20],
+    );
+
     if gem_strip_height > 0 {
         // Pad 2 cols off each side and lift the gem 1 row off the bottom
         // border so it doesn't crowd the dialog frame.
         const PAD_X: u16 = 2;
         const PAD_BOTTOM: u16 = 1;
-        let strip = sections[19];
+        let strip = sections[22];
         let pad_x = PAD_X.min(strip.width / 2);
         let pad_bottom = PAD_BOTTOM.min(strip.height);
         let gem_area = Rect::new(
@@ -2486,6 +2501,28 @@ fn toggle_span(enabled: bool) -> ValueSpan {
     }
 }
 
+fn interaction_mode_span(mode: late_core::models::user::InteractionMode) -> ValueSpan {
+    use late_core::models::user::InteractionMode;
+    match mode {
+        InteractionMode::Keyboard => ValueSpan {
+            text: "○ keyboard".to_string(),
+            style: Style::default().fg(theme::AMBER()),
+        },
+        InteractionMode::Mouse => ValueSpan {
+            text: "● mouse".to_string(),
+            style: Style::default()
+                .fg(theme::SUCCESS())
+                .add_modifier(Modifier::BOLD),
+        },
+        InteractionMode::Hybrid => ValueSpan {
+            text: "◐ hybrid".to_string(),
+            style: Style::default()
+                .fg(theme::SUCCESS())
+                .add_modifier(Modifier::BOLD),
+        },
+    }
+}
+
 fn right_sidebar_mode_span(mode: RightSidebarMode) -> ValueSpan {
     match mode {
         RightSidebarMode::On => ValueSpan {
@@ -2498,6 +2535,31 @@ fn right_sidebar_mode_span(mode: RightSidebarMode) -> ValueSpan {
         RightSidebarMode::Off => ValueSpan {
             text: "○ off".to_string(),
             style: Style::default().fg(theme::TEXT_FAINT()),
+        },
+        RightSidebarMode::Auto => ValueSpan {
+            text: "◐ auto  ⏎ panels".to_string(),
+            style: Style::default().fg(theme::AMBER()),
+        },
+    }
+}
+
+/// The room-list rail row. Mirrors `right_sidebar_mode_span` without the panel
+/// editor affordance: the rail has no panel list of its own.
+fn room_list_mode_span(mode: RoomListMode) -> ValueSpan {
+    match mode {
+        RoomListMode::On => ValueSpan {
+            text: "● on".to_string(),
+            style: Style::default()
+                .fg(theme::SUCCESS())
+                .add_modifier(Modifier::BOLD),
+        },
+        RoomListMode::Off => ValueSpan {
+            text: "○ off".to_string(),
+            style: Style::default().fg(theme::TEXT_FAINT()),
+        },
+        RoomListMode::Auto => ValueSpan {
+            text: "◐ auto".to_string(),
+            style: Style::default().fg(theme::AMBER()),
         },
     }
 }

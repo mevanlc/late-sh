@@ -92,20 +92,8 @@ fn effective_chat_scroll_keeps_selected_message_off_bottom_edge() {
 }
 
 #[test]
-fn chat_rows_fingerprint_changes_when_theme_changes() {
-    let room_id = Uuid::from_u128(1);
+fn chat_rows_cache_key_changes_when_theme_changes() {
     let user_id = Uuid::from_u128(2);
-    let message = ChatMessage {
-        id: Uuid::from_u128(3),
-        created: Utc::now(),
-        updated: Utc::now(),
-        pinned: false,
-        reply_to_message_id: None,
-        reply_to_user_id: None,
-        room_id,
-        user_id,
-        body: "hello".to_string(),
-    };
     let usernames = HashMap::from([(user_id, "alice".to_string())]);
     let countries = HashMap::new();
     let bonsai_glyphs = HashMap::new();
@@ -117,10 +105,11 @@ fn chat_rows_fingerprint_changes_when_theme_changes() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_styles = HashMap::new();
+    let peer_pomodoros = HashMap::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
 
-    let messages = vec![&message];
     let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
         current_user_id: user_id,
         afk_user_ids: &afk_user_ids,
         show_flag_fallback: false,
@@ -135,160 +124,24 @@ fn chat_rows_fingerprint_changes_when_theme_changes() {
         unread_marker: None,
         drunk_levels: &drunk_levels,
         name_styles: &name_styles,
+        peer_pomodoros: &peer_pomodoros,
     };
 
     theme::set_current_by_id("late");
-    let late_fingerprint = chat_rows_fingerprint(&messages, &ctx, 80);
+    let late_key = chat_rows_cache_key(&ctx, 80);
     theme::set_current_by_id("contrast");
-    let contrast_fingerprint = chat_rows_fingerprint(&messages, &ctx, 80);
+    let contrast_key = chat_rows_cache_key(&ctx, 80);
 
-    assert_ne!(late_fingerprint, contrast_fingerprint);
+    assert_ne!(late_key, contrast_key);
 }
 
 #[test]
-fn chat_rows_fingerprint_changes_when_author_goes_afk() {
-    let room_id = Uuid::from_u128(1);
-    let current_user_id = Uuid::from_u128(2);
-    let author_id = Uuid::from_u128(3);
-    let message = ChatMessage {
-        id: Uuid::from_u128(4),
-        created: Utc::now(),
-        updated: Utc::now(),
-        pinned: false,
-        reply_to_message_id: None,
-        reply_to_user_id: None,
-        room_id,
-        user_id: author_id,
-        body: "hello".to_string(),
-    };
-    let usernames = HashMap::from([
-        (current_user_id, "alice".to_string()),
-        (author_id, "bob".to_string()),
-    ]);
-    let countries = HashMap::new();
-    let bonsai_glyphs = HashMap::new();
-    let chat_badges = HashMap::new();
-    let friend_user_ids = HashSet::new();
-    let message_reactions = HashMap::new();
-    let inline_images = HashMap::new();
-    let profile_award_badges = HashMap::new();
-    let drunk_levels = HashMap::new();
-    let name_styles = HashMap::new();
-    let username_lookup = UsernameLookup::new(&usernames, None);
-    let messages = vec![&message];
-    let active_afk_user_ids = HashSet::from([author_id]);
-    let inactive_afk_user_ids = HashSet::new();
-
-    let active_ctx = ChatRowsContext {
-        current_user_id,
-        afk_user_ids: &active_afk_user_ids,
-        show_flag_fallback: false,
-        usernames: &username_lookup,
-        countries: &countries,
-        friend_user_ids: &friend_user_ids,
-        bonsai_glyphs: &bonsai_glyphs,
-        chat_badges: &chat_badges,
-        profile_award_badges: &profile_award_badges,
-        message_reactions: &message_reactions,
-        inline_images: &inline_images,
-        unread_marker: None,
-        drunk_levels: &drunk_levels,
-        name_styles: &name_styles,
-    };
-    let inactive_ctx = ChatRowsContext {
-        current_user_id,
-        afk_user_ids: &inactive_afk_user_ids,
-        show_flag_fallback: false,
-        usernames: &username_lookup,
-        countries: &countries,
-        friend_user_ids: &friend_user_ids,
-        bonsai_glyphs: &bonsai_glyphs,
-        chat_badges: &chat_badges,
-        profile_award_badges: &profile_award_badges,
-        message_reactions: &message_reactions,
-        inline_images: &inline_images,
-        unread_marker: None,
-        drunk_levels: &drunk_levels,
-        name_styles: &name_styles,
-    };
-
-    assert_ne!(
-        chat_rows_fingerprint(&messages, &active_ctx, 80),
-        chat_rows_fingerprint(&messages, &inactive_ctx, 80)
-    );
-}
-
-#[test]
-fn chat_rows_fingerprint_changes_when_author_drunk_level_changes() {
-    let room_id = Uuid::from_u128(1);
-    let current_user_id = Uuid::from_u128(2);
-    let author_id = Uuid::from_u128(3);
-    let message = ChatMessage {
-        id: Uuid::from_u128(4),
-        created: Utc::now(),
-        updated: Utc::now(),
-        pinned: false,
-        reply_to_message_id: None,
-        reply_to_user_id: None,
-        room_id,
-        user_id: author_id,
-        body: "hello".to_string(),
-    };
-    let usernames = HashMap::from([(author_id, "bob".to_string())]);
-    let countries = HashMap::new();
-    let bonsai_glyphs = HashMap::new();
-    let chat_badges = HashMap::new();
-    let friend_user_ids = HashSet::new();
-    let afk_user_ids = HashSet::new();
-    let message_reactions = HashMap::new();
-    let inline_images = HashMap::new();
-    let profile_award_badges = HashMap::new();
-    let username_lookup = UsernameLookup::new(&usernames, None);
-    let messages = vec![&message];
-    let sober = HashMap::new();
-    let wasted = HashMap::from([(author_id, 4u8)]);
-    let name_styles = HashMap::new();
-
-    let ctx = |drunk_levels| ChatRowsContext {
-        current_user_id,
-        afk_user_ids: &afk_user_ids,
-        show_flag_fallback: false,
-        usernames: &username_lookup,
-        countries: &countries,
-        friend_user_ids: &friend_user_ids,
-        bonsai_glyphs: &bonsai_glyphs,
-        chat_badges: &chat_badges,
-        profile_award_badges: &profile_award_badges,
-        message_reactions: &message_reactions,
-        inline_images: &inline_images,
-        unread_marker: None,
-        drunk_levels,
-        name_styles: &name_styles,
-    };
-
-    assert_ne!(
-        chat_rows_fingerprint(&messages, &ctx(&sober), 80),
-        chat_rows_fingerprint(&messages, &ctx(&wasted), 80)
-    );
-}
-
-#[test]
-fn chat_rows_fingerprint_changes_with_name_style() {
-    let room_id = Uuid::from_u128(1);
-    let current_user_id = Uuid::from_u128(2);
-    let author_id = Uuid::from_u128(3);
-    let message = ChatMessage {
-        id: Uuid::from_u128(4),
-        created: Utc::now(),
-        updated: Utc::now(),
-        pinned: false,
-        reply_to_message_id: None,
-        reply_to_user_id: None,
-        room_id,
-        user_id: author_id,
-        body: "hello".to_string(),
-    };
-    let usernames = HashMap::from([(author_id, "bob".to_string())]);
+fn chat_rows_cache_key_changes_with_any_version_counter() {
+    // The counters are the whole invalidation contract now: a bump to the
+    // room version or either context epoch, or a different rendered room,
+    // must produce a different cache key so the rows rebuild.
+    let user_id = Uuid::from_u128(2);
+    let usernames = HashMap::from([(user_id, "alice".to_string())]);
     let countries = HashMap::new();
     let bonsai_glyphs = HashMap::new();
     let chat_badges = HashMap::new();
@@ -298,32 +151,19 @@ fn chat_rows_fingerprint_changes_with_name_style() {
     let inline_images = HashMap::new();
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
+    let name_styles = HashMap::new();
+    let peer_pomodoros = HashMap::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
-    let messages = vec![&message];
-    let plain = HashMap::new();
-    let glowing = HashMap::from([(
-        author_id,
-        crate::app::common::username_effect::NameStyle::Solid(Color::Rgb(255, 200, 80)),
-    )]);
-    // Two shimmer phases resolve to different two-tones: the fingerprint
-    // must move so the animated name actually repaints.
-    let phase_a = HashMap::from([(
-        author_id,
-        crate::app::common::username_effect::resolve(
-            late_core::models::username_effect::UsernameEffect::Shimmer,
-            0,
-        ),
-    )]);
-    let phase_b = HashMap::from([(
-        author_id,
-        crate::app::common::username_effect::resolve(
-            late_core::models::username_effect::UsernameEffect::Shimmer,
-            1,
-        ),
-    )]);
 
-    let ctx = |name_styles| ChatRowsContext {
-        current_user_id,
+    let base_versions = ChatRowsVersions {
+        room_id: Some(Uuid::from_u128(1)),
+        room_version: 1,
+        chat_ctx_epoch: 1,
+        app_ctx_epoch: 1,
+    };
+    let ctx = |versions| ChatRowsContext {
+        versions,
+        current_user_id: user_id,
         afk_user_ids: &afk_user_ids,
         show_flag_fallback: false,
         usernames: &username_lookup,
@@ -336,17 +176,33 @@ fn chat_rows_fingerprint_changes_with_name_style() {
         inline_images: &inline_images,
         unread_marker: None,
         drunk_levels: &drunk_levels,
-        name_styles,
+        name_styles: &name_styles,
+        peer_pomodoros: &peer_pomodoros,
     };
 
-    assert_ne!(
-        chat_rows_fingerprint(&messages, &ctx(&plain), 80),
-        chat_rows_fingerprint(&messages, &ctx(&glowing), 80)
-    );
-    assert_ne!(
-        chat_rows_fingerprint(&messages, &ctx(&phase_a), 80),
-        chat_rows_fingerprint(&messages, &ctx(&phase_b), 80)
-    );
+    let base_key = chat_rows_cache_key(&ctx(base_versions), 80);
+    let variants = [
+        ChatRowsVersions {
+            room_id: Some(Uuid::from_u128(9)),
+            ..base_versions
+        },
+        ChatRowsVersions {
+            room_version: 2,
+            ..base_versions
+        },
+        ChatRowsVersions {
+            chat_ctx_epoch: 2,
+            ..base_versions
+        },
+        ChatRowsVersions {
+            app_ctx_epoch: 2,
+            ..base_versions
+        },
+    ];
+    for versions in variants {
+        assert_ne!(base_key, chat_rows_cache_key(&ctx(versions), 80));
+    }
+    assert_ne!(base_key, chat_rows_cache_key(&ctx(base_versions), 40));
 }
 
 #[test]
@@ -359,7 +215,6 @@ fn unread_boundary_ignores_read_and_own_messages() {
         id: Uuid::now_v7(),
         created,
         updated: created,
-        pinned: false,
         reply_to_message_id: None,
         reply_to_user_id: None,
         room_id,
@@ -387,6 +242,236 @@ fn unread_boundary_ignores_read_and_own_messages() {
         &make_message(other_user_id, marker + chrono::Duration::seconds(1)),
         current_user_id
     ));
+}
+
+#[test]
+fn mentions_user_matches_the_same_way_the_notifier_does() {
+    assert!(mentions_user("hey @alice look", Some("alice")));
+    // Case-insensitive, like the mention notification path.
+    assert!(mentions_user("hey @Alice look", Some("alice")));
+    // A longer name that merely starts with ours is a different person.
+    assert!(!mentions_user("hey @alicebob look", Some("alice")));
+    // A mention inside a code span is not a mention.
+    assert!(!mentions_user("try `@alice` here", Some("alice")));
+    assert!(!mentions_user("hey @alice look", None));
+}
+
+#[test]
+fn replies_to_user_resolves_the_target_author() {
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let other_user_id = Uuid::from_u128(3);
+    let our_message_id = Uuid::from_u128(10);
+    let their_message_id = Uuid::from_u128(11);
+    let message_authors = HashMap::from([
+        (our_message_id, current_user_id),
+        (their_message_id, other_user_id),
+    ]);
+    let make_reply = |reply_to_message_id, reply_to_user_id| ChatMessage {
+        id: Uuid::from_u128(20),
+        created: Utc::now(),
+        updated: Utc::now(),
+        reply_to_message_id,
+        reply_to_user_id,
+        room_id,
+        user_id: other_user_id,
+        body: "sure".to_string(),
+    };
+
+    // A human reply carries only the target message id.
+    assert!(replies_to_user(
+        &make_reply(Some(our_message_id), None),
+        current_user_id,
+        &message_authors
+    ));
+    assert!(!replies_to_user(
+        &make_reply(Some(their_message_id), None),
+        current_user_id,
+        &message_authors
+    ));
+    // A bot reply carries the target user id directly.
+    assert!(replies_to_user(
+        &make_reply(None, Some(current_user_id)),
+        current_user_id,
+        &message_authors
+    ));
+    // A reply whose target is no longer loaded cannot be resolved.
+    assert!(!replies_to_user(
+        &make_reply(Some(Uuid::from_u128(99)), None),
+        current_user_id,
+        &message_authors
+    ));
+    assert!(!replies_to_user(
+        &make_reply(None, None),
+        current_user_id,
+        &message_authors
+    ));
+}
+
+#[test]
+fn mentions_and_replies_paint_a_background_wash() {
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let other_user_id = Uuid::from_u128(3);
+    let our_message_id = Uuid::from_u128(10);
+    let created = Utc::now();
+    let make_message = |id, user_id, body: &str, reply_to_message_id| ChatMessage {
+        id,
+        created,
+        updated: created,
+        reply_to_message_id,
+        reply_to_user_id: None,
+        room_id,
+        user_id,
+        body: body.to_string(),
+    };
+
+    let plain = make_message(Uuid::from_u128(12), other_user_id, "just talking", None);
+    let mention = make_message(Uuid::from_u128(11), other_user_id, "hey @alice", None);
+    let reply = make_message(
+        Uuid::from_u128(13),
+        other_user_id,
+        "on it",
+        Some(our_message_id),
+    );
+    let ours = make_message(our_message_id, current_user_id, "who can help?", None);
+    // `ensure_chat_rows_cache` walks the slice newest-first.
+    let messages = vec![&reply, &plain, &mention, &ours];
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (other_user_id, "bob".to_string()),
+    ]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_styles = HashMap::new();
+    let peer_pomodoros = HashMap::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
+        current_user_id,
+        afk_user_ids: &afk_user_ids,
+        show_flag_fallback: false,
+        usernames: &username_lookup,
+        countries: &countries,
+        friend_user_ids: &friend_user_ids,
+        bonsai_glyphs: &bonsai_glyphs,
+        chat_badges: &chat_badges,
+        profile_award_badges: &profile_award_badges,
+        message_reactions: &message_reactions,
+        inline_images: &inline_images,
+        unread_marker: None,
+        drunk_levels: &drunk_levels,
+        name_styles: &name_styles,
+        peer_pomodoros: &peer_pomodoros,
+    };
+
+    let width = 60;
+    let mut cache = ChatRowsCache::default();
+    ensure_chat_rows_cache(&mut cache, messages, width, ctx);
+
+    let background_of = |message_id: Uuid| {
+        let row = cache
+            .row_message
+            .iter()
+            .position(|owner| *owner == Some(message_id))
+            .expect("message should own at least one row");
+        let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len());
+        visible.lines[row].spans[0].style.bg
+    };
+
+    assert_eq!(background_of(mention.id), Some(theme::CHAT_MENTION_BG()));
+    assert_eq!(background_of(reply.id), Some(theme::CHAT_REPLY_BG()));
+    assert_eq!(background_of(plain.id), None);
+    // Our own message never washes, even though it is the reply target.
+    assert_eq!(background_of(ours.id), None);
+}
+
+#[test]
+fn background_wash_fills_the_whole_row_width() {
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let other_user_id = Uuid::from_u128(3);
+    let created = Utc::now();
+    let mention = ChatMessage {
+        id: Uuid::from_u128(11),
+        created,
+        updated: created,
+        reply_to_message_id: None,
+        reply_to_user_id: None,
+        room_id,
+        user_id: other_user_id,
+        body: "hey @alice".to_string(),
+    };
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (other_user_id, "bob".to_string()),
+    ]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_styles = HashMap::new();
+    let peer_pomodoros = HashMap::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
+        current_user_id,
+        afk_user_ids: &afk_user_ids,
+        show_flag_fallback: false,
+        usernames: &username_lookup,
+        countries: &countries,
+        friend_user_ids: &friend_user_ids,
+        bonsai_glyphs: &bonsai_glyphs,
+        chat_badges: &chat_badges,
+        profile_award_badges: &profile_award_badges,
+        message_reactions: &message_reactions,
+        inline_images: &inline_images,
+        unread_marker: None,
+        drunk_levels: &drunk_levels,
+        name_styles: &name_styles,
+        peer_pomodoros: &peer_pomodoros,
+    };
+
+    let width = 60;
+    let mut cache = ChatRowsCache::default();
+    ensure_chat_rows_cache(&mut cache, vec![&mention], width, ctx);
+    let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len());
+
+    for (index, line) in visible.lines.iter().enumerate() {
+        if cache.row_message.get(index).copied().flatten() != Some(mention.id) {
+            continue;
+        }
+        let painted: usize = line
+            .spans
+            .iter()
+            .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+            .sum();
+        assert_eq!(painted, width, "row {index} should be washed edge to edge");
+        assert!(
+            line.spans
+                .iter()
+                .all(|span| span.style.bg == Some(theme::CHAT_MENTION_BG())),
+            "row {index} should be washed in one background color"
+        );
+    }
 }
 
 fn composer_view<'a>(textarea: &'a TextArea<'static>) -> ComposerBlockView<'a> {
@@ -435,6 +520,8 @@ fn chat_view<'a>(
     static ROOM_UNREAD_MARKERS: OnceLock<HashMap<Uuid, Option<DateTime<Utc>>>> = OnceLock::new();
     static DRUNK_LEVELS: OnceLock<HashMap<Uuid, u8>> = OnceLock::new();
     static NAME_STYLES: OnceLock<HashMap<Uuid, NameStyle>> = OnceLock::new();
+    static PEER_POMODOROS: OnceLock<HashMap<Uuid, String>> = OnceLock::new();
+    static ROOM_VERSIONS: OnceLock<HashMap<Uuid, u64>> = OnceLock::new();
 
     ChatRenderInput {
         pet_strip: None,
@@ -465,6 +552,9 @@ fn chat_view<'a>(
             query: "",
         },
         rows_cache,
+        room_versions: ROOM_VERSIONS.get_or_init(HashMap::new),
+        chat_ctx_epoch: 0,
+        app_ctx_epoch: 0,
         chat_rooms: rooms,
         overlay: None,
         image_modal: None,
@@ -493,6 +583,7 @@ fn chat_view<'a>(
         current_user_id: Uuid::nil(),
         afk_user_ids: AFK_USER_IDS.get_or_init(HashSet::new),
         ignored_user_ids: IGNORED_USER_IDS.get_or_init(HashSet::new),
+        sticky_unread_dm: None,
         show_flag_fallback: false,
         cursor_visible: false,
         mention_matches: &[],
@@ -505,6 +596,7 @@ fn chat_view<'a>(
         profile_award_badges,
         drunk_levels: DRUNK_LEVELS.get_or_init(HashMap::new),
         name_styles: NAME_STYLES.get_or_init(HashMap::new),
+        peer_pomodoros: PEER_POMODOROS.get_or_init(HashMap::new),
         news_composer,
         news_composing: false,
         news_processing: false,
@@ -1000,6 +1092,9 @@ fn room_list_rows_display_lounge() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rooms = vec![(lounge.clone(), Vec::new())];
     let mut rows_cache = ChatRowsCache::default();
@@ -1100,6 +1195,9 @@ fn cozy_room_rail_places_voice_news_and_feeds_below_mentions_with_jump_keys() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rust = ChatRoom {
         id: Uuid::from_u128(2),
@@ -1113,6 +1211,9 @@ fn cozy_room_rail_places_voice_news_and_feeds_below_mentions_with_jump_keys() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rooms = vec![(lounge.clone(), Vec::new()), (rust.clone(), Vec::new())];
     let mut rows_cache = ChatRowsCache::default();
@@ -1181,6 +1282,9 @@ fn cozy_room_rail_shows_section_keys_when_fold_prefix_is_armed() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rust = ChatRoom {
         id: Uuid::from_u128(2),
@@ -1194,6 +1298,9 @@ fn cozy_room_rail_shows_section_keys_when_fold_prefix_is_armed() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let dm = ChatRoom {
         id: Uuid::from_u128(3),
@@ -1207,6 +1314,9 @@ fn cozy_room_rail_shows_section_keys_when_fold_prefix_is_armed() {
         language_code: None,
         dm_user_a: Some(Uuid::nil()),
         dm_user_b: Some(Uuid::from_u128(4)),
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rooms = vec![
         (lounge.clone(), Vec::new()),
@@ -1259,6 +1369,160 @@ fn cozy_room_rail_shows_section_keys_when_fold_prefix_is_armed() {
     }
 }
 
+fn rail_dm(id: u128, peer: Uuid) -> ChatRoom {
+    ChatRoom {
+        id: Uuid::from_u128(id),
+        created: Utc::now(),
+        updated: Utc::now(),
+        kind: "dm".to_string(),
+        visibility: "dm".to_string(),
+        auto_join: false,
+        slug: None,
+        permanent: false,
+        language_code: None,
+        dm_user_a: Some(Uuid::nil()),
+        dm_user_b: Some(peer),
+        topic: None,
+        rules: None,
+        created_by: None,
+    }
+}
+
+fn rail_channel(id: u128, slug: &str) -> ChatRoom {
+    ChatRoom {
+        id: Uuid::from_u128(id),
+        created: Utc::now(),
+        updated: Utc::now(),
+        kind: "topic".to_string(),
+        visibility: "public".to_string(),
+        auto_join: false,
+        slug: Some(slug.to_string()),
+        permanent: false,
+        language_code: None,
+        dm_user_a: None,
+        dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
+    }
+}
+
+#[test]
+fn cozy_room_rail_lifts_unread_dms_above_channels() {
+    let alice = Uuid::from_u128(101);
+    let bob = Uuid::from_u128(102);
+    let dm_alice = rail_dm(1, alice);
+    let dm_bob = rail_dm(2, bob);
+    let rust = rail_channel(3, "rust");
+    let rooms = vec![
+        (dm_alice.clone(), Vec::new()),
+        (dm_bob.clone(), Vec::new()),
+        (rust.clone(), Vec::new()),
+    ];
+
+    let mut rows_cache = ChatRowsCache::default();
+    let usernames = HashMap::from([(alice, "alice".to_string()), (bob, "bob".to_string())]);
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let countries = HashMap::new();
+    let message_reactions = HashMap::new();
+    let unread_counts = HashMap::from([(dm_bob.id, 2)]);
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let composer = TextArea::default();
+    let profile_award_badges = HashMap::new();
+    let news_composer = TextArea::default();
+    let view = chat_view(
+        &mut rows_cache,
+        &rooms,
+        None,
+        &username_lookup,
+        &countries,
+        &message_reactions,
+        &unread_counts,
+        &bonsai_glyphs,
+        &chat_badges,
+        &profile_award_badges,
+        &composer,
+        &news_composer,
+    );
+
+    let room_list_view = room_list_view_from_render_input(&view);
+    let room_rows = build_cozy_room_rail_rows(&room_list_view, 40);
+    let rendered: Vec<String> = room_rows.lines.iter().map(line_text).collect();
+    let row_of = |slot: RoomSlot| {
+        room_rows
+            .hit_slots
+            .iter()
+            .position(|hit| *hit == Some(slot))
+            .unwrap_or_else(|| panic!("{slot:?} missing from {rendered:?}"))
+    };
+    let header_of = |label: &str| {
+        rendered
+            .iter()
+            .position(|line| strip_room_section_header_prefix(line) == label)
+            .unwrap_or_else(|| panic!("{label:?} header missing from {rendered:?}"))
+    };
+
+    // The unread DM sits in its own group between Core and Channels; the read
+    // one keeps the bottom of the rail.
+    assert!(header_of("unread dms") < row_of(RoomSlot::Room(dm_bob.id)));
+    assert!(row_of(RoomSlot::Room(dm_bob.id)) < header_of("channels"));
+    assert!(header_of("channels") < row_of(RoomSlot::Room(rust.id)));
+    assert!(header_of("dms") < row_of(RoomSlot::Room(dm_alice.id)));
+}
+
+#[test]
+fn cozy_room_rail_hides_dm_with_ignored_peer() {
+    let bob = Uuid::from_u128(102);
+    let dm_bob = rail_dm(2, bob);
+    let rooms = vec![(dm_bob.clone(), Vec::new())];
+
+    let mut rows_cache = ChatRowsCache::default();
+    let usernames = HashMap::from([(bob, "bob".to_string())]);
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let countries = HashMap::new();
+    let message_reactions = HashMap::new();
+    let unread_counts = HashMap::from([(dm_bob.id, 4)]);
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let composer = TextArea::default();
+    let profile_award_badges = HashMap::new();
+    let news_composer = TextArea::default();
+    let ignored = HashSet::from([bob]);
+    let mut view = chat_view(
+        &mut rows_cache,
+        &rooms,
+        None,
+        &username_lookup,
+        &countries,
+        &message_reactions,
+        &unread_counts,
+        &bonsai_glyphs,
+        &chat_badges,
+        &profile_award_badges,
+        &composer,
+        &news_composer,
+    );
+    view.ignored_user_ids = &ignored;
+
+    let room_list_view = room_list_view_from_render_input(&view);
+    let room_rows = build_cozy_room_rail_rows(&room_list_view, 40);
+    let rendered: Vec<String> = room_rows.lines.iter().map(line_text).collect();
+
+    // An ignored peer must not be able to resurface the DM, or its unread
+    // badge, in the rail. Navigation already hides it.
+    assert!(
+        !room_rows
+            .hit_slots
+            .contains(&Some(RoomSlot::Room(dm_bob.id))),
+        "ignored peer's dm rendered in {rendered:?}"
+    );
+    assert!(
+        !rendered.iter().any(|line| line.contains("bob")),
+        "ignored peer's dm rendered in {rendered:?}"
+    );
+}
+
 #[test]
 fn room_section_header_parser_ignores_fold_key_hints() {
     assert_eq!(strip_room_section_header_prefix("[o] - core"), "core");
@@ -1280,6 +1544,9 @@ fn room_list_rows_skip_game_rooms() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let game = ChatRoom {
         id: Uuid::now_v7(),
@@ -1293,6 +1560,9 @@ fn room_list_rows_skip_game_rooms() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rooms = vec![(lounge.clone(), Vec::new()), (game.clone(), Vec::new())];
     let mut rows_cache = ChatRowsCache::default();
@@ -1341,6 +1611,9 @@ fn room_list_hit_test_maps_public_room_row_to_room_slot() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rust = ChatRoom {
         id: Uuid::now_v7(),
@@ -1354,6 +1627,9 @@ fn room_list_hit_test_maps_public_room_row_to_room_slot() {
         language_code: None,
         dm_user_a: None,
         dm_user_b: None,
+        topic: None,
+        rules: None,
+        created_by: None,
     };
     let rooms = vec![(lounge.clone(), Vec::new()), (rust.clone(), Vec::new())];
     let mut rows_cache = ChatRowsCache::default();
@@ -1432,7 +1708,7 @@ fn room_list_hit_test_maps_public_room_row_to_room_slot() {
 #[test]
 fn header_segments_bare_username_only() {
     let (prefix, segs) =
-        build_author_prefix_and_segments(false, "alice", &[], None, None, None, None);
+        build_author_prefix_and_segments(false, "alice", &[], None, None, None, &[]);
     assert_eq!(prefix, "alice");
     assert_eq!(segs.len(), 1);
     assert_eq!(segs[0].target, HeaderTarget::Profile);
@@ -1456,7 +1732,7 @@ fn build_author_prefix_matches_legacy_formatter_across_combinations() {
                 format!("{author}{suffix}")
             };
             let (built, _) =
-                build_author_prefix_and_segments(is_friend, author, sp, cb, bg, None, None);
+                build_author_prefix_and_segments(is_friend, author, sp, cb, bg, None, &[]);
             assert_eq!(
                 built, legacy,
                 "case {is_friend} {author:?} {sp:?} {cb:?} {bg:?}"
@@ -1482,7 +1758,7 @@ fn header_segments_full_label_orders_special_bonsai_store() {
         Some("🐱"),
         Some("bonsai"),
         None,
-        None,
+        &[],
     );
     // Sanity: the legacy formatter produces the same suffix shape.
     let legacy = format!(
@@ -1535,7 +1811,7 @@ fn header_segments_skip_empty_badges() {
         Some(""),
         Some(""),
         None,
-        None,
+        &[],
     );
     // 1 author + 1 special "mod" = 2 segments. No store, no bonsai.
     assert_eq!(segs.len(), 2);
@@ -1546,7 +1822,7 @@ fn header_segments_skip_empty_badges() {
 #[test]
 fn header_segments_bonsai_then_store_without_specials() {
     let (_prefix, segs) =
-        build_author_prefix_and_segments(false, "bob", &[], Some("🐱"), Some("🌱"), None, None);
+        build_author_prefix_and_segments(false, "bob", &[], Some("🐱"), Some("🌱"), None, &[]);
     // author (Profile), bonsai (Profile), store (StoreBadge).
     assert_eq!(segs.len(), 3);
     assert_eq!(segs[0].target, HeaderTarget::Profile);
@@ -1566,7 +1842,7 @@ fn header_segments_put_monthly_awards_after_author() {
         Some("shop"),
         Some("bonsai"),
         Some("AW1 CHIP2 SN3"),
-        None,
+        &[],
     );
 
     assert_eq!(prefix, "alice [AW1 CHIP2 SN3] mod bonsai shop");
@@ -1598,7 +1874,7 @@ fn header_segments_split_chat_flag_from_regular_badge() {
         &chat_badges,
         None,
         None,
-        None,
+        &[],
     );
     assert_eq!(prefix, "bob 🐱 US");
     assert_eq!(author_range, (0, 3));
@@ -1621,7 +1897,7 @@ fn header_prefix_orders_all_badge_classes() {
         &chat_badges,
         Some("bonsai"),
         Some("AW1 CHIP2"),
-        Some("brb"),
+        &["brb"],
     );
 
     assert_eq!(
@@ -1686,4 +1962,137 @@ fn visible_chat_rows_pads_top_with_none_hits() {
     assert_eq!(visible.hits[2].message_id, Some(message_id));
     assert!(matches!(visible.hits[3].kind, ChatRowKind::Body));
     assert!(matches!(visible.hits[4].kind, ChatRowKind::Body));
+}
+
+fn room_with_info(topic: Option<&str>, rules: Option<&str>) -> ChatRoom {
+    ChatRoom {
+        id: Uuid::now_v7(),
+        created: Utc::now(),
+        updated: Utc::now(),
+        kind: "topic".to_string(),
+        visibility: "public".to_string(),
+        auto_join: false,
+        slug: Some("book-club".to_string()),
+        permanent: false,
+        language_code: None,
+        dm_user_a: None,
+        dm_user_b: None,
+        topic: topic.map(str::to_string),
+        rules: rules.map(str::to_string),
+        created_by: None,
+    }
+}
+
+fn row_text(buf: &ratatui::buffer::Buffer, y: u16, width: u16) -> String {
+    (0..width)
+        .map(|x| buf[(x, y)].symbol().to_string())
+        .collect()
+}
+
+#[test]
+fn room_header_puts_the_topic_left_and_the_rules_hint_right() {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let room = room_with_info(Some("We read sci-fi"), Some("Be kind"));
+    let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("term");
+    let area = Rect::new(0, 0, 40, 20);
+    let mut remaining = area;
+    terminal
+        .draw(|f| {
+            remaining = super::draw_room_header(
+                f,
+                area,
+                super::RoomHeader {
+                    voice: None,
+                    topic: super::room_topic(&room),
+                    has_rules: super::room_has_rules(&room),
+                },
+            )
+        })
+        .unwrap();
+
+    assert_eq!(remaining.y, 2, "the topic row plus the rule closing it off");
+    assert_eq!(remaining.height, 18);
+
+    let buf = terminal.backend().buffer();
+    let row = row_text(buf, 0, 40);
+    assert!(
+        row.starts_with("We read sci-fi"),
+        "topic reads from the left"
+    );
+    assert!(
+        row.trim_end().ends_with("/rules"),
+        "the hint is flushed right: {row}"
+    );
+    assert!(
+        row_text(buf, 1, 40).starts_with('\u{2500}'),
+        "the block is closed off from the messages"
+    );
+}
+
+#[test]
+fn room_header_is_absent_without_a_topic_or_voice() {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let room = room_with_info(None, Some("Be kind"));
+    let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("term");
+    let area = Rect::new(0, 0, 40, 20);
+    let mut remaining = area;
+    terminal
+        .draw(|f| {
+            remaining = super::draw_room_header(
+                f,
+                area,
+                super::RoomHeader {
+                    voice: None,
+                    topic: super::room_topic(&room),
+                    has_rules: super::room_has_rules(&room),
+                },
+            )
+        })
+        .unwrap();
+    assert_eq!(remaining, area, "nothing to show, no rows taken");
+}
+
+#[test]
+fn room_header_omits_the_hint_when_there_are_no_rules() {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+    let room = room_with_info(Some("A cozy corner"), None);
+    let mut terminal = Terminal::new(TestBackend::new(40, 20)).expect("term");
+    let area = Rect::new(0, 0, 40, 20);
+    terminal
+        .draw(|f| {
+            super::draw_room_header(
+                f,
+                area,
+                super::RoomHeader {
+                    voice: None,
+                    topic: super::room_topic(&room),
+                    has_rules: super::room_has_rules(&room),
+                },
+            );
+        })
+        .unwrap();
+    let row = row_text(terminal.backend().buffer(), 0, 40);
+    assert!(row.contains("A cozy corner"));
+    assert!(!row.contains("/rules"));
+}
+
+#[test]
+fn unread_badge_shows_exact_counts_below_the_cap() {
+    assert_eq!(format_unread_badge(1), "1");
+    assert_eq!(format_unread_badge(42), "42");
+    assert_eq!(
+        format_unread_badge(ChatRoomMember::UNREAD_COUNT_CAP - 1),
+        "99"
+    );
+}
+
+#[test]
+fn unread_badge_collapses_at_the_cap() {
+    // SQL stops counting at the cap, so the exact total is unknown past it.
+    // Rendering it as a precise number would be a lie.
+    assert_eq!(format_unread_badge(ChatRoomMember::UNREAD_COUNT_CAP), "99+");
+    assert_eq!(
+        format_unread_badge(ChatRoomMember::UNREAD_COUNT_CAP + 500),
+        "99+"
+    );
 }
