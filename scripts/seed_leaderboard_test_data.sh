@@ -11,25 +11,12 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-
-if ! command -v docker >/dev/null 2>&1; then
-  echo "docker is required" >&2
-  exit 1
-fi
-
-COMPOSE=(docker compose)
-if ! "${COMPOSE[@]}" version >/dev/null 2>&1; then
-  if command -v docker-compose >/dev/null 2>&1; then
-    COMPOSE=(docker-compose)
-  else
-    echo "docker compose is required" >&2
-    exit 1
-  fi
-fi
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd -P)"
+SCRIPT_DIR="${ROOT_DIR}/scripts"
+COMPOSE=("${SCRIPT_DIR}/dev_compose.sh")
 
 echo "-> ensuring local postgres is running"
-"${COMPOSE[@]}" up -d postgres >/dev/null
+"${COMPOSE[@]}" up -d --wait postgres >/dev/null
 
 echo "-> replacing synthetic leaderboard activity"
 "${COMPOSE[@]}" exec -T postgres psql \
