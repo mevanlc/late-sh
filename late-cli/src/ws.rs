@@ -941,16 +941,12 @@ async fn send_desktop_command(
 /// Off-Linux `DesktopCommand` is uninhabited, so this can never be reached;
 /// the empty match proves it to the compiler and keeps the pair loop cfg-free.
 #[cfg(not(target_os = "linux"))]
-#[allow(
-    clippy::unused_async,
-    reason = "shares the Linux arm's signature so the caller stays cfg-free"
-)]
-async fn send_desktop_command(
+fn send_desktop_command(
     _ws: &mut tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
     >,
     command: DesktopCommand,
-) -> Result<()> {
+) -> std::future::Ready<Result<()>> {
     match command {}
 }
 
