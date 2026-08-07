@@ -15,7 +15,8 @@ use super::{
     gem::{GemPosition, GemState, MoveDirection},
     state::{
         AccountRow, BIO_MAX_LEN, IrcTokenFocus, LinkAccountEnterCodeFocus, LinkAccountStep,
-        PickerKind, Row, SettingsModalState, Tab, ThemeTreeRow, TweakRow,
+        PickerKind, Row, SettingsModalState, StatuslineDial, StatuslinePane, Tab, ThemeTreeRow,
+        TweakRow,
     },
 };
 
@@ -66,6 +67,9 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     }
     if state.right_sidebar_components_open() {
         draw_right_sidebar_components_dialog(frame, popup, state);
+    }
+    if state.statusline_open() {
+        draw_statusline_dialog(frame, popup, state);
     }
     if state.link_account_dialog().open() {
         draw_link_account_dialog(frame, popup, state);
@@ -665,7 +669,10 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     // 5-line body + 1 row of sparkles above + 1 row of padding off the
     // dialog's bottom border.
     const GEM_STRIP_HEIGHT: u16 = 7;
-    let gem_strip_height = GEM_STRIP_HEIGHT.min(area.height.saturating_sub(8));
+    /// Fixed rows above the gem. The gem shrinks to fit rather than pushing a
+    /// control off the bottom: it is an easter egg, the rows are settings.
+    const ROWS_ABOVE_GEM: u16 = 21;
+    let gem_strip_height = GEM_STRIP_HEIGHT.min(area.height.saturating_sub(ROWS_ABOVE_GEM));
 
     let sections = Layout::vertical([
         Constraint::Length(1),                // Appearance subsection heading
@@ -674,6 +681,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // right sidebar row
         Constraint::Length(1),                // room list row
         Constraint::Length(1),                // pet strip row
+        Constraint::Length(1),                // flag fallback row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Compose subsection heading
         Constraint::Length(1),                // composer keep-focused row
@@ -681,14 +689,13 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // Music subsection heading
         Constraint::Length(1),                // start-with-music-muted row
         Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // Display subsection heading
-        Constraint::Length(1),                // flag fallback row
-        Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Startup subsection heading
         Constraint::Length(1),                // land on home row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Input subsection heading
         Constraint::Length(1),                // interaction mode row
+        Constraint::Length(1),                // breathing
+        Constraint::Length(1),                // status bar customizer row
         Constraint::Min(0),                   // flex spacer
         Constraint::Length(gem_strip_height), // gem
     ])
@@ -747,32 +754,6 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         )),
         sections[5],
     );
-
-    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[7]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::ComposerKeepFocused,
-            width,
-            "Send and keep open on Enter",
-            toggle_span(state.draft().keep_composer_focused),
-        )),
-        sections[8],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Music")), sections[10]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::StartWithMusicMuted,
-            width,
-            "Start app with music muted",
-            toggle_span(state.draft().start_with_music_muted),
-        )),
-        sections[11],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Display")), sections[13]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -781,10 +762,34 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Chat flag text fallback",
             toggle_span(state.draft().show_flag_fallback),
         )),
-        sections[14],
+        sections[6],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[16]);
+    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[8]);
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::ComposerKeepFocused,
+            width,
+            "Send and keep open on Enter",
+            toggle_span(state.draft().keep_composer_focused),
+        )),
+        sections[9],
+    );
+
+    frame.render_widget(Paragraph::new(section_heading("Music")), sections[11]);
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::StartWithMusicMuted,
+            width,
+            "Start app with music muted",
+            toggle_span(state.draft().start_with_music_muted),
+        )),
+        sections[12],
+    );
+
+    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[14]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -793,10 +798,10 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Land on Home page",
             toggle_span(state.draft().land_on_home),
         )),
-        sections[17],
+        sections[15],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Input")), sections[19]);
+    frame.render_widget(Paragraph::new(section_heading("Input")), sections[17]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -804,6 +809,17 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             width,
             "Interaction mode",
             interaction_mode_span(state.interaction_mode()),
+        )),
+        sections[18],
+    );
+
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::Statusline,
+            width,
+            "Status bar",
+            value_span("⏎ segments", theme::AMBER()),
         )),
         sections[20],
     );
@@ -1652,6 +1668,189 @@ fn draw_right_sidebar_components_dialog(frame: &mut Frame, area: Rect, state: &S
     ]);
     frame.render_widget(Paragraph::new(footer_top), layout[layout.len() - 2]);
     frame.render_widget(Paragraph::new(footer_bottom), layout[layout.len() - 1]);
+}
+
+/// Status bar customizer: the ordered segment list on the left, the selected
+/// segment's dials on the right.
+///
+/// The list is ordered top-to-bottom the way the bar reads left-to-right, so
+/// "move up" and "move left" are the same gesture and the user never has to
+/// hold the mapping in their head.
+fn draw_statusline_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    /// Columns given to the segment list; the dials take what's left.
+    const LIST_WIDTH: u16 = 24;
+
+    let components = state.statusline_components();
+    let count = components.len() as u16;
+    // rows + heading + blank + 2 footer lines + borders, plus one spare row.
+    let popup = centered_rect(62, count + 7, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Status bar ")
+        .title_style(
+            Style::default()
+                .fg(theme::AMBER_GLOW())
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // heading
+        Constraint::Length(1), // blank
+        Constraint::Min(0),    // list + dials
+        Constraint::Length(1), // footer line 1
+        Constraint::Length(1), // footer line 2
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "Segments paint left to right along the top border.",
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ])),
+        layout[0],
+    );
+
+    let body =
+        Layout::horizontal([Constraint::Length(LIST_WIDTH), Constraint::Min(0)]).split(layout[2]);
+    draw_statusline_list(frame, body[0], state);
+    draw_statusline_dials(frame, body[1], state);
+
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let key = Style::default().fg(theme::AMBER_DIM());
+    let footer_top = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("↑↓", key),
+        Span::styled(" select  ", dim),
+        Span::styled("⇧↑↓", key),
+        Span::styled(" reorder  ", dim),
+        Span::styled("space", key),
+        Span::styled(" toggle", dim),
+    ]);
+    let footer_bottom = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("→", key),
+        Span::styled(" options  ", dim),
+        Span::styled("Esc", key),
+        Span::styled(" back", dim),
+    ]);
+    frame.render_widget(Paragraph::new(footer_top), layout[layout.len() - 2]);
+    frame.render_widget(Paragraph::new(footer_bottom), layout[layout.len() - 1]);
+}
+
+fn draw_statusline_list(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    let components = state.statusline_components();
+    let focused = state.statusline_pane() == StatuslinePane::List;
+    let width = area.width as usize;
+
+    for (idx, setting) in components.iter().enumerate() {
+        if idx as u16 >= area.height {
+            break;
+        }
+        let selected = state.statusline_index() == idx;
+        let marker = if selected { ">" } else { " " };
+        let checkbox = if setting.enabled { "[x]" } else { "[ ]" };
+        let text = format!(" {marker} {checkbox} {}", setting.component.label());
+        let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                pad_to_width(&text, width, selected),
+                statusline_row_style(selected, focused, setting.enabled),
+            ))),
+            row,
+        );
+    }
+}
+
+/// The dials for the selected segment. Renders nothing when the list is empty,
+/// which only happens if the roster itself is empty.
+fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    let Some(setting) = state
+        .statusline_components()
+        .get(state.statusline_index())
+        .copied()
+    else {
+        return;
+    };
+    let focused = state.statusline_pane() == StatuslinePane::Detail;
+    let width = area.width as usize;
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            setting.component.label(),
+            Style::default()
+                .fg(theme::AMBER())
+                .add_modifier(Modifier::BOLD),
+        ))),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+
+    for (idx, dial) in state.statusline_dials().into_iter().enumerate() {
+        // +2 leaves the component name a blank line of its own.
+        let y = idx as u16 + 2;
+        if y >= area.height {
+            break;
+        }
+        let selected = focused && state.statusline_dial_index() == idx;
+        let marker = if selected { "›" } else { " " };
+        let title = dial.title(&setting);
+        let value = statusline_dial_value(dial, &setting);
+        let text = format!("{marker} {title:<13}{value}");
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                pad_to_width(&text, width, selected),
+                statusline_row_style(selected, focused, true),
+            ))),
+            Rect::new(area.x, area.y + y, area.width, 1),
+        );
+    }
+}
+
+fn statusline_dial_value(
+    dial: StatuslineDial,
+    setting: &late_core::models::statusline::StatusComponentSetting,
+) -> String {
+    match dial {
+        StatuslineDial::Label => setting.label.label().to_string(),
+        StatuslineDial::AutoHide => on_off(setting.auto_hide),
+        StatuslineDial::LowPriority => on_off(setting.low_priority),
+        StatuslineDial::Variant => setting
+            .variant
+            .or_else(|| setting.component.variants().first().copied())
+            .map(|variant| variant.label().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn on_off(enabled: bool) -> String {
+    if enabled { "● on" } else { "○ off" }.to_string()
+}
+
+/// Row styling shared by both panes. Only the focused pane paints a selection
+/// background; the other keeps its cursor visible as brightened text, so it's
+/// always clear which segment the dials belong to.
+fn statusline_row_style(selected: bool, focused: bool, enabled: bool) -> Style {
+    if selected && focused {
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .bg(theme::BG_SELECTION())
+            .add_modifier(Modifier::BOLD)
+    } else if selected {
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .add_modifier(Modifier::BOLD)
+    } else if enabled {
+        Style::default().fg(theme::TEXT())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    }
 }
 
 fn draw_link_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {

@@ -45,6 +45,7 @@ mod smoke_test;
 pub mod state;
 #[cfg(test)]
 mod state_test;
+pub(crate) mod statusline;
 pub mod tick;
 #[cfg(test)]
 mod tick_test;

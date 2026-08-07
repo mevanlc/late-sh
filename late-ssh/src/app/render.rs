@@ -12,6 +12,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use late_core::models::leaderboard::LeaderboardData;
+use late_core::models::statusline::{StatusComponent, StatusComponentSetting};
 use late_core::models::user::{RightSidebarComponentSetting, RightSidebarMode, RoomListMode};
 
 use super::{
@@ -281,16 +282,16 @@ struct DrawContext<'a> {
     icon_picker_open: bool,
     icon_picker_state: &'a icon_picker::IconPickerState,
     icon_catalog: Option<&'a icon_picker::catalog::IconCatalogData>,
-    mentions_unread_count: i64,
-    chip_balance: i64,
-    /// Slot for where the top-border mentions text lands this frame, read by
-    /// the HUD click hit test in `input.rs`.
-    mentions_hud_rect: &'a std::cell::Cell<Option<Rect>>,
-    voice_badge: Option<String>,
-    /// The running `/pomodoro` countdown, already rendered to `MM:SS label`.
-    /// Formatting once per frame here keeps the HUD builder a pure function
-    /// of its inputs (no clock read inside the draw path).
-    pomodoro_badge: Option<String>,
+    /// The user's ordered status bar (draft while the settings modal is open,
+    /// else the saved profile). Order is paint order, left to right.
+    statusline_components: Vec<StatusComponentSetting>,
+    /// Everything the status bar can show this frame. Pre-formatted — notably
+    /// the clock and the `/pomodoro` countdown — so the bar builder stays a
+    /// pure function of its inputs with no clock read inside the draw path.
+    status_data: crate::app::statusline::data::StatusData<'a>,
+    /// Slot for where each clickable status segment landed this frame, read by
+    /// the hit test in `input.rs`.
+    status_hits: &'a std::cell::RefCell<Vec<(StatusComponent, Rect)>>,
     home_selected: bool,
 }
 
@@ -388,6 +389,15 @@ impl App {
                 .profile()
                 .right_sidebar_components
                 .clone()
+        };
+        // Same draft-aware live preview as the sidebar panels above.
+        let statusline_components = if self.show_settings {
+            self.settings_modal_state
+                .draft()
+                .statusline_components
+                .clone()
+        } else {
+            self.profile_state.profile().statusline_components.clone()
         };
         let shell_active_room = self.chat.selected_room_id;
         let synthetic_selected = self.chat.synthetic_entry_selected();
@@ -500,6 +510,31 @@ impl App {
             .pomodoro
             .as_ref()
             .map(|timer| timer.badge(chrono::Utc::now()));
+        // Status bar inputs. Formatted here, once, so the draw path reads no
+        // wall clock and a frame stays reproducible from its inputs.
+        let status_local_now = crate::app::common::time::timezone_now(
+            chrono::Utc::now(),
+            self.profile_state.profile().timezone.as_deref(),
+        );
+        let status_clock_24 = status_local_now.format("%H:%M").to_string();
+        let status_clock_ampm = status_local_now.format("%-I:%M %P").to_string();
+        let (status_quests_daily, status_quests_weekly) = self.quest_state.open_counts();
+        let status_station_name = match self.paired_source {
+            late_core::models::user::AudioSource::Radio => Some(
+                crate::app::audio::stations::radio_station_display_name(selected_radio_station),
+            ),
+            late_core::models::user::AudioSource::Icecast => Some(
+                crate::app::audio::stations::icecast_stream_display_name(selected_icecast_stream),
+            ),
+            late_core::models::user::AudioSource::Youtube => Some("youtube"),
+        };
+        let status_station_track = match self.paired_source {
+            late_core::models::user::AudioSource::Radio => radio_now_playing.as_deref(),
+            late_core::models::user::AudioSource::Icecast => {
+                now_playing.as_ref().map(|np| np.track.title.as_str())
+            }
+            late_core::models::user::AudioSource::Youtube => None,
+        };
         let dashboard_view = chat::ui::DashboardChatView {
             pet_strip: pet_strip_enabled.then(|| crate::app::pet::ui::PetStripView {
                 state: &self.pet_state,
@@ -1082,11 +1117,25 @@ impl App {
                         icon_picker_open: self.icon_picker_open,
                         icon_picker_state: &self.icon_picker_state,
                         icon_catalog: self.icon_catalog.as_ref(),
-                        mentions_unread_count: self.chat.notifications.unread_count(),
-                        chip_balance: self.chip_balance,
-                        mentions_hud_rect: &self.last_mentions_hud_rect,
-                        voice_badge,
-                        pomodoro_badge,
+                        statusline_components,
+                        status_data: crate::app::statusline::data::StatusData {
+                            clock_24: &status_clock_24,
+                            clock_ampm: &status_clock_ampm,
+                            hour: chrono::Timelike::hour(&status_local_now),
+                            chip_balance: self.chip_balance,
+                            mentions_unread: self.chat.notifications.unread_count(),
+                            dms_unread: self.chat.unread_dm_count(),
+                            online_count,
+                            turns_waiting: self.daily.my_turn_matches().len(),
+                            pomodoro: pomodoro_badge.as_deref(),
+                            station_name: status_station_name,
+                            station_track: status_station_track,
+                            quests_open_daily: status_quests_daily,
+                            quests_open_weekly: status_quests_weekly,
+                            invites: self.daily.my_invite_count(),
+                            voice: voice_badge.as_deref(),
+                        },
+                        status_hits: &self.last_status_hits,
                         home_selected,
                     },
                     &mut terminal_image_frame,
@@ -1148,9 +1197,9 @@ impl App {
         terminal_images: &mut TerminalImageFrame,
     ) {
         if ctx.show_splash {
-            // No HUD on the splash: keep the click slot in step with what is
-            // actually on screen.
-            ctx.mentions_hud_rect.set(None);
+            // No status bar on the splash: keep the click slots in step with
+            // what is actually on screen.
+            ctx.status_hits.borrow_mut().clear();
             let msg = "take a break, grab a coffee";
             // Animate typing the message (1 char per tick instead of 1 char per 2 ticks)
             let len = msg.len();
@@ -1227,28 +1276,18 @@ impl App {
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
-        match status_hud_title(StatusHudInputs {
-            balance: Some(ctx.chip_balance),
-            unread: ctx.mentions_unread_count,
-            voice_badge: ctx.voice_badge.as_deref(),
-            pomodoro_badge: ctx.pomodoro_badge.as_deref(),
-            border_width: area.width,
+        match crate::app::statusline::bar::build_status_bar(
+            &ctx.statusline_components,
+            &ctx.status_data,
+            crate::app::statusline::bar::Placement::TopRight,
+            area,
             title_width,
-        }) {
-            Some(hud) => {
-                // The right-aligned title's last cell sits just inside the
-                // top-right corner, and the mentions segment leads the line.
-                let total = hud.line.width() as u16;
-                let rect = (hud.mentions_width > 0).then(|| Rect {
-                    x: area.right().saturating_sub(total + 1),
-                    y: area.y,
-                    width: hud.mentions_width,
-                    height: 1,
-                });
-                ctx.mentions_hud_rect.set(rect);
-                block = block.title_top(hud.line);
+        ) {
+            Some(bar) => {
+                *ctx.status_hits.borrow_mut() = bar.hits;
+                block = block.title_top(bar.line);
             }
-            None => ctx.mentions_hud_rect.set(None),
+            None => ctx.status_hits.borrow_mut().clear(),
         }
         let (help_hint_title, sponsor_title) = app_frame_bottom_titles(area.width);
         block = block.title_bottom(help_hint_title);
@@ -2207,140 +2246,6 @@ fn sponsor_line(include_thanks: bool, include_protocol: bool) -> Line<'static> {
     };
     spans.push(Span::styled(url, Style::default().fg(theme::AMBER_DIM())));
     Line::from(spans).right_aligned()
-}
-
-/// The top-border status line plus the width of its leading mentions
-/// segment, so the click hit test can find the mentions text inside the
-/// right-aligned line (the voice/chips text after it is not clickable).
-struct StatusHud {
-    line: Line<'static>,
-    /// Display cells of the mentions segment, 0 when nothing is unread.
-    mentions_width: u16,
-}
-
-/// Everything the status HUD needs, named: `voice_badge` and `pomodoro_badge`
-/// are both `Option<&str>`, so positional arguments would let a call site swap
-/// them without a compile error. `border_width` and `title_width` come in raw
-/// rather than pre-subtracted so the fitting math below is covered by the
-/// tests instead of living uncovered at the one call site.
-struct StatusHudInputs<'a> {
-    balance: Option<i64>,
-    unread: i64,
-    voice_badge: Option<&'a str>,
-    pomodoro_badge: Option<&'a str>,
-    /// Full width of the bordered frame, corners included.
-    border_width: u16,
-    /// Width of the left-aligned frame title sharing the top border row.
-    title_width: u16,
-}
-
-fn status_hud_title(inputs: StatusHudInputs<'_>) -> Option<StatusHud> {
-    let StatusHudInputs {
-        balance,
-        unread,
-        voice_badge,
-        pomodoro_badge,
-        border_width,
-        title_width,
-    } = inputs;
-    if balance.is_none() && unread <= 0 && voice_badge.is_none() && pomodoro_badge.is_none() {
-        return None;
-    }
-    // What the right-aligned HUD can use before it starts painting over the
-    // left title (both live on the top border row, corners excluded).
-    let spare_cols = border_width.saturating_sub(2).saturating_sub(title_width);
-    let mut spans = Vec::new();
-    if unread > 0 {
-        let noun = if unread == 1 { "mention" } else { "mentions" };
-        spans.push(Span::styled(
-            format!(" {unread}"),
-            Style::default()
-                .fg(theme::MENTION())
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            format!(" unread {noun} "),
-            Style::default().fg(theme::TEXT_MUTED()),
-        ));
-    }
-    // Mentions lead the line and everything below appends or inserts behind
-    // them, so the hit-test rect measured here stays correct whatever else the
-    // HUD carries.
-    let mentions_width = spans.iter().map(Span::width).sum::<usize>() as u16;
-    let mentions_spans = spans.len();
-    if let Some(voice_badge) = voice_badge {
-        if !spans.is_empty() {
-            spans.push(Span::styled("|", Style::default().fg(theme::BORDER_DIM())));
-        }
-        spans.push(Span::styled(
-            voice_badge.to_string(),
-            Style::default()
-                .fg(theme::SUCCESS())
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-    if let Some(balance) = balance {
-        if !spans.is_empty() {
-            spans.push(Span::styled("|", Style::default().fg(theme::BORDER_DIM())));
-        }
-        spans.push(Span::styled(
-            format!(" {balance}"),
-            Style::default()
-                .fg(theme::AMBER())
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::styled(
-            " chips ",
-            Style::default().fg(theme::TEXT_MUTED()),
-        ));
-    }
-    // The HUD is a right-aligned title on the same border row as the left
-    // title, and ratatui paints it over anything already there: a HUD wider
-    // than `spare_cols` eats the page tabs. The three long-standing segments
-    // keep their existing behavior; the countdown, as the newcomer, is the one
-    // that yields -- full `MM:SS label` when it fits, bare `MM:SS` when only
-    // that does, dropped when neither does. Losing the badge is survivable
-    // because expiry still banners and notifies.
-    if let Some(pomodoro_badge) = pomodoro_badge {
-        // Mentions lead, so the badge goes behind them; the segment after the
-        // insertion point only carries its own divider when mentions built one
-        // first, hence the two placements.
-        let divider_before = mentions_spans > 0;
-        let divider_after = !divider_before && spans.len() > mentions_spans;
-        let used = spans.iter().map(Span::width).sum::<usize>() as u16;
-        let dividers = u16::from(divider_before) + u16::from(divider_after);
-        let time_only = pomodoro_badge
-            .split_once(' ')
-            .map_or(pomodoro_badge, |(time, _)| time);
-        let fitted = [pomodoro_badge, time_only].into_iter().find(|text| {
-            // +2 for the spaces padding the badge inside its segment.
-            used + dividers + UnicodeWidthStr::width(*text) as u16 + 2 <= spare_cols
-        });
-        if let Some(text) = fitted {
-            let divider = || Span::styled("|", Style::default().fg(theme::BORDER_DIM()));
-            let mut segment = Vec::new();
-            if divider_before {
-                segment.push(divider());
-            }
-            segment.push(Span::styled(
-                format!(" {text} "),
-                Style::default()
-                    .fg(theme::TEXT_BRIGHT())
-                    .add_modifier(Modifier::BOLD),
-            ));
-            if divider_after {
-                segment.push(divider());
-            }
-            spans.splice(mentions_spans..mentions_spans, segment);
-        }
-    }
-    if spans.is_empty() {
-        return None;
-    }
-    Some(StatusHud {
-        line: Line::from(spans).right_aligned(),
-        mentions_width,
-    })
 }
 
 #[cfg(test)]

@@ -108,6 +108,9 @@ pub mod showcase;
 pub mod showcase_feed_read;
 pub mod snake;
 pub mod solitaire;
+pub mod statusline;
+#[cfg(test)]
+mod statusline_test;
 pub mod sudoku;
 pub mod tetris;
 pub mod traffic;

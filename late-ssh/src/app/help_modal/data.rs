@@ -1129,7 +1129,7 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "  Bio               multiline markdown bio".to_string(),
         "  Themes            expanded theme browser".to_string(),
-        "  Tweaks            power-user toggles for appearance, compose, music, display, and startup"
+        "  Tweaks            power-user toggles for appearance, compose, music, display, startup, and the status bar"
             .to_string(),
         "  Account           link SSH keys across accounts, reset/revoke your IRC access token, or delete your account"
             .to_string(),
@@ -1144,7 +1144,7 @@ fn settings_help_lines() -> Vec<String> {
         "  country via picker, with Unicode flag rendering".to_string(),
         "  timezone via picker".to_string(),
         "  IDE, terminal, OS, and languages for profile/late.fetch surfaces".to_string(),
-        "  Tweaks: background color, text brightness, right sidebar mode, room list, pet strip, composer send behavior, music mute-on-start, chat flag fallback, land on Home"
+        "  Tweaks: background color, text brightness, right sidebar mode, room list, pet strip, composer send behavior, music mute-on-start, chat flag fallback, land on Home, status bar segments"
             .to_string(),
         "  private RSS/Atom subscriptions".to_string(),
         "  IRC access token for external IRC clients".to_string(),
@@ -1162,6 +1162,7 @@ fn settings_help_lines() -> Vec<String> {
         "  Space quick-cycles simple toggles".to_string(),
         "  Pickers: type to filter, Enter pick, Esc cancel".to_string(),
         "  Custom sidebar: Enter on Custom opens the three-page checklist".to_string(),
+        "  Tweaks > Status bar: Enter opens the top-border segment customizer".to_string(),
         "  Account: Enter opens Link Accounts or Delete Account".to_string(),
         "  ? opens this guide; Esc / q closes".to_string(),
         "".to_string(),
@@ -1195,17 +1196,49 @@ fn settings_help_lines() -> Vec<String> {
         "                            account default; `\\` on Home cycles the same two".to_string(),
         "    Pet companion strip     show/hide the pet strip above the Lounge chat composer (pet owners only)"
             .to_string(),
+        "    Chat flag text fallback show text/boxed-letter labels instead of flag emoji in chat badges and Shop Flags"
+            .to_string(),
         "  Compose".to_string(),
         "    Send and keep open on Enter   Enter sends without closing the composer; while on, Alt+S becomes a no-op"
             .to_string(),
         "  Music".to_string(),
         "    Start app with music muted    mutes the first paired audio client on each new session so music doesn't auto-play"
             .to_string(),
-        "  Display".to_string(),
-        "    Chat flag text fallback       show text/boxed-letter labels instead of flag emoji in chat badges and Shop Flags"
-            .to_string(),
         "  Startup".to_string(),
         "    Land on Home page             land on Home (page 1) instead of the Clubhouse (page 0) when a session starts"
+            .to_string(),
+        "  Status bar                      Enter opens the customizer for the app frame's top border"
+            .to_string(),
+        "".to_string(),
+        "Status bar customizer".to_string(),
+        "  The top border of the app frame is a status bar you arrange yourself.".to_string(),
+        "  Segments paint left to right in the order the list shows them top to bottom."
+            .to_string(),
+        "  Available segments: mentions, pomodoro, voice, chips, your move, invites, quests, station, users online, time"
+            .to_string(),
+        "  Most segments are clickable and jump to what they are counting.".to_string(),
+        "  Controls".to_string(),
+        "    j / k or arrows         move through segments".to_string(),
+        "    Shift+Up / Shift+Down   move the selected segment along the bar ([ and ] do the same)"
+            .to_string(),
+        "    Space                   turn the selected segment on or off".to_string(),
+        "    Right / Tab / Enter     step into that segment's options".to_string(),
+        "    Left / Right or Space   change the focused option".to_string(),
+        "    Esc                     back out of the options, then close".to_string(),
+        "  Per-segment options".to_string(),
+        "    Label          Text, Icon, or None beside the value".to_string(),
+        "    Auto-hide      drop the segment while it reads zero or idle".to_string(),
+        "    Low priority   yields first when the bar runs out of room; every low-priority"
+            .to_string(),
+        "                   segment is given up before any normal one is".to_string(),
+        "    plus one dial of its own on some segments: 24-hour vs AM/PM clock, mentions"
+            .to_string(),
+        "    with or without DMs, daily vs daily+weekly quests, station name vs track"
+            .to_string(),
+        "  The bar shares its row with the page tabs, so when the two collide segments".to_string(),
+        "  shed their text labels first and only then drop, leftmost first."
+            .to_string(),
+        "  Your arrangement is account-wide: every device you SSH in from gets the same bar."
             .to_string(),
         "".to_string(),
         "RSS tab".to_string(),

@@ -1535,8 +1535,11 @@ async fn the_lounge_renders_its_own_topic_header() {
     wait_for_render_contains(&mut app, "tonight: the rooms upgrade").await;
 }
 
+/// Each status bar segment routes to its own destination, so a click has to
+/// land in that segment's rect and no other. The rects come from measured span
+/// widths, which is what this exercises end to end.
 #[tokio::test]
-async fn clicking_the_mentions_hud_text_opens_mentions() {
+async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "hud-mention-viewer").await;
     let author = create_test_user(&test_db.db, "hud-mention-author").await;
@@ -1561,26 +1564,30 @@ async fn clicking_the_mentions_hud_text_opens_mentions() {
         Uuid::now_v7(),
         false,
     );
-    wait_for_render_contains(&mut app, "unread mention").await;
+    wait_for_render_contains(&mut app, "1 unread").await;
 
-    // The HUD sits on the top border row as `1 unread mention | N chips`.
-    // Border glyphs are multi-byte, so translate byte offsets into display
-    // columns by char count (every glyph on this row is single-width).
+    // The bar sits on the top border row as `1 unread ─ N chips`. Border
+    // glyphs are multi-byte, so translate byte offsets into display columns by
+    // char count (every glyph on this row is single-width).
     let frame = render_plain(&mut app);
     let top_row = frame.lines().next().expect("top border row").to_string();
     let char_col = |needle: &str| {
         let byte = top_row.find(needle).expect("needle on the top border");
         top_row[..byte].chars().count()
     };
-    let mentions_col = char_col("unread mention");
+    let mentions_col = char_col("unread");
     let chips_col = char_col("chips");
 
-    // Clicking the chips text, right of the mentions text, must not open
-    // Mentions. SGR mouse coords are 1-indexed.
+    // Chips sits immediately right of mentions and goes to the Shop, so a
+    // click there must not reach Mentions. SGR mouse coords are 1-indexed.
     app.handle_input(format!("\x1b[<0;{};1M", chips_col + 1).as_bytes());
+    wait_for_render_contains(&mut app, "-- Shop --").await;
     assert_render_not_contains_for(&mut app, "mentioned you in", Duration::from_millis(120)).await;
+    // Close the Shop that click opened before aiming at the next segment.
+    app.handle_input(b"q");
+    assert_render_not_contains_for(&mut app, "-- Shop --", Duration::from_millis(120)).await;
 
-    // Clicking inside the mentions text opens the Mentions view.
+    // Clicking inside the mentions segment opens the Mentions view.
     app.handle_input(format!("\x1b[<0;{};1M", mentions_col + 1).as_bytes());
     wait_for_render_contains(&mut app, "mentioned you in").await;
 }

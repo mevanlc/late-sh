@@ -13,6 +13,7 @@ use crate::app::common::readline::ctrl_byte_to_input;
 use crate::app::door::game::DoorGame;
 use crate::app::files::terminal_image::TerminalImageProtocol;
 use crate::app::help_modal::data::HelpTopic;
+use crate::app::statusline::bar::StatusClick;
 use crate::usernames::UsernameLookup;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -995,7 +996,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
             if handle_mouse_click(app, ctx.screen, mouse) {
                 return;
             }
-            if handle_notifications_hud_click(app, mouse) {
+            if handle_status_bar_click(app, mouse) {
                 return;
             }
             if let Some(delta) = mouse_scroll_delta(mouse) {
@@ -2895,32 +2896,47 @@ fn dashboard_room_rail_area(app: &App) -> Option<Rect> {
     })
 }
 
-fn handle_notifications_hud_click(app: &mut App, mouse: MouseEvent) -> bool {
+/// Route a click on the top-border status bar to the segment under it.
+///
+/// The rects come from the bar's own layout pass, rebuilt every frame, so this
+/// stays correct however the user reorders or resizes their components — and a
+/// segment the fit pass dropped simply has no rect to hit.
+fn handle_status_bar_click(app: &mut App, mouse: MouseEvent) -> bool {
     if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
         return false;
     }
     if app.show_splash {
         return false;
     }
-    // Where the last frame drew the "N unread mentions" text; `None` when
-    // nothing is unread. The voice/chips text after it is not clickable.
-    let Some(rect) = app.last_mentions_hud_rect.get() else {
+    // SGR mouse coords are 1-indexed; the rects are in 0-indexed frame cells.
+    let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
         return false;
     };
-    // SGR mouse coords are 1-indexed; the rect is in 0-indexed frame cells.
-    let Some(x) = mouse.x.checked_sub(1) else {
+    let hit = app
+        .last_status_hits
+        .borrow()
+        .iter()
+        .find(|(_, rect)| rect_contains(*rect, x, y))
+        .and_then(|(component, _)| crate::app::statusline::bar::click_action(*component));
+    let Some(action) = hit else {
         return false;
     };
-    let Some(y) = mouse.y.checked_sub(1) else {
-        return false;
-    };
-    if !rect_contains(rect, x, y) {
-        return false;
-    }
 
     app.pending_chat_profile_open = None;
-    app.set_screen(Screen::Dashboard);
-    app.chat.select_notifications();
+    match action {
+        StatusClick::Mentions => {
+            app.set_screen(Screen::Dashboard);
+            app.chat.select_notifications();
+        }
+        StatusClick::Shop => open_shop_modal_globally(app),
+        StatusClick::Lobby => open_daily_modal_globally(app),
+        StatusClick::Booth => {
+            let submit_enabled = app.audio.booth_submit_enabled();
+            app.booth_modal_state.open(submit_enabled);
+        }
+        StatusClick::Arcade => app.set_screen(Screen::Arcade),
+        StatusClick::Profiles => app.set_screen(Screen::Profiles),
+    }
     true
 }
 

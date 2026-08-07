@@ -11,6 +11,9 @@ use super::marketplace::{
     BONSAI_VARIANT_SLOT, CHAT_BADGE_SLOT, CHAT_FLAG_SLOT, DYNAMIC_BONSAI_SKU,
 };
 use super::profile_award::PROFILE_AWARD_RANK_LIMIT;
+use super::statusline::{
+    StatusComponentSetting, default_statusline_components, parse_statusline_components,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -365,6 +368,7 @@ const TEXT_BRIGHTNESS_ADJUSTMENT_KEY: &str = "text_brightness_adjustment";
 const SHOW_RIGHT_SIDEBAR_KEY: &str = "show_right_sidebar";
 const RIGHT_SIDEBAR_MODE_KEY: &str = "right_sidebar_mode";
 const RIGHT_SIDEBAR_COMPONENTS_KEY: &str = "right_sidebar_components";
+const STATUSLINE_COMPONENTS_KEY: &str = "statusline_components";
 const SHOW_AQUARIUM_TRAY_KEY: &str = "show_aquarium_tray";
 const SHOW_PET_STRIP_KEY: &str = "show_pet_strip";
 const SHOW_ROOM_LIST_SIDEBAR_KEY: &str = "show_room_list_sidebar";
@@ -1328,6 +1332,19 @@ pub fn extract_right_sidebar_components(settings: &Value) -> Vec<RightSidebarCom
     }
 
     normalize_right_sidebar_components(&parsed)
+}
+
+/// The user's status bar. An absent key means "never customized" and yields
+/// the shipped default bar, so this is also what every existing account reads
+/// until the customizer writes for the first time.
+pub fn extract_statusline_components(settings: &Value) -> Vec<StatusComponentSetting> {
+    let Some(values) = settings
+        .get(STATUSLINE_COMPONENTS_KEY)
+        .and_then(Value::as_array)
+    else {
+        return default_statusline_components();
+    };
+    parse_statusline_components(values)
 }
 
 pub fn extract_show_room_list_sidebar(settings: &Value) -> bool {

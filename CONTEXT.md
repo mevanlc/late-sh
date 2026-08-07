@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: late.sh - Command-Line Clubhouse for Computer People
 - Primary audience: LLM agents working on this codebase, human contributors
-- Last updated: 2026-08-06 (Pinstar removed entirely and page 5 redesigned as **Profiles**: `Screen::Pinstar` renamed to `Screen::Profiles`, the `late-ssh/src/app/pinstar/` slice, `PinstarServerRegistry` plumbing, the `DELETE_PINSTAR_GRAPH` cap, and the three `pinstar_*` tables (drop migration 135) are gone. The page is now a people list: one row per user who has showcases or a work profile, sorted by latest activity, with an h/l focus cursor over the person's card + projects in the detail panel (`ShowcaseFeedItem` gained `author_profile`), `o` opens the profile modal, and entering the page marks both feed-read cursors)
+- Last updated: 2026-08-07 (the app frame's top border is now a **customizable status bar**. New `late-core/src/models/statusline.rs` owns the persisted roster — mentions, pomodoro, voice, chips, your move, invites, quests, station, users online, time — each with a label mode, auto-hide, a low-priority drop tier, and an optional per-component dial; `late-ssh/src/app/statusline/` owns the build/fit/lay-out engine that replaces the old hardcoded `StatusHud`, deriving click rects from measured span widths so segments can be reordered and dropped without stale hit targets. Arranged in Settings > Tweaks > Status bar (new last row, `Enter`), stored account-wide in `users.settings.statusline_components`. Defaults reproduce the previous bar exactly)
 - Status: Active
 - Stability note: Sections marked `[STABLE]` should change rarely. Sections marked `[VOLATILE]` are expected to change often.
 
@@ -310,7 +310,7 @@ Because ticks can be sparse, `marquee_tick` is derived from wall clock (elapsed/
 2. **Animations report their frame boundary, only while visible.** The local clock is the source of change; wrap it in a boundary predicate (marquee step ticks, pet strip travel slots, the anim_half edge for the sidebar eq/sway), gated on the screen/panel actually showing it. Time-driven change that is *shared truth* (a server-side game loop: tron/ssnake/asterion, the blackjack dealer) does NOT belong here — it lives in the service as published snapshots, so consumers see it via rule 1 and it goes quiet when no round runs. Per-session decoration never goes through a channel.
 3. **Anything uncertain reports changed.** Prove-clean, not prove-dirty: over-reporting degrades to pre-gate behavior; a wrong "clean" freezes UI.
 
-A blanket `changed = true` or fixed cadence needs a written justification at its call site (current survivors, all in tick.rs: splash typing, lobby modal 1Hz occupancy, DailyMatch 1Hz deadline clock, a running `/pomodoro` countdown's 1Hz HUD badge, the `anim_half` ~7.5fps edge shared by pet, roam overlay, bonsai sway, and clubhouse ambience, and the `anim_quarter` ~3.8fps edge for aquarium steps). The program summary, design rules, test gotchas, and open follow-ups live in SCALE.md (Render-Cost Program).
+A blanket `changed = true` or fixed cadence needs a written justification at its call site (current survivors, all in tick.rs: splash typing, lobby modal 1Hz occupancy, DailyMatch 1Hz deadline clock, a running `/pomodoro` countdown's 1Hz status bar segment, the `anim_half` ~7.5fps edge shared by pet, roam overlay, bonsai sway, and clubhouse ambience, and the `anim_quarter` ~3.8fps edge for aquarium steps). The program summary, design rules, test gotchas, and open follow-ups live in SCALE.md (Render-Cost Program).
 
 The select loop picks which branch to act on:
 
@@ -654,7 +654,7 @@ overwrite its own layout on every reconnect.
 
 | Entity | Table | Key constraints |
 |--------|-------|----------------|
-| User | `users` | `fingerprint` UNIQUE; `is_admin` and `is_moderator` role flags; `username` trimmed length 1-32, case-insensitive UNIQUE via `idx_users_username_lower`, format `^[A-Za-z0-9._-]+$` and no `@` (canonical public handle); `settings` JSONB holds `ignored_user_ids: [uuid]` (keyed by id, not username, so renames don't drop ignores), `theme_id` (string), `enable_background_color` (bool), `text_brightness_adjustment` (int -5..5, default 0), `show_right_sidebar` (bool, default-on when absent), `show_room_list_sidebar` (bool, default-on when absent), `favorite_room_ids: [uuid]` (ordered room pins toggled from Home with `f`, not edited in Settings), `show_aquarium_tray` (bool, default-off when absent; whether the Lounge aquarium tray was open when last toggled), `show_pet_strip` (bool, default-on when absent; shows the pet strip above the Lounge chat composer for Pet Companion owners, toggled in settings or with `/pet`), `notify_kinds: [text]` (desktop-notification opt-ins: `dms`, `mentions`, `game_events`), `notify_cooldown_mins` (int >= 0; 0 = no throttle) |
+| User | `users` | `fingerprint` UNIQUE; `is_admin` and `is_moderator` role flags; `username` trimmed length 1-32, case-insensitive UNIQUE via `idx_users_username_lower`, format `^[A-Za-z0-9._-]+$` and no `@` (canonical public handle); `settings` JSONB holds `ignored_user_ids: [uuid]` (keyed by id, not username, so renames don't drop ignores), `theme_id` (string), `enable_background_color` (bool), `text_brightness_adjustment` (int -5..5, default 0), `show_right_sidebar` (bool, default-on when absent), `show_room_list_sidebar` (bool, default-on when absent), `favorite_room_ids: [uuid]` (ordered room pins toggled from Home with `f`, not edited in Settings), `show_aquarium_tray` (bool, default-off when absent; whether the Lounge aquarium tray was open when last toggled), `show_pet_strip` (bool, default-on when absent; shows the pet strip above the Lounge chat composer for Pet Companion owners, toggled in settings or with `/pet`), `notify_kinds: [text]` (desktop-notification opt-ins: `dms`, `mentions`, `game_events`), `notify_cooldown_mins` (int >= 0; 0 = no throttle), `statusline_components: [{key, enabled, label, auto_hide, low_priority, variant}]` (the top-border status bar, in paint order; absent = shipped defaults) |
 | UserSshKey | `user_ssh_keys` | `fingerprint` UNIQUE; many SSH key fingerprints may point to one `users.id`; account linking moves rows from the abandoned user to the kept user before deleting the abandoned user. Every op on this table lives in `late-core/src/models/user_ssh_key.rs`. `settings` JSONB holds this device's overrides: `room_list_mode` and `right_sidebar_mode` (`"on"`/`"off"`/`"auto"`), written as a pair or not at all, empty = inherit the account default |
 | IrcToken | `irc_tokens` | One IRC token per user; `token_hash` is SHA-256 hex of the plaintext token and is unique; plaintext exists only at mint/reset time and is never persisted or logged |
 | AccountLinkCode | `account_link_codes` | Short post-login link codes, `code` UNIQUE, per-user expiry and `consumed_at`; used only from Settings > Account between already-created accounts |
@@ -800,7 +800,7 @@ An always-running game where every connected SSH session is automatically a part
 - Daily/weekly rituals (lo-fi standup, shipped rollup, weekend recap)
 - Ambient presence (quiet hours, listening since, typing indicator)
 - ~~Micro-collab tools (shared scratchpad, pairing ping)~~ ✓ mutual `/pair @user` shared coding scratchpad shipped (`late-ssh/src/app/scratchpad/CONTEXT.md`); snippet paste is still open.
-- Cozy utilities (~~pomodoro~~ ✓ `/pomodoro [minutes] [label]` shipped: session-local countdown in the status HUD, banner + desktop notification on completion, peers see a minutes-only presence badge on chat author lines; focus playlists, now-playing shoutouts still open)
+- Cozy utilities (~~pomodoro~~ ✓ `/pomodoro [minutes] [label]` shipped: session-local countdown in the status bar, banner + desktop notification on completion, peers see a minutes-only presence badge on chat author lines; focus playlists, now-playing shoutouts still open)
 - Community texture (rotating shoutout board, wall of thanks)
 - Events (coffee breaks, AMAs, mini coding jams)
 - Personalization (accent color, favorite vibe, custom tagline)
@@ -1172,7 +1172,7 @@ WHERE jsonb_array_length(coalesce(data->'house_furniture', '[]'::jsonb)) > 0;
 ### Layout
 
 ```
-┌─ late.sh | 0 1 2 3 4 5 6 | Home ─────────────────────────────────────┐
+┌─ late.sh | 0 1 2 3 4 5 6 | Home ──────── 2 unread ─ 25:00 ─ 1204 ────┐
 │ ┌ room rail ┐ │                                      │ 14:37       │
 │ │ favorites │ │ Home center:                         │ ─────────── │
 │ │ core      │ │ - #lounge dashboard surface          │ visualizer  │
@@ -1186,6 +1186,16 @@ WHERE jsonb_array_length(coalesce(data->'house_furniture', '[]'::jsonb)) > 0;
 ```
 
 Toast notification is hidden by default (0 rows). When active, it appears as a 3-row bordered block (green for success, red for error) at the **top-right** of the content area. The settings overlay renders on top of the toast.
+
+### Status bar (top border) [STABLE]
+
+The frame's top border is right-aligned with a user-arranged status bar sharing the row with the page tabs. The persisted model lives in `late-core/src/models/statusline.rs` (`StatusComponent` roster — mentions, pomodoro, voice, chips, your move, invites, quests, station, users online, time — plus `LabelMode`, `StatusVariant`, and the `parse_/normalize_/*_json` trio); rendering and hit-testing live in `late-ssh/src/app/statusline/`. Stored account-wide in `users.settings.statusline_components`; per-device scoping is not designed yet.
+
+- **Three passes, and no segment knows its own x.** `build_segments` turns settings + this frame's `StatusData` into spans, `fit` degrades then drops until the bar clears the tabs, and `lay_out` joins the survivors with `─` separators and converts accumulated widths into click rects. Widths are measured with ratatui's own `Span::width`, the same function that decides which cells a span occupies, so a hit rect can never disagree with what the user sees — that is what lets segments be reordered, resized, and dropped freely.
+- **Icons must be Emoji_Presentation** (unambiguously two cells). Text-default glyphs that only become emoji via VS16 (`♟️`, `✉️`, `☎️`) slide every rect and let the bar overrun the tabs.
+- **Yield order** is two-tier: every `low_priority` segment sheds its text label and then drops before any normal-priority one yields, and within a tier the end nearest the colliding title goes first. `Placement` decides which end that is; `BottomLeft` is built and tested but not yet wired to a frame.
+- **Defaults are the legacy bar.** `default_enabled()` is exactly mentions/pomodoro/voice/chips in their old order, so nobody's frame changed when this shipped. A component added to the roster later backfills at its own `backfill_existing()` (currently `false` for all), not at a blanket `true` like the sidebar's rule.
+- Customizer: Settings > Tweaks > Status bar (last row, `Enter`). `late-ssh/src/app/settings_modal/` — `StatuslinePane`/`StatuslineDial` in `state.rs`, `draw_statusline_dialog` in `ui.rs`.
 
 ### Global guide (`?`) [STABLE]
 
@@ -1266,6 +1276,7 @@ Content invariants worth preserving when editing `data.rs`:
 | `↑` / `↓` / `j` / `k` | Settings modal | Move within the active tab. Settings rows include Username, IDE, Terminal, OS, Langs, Theme, Background, Text Brightness, Right sidebar, Room list, Pet companion strip, Country, Timezone, DMs, @mentions, Game events, Bell, Cooldown, Format |
 | `←` / `→` | Settings modal | Cycle the current row's setting (theme, toggles, cooldown, notification format) |
 | `Space` / `Enter` / `e` | Settings modal | Activate row — edit username/system fields/bio, cycle a setting, or open the country/timezone picker |
+| `Shift+↑` / `Shift+↓` / `Space` / `→` | Settings modal status bar customizer (Tweaks > Status bar) | Move the selected segment along the bar (`[`/`]` alias), turn it on/off, or step into its options; `Esc` backs out of the options, then closes |
 | `a` / `d` / `r` | Settings modal RSS tab | Add, delete, or refresh private RSS/Atom subscriptions |
 | `Alt+Enter` / `Ctrl+J` | Settings modal (bio editing) | Insert newline |
 | `?` | Settings modal | Open help modal on top |

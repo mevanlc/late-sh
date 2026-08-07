@@ -20,6 +20,7 @@ use late_core::models::{
     profile::{Profile, ProfileParams},
     room_ban::RoomBan,
     server_ban::ServerBan,
+    statusline::default_statusline_components,
     user::{RightSidebarMode, User, default_right_sidebar_components},
 };
 use std::collections::HashMap;
@@ -601,6 +602,7 @@ async fn room_tail_task_loads_favorite_room_history() {
             show_right_sidebar: true,
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: default_right_sidebar_components(),
+            statusline_components: default_statusline_components(),
             show_room_list_sidebar: true,
             room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
