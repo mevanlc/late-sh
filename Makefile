@@ -305,6 +305,11 @@ check: .env
 start: .env keys
 	docker compose -f docker-compose.yml up --build
 
+.PHONY: start-amd64
+start-amd64: .env keys
+	docker pull --platform linux/amd64 postgres:18
+	DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose -f docker-compose.yml up --build
+
 startm: .env keys
 	docker compose -f docker-compose.yml -f docker-compose.monitoring.yml up --build
 down:
