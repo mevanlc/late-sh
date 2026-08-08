@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: late.sh - Command-Line Clubhouse for Computer People
 - Primary audience: LLM agents working on this codebase, human contributors
-- Last updated: 2026-08-08 (chat translation goes two-way: English targets now translate Latin-script languages, with the model's cached `same_language` verdict (migration 137) replacing the script shortcut; replies translate only the reply text, never the baked-in `> @author:` quote line; and a new per-account "Translate my messages to English" setting (`Ctrl+O` → Settings → Translation) pre-warms the shared cache from the send/edit paths. The model call is `TranslationService` in `app/ai/translate.rs`; the full contract is in `late-ssh/src/app/chat/CONTEXT.md` §14 Translation)
+- Last updated: 2026-08-08 (local development uses thin `Makefile` / `Makefile2` instance defaults over `common.mk`; the late2 and Apple Silicon amd64 workflows are documented in §10.1)
 - Status: Active
 - Stability note: Sections marked `[STABLE]` should change rarely. Sections marked `[VOLATILE]` are expected to change often.
 
@@ -946,6 +946,48 @@ docker compose up -d postgres icecast liquidsoap
 cargo run -p late-ssh   # Needs LATE_* env vars
 cargo run -p late-web   # Needs LATE_WEB_* env vars
 ```
+
+#### Running a second concurrent development instance (`late2`)
+
+Use `Makefile2` from a second clone or worktree:
+
+```bash
+make -f Makefile2 <target...>
+```
+
+For example, the `start`, `stop`, and `check` targets operate on late2.
+Do not switch between the two Makefiles in one checkout: both generate that
+checkout's `.env`, and the separate checkout directory supplies the distinct
+Compose project, network, and volumes. Both Makefiles include `common.mk`; use
+`diff -u Makefile Makefile2` to review the complete instance-specific surface.
+
+| Setting | late | late2 |
+|---|---:|---:|
+| Container prefix | `late` | `late2` |
+| SSH | `2222` | `2223` |
+| API | `4001` | `4002` |
+| Web | `3000` | `3001` |
+| Postgres host port | `5433` | `5434` |
+| Icecast host port | `8000` | `8001` |
+| IRC | `6667` | `6668` |
+| IRC TLS | `6697` | `6698` |
+| LiveKit HTTP / TCP / UDP | `7880` / `7881` / `7882` | `7883` / `7884` / `7885` |
+| Check project | `late-check` | `late2-check` |
+| Check Postgres host port | `55433` | `55434` |
+
+Machine-local `.env.local` settings may be copied or linked into the second
+checkout. Files named by those settings, such as local IRC TLS credentials,
+must exist at a path visible inside the `/app` bind mount; a relative symlink
+that escapes the checkout does not resolve to the host target in the container.
+
+#### Developing on macOS
+
+On Apple Silicon, use `make start-amd64` for late or
+`make -f Makefile2 start-amd64` for late2. The door-game images and bundled game
+binaries are not yet reliably buildable or bootable as arm64, so native or
+mixed-architecture Compose startup remains unsupported. `start-amd64` pulls all
+image-only dependencies explicitly as `linux/amd64` before building the stack;
+setting `DOCKER_DEFAULT_PLATFORM` alone does not replace cached arm64 images.
 
 ### 10.2 Database
 

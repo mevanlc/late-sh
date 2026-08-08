@@ -122,6 +122,15 @@ export CARGO_HOME=$HOME/.cargo
 Use `mise install` to get the expected Rust toolchain, `mold` linker, and
 `cargo-nextest`.
 
+### macOS
+
+On Apple Silicon, use the x86-64 development stack while the door-game binary
+architecture issues remain unresolved:
+
+```bash
+make start-amd64
+```
+
 ## Verification
 
 Run the local gate before opening a PR:

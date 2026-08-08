@@ -593,6 +593,40 @@ async fn echo_message_client_receives_own_privmsg_with_time_and_msgid() {
 }
 
 #[tokio::test]
+async fn echo_message_client_receives_own_dm_with_time_and_msgid() {
+    let server = IrcTestServer::start().await;
+    let user = server.seed_user("irc-dm-echo-user").await;
+    let peer = server.seed_user("irc-dm-echo-peer").await;
+    let mut client = server
+        .connect_with_caps(&user.token, "message-tags server-time echo-message")
+        .await;
+    client.read_until(" 376 ").await;
+    client.read_until(" JOIN #lounge").await;
+    client.read_until(" 366 ").await;
+
+    client
+        .write_line(&format!("PRIVMSG {} :hello tagged dm", peer.username))
+        .await
+        .expect("send DM PRIVMSG");
+
+    let echo = client
+        .read_until(&format!("PRIVMSG {} :hello tagged dm", peer.username))
+        .await;
+    assert!(
+        echo.starts_with("@time="),
+        "DM echo should include server-time: {echo}"
+    );
+    assert!(
+        echo.contains(";msgid="),
+        "DM echo should include msgid: {echo}"
+    );
+    assert!(
+        echo.contains(&format!(" :{}!{}@late.sh ", user.username, user.username)),
+        "DM echo should retain the sender prefix: {echo}"
+    );
+}
+
+#[tokio::test]
 async fn tag_unaware_client_receives_plain_tui_privmsg_fallback() {
     let server = IrcTestServer::start().await;
     let user = server.seed_user("irc-plain-tui-user").await;

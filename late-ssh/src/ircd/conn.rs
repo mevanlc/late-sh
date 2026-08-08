@@ -1002,10 +1002,7 @@ impl Session {
                 return Ok(());
             }
             let slug = self.joined.get(&room_id).map(|c| c.slug.clone());
-            self.recent_sends.push_back((room_id, body.clone()));
-            while self.recent_sends.len() > RECENT_SENDS_MAX {
-                self.recent_sends.pop_front();
-            }
+            remember_send(&mut self.recent_sends, room_id, &body);
             self.state.chat_service.send_message_with_reply_task(
                 crate::app::chat::svc::SendMessageTask {
                     user_id: self.user_id,
@@ -1033,6 +1030,8 @@ impl Session {
             };
             let client = self.state.db.get().await?;
             let room = ChatRoom::get_or_create_dm(&client, self.user_id, target_id).await?;
+            ChatRoomMember::join(&client, room.id, self.user_id).await?;
+            ChatRoomMember::join(&client, room.id, target_id).await?;
             drop(client);
             if !self
                 .validate_reply_target(framed, target, room.id, reply_to_message_id, reply_errors)
@@ -1047,6 +1046,7 @@ impl Session {
                     peer_nick: proj::nick_for_username(&target_username),
                 },
             );
+            remember_send(&mut self.recent_sends, room.id, &body);
             self.state.chat_service.send_message_with_reply_task(
                 crate::app::chat::svc::SendMessageTask {
                     user_id: self.user_id,
@@ -2208,18 +2208,18 @@ impl Session {
             if message.user_id != self.user_id && self.ignored_user_ids.contains(&message.user_id) {
                 return Ok(());
             }
-            if message.user_id == self.user_id && !is_edit && !self.caps.echo_message {
+            if message.user_id == self.user_id
+                && should_suppress_sent_message(
+                    &mut self.recent_sends,
+                    &message,
+                    is_edit,
+                    self.caps.echo_message,
+                )
+            {
                 // Self-echo suppression: skip exactly one copy of a body this
                 // connection sent; copies from the TUI or other connections
                 // still flow (bouncer behavior, FRD §5.4 M3).
-                if let Some(pos) = self
-                    .recent_sends
-                    .iter()
-                    .position(|(room, body)| *room == message.room_id && *body == message.body)
-                {
-                    self.recent_sends.remove(pos);
-                    return Ok(());
-                }
+                return Ok(());
             }
             let directory = usernames::snapshot(&self.state.username_directory);
             let author = match author_username {
@@ -2245,42 +2245,25 @@ impl Session {
 
         // Not a joined channel: deliver DMs addressed to us (FRD §8 S2).
         let targets = target_user_ids.unwrap_or_default();
-        if !targets.contains(&self.user_id) || message.user_id == self.user_id {
+        if !should_project_dm_message(
+            &targets,
+            &message,
+            self.user_id,
+            is_edit,
+            self.caps.echo_message,
+            &mut self.recent_sends,
+        ) {
             return Ok(());
         }
         if self.non_dm_target_rooms.contains(&message.room_id) {
             return Ok(());
         }
-        if !self.dm_peers.contains_key(&message.room_id) {
-            let client = self.state.db.get().await?;
-            let Some(room) = ChatRoom::get(&client, message.room_id).await? else {
-                return Ok(());
-            };
-            if room.kind != "dm" {
-                self.non_dm_target_rooms.insert(message.room_id);
-                return Ok(());
-            }
-            drop(client);
-            let directory = usernames::snapshot(&self.state.username_directory);
-            let Some(peer_nick) = directory
-                .get(&message.user_id)
-                .map(|username| proj::nick_for_username(username))
-            else {
-                return Ok(());
-            };
-            self.dm_peers.insert(
-                message.room_id,
-                DmPeer {
-                    peer_user_id: message.user_id,
-                    peer_nick,
-                },
-            );
-        }
-        let Some(peer) = self.dm_peers.get(&message.room_id) else {
+        let Some((author, target)) = self
+            .dm_event_route(message.room_id, message.user_id)
+            .await?
+        else {
             return Ok(());
         };
-        let author = peer.peer_nick.clone();
-        let target = self.nick.clone();
         let body = proj::body_for_irc(&message.body, &author);
         self.deliver_privmsg(framed, &author, &target, &message, &body, is_edit)
             .await?;
@@ -2362,7 +2345,7 @@ impl Session {
             return Ok(());
         }
         let Some((author, target)) = self
-            .dm_reaction_route(delta.room_id, delta.actor_user_id)
+            .dm_event_route(delta.room_id, delta.actor_user_id)
             .await?
         else {
             return Ok(());
@@ -2372,11 +2355,20 @@ impl Session {
         Ok(())
     }
 
-    async fn dm_reaction_route(
+    async fn dm_event_route(
         &mut self,
         room_id: Uuid,
         actor_user_id: Uuid,
     ) -> Result<Option<(String, String)>> {
+        if let Some(peer) = self.dm_peers.get(&room_id) {
+            return Ok(dm_route_from_peer(
+                self.user_id,
+                &self.nick,
+                actor_user_id,
+                peer,
+            ));
+        }
+
         let client = self.state.db.get().await?;
         let Some(room) = ChatRoom::get(&client, room_id).await? else {
             return Ok(None);
@@ -2387,21 +2379,6 @@ impl Session {
         }
         drop(client);
 
-        let directory = usernames::snapshot(&self.state.username_directory);
-        let Some(author) = directory
-            .get(&actor_user_id)
-            .map(|username| proj::nick_for_username(username))
-        else {
-            return Ok(None);
-        };
-        if actor_user_id != self.user_id {
-            self.dm_peers.entry(room_id).or_insert_with(|| DmPeer {
-                peer_user_id: actor_user_id,
-                peer_nick: author.clone(),
-            });
-            return Ok(Some((author, self.nick.clone())));
-        }
-
         let peer_id = match (room.dm_user_a, room.dm_user_b) {
             (Some(a), Some(b)) if a == self.user_id => Some(b),
             (Some(a), Some(b)) if b == self.user_id => Some(a),
@@ -2410,17 +2387,23 @@ impl Session {
         let Some(peer_id) = peer_id else {
             return Ok(None);
         };
+        if actor_user_id != self.user_id && actor_user_id != peer_id {
+            return Ok(None);
+        }
+        let directory = usernames::snapshot(&self.state.username_directory);
         let Some(peer_nick) = directory
             .get(&peer_id)
             .map(|username| proj::nick_for_username(username))
         else {
             return Ok(None);
         };
-        self.dm_peers.entry(room_id).or_insert_with(|| DmPeer {
+        let peer = DmPeer {
             peer_user_id: peer_id,
-            peer_nick: peer_nick.clone(),
-        });
-        Ok(Some((author, peer_nick)))
+            peer_nick,
+        };
+        let route = dm_route_from_peer(self.user_id, &self.nick, actor_user_id, &peer);
+        self.dm_peers.insert(room_id, peer);
+        Ok(route)
     }
 
     async fn deliver_reaction_delta(
@@ -2653,6 +2636,60 @@ impl Session {
         self.last_online = now_online;
         send_all(framed, out).await?;
         Ok(())
+    }
+}
+
+fn remember_send(recent_sends: &mut VecDeque<(Uuid, String)>, room_id: Uuid, body: &str) {
+    recent_sends.push_back((room_id, body.to_string()));
+    while recent_sends.len() > RECENT_SENDS_MAX {
+        recent_sends.pop_front();
+    }
+}
+
+fn should_suppress_sent_message(
+    recent_sends: &mut VecDeque<(Uuid, String)>,
+    message: &ChatMessage,
+    is_edit: bool,
+    echo_message: bool,
+) -> bool {
+    if is_edit {
+        return false;
+    }
+    let Some(pos) = recent_sends
+        .iter()
+        .position(|(room_id, body)| *room_id == message.room_id && *body == message.body)
+    else {
+        return false;
+    };
+    recent_sends.remove(pos);
+    !echo_message
+}
+
+fn should_project_dm_message(
+    target_user_ids: &[Uuid],
+    message: &ChatMessage,
+    user_id: Uuid,
+    is_edit: bool,
+    echo_message: bool,
+    recent_sends: &mut VecDeque<(Uuid, String)>,
+) -> bool {
+    target_user_ids.contains(&user_id)
+        && (message.user_id != user_id
+            || !should_suppress_sent_message(recent_sends, message, is_edit, echo_message))
+}
+
+fn dm_route_from_peer(
+    user_id: Uuid,
+    nick: &str,
+    actor_user_id: Uuid,
+    peer: &DmPeer,
+) -> Option<(String, String)> {
+    if actor_user_id == user_id {
+        Some((nick.to_string(), peer.peer_nick.clone()))
+    } else if actor_user_id == peer.peer_user_id {
+        Some((peer.peer_nick.clone(), nick.to_string()))
+    } else {
+        None
     }
 }
 

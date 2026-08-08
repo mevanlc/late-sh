@@ -1,0 +1,23 @@
+# Instance defaults. Shared configuration and recipes live in common.mk.
+
+INSTANCE ?= late2
+
+# Application listeners
+LATE_SSH_PORT ?= 2223
+LATE_API_PORT ?= 4002
+LATE_WEB_PORT ?= 3001
+LATE_IRC_PORT ?= 6668
+LATE_IRC_TLS_HOST_PORT ?= 6698
+
+# Supporting services
+LATE_PG_HOST_PORT ?= 5434
+LATE_ICECAST_HOST_PORT ?= 8001
+LATE_LIVEKIT_HOST_PORT ?= 7883
+LATE_LIVEKIT_RTC_TCP_PORT ?= 7884
+LATE_LIVEKIT_RTC_UDP_PORT ?= 7885
+
+# Check database
+CHECK_INSTANCE ?= late2-check
+CHECK_PG_HOST_PORT ?= 55434
+
+include common.mk
