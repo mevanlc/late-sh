@@ -53,9 +53,8 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, show_bottom_bar: 
         ]),
         keys: keys_line(vec![
             ("h/j/k/l", "move"),
-            ("Space", "reveal"),
+            ("Space", "reveal/chord"),
             ("f", "flag"),
-            ("1-8", "chord"),
             ("d/p/n", "daily/pers/new"),
             ("[ ]", "diff"),
             ("o", "cell style"),
@@ -66,7 +65,7 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, show_bottom_bar: 
         tip: Some(tip_line(if state.reset_pending {
             "Press again to reset"
         } else {
-            "On a revealed cell, press its number to open all adjacent unflagged cells."
+            "On a revealed cell, press Space to open all adjacent unflagged cells."
         })),
     };
 

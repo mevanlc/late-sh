@@ -10,7 +10,9 @@ use uuid::Uuid;
 use super::marketplace::{
     BONSAI_VARIANT_SLOT, CHAT_BADGE_SLOT, CHAT_FLAG_SLOT, DYNAMIC_BONSAI_SKU,
 };
-use super::profile_award::PROFILE_AWARD_RANK_LIMIT;
+use super::profile_award::{
+    MILESTONE_AWARD_CATEGORIES, PROFILE_AWARD_RANK_LIMIT, top_badge_per_game,
+};
 use super::statusline::{
     StatusComponentSetting, default_statusline_components, parse_statusline_components,
 };
@@ -267,8 +269,8 @@ impl RightSidebarComponent {
     /// Default order, top to bottom. Used when a user has no stored list and
     /// to backfill any panels missing from a stored list. Space cuts by
     /// shrink priority; Bonsai is the one flexible panel and absorbs leftover
-    /// rows. Stale stored keys (e.g. the retired "activity" and "visualizer"
-    /// panels) are dropped on read by `from_key`.
+    /// rows. Stale stored keys (e.g. the retired "activity", "visualizer" and
+    /// "pot" panels) are dropped on read by `from_key`.
     pub const ALL: [RightSidebarComponent; RIGHT_SIDEBAR_COMPONENT_COUNT] =
         [Self::Daily, Self::Music, Self::Bonsai];
 
@@ -376,9 +378,30 @@ const ROOM_LIST_MODE_KEY: &str = "room_list_mode";
 const KEEP_COMPOSER_FOCUSED_KEY: &str = "keep_composer_focused";
 const START_WITH_MUSIC_MUTED_KEY: &str = "start_with_music_muted";
 const LAND_ON_HOME_KEY: &str = "land_on_home";
+const PAPER_AT_LOGIN_KEY: &str = "paper_at_login";
+/// The edition (UTC date, ISO) whose login pop this account has had.
+const PAPER_SHOWN_ON_KEY: &str = "paper_shown_on";
+/// `{"month": "YYYY-MM", "shown": n}`: how many of last month's podium
+/// pieces the splash has shown this account, and for which month. One
+/// key, overwritten in place; it never grows.
+const SPLASH_PODIUM_KEY: &str = "splash_podium";
+const TRANSLATE_TO_KEY: &str = "translate_to";
+const AUTO_TRANSLATE_KEY: &str = "auto_translate";
+const TRANSLATE_MINE_TO_EN_KEY: &str = "translate_mine_to_en";
 const SHOW_FLAG_FALLBACK_KEY: &str = "show_flag_fallback";
 const CLUBHOUSE_TUTORIAL_DONE_KEY: &str = "clubhouse_tutorial_done";
+const FIRST_CONTACT_GLITCH_HITS_KEY: &str = "first_contact_glitch_hits";
+const FIRST_CONTACT_NAME_HITS_KEY: &str = "first_contact_name_hits";
+const FIRST_CONTACT_WHISPER_HITS_KEY: &str = "first_contact_whisper_hits";
+const FIRST_CONTACT_WHISPER_AT_KEY: &str = "first_contact_whisper_at";
+const FIRST_CONTACT_INVITED_AT_KEY: &str = "first_contact_invited_at";
+const FIRST_CONTACT_GLITCH_DAY_KEY: &str = "first_contact_glitch_day";
+const FIRST_CONTACT_GLITCH_DAY_HITS_KEY: &str = "first_contact_glitch_day_hits";
+const FIRST_CONTACT_NAME_DAY_KEY: &str = "first_contact_name_day";
+const FIRST_CONTACT_NAME_DAY_HITS_KEY: &str = "first_contact_name_day_hits";
+const FIRST_CONTACT_BIO_KEY: &str = "first_contact_bio";
 const FAVORITE_ROOM_IDS_KEY: &str = "favorite_room_ids";
+const FAVORITE_THEME_IDS_KEY: &str = "favorite_theme_ids";
 const BIO_KEY: &str = "bio";
 const COUNTRY_KEY: &str = "country";
 const TIMEZONE_KEY: &str = "timezone";
@@ -386,9 +409,19 @@ const IDE_KEY: &str = "ide";
 const TERMINAL_KEY: &str = "terminal";
 const OS_KEY: &str = "os";
 const LANGS_KEY: &str = "langs";
-const BIRTHDAY_KEY: &str = "birthday";
 
 impl User {
+    /// Whether this account is one of the app's own actors (the ghost bots,
+    /// the `system` feed author). Set in `settings.bot` when the row is
+    /// ensured. Callers use it to keep player-to-player mechanics between
+    /// players: nobody tips the house.
+    pub fn is_bot(&self) -> bool {
+        self.settings
+            .get("bot")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     pub async fn find_by_fingerprint(client: &Client, fingerprint: &str) -> Result<Option<Self>> {
         let row = client
             .query_opt(
@@ -552,6 +585,10 @@ impl User {
             return Ok(Vec::new());
         }
 
+        // The rankless milestone badges show whatever month they were earned,
+        // unlike the ranked boards. Bound as a parameter so the set lives in
+        // `profile_award` alone rather than being respelled in SQL.
+        let milestone_categories: Vec<&str> = MILESTONE_AWARD_CATEGORIES.to_vec();
         let rows = client
             .query(
                 "SELECT u.id,
@@ -570,22 +607,40 @@ impl User {
                               AND dynamic_up.equipped_slot = $3
                               AND dynamic_bonsai.sku = $4
                         ) AS dynamic_bonsai_selected,
-                        flag.payload->>'emoji' AS chat_flag,
-                        badge.payload->>'emoji' AS chat_badge,
+                        flag_rental.payload->>'emoji' AS chat_flag,
+                        badge_rental.payload->>'emoji' AS chat_badge,
                         award.badges AS profile_award_badges
                  FROM users u
                  LEFT JOIN bonsai_trees t ON t.user_id = u.id
                  LEFT JOIN bonsai_v2_trees v2 ON v2.user_id = u.id
-                 LEFT JOIN user_purchases up
-                   ON up.user_id = u.id
-                  AND up.equipped_slot = $2
-                 LEFT JOIN marketplace_items badge
-                   ON badge.id = up.item_id
-                 LEFT JOIN user_purchases flag_up
-                   ON flag_up.user_id = u.id
-                  AND flag_up.equipped_slot = $5
-                 LEFT JOIN marketplace_items flag
-                   ON flag.id = flag_up.item_id
+                 -- A rental is the only thing that fills these two slots.
+                 -- Expiry is read-time: once `ends_at` passes the label goes
+                 -- bare, with no background job to run. Migration 165 cleared
+                 -- the last permanent equips, so `equipped_slot` no longer
+                 -- carries a badge or a flag; $2 and $5 are effect kinds here,
+                 -- and `bonsai_variant` above is the only equip slot left.
+                 LEFT JOIN LATERAL (
+                    SELECT e.payload
+                    FROM shop_consumable_effects e
+                    WHERE e.user_id = u.id
+                      AND e.room_id IS NULL
+                      AND e.effect_kind = $2
+                      AND e.active = true
+                      AND e.ends_at > current_timestamp
+                    ORDER BY e.ends_at DESC
+                    LIMIT 1
+                 ) badge_rental ON true
+                 LEFT JOIN LATERAL (
+                    SELECT e.payload
+                    FROM shop_consumable_effects e
+                    WHERE e.user_id = u.id
+                      AND e.room_id IS NULL
+                      AND e.effect_kind = $5
+                      AND e.active = true
+                      AND e.ends_at > current_timestamp
+                    ORDER BY e.ends_at DESC
+                    LIMIT 1
+                 ) flag_rental ON true
                  LEFT JOIN LATERAL (
                     SELECT string_agg(
                         CASE category
@@ -595,7 +650,17 @@ impl User {
                           WHEN 'lateania_kaethyr_ascendant' THEN 'LKA'
                           WHEN 'nethack_amulet' THEN 'NHA'
                           WHEN 'nethack_ascension' THEN 'NHY'
+                          WHEN 'dcss_orb' THEN 'DCO'
+                          WHEN 'dcss_win' THEN 'DCW'
+                          WHEN 'brogue_escape' THEN 'BRE'
+                          WHEN 'brogue_mastery' THEN 'BRM'
                           WHEN 'greendragon_dragon' THEN 'GDS'
+                          WHEN 'darkroom_escape' THEN 'ADE'
+                          WHEN 'darkroom_beacon' THEN 'ADB'
+                          -- Monthly like the boards below, rankless like the
+                          -- milestones above: one holder, so no rank digit
+                          -- (`profile_award::is_rankless_award`).
+                          WHEN 'crown' THEN 'CRWN'
                           ELSE (
                             CASE category
                               WHEN 'top_chips' THEN 'CHIP'
@@ -612,6 +677,8 @@ impl User {
                                  CASE category
                                    WHEN 'arcade_wins' THEN 0
                                    WHEN 'top_chips' THEN 1
+                                   WHEN 'crown' THEN 5
+                                   WHEN 'artboard' THEN 6
                                    WHEN 'tetris' THEN 2
                                    WHEN 'twenty_forty_eight' THEN 3
                                    WHEN 'snake' THEN 4
@@ -622,6 +689,12 @@ impl User {
                                    WHEN 'nethack_amulet' THEN 14
                                    WHEN 'nethack_ascension' THEN 15
                                    WHEN 'greendragon_dragon' THEN 16
+                                   WHEN 'dcss_orb' THEN 17
+                                   WHEN 'dcss_win' THEN 18
+                                   WHEN 'brogue_escape' THEN 19
+                                   WHEN 'brogue_mastery' THEN 20
+                                   WHEN 'darkroom_escape' THEN 21
+                                   WHEN 'darkroom_beacon' THEN 22
                                    ELSE 99
                                  END
                     ) AS badges
@@ -630,7 +703,7 @@ impl User {
                       AND pa.rank <= $6
                       AND (
                         pa.period_month = (date_trunc('month', now() AT TIME ZONE 'UTC')::date - INTERVAL '1 month')::date
-                        OR pa.category IN ('lateania_archdemon', 'lateania_frontier_king', 'lateania_sundering_deep', 'lateania_kaethyr_ascendant', 'nethack_amulet', 'nethack_ascension', 'greendragon_dragon')
+                        OR pa.category = ANY($7)
                       )
                  ) award ON true
                  WHERE u.id = ANY($1)",
@@ -641,6 +714,7 @@ impl User {
                     &DYNAMIC_BONSAI_SKU,
                     &CHAT_FLAG_SLOT,
                     &PROFILE_AWARD_RANK_LIMIT,
+                    &milestone_categories,
                 ],
             )
             .await?;
@@ -778,6 +852,11 @@ impl User {
         Ok(extract_start_with_music_muted(&settings))
     }
 
+    pub async fn translate_mine_to_en(client: &Client, user_id: Uuid) -> Result<bool> {
+        let settings = Self::settings_for_user(client, user_id).await?;
+        Ok(extract_translate_mine_to_en(&settings))
+    }
+
     /// Atomically merge `audio_source` into `settings` without clobbering other keys.
     pub async fn set_audio_source(
         client: &Client,
@@ -848,6 +927,338 @@ impl User {
                      updated = current_timestamp
                  WHERE id = $2",
                 &[&CLUBHOUSE_TUTORIAL_DONE_KEY, &user_id],
+            )
+            .await?;
+        if updated == 0 {
+            bail!("user not found");
+        }
+        Ok(())
+    }
+
+    /// Count one first-contact clock-glitch burst (stage 1). The counter is
+    /// what opens stage 2 once the ladder's share of bursts has been seen,
+    /// and it quiets the clock afterwards.
+    pub async fn record_first_contact_glitch_hit(client: &Client, user_id: Uuid) -> Result<()> {
+        Self::increment_first_contact_counter(client, FIRST_CONTACT_GLITCH_HITS_KEY, user_id).await
+    }
+
+    /// Count one first-contact name-flicker hit (stage 2). The counter is
+    /// what arms the stage-3 whisper for the next fresh connect, and it caps
+    /// the total flickers a person ever gets.
+    pub async fn record_first_contact_name_hit(client: &Client, user_id: Uuid) -> Result<()> {
+        Self::increment_first_contact_counter(client, FIRST_CONTACT_NAME_HITS_KEY, user_id).await
+    }
+
+    async fn increment_first_contact_counter(
+        client: &Client,
+        key: &str,
+        user_id: Uuid,
+    ) -> Result<()> {
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = jsonb_set(
+                         settings,
+                         ARRAY[$1::text],
+                         to_jsonb(COALESCE((settings->>$1)::int, 0) + 1)
+                     ),
+                     updated = current_timestamp
+                 WHERE id = $2",
+                &[&key, &user_id],
+            )
+            .await?;
+        if updated == 0 {
+            bail!("user not found");
+        }
+        Ok(())
+    }
+
+    /// Claim one capped first-contact clock-glitch burst (stage 1). The
+    /// row is the only judge of both caps, so two devices on two replicas
+    /// cannot double a day: the increment lands only while the lifetime
+    /// counter is under `caps.total` and today's counter under
+    /// `caps.daily`, and the day rolls inside the same statement.
+    pub async fn claim_first_contact_glitch_burst(
+        client: &Client,
+        user_id: Uuid,
+        today: chrono::NaiveDate,
+        caps: FirstContactHitCaps,
+    ) -> Result<FirstContactHitClaim> {
+        Self::claim_first_contact_hit(
+            client,
+            FirstContactHitKeys {
+                hits: FIRST_CONTACT_GLITCH_HITS_KEY,
+                day: FIRST_CONTACT_GLITCH_DAY_KEY,
+                day_hits: FIRST_CONTACT_GLITCH_DAY_HITS_KEY,
+            },
+            user_id,
+            today,
+            caps,
+        )
+        .await
+    }
+
+    /// Claim one capped first-contact name-flicker hit (stage 2). Same
+    /// contract as [`User::claim_first_contact_glitch_burst`].
+    pub async fn claim_first_contact_name_hit(
+        client: &Client,
+        user_id: Uuid,
+        today: chrono::NaiveDate,
+        caps: FirstContactHitCaps,
+    ) -> Result<FirstContactHitClaim> {
+        Self::claim_first_contact_hit(
+            client,
+            FirstContactHitKeys {
+                hits: FIRST_CONTACT_NAME_HITS_KEY,
+                day: FIRST_CONTACT_NAME_DAY_KEY,
+                day_hits: FIRST_CONTACT_NAME_DAY_HITS_KEY,
+            },
+            user_id,
+            today,
+            caps,
+        )
+        .await
+    }
+
+    async fn claim_first_contact_hit(
+        client: &Client,
+        keys: FirstContactHitKeys,
+        user_id: Uuid,
+        today: chrono::NaiveDate,
+        caps: FirstContactHitCaps,
+    ) -> Result<FirstContactHitClaim> {
+        let today = today.format("%Y-%m-%d").to_string();
+        let total_cap = i32::try_from(caps.total).unwrap_or(i32::MAX);
+        let daily_cap = i32::try_from(caps.daily).unwrap_or(i32::MAX);
+        let won = client
+            .query_opt(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object(
+                         $1::text, COALESCE((settings->>$1)::int, 0) + 1,
+                         $2::text, $4::text,
+                         $3::text, CASE WHEN settings->>$2 = $4
+                                        THEN COALESCE((settings->>$3)::int, 0) + 1
+                                        ELSE 1 END
+                     ),
+                     updated = current_timestamp
+                 WHERE id = $5
+                   AND COALESCE((settings->>$1)::int, 0) < $6
+                   AND (settings->>$2 IS DISTINCT FROM $4
+                        OR COALESCE((settings->>$3)::int, 0) < $7)
+                 RETURNING (settings->>$1)::int AS hits",
+                &[
+                    &keys.hits,
+                    &keys.day,
+                    &keys.day_hits,
+                    &today,
+                    &user_id,
+                    &total_cap,
+                    &daily_cap,
+                ],
+            )
+            .await?;
+        if let Some(row) = won {
+            let hits: i32 = row.get("hits");
+            return Ok(FirstContactHitClaim::Won {
+                hits: u32::try_from(hits).unwrap_or(0),
+            });
+        }
+        let row = client
+            .query_opt(
+                "SELECT COALESCE((settings->>$1)::int, 0) AS hits FROM users WHERE id = $2",
+                &[&keys.hits, &user_id],
+            )
+            .await?;
+        let Some(row) = row else {
+            bail!("user not found");
+        };
+        let hits: i32 = row.get("hits");
+        Ok(FirstContactHitClaim::Capped {
+            hits: u32::try_from(hits).unwrap_or(0),
+        })
+    }
+
+    /// Claim one delivery of the first-contact splash whisper (stage 3).
+    /// The row judges both limits: the increment lands only while the
+    /// delivery counter is under `cap` and the last delivery is at least
+    /// `gap` before `at` (or there was none), so two devices that both
+    /// played the held door in one window leave exactly one mark, and the
+    /// second whisper never lands the same evening as the first. The
+    /// stamp is what schedules the stage-4 invitation once the counter
+    /// reaches the cap. Returns whether this caller won.
+    pub async fn claim_first_contact_whisper(
+        client: &Client,
+        user_id: Uuid,
+        at: DateTime<Utc>,
+        gap: chrono::Duration,
+        cap: u32,
+    ) -> Result<bool> {
+        let value = at.to_rfc3339();
+        let cap = i32::try_from(cap).unwrap_or(i32::MAX);
+        let not_before = at - gap;
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object(
+                         $1::text, COALESCE((settings->>$1)::int, 0) + 1,
+                         $2::text, $3::text
+                     ),
+                     updated = current_timestamp
+                 WHERE id = $4
+                   AND COALESCE((settings->>$1)::int, 0) < $5
+                   AND (settings->>$2 IS NULL
+                        OR (settings->>$2)::timestamptz <= $6)",
+                &[
+                    &FIRST_CONTACT_WHISPER_HITS_KEY,
+                    &FIRST_CONTACT_WHISPER_AT_KEY,
+                    &value,
+                    &user_id,
+                    &cap,
+                    &not_before,
+                ],
+            )
+            .await?;
+        Ok(updated == 1)
+    }
+
+    /// Claim the right to screen this user's bio (the first-contact
+    /// eligibility gate). The verdict is keyed to a hash of the bio text:
+    /// the claim wins when no verdict exists for this hash, or when the one
+    /// that exists is not a pass and is older than `retry_after` (a pending
+    /// claim whose replica died, or a failure worth one more look). A won
+    /// claim stamps a pending verdict, so racing sessions on any number of
+    /// replicas spend exactly one AI call per bio text. Returns whether
+    /// this caller won.
+    pub async fn claim_first_contact_bio_screen(
+        client: &Client,
+        user_id: Uuid,
+        hash: &str,
+        now: DateTime<Utc>,
+        retry_after: chrono::Duration,
+    ) -> Result<bool> {
+        let stale_before = now - retry_after;
+        let pending = json!({
+            "hash": hash,
+            "verdict": FirstContactBioVerdict::Pending.as_str(),
+            "at": now.to_rfc3339(),
+        });
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object($1::text, $2::jsonb),
+                     updated = current_timestamp
+                 WHERE id = $3
+                   AND (settings->$1->>'hash' IS DISTINCT FROM $4
+                        OR (settings->$1->>'verdict' <> $5
+                            AND (settings->$1->>'at')::timestamptz < $6))",
+                &[
+                    &FIRST_CONTACT_BIO_KEY,
+                    &pending,
+                    &user_id,
+                    &hash,
+                    &FirstContactBioVerdict::Passed.as_str(),
+                    &stale_before,
+                ],
+            )
+            .await?;
+        Ok(updated == 1)
+    }
+
+    /// Record the screen's verdict for the bio text `hash` names. Lands only
+    /// while that text is still the one on record: a bio rewritten during
+    /// the call gets no stale verdict, and the next session claims a fresh
+    /// screen for it. Returns whether the verdict landed.
+    pub async fn set_first_contact_bio_verdict(
+        client: &Client,
+        user_id: Uuid,
+        hash: &str,
+        verdict: FirstContactBioVerdict,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let value = json!({
+            "hash": hash,
+            "verdict": verdict.as_str(),
+            "at": at.to_rfc3339(),
+        });
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object($1::text, $2::jsonb),
+                     updated = current_timestamp
+                 WHERE id = $3 AND settings->$1->>'hash' = $4",
+                &[&FIRST_CONTACT_BIO_KEY, &value, &user_id, &hash],
+            )
+            .await?;
+        Ok(updated == 1)
+    }
+
+    /// Claim the right to send this user their one first-contact invitation
+    /// (stage 4). Conditional on the stamp being absent, so of several
+    /// sessions noticing the due date at once exactly one sends the DM.
+    /// Returns whether this caller won the claim.
+    pub async fn claim_first_contact_invitation(
+        client: &Client,
+        user_id: Uuid,
+        at: DateTime<Utc>,
+    ) -> Result<bool> {
+        let value = at.to_rfc3339();
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object($1::text, $2::text),
+                     updated = current_timestamp
+                 WHERE id = $3 AND NOT (settings ? $1)",
+                &[&FIRST_CONTACT_INVITED_AT_KEY, &value, &user_id],
+            )
+            .await?;
+        Ok(updated == 1)
+    }
+
+    /// Give back a won-but-unspent invitation claim: the send after the
+    /// claim failed, so the stamp comes off and a later session retries.
+    /// Only the claim's winner calls this, so a plain key removal is
+    /// enough; a stamp left behind here is a burned invitation.
+    pub async fn release_first_contact_invitation(client: &Client, user_id: Uuid) -> Result<()> {
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings - $1,
+                     updated = current_timestamp
+                 WHERE id = $2",
+                &[&FIRST_CONTACT_INVITED_AT_KEY, &user_id],
+            )
+            .await?;
+        if updated == 0 {
+            bail!("user not found");
+        }
+        Ok(())
+    }
+
+    /// Wipe every first-contact chain mark (the admin `/haunt reset` test
+    /// hook): glitch hits, name hits, both daily counters, the whisper
+    /// counter and stamp, and the invitation stamp. The bio screen verdict stays: it is
+    /// a cache of a paid check on the bio text, not a rung of the chain.
+    pub async fn reset_first_contact(client: &Client, user_id: Uuid) -> Result<()> {
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings - $1::text[],
+                     updated = current_timestamp
+                 WHERE id = $2",
+                &[
+                    &vec![
+                        FIRST_CONTACT_GLITCH_HITS_KEY,
+                        FIRST_CONTACT_NAME_HITS_KEY,
+                        FIRST_CONTACT_WHISPER_HITS_KEY,
+                        FIRST_CONTACT_WHISPER_AT_KEY,
+                        FIRST_CONTACT_INVITED_AT_KEY,
+                        FIRST_CONTACT_GLITCH_DAY_KEY,
+                        FIRST_CONTACT_GLITCH_DAY_HITS_KEY,
+                        FIRST_CONTACT_NAME_DAY_KEY,
+                        FIRST_CONTACT_NAME_DAY_HITS_KEY,
+                    ],
+                    &user_id,
+                ],
             )
             .await?;
         if updated == 0 {
@@ -973,31 +1384,6 @@ impl User {
         Ok((true, ids))
     }
 
-    /// `(username, birthday MM-DD)` for every friend that has set a birthday.
-    /// Used to build connect-time birthday alerts.
-    pub async fn friend_birthdays(client: &Client, user_id: Uuid) -> Result<Vec<(String, String)>> {
-        let ids = Self::friend_user_ids(client, user_id).await?;
-        if ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let rows = client
-            .query(
-                "SELECT username, settings FROM users WHERE id = ANY($1)",
-                &[&ids],
-            )
-            .await?;
-        let mut out = Vec::new();
-        for row in &rows {
-            let username: String = row.get("username");
-            let settings: Value = row.get("settings");
-            if let Some(birthday) = extract_birthday(&settings) {
-                out.push((username, birthday));
-            }
-        }
-        out.sort();
-        Ok(out)
-    }
-
     /// Atomically merge `theme_id` into `settings` without clobbering other keys.
     pub async fn set_theme_id(client: &Client, user_id: Uuid, theme_id: &str) -> Result<()> {
         let updated = client
@@ -1081,6 +1467,87 @@ impl User {
         Ok(row.get("settings"))
     }
 
+    /// Claim this account's one login pop of the paper for `edition`. Wins
+    /// once per edition across every device and replica: the stamp is the
+    /// only judge, and ISO dates compare as text, so a later edition always
+    /// beats the stamp and the same or an older one never does.
+    pub async fn claim_paper_shown(
+        client: &Client,
+        user_id: Uuid,
+        edition: chrono::NaiveDate,
+    ) -> Result<bool> {
+        let value = edition.format("%Y-%m-%d").to_string();
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object($1::text, $2::text),
+                     updated = current_timestamp
+                 WHERE id = $3
+                   AND COALESCE(settings->>$1, '') < $2",
+                &[&PAPER_SHOWN_ON_KEY, &value, &user_id],
+            )
+            .await?;
+        Ok(updated == 1)
+    }
+
+    /// Claim the next of `podium_size` splash slots for `month` (the podium's
+    /// `period_month`): the first login of a month gets slot 1, the next
+    /// slot 2, and so on up to the podium's size, after which the door
+    /// shows the coffee cup and this returns `None` without writing. Wins
+    /// once per login across every device and replica, the way the paper's
+    /// stamp does: the row is the only judge. A stored month past `month`
+    /// (a replica behind the calendar) never resets and never counts.
+    pub async fn claim_splash_podium_slot(
+        client: &Client,
+        user_id: Uuid,
+        month: chrono::NaiveDate,
+        podium_size: i64,
+    ) -> Result<Option<i64>> {
+        let value = month.format("%Y-%m").to_string();
+        let row = client
+            .query_opt(
+                "UPDATE users
+                 SET settings = settings || jsonb_build_object(
+                         $1::text,
+                         jsonb_build_object(
+                             'month', $2::text,
+                             'shown', CASE
+                                 WHEN settings->$1->>'month' = $2
+                                 THEN (settings->$1->>'shown')::bigint + 1
+                                 ELSE 1::bigint
+                             END
+                         )
+                     ),
+                     updated = current_timestamp
+                 WHERE id = $3
+                   AND (COALESCE(settings->$1->>'month', '') < $2
+                        OR (settings->$1->>'month' = $2
+                            AND (settings->$1->>'shown')::bigint < $4))
+                 RETURNING (settings->$1->>'shown')::bigint AS slot",
+                &[&SPLASH_PODIUM_KEY, &value, &user_id, &podium_size],
+            )
+            .await?;
+        Ok(row.map(|row| row.get("slot")))
+    }
+
+    /// Take the paper's login stamp off (the admin `/paper reset` hook), so
+    /// the next session pops the paper again whatever edition is printed.
+    pub async fn clear_paper_shown(client: &Client, user_id: Uuid) -> Result<()> {
+        let updated = client
+            .execute(
+                "UPDATE users
+                 SET settings = settings - $1,
+                     updated = current_timestamp
+                 WHERE id = $2",
+                &[&PAPER_SHOWN_ON_KEY, &user_id],
+            )
+            .await?;
+        if updated == 0 {
+            bail!("user not found");
+        }
+        Ok(())
+    }
+
     pub async fn update_settings(client: &Client, user_id: Uuid, settings: &Value) -> Result<()> {
         let updated = client
             .execute(
@@ -1114,22 +1581,11 @@ pub struct ChatAuthorMetadata {
 
 fn chat_profile_award_badges(raw: Option<String>) -> Option<String> {
     let raw = raw?;
-    // Collapse the lesser milestone when its superseding one is present:
-    // Kaethyr Ascendant implies Yssgar implies the Frontier King implies the
-    // Archdemon, and an Ascension implies the Amulet. Profile views still show
-    // all; chat author labels show only the highest.
-    let has_kaethyr = raw.split_whitespace().any(|badge| badge == "LKA");
-    let has_sundering_deep = raw.split_whitespace().any(|badge| badge == "LYS");
-    let has_frontier_king = raw.split_whitespace().any(|badge| badge == "LKN");
-    let has_ascension = raw.split_whitespace().any(|badge| badge == "NHY");
-    let badges = raw
-        .split_whitespace()
-        .filter(|badge| !(has_kaethyr && matches!(*badge, "LYS" | "LKN" | "LMG")))
-        .filter(|badge| !(has_sundering_deep && (*badge == "LKN" || *badge == "LMG")))
-        .filter(|badge| !(has_frontier_king && *badge == "LMG"))
-        .filter(|badge| !(has_ascension && *badge == "NHA"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    // One badge per game: the lesser milestone drops out whenever the player
+    // also holds a higher one on that game's ladder (see `BADGE_LADDERS`).
+    // Profile views still list every award; chat author labels show only the
+    // top of each ladder, so a shelf of crowns cannot crowd out the message.
+    let badges = top_badge_per_game(raw.split_whitespace()).join(" ");
     (!badges.is_empty()).then_some(badges)
 }
 
@@ -1152,13 +1608,6 @@ fn set_uuid_ids(settings: &mut Value, key: &str, ids: &[Uuid]) {
         *settings = json!({});
     }
     settings[key] = json!(ids.iter().map(Uuid::to_string).collect::<Vec<_>>());
-}
-
-pub fn extract_birthday(settings: &Value) -> Option<String> {
-    settings
-        .get(BIRTHDAY_KEY)
-        .and_then(Value::as_str)
-        .and_then(crate::models::birthday::normalize_birthday)
 }
 
 /// The chosen interaction mode, or `None` if the user has never picked one -
@@ -1393,6 +1842,38 @@ pub fn extract_start_with_music_muted(settings: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// The language chat translations render into for this user. Defaults to
+/// English: inert for the English-reading majority (their messages are
+/// already in it), one settings flip for everyone else.
+pub fn extract_translate_to(settings: &Value) -> crate::models::message_translation::TranslateLang {
+    settings
+        .get(TRANSLATE_TO_KEY)
+        .and_then(Value::as_str)
+        .and_then(crate::models::message_translation::TranslateLang::from_key)
+        .unwrap_or(crate::models::message_translation::TranslateLang::En)
+}
+
+/// Tweak: auto-translate foreign-script messages arriving in the room being
+/// viewed (plus anything already cached). Opt-in; defaults to false so
+/// translation stays on-demand (`t`) until the user asks for more.
+pub fn extract_auto_translate(settings: &Value) -> bool {
+    settings
+        .get(AUTO_TRANSLATE_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Tweak: pre-translate this author's outgoing messages to English at send
+/// time, warming the shared cache so English readers see them without
+/// asking. Opt-in; defaults to false since it spends an API call per
+/// message the author writes.
+pub fn extract_translate_mine_to_en(settings: &Value) -> bool {
+    settings
+        .get(TRANSLATE_MINE_TO_EN_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Tweak: land on Home (Dashboard, page 1) instead of the Clubhouse (page 0)
 /// when a session starts. Opt-in; defaults to false so sessions land in the
 /// clubhouse tavern like today.
@@ -1401,6 +1882,15 @@ pub fn extract_land_on_home(settings: &Value) -> bool {
         .get(LAND_ON_HOME_KEY)
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Tweak: open The Late Edition (the daily paper) once a day at login.
+/// Defaults to true; `/paper` still opens it by hand when off.
+pub fn extract_paper_at_login(settings: &Value) -> bool {
+    settings
+        .get(PAPER_AT_LOGIN_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
 }
 
 /// Whether the aquarium tray was open when the user last toggled it; defaults
@@ -1432,6 +1922,159 @@ pub fn extract_clubhouse_tutorial_done(settings: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// First-contact stage-1 clock-glitch bursts seen so far; defaults to 0.
+/// Opens stage 2 at the ladder's threshold and quiets the clock after.
+pub fn extract_first_contact_glitch_hits(settings: &Value) -> u32 {
+    extract_counter(settings, FIRST_CONTACT_GLITCH_HITS_KEY)
+}
+
+/// First-contact stage-2 name-flicker hits so far; defaults to 0. Arms the
+/// stage-3 whisper at the ladder's threshold, and caps total flickers per
+/// person.
+pub fn extract_first_contact_name_hits(settings: &Value) -> u32 {
+    extract_counter(settings, FIRST_CONTACT_NAME_HITS_KEY)
+}
+
+fn extract_counter(settings: &Value, key: &str) -> u32 {
+    settings
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|hits| hits.min(u32::MAX as u64) as u32)
+        .unwrap_or(0)
+}
+
+fn extract_rfc3339(settings: &Value, key: &str) -> Option<DateTime<Utc>> {
+    settings
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        .map(|at| at.with_timezone(&Utc))
+}
+
+/// First-contact stage-3 whispers delivered so far; defaults to 0. The
+/// held door plays a capped number of times per person (GAME.md, First
+/// contact), each on a later day; the counter at its cap schedules the
+/// stage-4 invitation.
+pub fn extract_first_contact_whisper_hits(settings: &Value) -> u32 {
+    extract_counter(settings, FIRST_CONTACT_WHISPER_HITS_KEY)
+}
+
+/// When the last first-contact splash whisper was delivered, or `None`
+/// while none has been. Spaces the whispers apart and, once the counter
+/// is at its cap, starts the clock on the stage-4 invitation.
+pub fn extract_first_contact_whisper_at(settings: &Value) -> Option<DateTime<Utc>> {
+    extract_rfc3339(settings, FIRST_CONTACT_WHISPER_AT_KEY)
+}
+
+/// When the first-contact invitation DM was sent, or `None` while it is
+/// still ahead.
+pub fn extract_first_contact_invited_at(settings: &Value) -> Option<DateTime<Utc>> {
+    extract_rfc3339(settings, FIRST_CONTACT_INVITED_AT_KEY)
+}
+
+/// The keys a person only ever touches on purpose: the "touched settings"
+/// leg of the first-contact eligibility gate counts how many of these are
+/// present. Closed list; a key that every account gets written by default
+/// (audio source, tutorial done, the first-contact marks) does not belong
+/// here, since it would measure nothing.
+const TOUCHED_SETTINGS_KEYS: [&str; 11] = [
+    THEME_ID_KEY,
+    COUNTRY_KEY,
+    TIMEZONE_KEY,
+    IDE_KEY,
+    TERMINAL_KEY,
+    OS_KEY,
+    RIGHT_SIDEBAR_COMPONENTS_KEY,
+    RIGHT_SIDEBAR_MODE_KEY,
+    NOTIFY_KINDS_KEY,
+    TRANSLATE_TO_KEY,
+    FAVORITE_THEME_IDS_KEY,
+];
+
+/// How many deliberately-set settings this account carries (see
+/// [`TOUCHED_SETTINGS_KEYS`]).
+pub fn count_touched_settings(settings: &Value) -> usize {
+    TOUCHED_SETTINGS_KEYS
+        .iter()
+        .filter(|key| settings.get(**key).is_some_and(|value| !value.is_null()))
+        .count()
+}
+
+/// The screen's standing on one bio text, keyed by a hash of that text so
+/// a rewritten bio never inherits a verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstContactBioVerdict {
+    /// A session claimed the screen and the call is (or was) in flight.
+    Pending,
+    Passed,
+    Failed,
+}
+
+impl FirstContactBioVerdict {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "pending" => Some(Self::Pending),
+            "passed" => Some(Self::Passed),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// The persisted bio screen: which text it judged, what it said, when.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FirstContactBioScreen {
+    pub hash: String,
+    pub verdict: FirstContactBioVerdict,
+    pub at: DateTime<Utc>,
+}
+
+/// The bio screen on record, or `None` when no bio was ever screened (or
+/// the record is unreadable, which the gate treats the same way: screen
+/// again).
+pub fn extract_first_contact_bio_screen(settings: &Value) -> Option<FirstContactBioScreen> {
+    let record = settings.get(FIRST_CONTACT_BIO_KEY)?;
+    let hash = record.get("hash")?.as_str()?.to_string();
+    let verdict = FirstContactBioVerdict::from_key(record.get("verdict")?.as_str()?)?;
+    let at = DateTime::parse_from_rfc3339(record.get("at")?.as_str()?)
+        .ok()?
+        .with_timezone(&Utc);
+    Some(FirstContactBioScreen { hash, verdict, at })
+}
+
+/// The two caps a first-contact hit claim enforces in the row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FirstContactHitCaps {
+    /// Hits allowed per UTC day.
+    pub daily: u32,
+    /// Hits allowed ever.
+    pub total: u32,
+}
+
+/// What a capped first-contact hit claim decided. Both carry the lifetime
+/// counter after the claim, so the caller's mirror stays honest either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FirstContactHitClaim {
+    Won { hits: u32 },
+    Capped { hits: u32 },
+}
+
+/// The three settings keys one capped counter lives in.
+#[derive(Clone, Copy)]
+struct FirstContactHitKeys {
+    hits: &'static str,
+    day: &'static str,
+    day_hits: &'static str,
+}
+
 /// Tweak: show text labels instead of flag emoji in the shop Flags tab for
 /// terminal/font stacks that render regional-indicator flags as letters.
 pub fn extract_show_flag_fallback(settings: &Value) -> bool {
@@ -1461,6 +2104,31 @@ pub fn extract_favorite_room_ids(settings: &Value) -> Vec<Uuid> {
         };
         if seen.insert(id) {
             out.push(id);
+        }
+    }
+    out
+}
+
+/// Theme ids the user has starred, in the order they starred them. Ids are
+/// opaque strings rather than uuids and are not validated against the theme
+/// table here: a theme that gets renamed or retired simply stops matching, and
+/// the stale entry is inert until the user unstars it.
+pub fn extract_favorite_theme_ids(settings: &Value) -> Vec<String> {
+    let Some(entries) = settings
+        .get(FAVORITE_THEME_IDS_KEY)
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some(id) = entry.as_str().map(str::trim).filter(|id| !id.is_empty()) else {
+            continue;
+        };
+        if seen.insert(id.to_string()) {
+            out.push(id.to_string());
         }
     }
     out

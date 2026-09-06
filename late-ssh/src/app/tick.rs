@@ -66,13 +66,23 @@ impl App {
         let anim_quarter = self.marquee_tick / 4 != prev_marquee_tick / 4;
 
         if self.show_splash {
-            // The splash types one character per tick and self-expires.
+            // The splash types one character per tick and self-expires,
+            // unless first contact's whisper is holding the door
+            // (`app/deadchannel/haunt`): then the release is the machine's.
             changed = true;
             self.splash_ticks = self.splash_ticks.saturating_add(1);
-            if self.splash_ticks > 90 {
+            if self.splash_ticks > 90 && !self.haunt.holds_splash_door() {
                 self.show_splash = false;
             }
         }
+
+        // First contact (`app/deadchannel/haunt`): the held splash door,
+        // the clock-glitch scheduler, and the `/haunt` drain. Must follow
+        // the splash block, which advances the clock it reads.
+        changed |= crate::app::deadchannel::haunt::svc::tick(self);
+        // The Late Edition: the login pop once the splash is down, `/paper`,
+        // and the results of both.
+        changed |= crate::app::paper::svc::tick(self);
 
         let mut messages = Vec::new();
         if let Some(rx) = &mut self.session_rx {
@@ -116,6 +126,13 @@ impl App {
                 self.notifier
                     .push(crate::app::notify::Notification::pomodoro_done(&label));
             }
+            changed = true;
+        }
+        // UTC midnight rolls the Arcade dailies over. This rides the 1Hz edge
+        // rather than an input path so a session parked in chat overnight is
+        // already on today's boards when it looks at the Arcade again; the
+        // check is a date comparison per game until the day actually changes.
+        if one_hz && crate::app::arcade::daily::refresh_daily_games(self) {
             changed = true;
         }
         if self.screen == Screen::Clubhouse && anim_half {
@@ -162,6 +179,8 @@ impl App {
                 Ok(url) => {
                     if let Some(room_id) = target_room_id.or(self.chat.selected_room_id) {
                         self.chat.start_composing_in_room(room_id);
+                        // After `start_composing_in_room`, which clears it.
+                        self.chat.restore_image_upload_reply_target();
                         self.chat.composer_push_str(&url);
                     }
                     self.banner = Some(crate::app::common::primitives::Banner::success(
@@ -169,6 +188,9 @@ impl App {
                     ));
                 }
                 Err(msg) => {
+                    // Nothing reopens the composer on failure, so the stashed
+                    // reply would otherwise surface on the next upload.
+                    self.chat.clear_image_upload_reply_target();
                     self.banner = Some(crate::app::common::primitives::Banner::error(&msg));
                 }
             }
@@ -221,6 +243,9 @@ impl App {
         }
         changed |= self.voice.tick();
         changed |= self.drain_voice_join_results();
+        changed |= self.tick_stream();
+        changed |= self.tick_crown();
+        changed |= self.tick_pot();
         // News state is ticked inside chat.tick()
         let profile_tick = self.profile_state.tick();
         changed |= profile_tick.changed;
@@ -230,7 +255,21 @@ impl App {
         }
         self.chat
             .set_favorite_room_ids(self.profile_state.profile().favorite_room_ids.clone());
+        self.chat
+            .set_viewer_tz(crate::app::profile::svc::parse_account_tz(
+                self.profile_state.profile().timezone.as_deref(),
+            ));
+        // The AFK line: how long this terminal's keyboard has been quiet is
+        // an `App` fact, mirrored into chat the same way the timezone is,
+        // because chat is what knows which room is on screen to hang it on.
+        changed |= self.chat.sync_afk_line(self.last_input_at.elapsed());
+        let translate_to = self.profile_state.profile().translate_to;
+        let auto_translate = self.profile_state.profile().auto_translate;
+        changed |= self
+            .chat
+            .set_translate_settings(translate_to, auto_translate);
         changed |= self.sudoku_state.poll_daily_generation();
+        changed |= self.le_word_state.poll_word_reload();
         let settings_tick = self.settings_modal_state.tick();
         changed |= settings_tick.changed;
         if let Some(b) = settings_tick.banner {
@@ -258,8 +297,11 @@ impl App {
                         tracing::warn!("ignoring unsolicited paired clipboard image");
                         continue;
                     };
-                    if let Some(banner) = self.chat.start_image_upload_in_room(data, upload.room_id)
-                    {
+                    if let Some(banner) = self.chat.start_image_upload_in_room(
+                        data,
+                        upload.room_id,
+                        upload.reply_target,
+                    ) {
                         self.banner = Some(banner);
                     } else {
                         self.banner = Some(crate::app::common::primitives::Banner::success(
@@ -481,6 +523,9 @@ impl App {
         if let Some(state) = self.dopewars_state.as_mut() {
             state.tick();
         }
+        if let Some(state) = self.bashquest_state.as_mut() {
+            state.tick();
+        }
         if let Some(state) = self.codekeep_state.as_mut() {
             state.tick();
         }
@@ -495,6 +540,55 @@ impl App {
             // frame nobody is looking at.
             let darkroom_changed = state.tick();
             changed |= darkroom_changed && self.screen == Screen::Darkroom;
+        }
+        // The two native remakes are the doors that outlive a screen switch,
+        // so they are the two that can be abandoned: a player who hopped away
+        // and never came back would keep them on the backtick cycle and in the
+        // hub's in-progress list for the rest of the session. Once the door
+        // has gone `IDLE_WINDOW` without a touch, end the visit exactly as an
+        // explicit leave does (settle, save, drop). Dark Room loses nothing by
+        // it: the leave stamps `last_settled`, and re-joining later in the
+        // same session credits the whole gap at once. Never while the door is
+        // the open screen (sitting on it reading is not being away), and the
+        // drop dirties the frame, because the hub pip and resume line would
+        // otherwise linger until some unrelated repaint. An open door is
+        // presence itself, so below the reaps the clock is stamped while the
+        // door is the open screen: the deadline measures time away from the
+        // door, and a keyless exit (a Ctrl+G lobby jump) must not inherit
+        // half an hour banked while watching the village.
+        if self.screen != Screen::Darkroom
+            && self
+                .darkroom_state
+                .as_ref()
+                .is_some_and(|state| state.idle_expired())
+        {
+            if let Some(state) = self.darkroom_state.as_mut() {
+                state.save_on_leave();
+            }
+            self.leave_darkroom();
+            changed = true;
+        }
+        if self.screen != Screen::GreenDragon
+            && self
+                .greendragon_state
+                .as_ref()
+                .is_some_and(|state| state.idle_expired())
+        {
+            if let Some(state) = self.greendragon_state.as_ref() {
+                state.save_on_leave();
+            }
+            self.leave_greendragon();
+            changed = true;
+        }
+        if self.screen == Screen::Darkroom
+            && let Some(state) = self.darkroom_state.as_mut()
+        {
+            state.touch();
+        }
+        if self.screen == Screen::GreenDragon
+            && let Some(state) = self.greendragon_state.as_mut()
+        {
+            state.touch();
         }
         // Door games are launched from the Games hub, so they return there when
         // they exit. Rebels flips out of Running the tick its proxy closes;
@@ -553,6 +647,16 @@ impl App {
         {
             self.set_screen(Screen::Games);
         }
+        if self.screen == Screen::Bashquest
+            && self
+                .bashquest_state
+                .as_ref()
+                // `awaiting_handle` holds the screen through the arcade-name
+                // lookup and claim prompt, which run before any game does.
+                .is_none_or(|s| !s.is_running() && !s.in_exit_grace() && !s.awaiting_handle())
+        {
+            self.set_screen(Screen::Games);
+        }
         if self.screen == Screen::Codekeep
             && self.codekeep_state.as_ref().is_none_or(|s| !s.is_running())
         {
@@ -578,15 +682,48 @@ impl App {
                 self.chat_ctx_epoch += 1;
             }
             if let Some(directory) = &self.flair_directory {
+                let now = chrono::Utc::now();
                 let phase = crate::app::common::username_effect::shimmer_phase(self.marquee_tick);
-                let name_styles = crate::app::common::username_effect::resolve_all(
+                // The crown rides the same map, and lapses the same way: an
+                // entry from a finished UTC month resolves to nobody, which
+                // is what empties the slot at the rollover with no sweeper.
+                let crown_holder = self
+                    .crown_holder_rx
+                    .as_mut()
+                    .and_then(|rx| *rx.borrow_and_update())
+                    .and_then(|holder| holder.if_current(now));
+                let name_flair = crate::app::common::username_effect::resolve_all(
                     &crate::app::common::username_effect::snapshot(directory),
+                    crown_holder,
                     phase,
+                    now,
+                );
+                if self.name_flair != name_flair {
+                    self.name_flair = name_flair;
+                    self.chat_ctx_epoch += 1;
+                }
+            }
+            // Runner looks (the #deadchannel portraits) ride the same edge:
+            // a pointer bump when the directory changed, and the chat rows
+            // rebuild once for every portrait in view.
+            if self.runner_looks_rx.has_changed().unwrap_or(false) {
+                self.runner_looks = self.runner_looks_rx.borrow_and_update().clone();
+                self.chat_ctx_epoch += 1;
+            }
+            // The pot resolves on the same edge, and for the same reason:
+            // the panel reads owned values, and only a change the viewer can
+            // actually see (a new size, a minute off the countdown) marks the
+            // frame dirty.
+            if let Some(rx) = &mut self.pot_snapshot_rx {
+                let snapshot = rx.borrow_and_update().clone();
+                let pot_view = crate::app::pot::state::PotView::resolve(
+                    &snapshot,
+                    self.user_id,
                     chrono::Utc::now(),
                 );
-                if self.name_styles != name_styles {
-                    self.name_styles = name_styles;
-                    self.chat_ctx_epoch += 1;
+                if self.pot_view != pot_view {
+                    self.pot_view = pot_view;
+                    changed = true;
                 }
             }
             // Peer countdowns resolve on the same edge, and only the minute
@@ -756,14 +893,47 @@ impl App {
         }
 
         // The activity feed subscription survives the retired sidebar panel
-        // for one job: edge-detecting friend joins for the friend-online
-        // banner. The public feed itself ships to #lounge (activity/lounge).
+        // for one job: edge-detecting a friend's arrivals — logging in, and
+        // going live — for the banner + desktop notification. The public
+        // feed itself ships to #lounge (activity/lounge).
         if let Some(rx) = &mut self.activity_feed_rx {
             while let Ok(event) = rx.try_recv() {
-                if matches!(&event.kind, ActivityKind::UserJoined)
-                    && let Some(user_id) = event.user_id
-                    && let Some(b) = self.chat.note_friend_join(user_id, &event.username)
-                {
+                let Some(user_id) = event.user_id else {
+                    continue;
+                };
+                let banner = match &event.kind {
+                    ActivityKind::UserJoined => {
+                        self.chat.note_friend_join(user_id, &event.username)
+                    }
+                    ActivityKind::WentLive { title } => {
+                        self.chat
+                            .note_friend_went_live(user_id, &event.username, title.as_deref())
+                    }
+                    // The session's own daily win: paint the Arcade card now
+                    // rather than on the next leaderboard pass. Score games
+                    // and other players' wins fall through.
+                    ActivityKind::GameWon {
+                        game,
+                        detail: Some(difficulty),
+                        ..
+                    } if user_id == self.user_id => {
+                        if let Some(puzzle) =
+                            late_core::models::leaderboard::DailyPuzzle::from_key(game.key())
+                        {
+                            changed |= self.session_daily_wins.note_win(
+                                event.occurred_at.date_naive(),
+                                puzzle,
+                                difficulty.clone(),
+                            );
+                        }
+                        None
+                    }
+                    // Everything else on the global feed is somebody else's
+                    // business: this subscription only exists for the friend
+                    // edges above and the session's own daily wins.
+                    _ => None,
+                };
+                if let Some(b) = banner {
                     self.banner = Some(b);
                     changed = true;
                 }
@@ -940,7 +1110,7 @@ impl App {
     /// Whether the right sidebar draws this frame (the settings draft
     /// previews the toggle live). Shared by the viz gate in tick() and the
     /// wake cadence.
-    fn right_sidebar_visible(&self) -> bool {
+    pub(crate) fn right_sidebar_visible(&self) -> bool {
         let mode = if self.show_settings {
             self.settings_modal_state.device_rails().1
         } else {

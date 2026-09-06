@@ -5,6 +5,7 @@ use crate::app::arcade::minesweeper::svc::MinesweeperService;
 use crate::app::arcade::nonogram::state::Library as NonogramLibrary;
 use crate::app::arcade::nonogram::svc::NonogramService;
 use crate::app::arcade::rubiks_cube::svc::RubiksCubeService;
+use crate::app::arcade::sliding_puzzle::svc::SlidingPuzzleService;
 use crate::app::arcade::snake::svc::SnakeService;
 use crate::app::arcade::solitaire::svc::SolitaireService;
 use crate::app::arcade::sudoku::svc::SudokuService;
@@ -23,7 +24,7 @@ use crate::app::chat::work::svc::WorkService;
 use crate::app::games::chips::svc::ChipService;
 use crate::app::hub::dailies::svc::QuestService;
 use crate::app::hub::shop::svc::ShopService;
-use crate::app::hub::svc::LeaderboardService;
+use crate::app::leaderboard::svc::LeaderboardService;
 use crate::app::pet::svc::PetService;
 use crate::app::profile::svc::ProfileService;
 use crate::app::voice::svc::VoiceService;
@@ -57,7 +58,6 @@ pub struct ActiveSession {
 pub struct ActiveUser {
     pub username: String,
     pub fingerprint: Option<String>,
-    pub peer_ip: Option<IpAddr>,
     pub audio_source: AudioSource,
     pub sessions: Vec<ActiveSession>,
     pub connection_count: usize,
@@ -80,6 +80,24 @@ pub fn online_human_count(active_users: &ActiveUsers) -> usize {
         .values()
         .filter(|user| user.fingerprint.is_some())
         .count()
+}
+
+/// Everyone at the bar right now except `buyer`: the roster a round pays for.
+///
+/// Same fingerprint filter as [`online_human_count`], since the always-on bots
+/// are furniture rather than patrons, and the buyer is never their own guest,
+/// which is what makes "nobody to buy for" a real refusal instead of a round
+/// bought for one. This is in-process presence, so on a second replica a round
+/// would only reach the buyer's own pod. That is the accepted single-replica
+/// assumption (root `CONTEXT.md`, multi-replica readiness), not an oversight:
+/// the credits it grants are DB rows and are cashed from anywhere.
+pub fn online_human_ids_excluding(active_users: &ActiveUsers, buyer: Uuid) -> Vec<Uuid> {
+    active_users
+        .lock_recover()
+        .iter()
+        .filter(|(user_id, user)| user.fingerprint.is_some() && **user_id != buyer)
+        .map(|(user_id, _)| *user_id)
+        .collect()
 }
 
 pub fn afk_users_snapshot(afk_users: &AfkUsers) -> Arc<HashSet<Uuid>> {
@@ -108,8 +126,12 @@ pub struct State {
     pub config: Config,
     pub db: Db,
     pub ai_service: AiService,
+    pub translation_service: crate::app::ai::translate::TranslationService,
+    pub summary_service: crate::app::ai::summary::SummaryService,
+    pub paper_service: crate::app::paper::svc::PaperService,
     pub audio_service: AudioService,
     pub voice_service: VoiceService,
+    pub stream_service: crate::app::stream::svc::StreamService,
     pub chat_service: ChatService,
     pub notification_service: NotificationService,
     pub article_service: ArticleService,
@@ -123,6 +145,7 @@ pub struct State {
     pub snake_service: SnakeService,
     pub traffic_service: TrafficService,
     pub rubiks_cube_service: RubiksCubeService,
+    pub sliding_puzzle_service: SlidingPuzzleService,
     pub le_word_service: LeWordService,
     pub sudoku_service: SudokuService,
     pub nonogram_service: NonogramService,
@@ -141,6 +164,8 @@ pub struct State {
     pub house_registry: crate::app::lobby::house::registry::HouseTableRegistry,
     pub dartboard_server: dartboard_local::ServerHandle,
     pub dartboard_provenance: SharedArtboardProvenance,
+    /// The Artboard gallery: listings, hanging, applause, the splash piece.
+    pub gallery_service: crate::app::artboard::gallery::svc::GalleryService,
     pub leaderboard_service: LeaderboardService,
     pub quest_service: QuestService,
     pub shop_service: ShopService,
@@ -167,6 +192,8 @@ pub struct State {
     /// that own them, resolved per session in the tick loop). In-memory only:
     /// a countdown dies with its session, so there is nothing to persist.
     pub pomodoro_directory: crate::app::common::pomodoro::PomodoroDirectory,
+    pub crown_service: crate::app::crown::svc::CrownService,
+    pub pot_service: crate::app::pot::svc::PotService,
     pub activity_feed: broadcast::Sender<ActivityEvent>,
     pub now_playing_rx: watch::Receiver<HashMap<String, NowPlaying>>,
     pub radio_meta_rx:
@@ -177,4 +204,12 @@ pub struct State {
     pub ssh_attempt_limiter: IpRateLimiter,
     pub ws_pair_limiter: IpRateLimiter,
     pub is_draining: Arc<std::sync::atomic::AtomicBool>,
+    /// Process-wide switches (`app_flags` rows: the first-contact kill
+    /// switch and fuse), served to every replica over Postgres. See
+    /// `app/flags` and the multi-replica rule in the root CONTEXT.md.
+    pub app_flags: crate::app::flags::svc::AppFlagService,
+    /// Every runner's look (`deadchannel_runners` rows), served to every
+    /// replica over Postgres so the #deadchannel portraits agree everywhere.
+    /// See `app/deadchannel/runner`.
+    pub runner_looks: crate::app::deadchannel::runner::svc::RunnerLookService,
 }

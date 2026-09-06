@@ -12,10 +12,15 @@ use uuid::Uuid;
 
 use late_core::{
     MutexRecover,
-    db::Db,
+    db::{Db, DbConfig},
     models::{
         character_sheet::{CharacterSheet, CharacterSheetParams},
-        chat_message::{ChatMessage, ChatMessageParams},
+        chat_message::{ChatMessage, ChatMessageParams, HistoryDirection},
+        chat_message_gild::{
+            CHAT_MESSAGE_GILDED_CHANNEL, ChatMessageGild, ChatMessageGildSummary,
+            GILD_FEED_THRESHOLD, GildPlacement, GildTier, listen_for_gild_changes,
+            parse_gilded_payload,
+        },
         chat_message_reaction::{
             ChatMessageReaction, ChatMessageReactionAction, ChatMessageReactionOwners,
             ChatMessageReactionSummary,
@@ -24,7 +29,13 @@ use late_core::{
         chat_room::{ChatRoom, UserRoomState},
         chat_room_member::ChatRoomMember,
         chat_slow_mode::ChatSlowMode,
+        chips::UserChips,
+        deadchannel_name_hit::{
+            DEADCHANNEL_NAME_HIT_CHANNEL, NameHitSignal, listen_for_name_hits, notify_name_hit,
+            parse_name_hit_payload,
+        },
         drinks::UserDrinks,
+        message_translation::{TranslateLang, needs_translation},
         moderation_audit_log::ModerationAuditLog,
         room_ban::RoomBan,
         user::User,
@@ -42,9 +53,11 @@ use crate::app::games::chips::svc::ChipService;
 use crate::authz::{Caps, Permissions, Tier};
 use crate::ircd::registry::IrcRegistry;
 use crate::metrics;
+use crate::moderation::command::RoomModAction;
 use crate::moderation::event::ModerationEvent;
 use crate::moderation::service::{
-    ModerationInfra, ModerationService, ensure_message_permission, target_tier_for_user_id,
+    ModerationInfra, ModerationService, RoomModRequest, ensure_message_permission,
+    target_tier_for_user_id,
 };
 use crate::moderation::session_effects::ModerationSessionEffects;
 use crate::session::SessionRegistry;
@@ -56,6 +69,10 @@ use super::commands::RoomScopedCommand;
 /// Messages before and after a search hit, plus a username lookup for their
 /// authors, as loaded by `load_message_context_task`.
 type MessageContext = (Vec<ChatMessage>, Vec<ChatMessage>, HashMap<Uuid, String>);
+
+/// One page of history plus the usernames its authors need, as loaded by
+/// `load_history_page_task` and `load_history_anchor_task`.
+type HistoryPage = (Vec<ChatMessage>, HashMap<Uuid, String>);
 
 /// The staff room a new public room is reported to. A missing room means the
 /// report is skipped, not that opening the room fails.
@@ -69,6 +86,9 @@ const POLL_FINALIZER_RECOVERY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 const POLL_FINALIZER_BATCH_LIMIT: i64 = 25;
 pub(crate) const GIFT_MAX_AMOUNT: i64 = 1_000_000;
 const GIFT_COOLDOWN: Duration = Duration::from_secs(30);
+/// Same window as a gift, for the same reason: one buyer cannot machine-gun
+/// a room with paid markers.
+const GILD_COOLDOWN: Duration = Duration::from_secs(30);
 const SEARCH_RESULTS_LIMIT: i64 = 50;
 /// Minimum query length before a message search fires; also the trigram
 /// index floor, so shorter queries would seq-scan anyway.
@@ -76,6 +96,13 @@ pub(crate) const SEARCH_MIN_CHARS: usize = 3;
 /// Messages fetched on each side of a selected search hit for the modal's
 /// context window.
 const SEARCH_CONTEXT_EACH_SIDE: i64 = 4;
+
+/// Messages per history-modal page. Large enough that scrolling rarely
+/// stalls on a fetch, small enough that the first page renders promptly and
+/// a fast scroller cannot queue many large pages. Pages are index-only walks
+/// (see `ChatMessage::list_page_for_viewer`), so this trades render work, not
+/// query cost.
+pub(crate) const HISTORY_PAGE_SIZE: i64 = 50;
 
 /// The two report-only rooms. `#bugs` and `#suggestions` accept only
 /// `/bug` / `/suggest` report cards from regular users; free-text posting is
@@ -136,6 +163,110 @@ impl ReportKind {
     }
 }
 
+/// Why a gild did not happen. Every arm is a rule the buyer can act on, and
+/// every arm costs nothing: a refused gild never touches the ledger. Kept
+/// closed so a new guard has to write its own line rather than fall into a
+/// generic "could not gild".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GildRefusal {
+    /// The message was deleted while the tier picker was open.
+    MessageNotFound,
+    /// The buyer cannot read the room the message is in.
+    NotAMember,
+    /// DMs and private rooms. A gild is a public mark; paying for one where
+    /// two people can see it is not the product.
+    NotPublic,
+    /// Arcade tables, daily matches and `#user-live` stream chats. They are
+    /// `kind = 'game'` and mostly `visibility = 'public'`, so a visibility
+    /// check alone would let them through; gilds are for the rooms on the
+    /// Home rail, where the #lounge line can point somewhere people can go.
+    GameRoom,
+    /// Your own message. Also a table constraint (migration 154).
+    SelfGild,
+    /// A ghost bot or the #lounge system author. Chips move between players.
+    BotAuthor,
+    /// Inside [`GILD_COOLDOWN`] of this buyer's last gild.
+    OnCooldown,
+    /// This buyer already holds exactly this tier on this message. A gild
+    /// only goes up, so the one move left is a higher tier.
+    AlreadyGilded,
+    /// This buyer holds a higher tier on this message. A gild never goes
+    /// down, and nobody pays to lower their own marker.
+    HeldHigher,
+    /// The tier would take the buyer below the chip floor.
+    InsufficientChips,
+}
+
+impl GildRefusal {
+    /// Sentence-case banner copy, the one place a refusal is worded.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::MessageNotFound => "That message is gone",
+            Self::NotAMember => "You are not a member of this room",
+            Self::NotPublic => "Gilds only work in public rooms",
+            Self::GameRoom => "Gilds do not work in game or stream chats",
+            Self::SelfGild => "You cannot gild your own message",
+            Self::BotAuthor => "Bots do not take chips",
+            Self::OnCooldown => "Gilding is on cooldown",
+            Self::AlreadyGilded => "You already gilded this message at that tier",
+            Self::HeldHigher => "Your gild on this message is already higher",
+            Self::InsufficientChips => "Not enough chips for that tier",
+        }
+    }
+}
+
+/// A gild attempt that did not pay: a rule said no, or the database did.
+/// The two are separated because only one of them is the buyer's business.
+#[derive(Debug)]
+pub enum GildError {
+    Refused(GildRefusal),
+    Failed(anyhow::Error),
+}
+
+impl From<anyhow::Error> for GildError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+/// What `settle_gild` hands back from inside the transaction.
+struct SettledGild {
+    buyer_balance: i64,
+    author_balance: i64,
+    total_gilds: i64,
+    upgraded_from: Option<GildTier>,
+}
+
+/// A settled gild: what the room must repaint, what the buyer is told, and
+/// what the author is told.
+#[derive(Clone, Debug)]
+pub struct GildOutcome {
+    pub message_id: Uuid,
+    pub tier: GildTier,
+    pub buyer_username: String,
+    pub buyer_balance: i64,
+    pub author_user_id: Uuid,
+    pub author_balance: i64,
+    /// Buyers this message now holds (one gild each), counted under the
+    /// message row lock.
+    pub total_gilds: i64,
+    /// The tier this buyer held before, when the buy raised an existing
+    /// gild instead of adding one.
+    pub upgraded_from: Option<GildTier>,
+    /// `#slug` of the room, for the #lounge line. Public rooms always have
+    /// one; the option is the schema being honest, not a real case.
+    pub room_slug: Option<String>,
+}
+
+impl GildOutcome {
+    /// The #lounge line fires on the buy that made this the threshold buyer,
+    /// and only there. A raise adds no buyer, so it never fires it, however
+    /// many buyers the message already holds.
+    pub fn fires_feed_line(&self) -> bool {
+        self.upgraded_from.is_none() && self.total_gilds == GILD_FEED_THRESHOLD
+    }
+}
+
 #[derive(Clone)]
 pub struct ChatService {
     db: Db,
@@ -150,7 +281,19 @@ pub struct ChatService {
     irc_registry: Option<IrcRegistry>,
     moderation_infra: ModerationInfra,
     chip_service: Option<ChipService>,
+    /// Pre-warms the English translation cache for authors who opted into
+    /// "Translate my messages to English" (send and edit paths). `None` only
+    /// in tests that never exercise sending.
+    translation_svc: Option<crate::app::ai::translate::TranslationService>,
     gift_cooldowns: Arc<Mutex<HashMap<Uuid, std::time::Instant>>>,
+    /// Per-buyer gild throttle. Deliberately its own map rather than sharing
+    /// `gift_cooldowns`: gifting and gilding are two separate sinks, and one
+    /// silently locking the other out would read as a bug.
+    gild_cooldowns: Arc<Mutex<HashMap<Uuid, std::time::Instant>>>,
+    /// The #lounge feed publisher. `None` in tests and in any process that
+    /// runs chat without the activity broadcast; the gild still lands, it
+    /// just tells nobody.
+    activity: Option<crate::app::activity::publisher::ActivityPublisher>,
     /// Last time each user posted a message containing a link. Drives the
     /// account-age link cooldown (blunts fresh-account spam-and-leave). Keyed by
     /// user, so it survives reconnects; holds at most one entry per link-poster.
@@ -616,9 +759,11 @@ pub enum ChatEvent {
     RoomTailLoaded {
         user_id: Uuid,
         room_id: Uuid,
-        last_read_at: Option<DateTime<Utc>>,
         messages: Vec<ChatMessage>,
         message_reactions: HashMap<Uuid, Vec<ChatMessageReactionSummary>>,
+        /// Gild markers for this page. Absent means ungilded, which is
+        /// almost every message.
+        message_gilds: HashMap<Uuid, ChatMessageGildSummary>,
         usernames: HashMap<Uuid, String>,
         bonsai_glyphs: HashMap<Uuid, String>,
         chat_badges: HashMap<Uuid, String>,
@@ -660,6 +805,38 @@ pub enum ChatEvent {
         request_id: Uuid,
         message_id: Uuid,
     },
+    /// One page of the history modal, oldest first. `direction` says which
+    /// edge asked for it, so the modal knows which end to splice onto and
+    /// which "no more" flag an empty page retires.
+    HistoryPageLoaded {
+        user_id: Uuid,
+        request_id: Uuid,
+        direction: HistoryDirection,
+        messages: Vec<ChatMessage>,
+        usernames: HashMap<Uuid, String>,
+    },
+    HistoryPageFailed {
+        user_id: Uuid,
+        request_id: Uuid,
+        direction: HistoryDirection,
+    },
+    /// The opening window for a history modal centered on one message:
+    /// `messages` already has the anchor spliced between its two pages, so
+    /// the modal never has to stitch them itself.
+    HistoryAnchorLoaded {
+        user_id: Uuid,
+        request_id: Uuid,
+        anchor_id: Uuid,
+        messages: Vec<ChatMessage>,
+        usernames: HashMap<Uuid, String>,
+    },
+    /// The anchor is gone (hard-deleted) or sits in a room this viewer may
+    /// not read. Distinct from `HistoryPageFailed` because it is a settled
+    /// answer, not a transient failure worth retrying.
+    HistoryAnchorMissing {
+        user_id: Uuid,
+        request_id: Uuid,
+    },
     MessageReactionsUpdated {
         room_id: Uuid,
         message_id: Uuid,
@@ -667,6 +844,42 @@ pub enum ChatEvent {
         target_user_ids: Option<Vec<Uuid>>,
     },
     MessageReactionDelta(ChatReactionDelta),
+    /// A message's gild marker changed. Carries no `target_user_ids`: gilds
+    /// only exist in public rooms, so there is no audience to narrow to.
+    /// `summary` is `None` only if the last gild vanished with its message.
+    MessageGildsUpdated {
+        room_id: Uuid,
+        message_id: Uuid,
+        summary: Option<ChatMessageGildSummary>,
+    },
+    /// The static took somebody's name (`app/deadchannel/haunt`, stage 2):
+    /// this message's author label corrupts on every screen in the room.
+    /// Off the Postgres notify like a gild, so every replica, this one
+    /// included, hears it one way. Carries no `target_user_ids`: the beat
+    /// is only ever put on the wire for a room the sender is in, and a
+    /// session that does not hold that room drops it.
+    NameHit {
+        room_id: Uuid,
+        message_id: Uuid,
+        seed: u64,
+    },
+    /// A gild landed. Read by the buyer (what it cost, what is left) and by
+    /// the author (who paid, what arrived); everyone else repaints off
+    /// `MessageGildsUpdated`.
+    GildSucceeded {
+        user_id: Uuid,
+        message_id: Uuid,
+        tier: GildTier,
+        buyer_username: String,
+        buyer_balance: i64,
+        author_user_id: Uuid,
+        author_balance: i64,
+    },
+    /// A gild was refused or failed. Nothing was charged either way.
+    GildFailed {
+        user_id: Uuid,
+        message: String,
+    },
     SendSucceeded {
         user_id: Uuid,
         request_id: Uuid,
@@ -807,17 +1020,18 @@ pub enum ChatEvent {
         room_slug: String,
         username: String,
     },
-    KickSucceeded {
+    RoomModSucceeded {
         user_id: Uuid,
         room_slug: String,
         username: String,
+        action: RoomModAction,
     },
     RoomInfoUpdated {
         user_id: Uuid,
         room_id: Uuid,
         room_slug: String,
     },
-    KickFailed {
+    RoomModFailed {
         user_id: Uuid,
         message: String,
     },
@@ -836,6 +1050,8 @@ pub enum ChatEvent {
     ReactionOwnersListed {
         user_id: Uuid,
         message_id: Uuid,
+        /// Who gilded the message, best tier first; shown above the reactions.
+        gilds: Vec<ChatMessageGild>,
         owners: Vec<ChatMessageReactionOwners>,
         usernames: HashMap<Uuid, String>,
     },
@@ -918,7 +1134,10 @@ impl ChatService {
             irc_registry: None,
             moderation_infra: ModerationInfra::default(),
             chip_service: None,
+            translation_svc: None,
             gift_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+            gild_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+            activity: None,
             link_last_sent: Arc::new(Mutex::new(HashMap::new())),
             username_refresh_started: Arc::new(AtomicBool::new(false)),
             refresh_sessions: Arc::new(Mutex::new(HashMap::new())),
@@ -975,8 +1194,24 @@ impl ChatService {
         self
     }
 
+    pub fn with_activity(
+        mut self,
+        activity: crate::app::activity::publisher::ActivityPublisher,
+    ) -> Self {
+        self.activity = Some(activity);
+        self
+    }
+
     pub fn with_chip_service(mut self, chip_service: ChipService) -> Self {
         self.chip_service = Some(chip_service);
+        self
+    }
+
+    pub fn with_translation_service(
+        mut self,
+        translation_svc: crate::app::ai::translate::TranslationService,
+    ) -> Self {
+        self.translation_svc = Some(translation_svc);
         self
     }
 
@@ -1649,13 +1884,20 @@ impl ChatService {
         if !is_member {
             anyhow::bail!("user is not a member of room");
         }
-        let last_read_at = ChatRoomMember::last_read_at(&client, room_id, user_id).await?;
-
+        // The tail deliberately carries no read cursor. It used to, and the
+        // session drew its `new messages` divider from it, which made a room
+        // being *opened* on any one of the account's sessions rewrite the
+        // divider on all of them (`send_user_event` fans out per user), from a
+        // cursor read before that session's own mark had committed. The
+        // divider is now this session's AFK line and nothing over the wire
+        // can move it.
         let messages = ChatMessage::list_recent(&client, room_id, HISTORY_LIMIT).await?;
         let message_ids: Vec<Uuid> = messages.iter().map(|message| message.id).collect();
         let author_ids: Vec<Uuid> = messages.iter().map(|message| message.user_id).collect();
         let message_reactions =
             ChatMessageReaction::list_summaries_for_messages(&client, &message_ids).await?;
+        let message_gilds =
+            ChatMessageGild::list_summaries_for_messages(&client, &message_ids).await?;
         let author_metadata = Self::load_chat_author_metadata(&client, &author_ids).await?;
 
         self.send_user_event(
@@ -1663,9 +1905,9 @@ impl ChatService {
             ChatEvent::RoomTailLoaded {
                 user_id,
                 room_id,
-                last_read_at,
                 messages,
                 message_reactions,
+                message_gilds,
                 usernames: author_metadata.usernames,
                 bonsai_glyphs: author_metadata.bonsai_glyphs,
                 chat_badges: author_metadata.chat_badges,
@@ -1728,8 +1970,9 @@ impl ChatService {
 
     /// Load up to `SEARCH_CONTEXT_EACH_SIDE` messages either side of a search
     /// hit (`MessageContextLoaded`, user-targeted, keyed by request id) for
-    /// the modal's detail-pane context window. Membership-gated; system-feed
-    /// lines and the caller's ignored users are excluded.
+    /// the modal's detail-pane context window. Read scoping, system-feed lines
+    /// and the caller's ignored users are all handled inside
+    /// `list_page_for_viewer`; an unreadable room yields an empty window.
     #[allow(clippy::too_many_arguments)]
     pub fn load_message_context_task(
         &self,
@@ -1746,20 +1989,10 @@ impl ChatService {
                 let result: Result<MessageContext> = async {
                     let _permit = service.read_permits.acquire().await?;
                     let client = service.db.get().await?;
-                    // Same read boundary as `get_for_viewer`: members
-                    // always, public non-game rooms for everyone (mention
-                    // previews can reference rooms the user never joined).
-                    if !ChatRoomMember::is_member(&client, room_id, user_id).await? {
-                        let public_readable = ChatRoom::get(&client, room_id)
-                            .await?
-                            .is_some_and(|room| room.visibility == "public" && room.kind != "game");
-                        if !public_readable {
-                            anyhow::bail!("user cannot read this room");
-                        }
-                    }
                     let (before, after) = ChatMessage::list_around(
                         &client,
                         room_id,
+                        user_id,
                         created,
                         message_id,
                         &exclude_user_ids,
@@ -1810,6 +2043,298 @@ impl ChatService {
                 "chat.load_message_context_task",
                 user_id = %user_id,
                 message_id = %message_id
+            )),
+        );
+    }
+
+    /// Load one page of room history for the history modal
+    /// (`HistoryPageLoaded`, user-targeted, keyed by request id). `cursor` is
+    /// the edge message the page walks away from, `None` for the first page
+    /// at the room tail. Read scoping lives in `list_page_for_viewer`, so an
+    /// unreadable room comes back as an empty page rather than an error.
+    #[allow(clippy::too_many_arguments)]
+    pub fn load_history_page_task(
+        &self,
+        user_id: Uuid,
+        request_id: Uuid,
+        room_id: Uuid,
+        cursor: Option<(DateTime<Utc>, Uuid)>,
+        direction: HistoryDirection,
+        exclude_user_ids: Vec<Uuid>,
+    ) {
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let result: Result<HistoryPage> = async {
+                    let _permit = service.read_permits.acquire().await?;
+                    let client = service.db.get().await?;
+                    let messages = ChatMessage::list_page_for_viewer(
+                        &client,
+                        room_id,
+                        user_id,
+                        cursor,
+                        direction,
+                        &exclude_user_ids,
+                        HISTORY_PAGE_SIZE,
+                    )
+                    .await?;
+                    let author_ids: Vec<Uuid> =
+                        messages.iter().map(|message| message.user_id).collect();
+                    let usernames = User::list_usernames_by_ids(&client, &author_ids).await?;
+                    Ok((messages, usernames))
+                }
+                .await;
+                match result {
+                    Ok((messages, usernames)) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryPageLoaded {
+                                user_id,
+                                request_id,
+                                direction,
+                                messages,
+                                usernames,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryPageFailed {
+                                user_id,
+                                request_id,
+                                direction,
+                            },
+                        );
+                        late_core::error_span!(
+                            "chat_history_page_failed",
+                            error = ?e,
+                            "failed to load chat history page"
+                        );
+                    }
+                }
+            }
+            .instrument(info_span!(
+                "chat.load_history_page_task",
+                user_id = %user_id,
+                room_id = %room_id
+            )),
+        );
+    }
+
+    /// Load the opening window for a history modal centered on `message_id`:
+    /// the anchor itself plus a page either side, spliced into one
+    /// chronological run (`HistoryAnchorLoaded`). Resolving the anchor here
+    /// rather than passing it in from the caller keeps the one case that has
+    /// no answer (a hard-deleted message, or a room this viewer cannot read)
+    /// in a single place (`HistoryAnchorMissing`). The room is the anchor's
+    /// own; taking a separate room id would only make a mismatched pair
+    /// representable.
+    pub fn load_history_anchor_task(
+        &self,
+        user_id: Uuid,
+        request_id: Uuid,
+        message_id: Uuid,
+        exclude_user_ids: Vec<Uuid>,
+    ) {
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let result: Result<Option<HistoryPage>> = async {
+                    let _permit = service.read_permits.acquire().await?;
+                    let client = service.db.get().await?;
+                    let Some(anchor) =
+                        ChatMessage::get_for_viewer(&client, message_id, user_id).await?
+                    else {
+                        return Ok(None);
+                    };
+                    let (before, after) = ChatMessage::list_around(
+                        &client,
+                        anchor.room_id,
+                        user_id,
+                        anchor.created,
+                        anchor.id,
+                        &exclude_user_ids,
+                        HISTORY_PAGE_SIZE,
+                    )
+                    .await?;
+                    // The anchor is spliced in unconditionally: the viewer
+                    // asked for this message by name, so it shows even when
+                    // the page filters would have dropped it (an ignored
+                    // author, a system line).
+                    let mut messages = before;
+                    messages.push(anchor);
+                    messages.extend(after);
+                    let author_ids: Vec<Uuid> =
+                        messages.iter().map(|message| message.user_id).collect();
+                    let usernames = User::list_usernames_by_ids(&client, &author_ids).await?;
+                    Ok(Some((messages, usernames)))
+                }
+                .await;
+                match result {
+                    Ok(Some((messages, usernames))) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryAnchorLoaded {
+                                user_id,
+                                request_id,
+                                anchor_id: message_id,
+                                messages,
+                                usernames,
+                            },
+                        );
+                    }
+                    Ok(None) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryAnchorMissing {
+                                user_id,
+                                request_id,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryPageFailed {
+                                user_id,
+                                request_id,
+                                direction: HistoryDirection::Older,
+                            },
+                        );
+                        late_core::error_span!(
+                            "chat_history_anchor_failed",
+                            error = ?e,
+                            "failed to load chat history anchor"
+                        );
+                    }
+                }
+            }
+            .instrument(info_span!(
+                "chat.load_history_anchor_task",
+                user_id = %user_id,
+                message_id = %message_id
+            )),
+        );
+    }
+
+    /// Open the history modal at the room's first unread message: resolve
+    /// the oldest message past `cutoff` by someone else, then load a page
+    /// either side of it and answer with the anchor pipeline
+    /// (`HistoryAnchorLoaded`). When nothing past the cutoff survives the
+    /// page filters (deleted since, ignored authors, system lines) the
+    /// answer degrades to a plain tail page (`HistoryPageLoaded`) under the
+    /// same request id, so the modal opens at the newest messages exactly
+    /// like a `/history` on a caught-up room.
+    pub fn load_history_unread_task(
+        &self,
+        user_id: Uuid,
+        request_id: Uuid,
+        room_id: Uuid,
+        cutoff: DateTime<Utc>,
+        exclude_user_ids: Vec<Uuid>,
+    ) {
+        // The two ways this open can land; both carry a full page run.
+        enum UnreadOpen {
+            Anchor(Uuid, HistoryPage),
+            Tail(HistoryPage),
+        }
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let result: Result<UnreadOpen> = async {
+                    let _permit = service.read_permits.acquire().await?;
+                    let client = service.db.get().await?;
+                    let Some(anchor) = ChatMessage::first_unread_after(
+                        &client,
+                        room_id,
+                        user_id,
+                        cutoff,
+                        &exclude_user_ids,
+                    )
+                    .await?
+                    else {
+                        let messages = ChatMessage::list_page_for_viewer(
+                            &client,
+                            room_id,
+                            user_id,
+                            None,
+                            HistoryDirection::Older,
+                            &exclude_user_ids,
+                            HISTORY_PAGE_SIZE,
+                        )
+                        .await?;
+                        let author_ids: Vec<Uuid> =
+                            messages.iter().map(|message| message.user_id).collect();
+                        let usernames = User::list_usernames_by_ids(&client, &author_ids).await?;
+                        return Ok(UnreadOpen::Tail((messages, usernames)));
+                    };
+                    let (before, after) = ChatMessage::list_around(
+                        &client,
+                        room_id,
+                        user_id,
+                        anchor.created,
+                        anchor.id,
+                        &exclude_user_ids,
+                        HISTORY_PAGE_SIZE,
+                    )
+                    .await?;
+                    let anchor_id = anchor.id;
+                    let mut messages = before;
+                    messages.push(anchor);
+                    messages.extend(after);
+                    let author_ids: Vec<Uuid> =
+                        messages.iter().map(|message| message.user_id).collect();
+                    let usernames = User::list_usernames_by_ids(&client, &author_ids).await?;
+                    Ok(UnreadOpen::Anchor(anchor_id, (messages, usernames)))
+                }
+                .await;
+                match result {
+                    Ok(UnreadOpen::Anchor(anchor_id, (messages, usernames))) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryAnchorLoaded {
+                                user_id,
+                                request_id,
+                                anchor_id,
+                                messages,
+                                usernames,
+                            },
+                        );
+                    }
+                    Ok(UnreadOpen::Tail((messages, usernames))) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryPageLoaded {
+                                user_id,
+                                request_id,
+                                direction: HistoryDirection::Older,
+                                messages,
+                                usernames,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        service.send_user_event(
+                            user_id,
+                            ChatEvent::HistoryPageFailed {
+                                user_id,
+                                request_id,
+                                direction: HistoryDirection::Older,
+                            },
+                        );
+                        late_core::error_span!(
+                            "chat_history_unread_failed",
+                            error = ?e,
+                            "failed to load chat history at first unread"
+                        );
+                    }
+                }
+            }
+            .instrument(info_span!(
+                "chat.load_history_unread_task",
+                user_id = %user_id,
+                room_id = %room_id
             )),
         );
     }
@@ -2355,6 +2880,174 @@ impl ChatService {
         );
     }
 
+    /// Ensure the game's first voice exists (GAME.md, First contact stage
+    /// 4). Runs at startup like the `system` user: the first deploy creates
+    /// the row, and the case-insensitive unique username index reserves the
+    /// name from then on. The invitation task calls it again, so a lost
+    /// startup race or a squatted username self-heals the moment the squat
+    /// clears. Unlike `system`, the voice never auto-joins public rooms: it
+    /// only ever speaks in its one DM.
+    pub(crate) async fn ensure_first_contact_voice(&self) -> anyhow::Result<User> {
+        use crate::app::deadchannel::haunt::state::{VOICE_FINGERPRINT, VOICE_USERNAME};
+        let client = self.db.get().await?;
+        let voice = match User::find_by_fingerprint(&client, VOICE_FINGERPRINT).await? {
+            Some(existing) => existing,
+            None => {
+                let created = User::create(
+                    &client,
+                    late_core::models::user::UserParams {
+                        fingerprint: VOICE_FINGERPRINT.to_string(),
+                        username: VOICE_USERNAME.to_string(),
+                        settings: serde_json::json!({ "bot": true }),
+                    },
+                )
+                .await;
+                match created {
+                    Ok(created) => {
+                        late_core::models::user_ssh_key::UserSshKey::ensure(
+                            &client,
+                            created.id,
+                            VOICE_FINGERPRINT,
+                        )
+                        .await?;
+                        created
+                    }
+                    // Two callers racing the first ensure: the loser's
+                    // create collides on the unique indexes, and the
+                    // winner's row is there to find. Anything else (a
+                    // squatted username) finds nothing and propagates the
+                    // original failure.
+                    Err(create_error) => User::find_by_fingerprint(&client, VOICE_FINGERPRINT)
+                        .await?
+                        .ok_or(create_error)?,
+                }
+            }
+        };
+        if let Some(directory) = &self.username_directory {
+            crate::usernames::upsert(directory, voice.id, VOICE_USERNAME);
+        }
+        Ok(voice)
+    }
+
+    /// Fire-and-forget startup ensure for the voice (main.rs, beside the
+    /// lounge feed's `system` ensure). Failure is only logged: the
+    /// invitation task retries the ensure itself, so a bad boot costs
+    /// nothing but the early name reservation.
+    pub fn ensure_first_contact_voice_task(&self) {
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                if let Err(error) = service.ensure_first_contact_voice().await {
+                    tracing::warn!(?error, "first contact voice not ensured at startup");
+                }
+            }
+            .instrument(info_span!("chat.ensure_first_contact_voice_task")),
+        );
+    }
+
+    /// First contact, stage 4 (`app/deadchannel/haunt`): the one
+    /// invitation DM from the game's first voice. Ensures the voice's
+    /// ghost user (fixed fingerprint, @bartender's shape, but never
+    /// auto-joined into public rooms: the voice lives in the dark), opens
+    /// the DM, claims the once-ever right to invite this user (a
+    /// conditional settings stamp, so two devices noticing the due date at
+    /// once send one DM), then sends the plea through the normal send
+    /// path. It persists on purpose: an invitation that vanishes cannot
+    /// be followed three days later.
+    pub fn send_first_contact_invitation_task(
+        &self,
+        target_user_id: Uuid,
+        target_username: String,
+    ) {
+        use crate::app::deadchannel::haunt::state::INVITATION_PLEA;
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let result: anyhow::Result<bool> = async {
+                    // The voice and the DM are ensured BEFORE the once-ever
+                    // claim is taken: a failure here (say, a real account
+                    // squatting the username, the `system` squat of
+                    // 2026-07-12 aimed at the voice) must leave the claim
+                    // untaken so a later session retries. The claim guards
+                    // only the send.
+                    let voice = service.ensure_first_contact_voice().await?;
+                    let client = service.db.get().await?;
+                    let room =
+                        ChatRoom::get_or_create_dm(&client, voice.id, target_user_id).await?;
+                    ChatRoomMember::join(&client, room.id, voice.id).await?;
+                    ChatRoomMember::join(&client, room.id, target_user_id).await?;
+                    VoiceChannel::upsert_for_target(&client, TARGET_CHAT_ROOM, room.id, "dm", true)
+                        .await?;
+                    if !User::claim_first_contact_invitation(
+                        &client,
+                        target_user_id,
+                        chrono::Utc::now(),
+                    )
+                    .await?
+                    {
+                        return Ok(false);
+                    }
+                    drop(client);
+                    let sent = service
+                        .send_message(SendMessageParams {
+                            user_id: voice.id,
+                            room_id: room.id,
+                            room_slug: None,
+                            body: INVITATION_PLEA.to_string(),
+                            reply_to_message_id: None,
+                            reply_to_user_id: None,
+                            is_admin: false,
+                        })
+                        .await;
+                    match sent {
+                        Ok(_) => Ok(true),
+                        Err(send_error) => {
+                            // Give the claim back so a later session retries.
+                            // Losing the release too leaves a burned claim,
+                            // which is worth its own line.
+                            let released: anyhow::Result<()> = async {
+                                let client = service.db.get().await?;
+                                User::release_first_contact_invitation(&client, target_user_id)
+                                    .await
+                            }
+                            .await;
+                            if let Err(release_error) = released {
+                                tracing::error!(
+                                    error = ?release_error,
+                                    user_id = %target_user_id,
+                                    username = %target_username,
+                                    "failed to release a burned first contact claim"
+                                );
+                            }
+                            Err(send_error)
+                        }
+                    }
+                }
+                .await;
+                match result {
+                    Ok(true) => {
+                        tracing::info!(user_id = %target_user_id, username = %target_username, "first contact invitation sent");
+                    }
+                    // Another session claimed it first: nothing to do.
+                    Ok(false) => {}
+                    Err(e) => {
+                        late_core::error_span!(
+                            "first_contact_invitation_failed",
+                            error = ?e,
+                            user_id = %target_user_id,
+                            username = %target_username,
+                            "failed to send first contact invitation"
+                        );
+                    }
+                }
+            }
+            .instrument(info_span!(
+                "chat.send_first_contact_invitation_task",
+                user_id = %target_user_id,
+            )),
+        );
+    }
+
     pub fn send_message_with_reply_task(&self, task: SendMessageTask) {
         let SendMessageTask {
             user_id,
@@ -2623,8 +3316,39 @@ impl ChatService {
         metrics::record_chat_message_sent();
         self.notification_svc
             .create_mentions_task(user_id, chat.id, room_id, body);
+        self.pretranslate_for_author(&client, &chat).await;
         tracing::info!(chat_id = %chat.id, "message sent");
         Ok(())
+    }
+
+    /// Translate an opted-in author's message to English up front (send and
+    /// edit paths, after the row exists) and mark it author-shared, so every
+    /// English-reading session shows it without auto mode or a `t`.
+    /// Fire-and-forget on top of a fire-and-forget service: a failed
+    /// settings lookup only means the message goes out unshared (readers
+    /// can still `t` it), so it logs here and never fails the send.
+    async fn pretranslate_for_author(&self, client: &tokio_postgres::Client, chat: &ChatMessage) {
+        let Some(translation_svc) = &self.translation_svc else {
+            return;
+        };
+        if !needs_translation(&chat.body, TranslateLang::En) {
+            return;
+        }
+        let opted_in = match User::translate_mine_to_en(client, chat.user_id).await {
+            Ok(opted_in) => opted_in,
+            Err(error) => {
+                tracing::error!(
+                    error = ?error,
+                    user_id = %chat.user_id,
+                    "author pre-translate settings lookup failed"
+                );
+                return;
+            }
+        };
+        if !opted_in {
+            return;
+        }
+        translation_svc.request_shared(chat.id, chat.room_id, chat.body.clone(), TranslateLang::En);
     }
 
     /// The patron's message after the bar gets a say in it: a drink deep
@@ -2746,6 +3470,11 @@ impl ChatService {
 
         let tx = client.transaction().await?;
         let updated = ChatMessage::edit_after_authorization(&tx, message_id, new_body).await?;
+        // Cached translations describe the pre-edit body; they die with it.
+        late_core::models::message_translation::MessageTranslation::delete_for_message(
+            &tx, message_id,
+        )
+        .await?;
         ModerationAuditLog::record_if(
             &tx,
             permissions.should_audit(is_owner),
@@ -2761,7 +3490,7 @@ impl ChatService {
         let mut author_metadata =
             Self::load_chat_author_metadata(&client, &[existing.user_id]).await?;
         let _ = self.evt_tx.send(ChatEvent::MessageEdited {
-            message: updated,
+            message: updated.clone(),
             target_user_ids,
             author_username: author_metadata.usernames.remove(&existing.user_id),
             author_bonsai_glyph: author_metadata.bonsai_glyphs.remove(&existing.user_id),
@@ -2771,6 +3500,9 @@ impl ChatService {
                 .remove(&existing.user_id),
         });
         metrics::record_chat_message_edited();
+        // The edit's transaction dropped the old cached translations; keep
+        // the author's opt-in warranty alive for the new body.
+        self.pretranslate_for_author(&client, &updated).await;
         Ok(())
     }
 
@@ -3266,6 +3998,367 @@ impl ChatService {
         }
     }
 
+    /// Tell the room the static took a name (`app/deadchannel/haunt`, stage
+    /// 2). Fire and forget on purpose, and logged here rather than
+    /// upstream: the beat is one frame of theater, and the session that
+    /// just won its claim must not wait on Postgres to paint it. This
+    /// replica hears the beat back over the listener like every other.
+    pub(crate) fn publish_name_hit(&self, signal: NameHitSignal) {
+        let db = self.db.clone();
+        tokio::spawn(
+            async move {
+                let sent = async {
+                    let client = db.get().await?;
+                    notify_name_hit(&client, &signal).await
+                }
+                .await;
+                if let Err(error) = sent {
+                    tracing::warn!(
+                        error = ?error,
+                        user_id = %signal.user_id,
+                        message_id = %signal.message_id,
+                        "first contact name flicker never reached the room"
+                    );
+                }
+            }
+            .instrument(info_span!("chat.publish_name_hit")),
+        );
+    }
+
+    /// Keep every replica's per-message markers in step. One long-lived
+    /// Postgres connection LISTENs on [`CHAT_MESSAGE_GILDED_CHANNEL`] and
+    /// [`DEADCHANNEL_NAME_HIT_CHANNEL`] and rebroadcasts each notification
+    /// locally; a dropped connection reconnects after five seconds, and
+    /// until it does gild markers only lag until the next room tail load
+    /// (a name hit fired meanwhile is simply not witnessed here). Same
+    /// shape as `ShopService::start_listener_task`.
+    pub fn start_message_listener_task(&self, db_config: DbConfig) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(error) = service.listen_for_message_events_once(&db_config).await {
+                    tracing::warn!(error = ?error, "chat message postgres listener stopped");
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        })
+    }
+
+    async fn listen_for_message_events_once(&self, db_config: &DbConfig) -> Result<()> {
+        let mut config = tokio_postgres::Config::new();
+        config.host(&db_config.host);
+        config.port(db_config.port);
+        config.user(&db_config.user);
+        config.password(&db_config.password);
+        config.dbname(&db_config.dbname);
+
+        let (client, mut connection) = config.connect(tokio_postgres::NoTls).await?;
+        let listen = async {
+            listen_for_gild_changes(&client).await?;
+            listen_for_name_hits(&client).await
+        };
+        tokio::pin!(listen);
+        loop {
+            tokio::select! {
+                result = &mut listen => {
+                    result?;
+                    break;
+                }
+                message = std::future::poll_fn(|cx| connection.poll_message(cx)) => {
+                    let Some(message) = message else {
+                        return Ok(());
+                    };
+                    self.handle_message_notification(message?).await?;
+                }
+            }
+        }
+
+        loop {
+            let Some(message) = std::future::poll_fn(|cx| connection.poll_message(cx)).await else {
+                return Ok(());
+            };
+            self.handle_message_notification(message?).await?;
+        }
+    }
+
+    async fn handle_message_notification(
+        &self,
+        message: tokio_postgres::AsyncMessage,
+    ) -> Result<()> {
+        let tokio_postgres::AsyncMessage::Notification(notification) = message else {
+            return Ok(());
+        };
+        if notification.channel() == DEADCHANNEL_NAME_HIT_CHANNEL {
+            match parse_name_hit_payload(notification.payload()) {
+                Some(signal) => {
+                    let _ = self.evt_tx.send(ChatEvent::NameHit {
+                        room_id: signal.room_id,
+                        message_id: signal.message_id,
+                        seed: signal.seed,
+                    });
+                }
+                None => tracing::warn!(
+                    payload = notification.payload(),
+                    "unreadable deadchannel name hit payload"
+                ),
+            }
+            return Ok(());
+        }
+        if notification.channel() != CHAT_MESSAGE_GILDED_CHANNEL {
+            return Ok(());
+        }
+        let Some((message_id, room_id)) = parse_gilded_payload(notification.payload()) else {
+            tracing::warn!(
+                payload = notification.payload(),
+                "unparseable gild notification payload"
+            );
+            return Ok(());
+        };
+        // A failed lookup is this one marker lagging until the next tail
+        // load, not a reason to drop the LISTEN connection: propagating it
+        // would lose every gild committed during the reconnect window.
+        let summary = match self.load_gild_summary(message_id).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                tracing::warn!(
+                    error = ?error,
+                    message_id = %message_id,
+                    "failed to load gild summary for notification"
+                );
+                return Ok(());
+            }
+        };
+        let _ = self.evt_tx.send(ChatEvent::MessageGildsUpdated {
+            room_id,
+            message_id,
+            summary,
+        });
+        Ok(())
+    }
+
+    async fn load_gild_summary(&self, message_id: Uuid) -> Result<Option<ChatMessageGildSummary>> {
+        let client = self.db.get().await?;
+        ChatMessageGild::summary_for_message(&client, message_id).await
+    }
+
+    /// Buy a gild on someone else's message. The whole thing is one
+    /// fire-and-forget task because the buyer is in a modal, not in a
+    /// request/response: the picker closes on the keypress and the banner
+    /// arrives with the answer.
+    ///
+    /// This is the orchestration layer for gilding: every refusal, every
+    /// failure, the ledger span, and the #lounge line are decided here, and
+    /// `settle_gild` below does nothing but the transaction.
+    pub fn gild_message_task(&self, user_id: Uuid, message_id: Uuid, tier: GildTier) {
+        let service = self.clone();
+        let span = info_span!(
+            "chat.gild_message_task",
+            user_id = %user_id,
+            message_id = %message_id,
+            tier = tier.label(),
+            price = tier.price()
+        );
+        tokio::spawn(
+            async move {
+                match service.gild_message(user_id, message_id, tier).await {
+                    Ok(outcome) => service.announce_gild(user_id, tier, outcome),
+                    Err(GildError::Refused(refusal)) => {
+                        metrics::record_gild_refused(refusal);
+                        let _ = service.evt_tx.send(ChatEvent::GildFailed {
+                            user_id,
+                            message: refusal.message().to_string(),
+                        });
+                    }
+                    Err(GildError::Failed(error)) => {
+                        late_core::error_span!(
+                            "chat_gild_failed",
+                            error = ?error,
+                            "failed to gild chat message"
+                        );
+                        let _ = service.evt_tx.send(ChatEvent::GildFailed {
+                            user_id,
+                            message: "Gilding failed, nothing was charged".to_string(),
+                        });
+                    }
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    /// Everything a settled gild has to tell: the buyer, the author, every
+    /// viewer of the room, and (on the threshold gild only) #lounge.
+    fn announce_gild(&self, user_id: Uuid, tier: GildTier, outcome: GildOutcome) {
+        metrics::record_gild_bought(tier);
+        let fires_feed_line = outcome.fires_feed_line();
+        // The marker itself repaints off the Postgres notify (see
+        // `settle_gild`), including in this process; what is sent here is
+        // only what the two people involved are told.
+        let _ = self.evt_tx.send(ChatEvent::GildSucceeded {
+            user_id,
+            message_id: outcome.message_id,
+            tier,
+            buyer_username: outcome.buyer_username,
+            buyer_balance: outcome.buyer_balance,
+            author_user_id: outcome.author_user_id,
+            author_balance: outcome.author_balance,
+        });
+        // The feed line fires on the threshold gild and only there, so the
+        // room hears "this message is being paid for" once instead of once
+        // per buyer.
+        if fires_feed_line && let Some(activity) = &self.activity {
+            activity.message_gilded_task(
+                outcome.author_user_id,
+                outcome.message_id,
+                outcome.total_gilds,
+                outcome.room_slug,
+            );
+        }
+    }
+
+    /// Read every guard, then settle. Guards run on a pooled read before the
+    /// transaction opens, so a refusal costs one connection and no lock.
+    pub(super) async fn gild_message(
+        &self,
+        user_id: Uuid,
+        message_id: Uuid,
+        tier: GildTier,
+    ) -> Result<GildOutcome, GildError> {
+        let client = self.db.get().await?;
+        let Some(message) = ChatMessage::get(&client, message_id).await? else {
+            return Err(GildError::Refused(GildRefusal::MessageNotFound));
+        };
+        if !ChatRoomMember::is_member(&client, message.room_id, user_id).await? {
+            return Err(GildError::Refused(GildRefusal::NotAMember));
+        }
+        let Some(room) = ChatRoom::get(&client, message.room_id).await? else {
+            return Err(GildError::Refused(GildRefusal::MessageNotFound));
+        };
+        if room.visibility != "public" {
+            return Err(GildError::Refused(GildRefusal::NotPublic));
+        }
+        if room.kind == "game" {
+            return Err(GildError::Refused(GildRefusal::GameRoom));
+        }
+        if message.user_id == user_id {
+            return Err(GildError::Refused(GildRefusal::SelfGild));
+        }
+        let Some(author) = User::get(&client, message.user_id).await? else {
+            return Err(GildError::Refused(GildRefusal::MessageNotFound));
+        };
+        if author.is_bot() {
+            return Err(GildError::Refused(GildRefusal::BotAuthor));
+        }
+        // The buyer is the session that pressed the key, so a missing row
+        // here is not a rule saying no, it is the database contradicting
+        // itself. Nothing to tell the buyer, everything to tell the log.
+        let Some(buyer) = User::get(&client, user_id).await? else {
+            return Err(GildError::Failed(anyhow::anyhow!(
+                "gild buyer {user_id} has no user row"
+            )));
+        };
+        drop(client);
+
+        let now = std::time::Instant::now();
+        {
+            let mut cooldowns = self.gild_cooldowns.lock_recover();
+            if let Some(last) = cooldowns.get(&user_id)
+                && now.duration_since(*last) < GILD_COOLDOWN
+            {
+                return Err(GildError::Refused(GildRefusal::OnCooldown));
+            }
+            cooldowns.insert(user_id, now);
+        }
+
+        // A gild that never landed must not spend the buyer's window.
+        match self.settle_gild(user_id, &message, author.id, tier).await {
+            Ok(settled) => Ok(GildOutcome {
+                message_id,
+                tier,
+                buyer_username: buyer.username,
+                buyer_balance: settled.buyer_balance,
+                author_user_id: author.id,
+                author_balance: settled.author_balance,
+                total_gilds: settled.total_gilds,
+                upgraded_from: settled.upgraded_from,
+                room_slug: room.slug,
+            }),
+            Err(error) => {
+                self.gild_cooldowns.lock_recover().remove(&user_id);
+                Err(error)
+            }
+        }
+    }
+
+    /// Test seam: forget this buyer's cooldown stamp, so a test can walk one
+    /// buyer through several buys without waiting out [`GILD_COOLDOWN`].
+    #[cfg(test)]
+    pub(super) fn lift_gild_cooldown(&self, user_id: Uuid) {
+        self.gild_cooldowns.lock_recover().remove(&user_id);
+    }
+
+    /// The one transaction: lock the message, place the gild, move the
+    /// chips, count what the message now holds. Every early return drops the
+    /// transaction, which rolls it back, so a refusal here is uncharged too.
+    async fn settle_gild(
+        &self,
+        user_id: Uuid,
+        message: &ChatMessage,
+        author_id: Uuid,
+        tier: GildTier,
+    ) -> Result<SettledGild, GildError> {
+        let mut client = self.db.get().await?;
+        let tx = client.transaction().await.map_err(anyhow::Error::from)?;
+        // Serializes every gild on this message, which is what makes both the
+        // placement's read-then-write and the threshold count exact.
+        let Some(locked_author) = ChatMessageGild::lock_message_author(&tx, message.id).await?
+        else {
+            return Err(GildError::Refused(GildRefusal::MessageNotFound));
+        };
+        if locked_author != author_id {
+            return Err(GildError::Failed(anyhow::anyhow!(
+                "message author changed under the gild lock"
+            )));
+        }
+        let upgraded_from =
+            match ChatMessageGild::place_in_tx(&tx, message.id, author_id, user_id, tier).await? {
+                GildPlacement::Placed(_) => None,
+                GildPlacement::Upgraded { from, .. } => Some(from),
+                GildPlacement::SameTier => {
+                    return Err(GildError::Refused(GildRefusal::AlreadyGilded));
+                }
+                GildPlacement::HeldHigher(_) => {
+                    return Err(GildError::Refused(GildRefusal::HeldHigher));
+                }
+            };
+        let Some((buyer_chips, author_chips)) = UserChips::transfer_gild(
+            &tx,
+            user_id,
+            author_id,
+            tier.price(),
+            tier.author_share(),
+            message.id,
+        )
+        .await?
+        else {
+            return Err(GildError::Refused(GildRefusal::InsufficientChips));
+        };
+        let total_gilds = ChatMessageGild::count_for_message(&tx, message.id).await?;
+        // The repaint rides Postgres, not this process's broadcast, so both
+        // replicas learn about the marker the same way and there is exactly
+        // one code path that draws it.
+        ChatMessageGild::notify_gilded(&tx, message.id, message.room_id).await?;
+        tx.commit().await.map_err(anyhow::Error::from)?;
+        drop(client);
+
+        Ok(SettledGild {
+            buyer_balance: buyer_chips.balance,
+            author_balance: author_chips.balance,
+            total_gilds,
+            upgraded_from,
+        })
+    }
+
     pub fn list_reaction_owners_task(&self, user_id: Uuid, message_id: Uuid) {
         let service = self.clone();
         let span = info_span!(
@@ -3276,9 +4369,10 @@ impl ChatService {
         tokio::spawn(
             async move {
                 let event = match service.list_reaction_owners(user_id, message_id).await {
-                    Ok((owners, usernames)) => ChatEvent::ReactionOwnersListed {
+                    Ok((gilds, owners, usernames)) => ChatEvent::ReactionOwnersListed {
                         user_id,
                         message_id,
+                        gilds,
                         owners,
                         usernames,
                     },
@@ -3293,11 +4387,18 @@ impl ChatService {
         );
     }
 
+    /// The `ff` overlay: who gilded the message and who reacted, with the
+    /// usernames for both. Room membership is the auth boundary, as for the
+    /// reactions alone.
     async fn list_reaction_owners(
         &self,
         user_id: Uuid,
         message_id: Uuid,
-    ) -> Result<(Vec<ChatMessageReactionOwners>, HashMap<Uuid, String>)> {
+    ) -> Result<(
+        Vec<ChatMessageGild>,
+        Vec<ChatMessageReactionOwners>,
+        HashMap<Uuid, String>,
+    )> {
         let client = self.db.get().await?;
         let message = ChatMessage::get(&client, message_id)
             .await?
@@ -3306,15 +4407,17 @@ impl ChatService {
         if !is_member {
             anyhow::bail!("You are not a member of this room");
         }
+        let gilds = ChatMessageGild::list_for_message(&client, message_id).await?;
         let owners = ChatMessageReaction::list_owners_for_message(&client, message_id).await?;
         let mut owner_ids: Vec<Uuid> = owners
             .iter()
             .flat_map(|reaction| reaction.user_ids.iter().copied())
+            .chain(gilds.iter().map(|gild| gild.user_id))
             .collect();
         owner_ids.sort();
         owner_ids.dedup();
         let usernames = User::list_usernames_by_ids(&client, &owner_ids).await?;
-        Ok((owners, usernames))
+        Ok((gilds, owners, usernames))
     }
 
     pub fn list_public_rooms_task(&self, user_id: Uuid) {
@@ -3609,7 +4712,7 @@ impl ChatService {
         Ok(room.id)
     }
 
-    async fn join_game_room(&self, user_id: Uuid, room_id: Uuid) -> Result<Uuid> {
+    pub(crate) async fn join_game_room(&self, user_id: Uuid, room_id: Uuid) -> Result<Uuid> {
         let client = self.db.get().await?;
         let room = ChatRoom::get(&client, room_id)
             .await?
@@ -3626,11 +4729,22 @@ impl ChatService {
         {
             anyhow::bail!("this match chat is players only");
         }
+        // A ban is what keeps someone out of a public game room, and
+        // `ChatRoomMember::join` is where that is enforced for every join path.
         ChatRoomMember::join(&client, room.id, user_id).await?;
         Ok(room.id)
     }
 
     async fn open_public_room(&self, user_id: Uuid, slug: &str) -> Result<Uuid> {
+        // The one gated join in the app (GAME.md, First contact stage 4):
+        // the invitation is the key, because an open door would let people
+        // skip the eligibility funnel the haunting exists to drive.
+        if slug
+            .trim()
+            .eq_ignore_ascii_case(late_core::models::chat_room::DEADCHANNEL_SLUG)
+        {
+            return self.join_deadchannel_room(user_id).await;
+        }
         let client = self.db.get().await?;
         // Public rooms are hosted, not owned: only mods edit their topic and
         // rules. Whether this call opens a brand-new room decides whether the
@@ -3656,6 +4770,47 @@ impl ChatService {
             // The room exists and the caller is in it. A missed notice is worth
             // logging, never worth telling them their room failed to open.
             tracing::error!(?error, slug = %slug, room_id = %room.id, "failed to announce new public room");
+        }
+        Ok(room.id)
+    }
+
+    /// `/join #deadchannel`, the invitation's only instruction (GAME.md,
+    /// First contact stage 4). Without the stamp the caller gets the exact
+    /// static line the reserved topic slug always gives, so from outside
+    /// the door and the wall are indistinguishable; with it the haunted
+    /// channel opens, seeded on the first invited entry.
+    async fn join_deadchannel_room(&self, user_id: Uuid) -> Result<Uuid> {
+        let client = self.db.get().await?;
+        let user = User::get(&client, user_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+        if late_core::models::user::extract_first_contact_invited_at(&user.settings).is_none() {
+            anyhow::bail!("only static on that channel");
+        }
+        let room = ChatRoom::get_or_create_deadchannel_room(&client).await?;
+        ChatRoomMember::join(&client, room.id, user_id).await?;
+        tracing::info!(user_id = %user_id, username = %user.username, room_id = %room.id, "deadchannel joined by invitation");
+        // Consent creates the character (GAME.md, Phase 2): the runner row,
+        // wearing a random starter look. A conditional insert, so a second
+        // device or a rejoin finds the runner already there and keeps its
+        // face; only a fresh row counts as the ladder's last beat, and the
+        // insert itself says which this was.
+        let look = crate::app::deadchannel::runner::state::Look::random(&mut rand::thread_rng());
+        let (runner, origin) =
+            late_core::models::deadchannel_runner::DeadchannelRunner::ensure_for_user(
+                &client,
+                user_id,
+                &look.to_json(),
+            )
+            .await?;
+        match origin {
+            late_core::models::deadchannel_runner::RunnerOrigin::Created => {
+                tracing::info!(user_id = %user_id, username = %user.username, runner_id = %runner.id, "runner created");
+                crate::metrics::record_first_contact_beat(
+                    crate::metrics::FirstContactBeat::RunnerCreated,
+                );
+            }
+            late_core::models::deadchannel_runner::RunnerOrigin::Existing => {}
         }
         Ok(room.id)
     }
@@ -4059,42 +5214,37 @@ impl ChatService {
         );
     }
 
-    /// Remove a user from a room via `/kick`. The work is the moderation
-    /// service's room kick, so ownership, staff rank, the audit log and the
-    /// target's live session all behave exactly as they do from the mod
-    /// surface.
-    pub fn kick_from_room_task(
+    /// Run `/kick`, `/ban` or `/unban` against a room. The work is the
+    /// moderation service's room action, so ownership, staff rank, the audit
+    /// log and the target's live session all behave exactly as they do from
+    /// the mod surface.
+    pub(crate) fn room_mod_task(
         &self,
         user_id: Uuid,
         permissions: Permissions,
-        room_slug: String,
-        target_username: String,
+        request: RoomModRequest,
     ) {
         let service = self.clone();
+        let action = request.action;
+        let target_username = request.username.clone();
         let span = info_span!(
-            "chat.kick_from_room_task",
+            "chat.room_mod_task",
             user_id = %user_id,
-            room_slug = %room_slug,
+            action = action.past_tense(),
+            room = ?request.room,
             target = %target_username
         );
         tokio::spawn(
             async move {
                 let moderation = service.moderation_service();
-                let event = match moderation
-                    .kick_from_room(
+                let event = match moderation.room_command(user_id, permissions, request).await {
+                    Ok(done) => ChatEvent::RoomModSucceeded {
                         user_id,
-                        permissions,
-                        room_slug.clone(),
-                        target_username.clone(),
-                    )
-                    .await
-                {
-                    Ok(_) => ChatEvent::KickSucceeded {
-                        user_id,
-                        room_slug,
+                        room_slug: done.room_slug,
                         username: target_username,
+                        action,
                     },
-                    Err(e) => ChatEvent::KickFailed {
+                    Err(e) => ChatEvent::RoomModFailed {
                         user_id,
                         message: e.to_string(),
                     },

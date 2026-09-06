@@ -14,13 +14,17 @@ use crate::app::{
     common::theme,
     state::{
         GAME_SELECTION_2048, GAME_SELECTION_LE_WORD, GAME_SELECTION_MINESWEEPER,
-        GAME_SELECTION_NONOGRAMS, GAME_SELECTION_RUBIKS_CUBE, GAME_SELECTION_SNAKE,
-        GAME_SELECTION_SOLITAIRE, GAME_SELECTION_SUDOKU, GAME_SELECTION_TETRIS,
-        GAME_SELECTION_TRAFFIC,
+        GAME_SELECTION_NONOGRAMS, GAME_SELECTION_RUBIKS_CUBE, GAME_SELECTION_SLIDING_PUZZLE,
+        GAME_SELECTION_SNAKE, GAME_SELECTION_SOLITAIRE, GAME_SELECTION_SUDOKU,
+        GAME_SELECTION_TETRIS, GAME_SELECTION_TRAFFIC,
     },
 };
 
 type DailyRewardTiers = &'static [(&'static str, i64)];
+
+/// Smallest area the Arcade lobby (quest strip + game grid) still fits in.
+const LOBBY_MIN_WIDTH: u16 = 50;
+const LOBBY_MIN_HEIGHT: u16 = 10;
 
 /// The three-tier games pay [`Difficulty::chips`] per tier. Solitaire's draw
 /// modes are not difficulties, but pay the medium and hard chip amounts; the
@@ -233,8 +237,10 @@ pub fn keys_line(hints: Vec<(&'static str, &'static str)>) -> Line<'static> {
             spans.push(Span::styled(" · ", Style::default().fg(theme::AMBER_DIM())));
         }
         spans.push(Span::styled(key, Style::default().fg(theme::AMBER())));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(desc, Style::default().fg(theme::TEXT_DIM())));
+        if !desc.is_empty() {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(desc, Style::default().fg(theme::TEXT_DIM())));
+        }
     }
     Line::from(spans)
 }
@@ -250,6 +256,7 @@ pub fn game_title(selection: usize) -> &'static str {
         GAME_SELECTION_SOLITAIRE => "Solitaire",
         GAME_SELECTION_SNAKE => "Snake",
         GAME_SELECTION_RUBIKS_CUBE => "Rubik's Cube",
+        GAME_SELECTION_SLIDING_PUZZLE => "Sliding Puzzle",
         GAME_SELECTION_TRAFFIC => "Traffic",
         _ => "The Arcade",
     }
@@ -262,6 +269,7 @@ pub struct ArcadeHubView<'a> {
     pub tetris_state: &'a super::tetris::state::State,
     pub snake_state: &'a super::snake::state::State,
     pub rubiks_cube_state: &'a super::rubiks_cube::state::State,
+    pub sliding_puzzle_state: &'a super::sliding_puzzle::state::State,
     pub le_word_state: &'a super::le_word::state::State,
     pub traffic_state: &'a super::traffic::state::State,
     pub sudoku_state: &'a super::sudoku::state::State,
@@ -269,6 +277,8 @@ pub struct ArcadeHubView<'a> {
     pub solitaire_state: &'a super::solitaire::state::State,
     pub minesweeper_state: &'a super::minesweeper::state::State,
     pub daily_completion: Option<&'a DailyCompletionStatus>,
+    /// Dailies this session banked today, ahead of the snapshot above.
+    pub session_daily_completion: Option<&'a DailyCompletionStatus>,
     pub quest_state: &'a crate::app::hub::dailies::state::QuestState,
 }
 
@@ -295,6 +305,14 @@ pub fn draw_arcade_hub(frame: &mut Frame, area: Rect, view: &ArcadeHubView<'_>) 
         } else if view.game_selection == GAME_SELECTION_RUBIKS_CUBE {
             super::rubiks_cube::ui::draw_game(frame, area, view.rubiks_cube_state, show_bottom_bar);
             return;
+        } else if view.game_selection == GAME_SELECTION_SLIDING_PUZZLE {
+            super::sliding_puzzle::ui::draw_game(
+                frame,
+                area,
+                view.sliding_puzzle_state,
+                show_bottom_bar,
+            );
+            return;
         } else if view.game_selection == GAME_SELECTION_LE_WORD {
             super::le_word::ui::draw_game(frame, area, view.le_word_state, show_bottom_bar);
             return;
@@ -313,10 +331,13 @@ pub fn draw_arcade_hub(frame: &mut Frame, area: Rect, view: &ArcadeHubView<'_>) 
         }
     }
 
-    if area.height < 10 || area.width < 50 {
-        frame.render_widget(
-            Paragraph::new("Terminal too small for The Arcade").alignment(Alignment::Center),
+    if area.height < LOBBY_MIN_HEIGHT || area.width < LOBBY_MIN_WIDTH {
+        crate::app::common::primitives::draw_too_small(
+            frame,
             area,
+            "The Arcade",
+            LOBBY_MIN_WIDTH,
+            LOBBY_MIN_HEIGHT,
         );
         return;
     }
@@ -482,7 +503,12 @@ fn draw_game_list(frame: &mut Frame, area: Rect, view: &ArcadeHubView<'_>) {
             Style::default().fg(theme::TEXT_MUTED())
         };
         let status = if available {
-            daily_reward_status_spans(view.daily_completion, game, tiers)
+            daily_reward_status_spans(
+                view.daily_completion,
+                view.session_daily_completion,
+                game,
+                tiers,
+            )
         } else {
             vec![Span::styled(
                 "Coming Soon",
@@ -522,8 +548,31 @@ fn draw_game_list(frame: &mut Frame, area: Rect, view: &ArcadeHubView<'_>) {
                     description_style: Style::default().fg(theme::TEXT_DIM()),
                     status: daily_reward_status_spans(
                         view.daily_completion,
+                        view.session_daily_completion,
                         DailyPuzzle::RubiksCube,
                         &[("daily", super::rubiks_cube::state::DAILY_WIN_REWARD_CHIPS)],
+                    ),
+                    label_width: 16,
+                },
+            );
+            draw_game_entry(
+                &mut lines,
+                &mut selected_line,
+                selection,
+                GameEntry {
+                    idx: GAME_SELECTION_SLIDING_PUZZLE,
+                    name: "Sliding Puzzle",
+                    descriptions: &["Slide numbered tiles into order."],
+                    selected_style: Style::default()
+                        .fg(theme::TEXT_BRIGHT())
+                        .add_modifier(Modifier::BOLD),
+                    normal_style: Style::default().fg(theme::TEXT()),
+                    description_style: Style::default().fg(theme::TEXT_DIM()),
+                    status: daily_reward_status_spans(
+                        view.daily_completion,
+                        view.session_daily_completion,
+                        DailyPuzzle::SlidingPuzzle,
+                        TIERED_REWARDS,
                     ),
                     label_width: 16,
                 },
@@ -567,8 +616,12 @@ fn push_game_section(lines: &mut Vec<Line<'static>>, title: &str) {
     )));
 }
 
+/// One `✓chips`/`✗chips` span per tier. A tier is done when either the
+/// leaderboard snapshot or this session's own wins (`SessionDailyWins`) say
+/// so; the snapshot catches up within a refresh, the session mark is instant.
 fn daily_reward_status_spans(
     status: Option<&DailyCompletionStatus>,
+    session_status: Option<&DailyCompletionStatus>,
     game: DailyPuzzle,
     tiers: &[(&str, i64)],
 ) -> Vec<Span<'static>> {
@@ -577,9 +630,10 @@ fn daily_reward_status_spans(
         if i > 0 {
             spans.push(Span::raw(" "));
         }
-        let done = status
-            .map(|s| s.completed_difficulty(game, difficulty_key))
-            .unwrap_or(false);
+        let done = [status, session_status]
+            .into_iter()
+            .flatten()
+            .any(|s| s.completed_difficulty(game, difficulty_key));
         let (glyph, style) = if done {
             ("✓", Style::default().fg(theme::SUCCESS()))
         } else {

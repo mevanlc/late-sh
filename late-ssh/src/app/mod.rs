@@ -11,12 +11,15 @@ pub(crate) mod bonsai_v2;
 pub mod chat;
 pub mod clubhouse;
 pub mod common;
+pub mod crown;
 pub mod dashboard;
 #[cfg(test)]
 mod dashboard_flow_test;
+pub mod deadchannel;
 pub(crate) mod directory;
 pub mod door;
 pub mod files;
+pub mod flags;
 pub mod games;
 pub(crate) mod help_modal;
 pub(crate) mod hub;
@@ -28,7 +31,9 @@ pub(crate) mod leaderboard;
 pub mod lobby;
 pub(crate) mod mod_modal;
 pub(crate) mod notify;
+pub mod paper;
 pub mod pet;
+pub mod pot;
 pub mod profile;
 pub(crate) mod profile_modal;
 pub(crate) mod quit_confirm;
@@ -46,13 +51,15 @@ pub mod state;
 #[cfg(test)]
 mod state_test;
 pub(crate) mod statusline;
+pub mod stream;
 pub mod tick;
 #[cfg(test)]
 mod tick_test;
 pub(crate) mod ultimates;
 pub mod voice;
+pub mod workspace;
 
 pub use hub::dailies::svc::QuestService;
 pub use hub::shop::svc::ShopService;
-pub use hub::svc::LeaderboardService;
+pub use leaderboard::svc::LeaderboardService;
 pub use ultimates::UltimateService;

@@ -9,17 +9,25 @@ use crate::app::door::hub::ui::sidebar_hit_test;
 fn clicks_select_games_and_ignore_chrome() {
     // 80x24 body: breathing row at y=0, rows fit without scrolling.
     let body = Rect::new(0, 0, 80, 24);
-    // First rows: "the house" header (y=1), Lateania (y=2), blank (y=3),
-    // "roguelikes" header (y=4), DCSS (y=5).
+    // The ` hop hint leads the nav (y=1) and is not selectable, nor is the
+    // blank under it (y=2). Then "the house" header (y=3), Lateania (y=4),
+    // blank (y=5), "roguelikes" header (y=6), DCSS (y=7), NetHack (y=8),
+    // Brogue (y=9), blank (y=10), "remakes" header (y=11), A Dark Room
+    // (y=12), Green Dragon (y=13).
     assert_eq!(sidebar_hit_test(body, 0, 5, 1), None);
-    assert_eq!(sidebar_hit_test(body, 0, 5, 2), Some(0));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 2), None);
     assert_eq!(sidebar_hit_test(body, 0, 5, 3), None);
-    assert_eq!(sidebar_hit_test(body, 0, 5, 5), Some(1));
-    // The ` hop hint under the roguelikes (y=8) is not selectable.
-    assert_eq!(sidebar_hit_test(body, 0, 5, 8), None);
-    // Last game (CodeKeep) sits at y=18, one past the hint row.
-    assert_eq!(sidebar_hit_test(body, 0, 5, 17), Some(8));
-    assert_eq!(sidebar_hit_test(body, 0, 5, 18), Some(9));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 4), Some(0));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 5), None);
+    assert_eq!(sidebar_hit_test(body, 0, 5, 6), None);
+    assert_eq!(sidebar_hit_test(body, 0, 5, 7), Some(1));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 9), Some(3));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 11), None);
+    assert_eq!(sidebar_hit_test(body, 0, 5, 12), Some(4));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 13), Some(5));
+    // Last games: Rebels at y=19, CodeKeep at y=20.
+    assert_eq!(sidebar_hit_test(body, 0, 5, 19), Some(9));
+    assert_eq!(sidebar_hit_test(body, 0, 5, 20), Some(10));
     // The rule column and the landing pane are not selectable.
     assert_eq!(sidebar_hit_test(body, 0, 18, 5), None);
     assert_eq!(sidebar_hit_test(body, 0, 40, 5), None);
@@ -31,11 +39,11 @@ fn clicks_select_games_and_ignore_chrome() {
 /// the hit test follows the same window.
 #[test]
 fn hit_test_follows_the_scroll_window() {
-    // Height 10: 8 sidebar rows visible of 17, selection on the last game
+    // Height 10: 8 sidebar rows visible of 20, selection on the last game
     // slides the window to the bottom of the list.
     let body = Rect::new(0, 0, 80, 10);
-    // Window starts at row 9 (Green Dragon), so y=1 lands on it...
-    assert_eq!(sidebar_hit_test(body, 9, 5, 1), Some(4));
+    // Window starts at row 12 (Green Dragon), so y=1 lands on it...
+    assert_eq!(sidebar_hit_test(body, 10, 5, 1), Some(5));
     // ...and the selected CodeKeep row is visible at the window's bottom.
-    assert_eq!(sidebar_hit_test(body, 9, 5, 8), Some(9));
+    assert_eq!(sidebar_hit_test(body, 10, 5, 8), Some(10));
 }

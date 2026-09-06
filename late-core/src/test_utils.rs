@@ -371,6 +371,41 @@ pub async fn create_test_user(db: &Db, username: &str) -> User {
     .expect("create user")
 }
 
+/// Test-only clock control: move every gallery piece back one UTC month,
+/// so the monthly award snapshot (which only ever looks at last month) sees
+/// them as last month's wall.
+pub async fn roll_artboard_pieces_back_a_month(client: &tokio_postgres::Client) {
+    client
+        .execute(
+            "UPDATE artboard_pieces
+             SET period_month = (period_month - INTERVAL '1 month')::date,
+                 created = created - INTERVAL '1 month'",
+            &[],
+        )
+        .await
+        .expect("roll artboard pieces back a month");
+}
+
+/// Test-only clock control: move every crown reign back one UTC month, as if
+/// the month had rolled over under it. The reign stays open on purpose: the
+/// crown emptying at the boundary is a read-time rule with no sweeper behind
+/// it, and this is what lets a test stand on the far side of the rollover.
+pub async fn roll_crown_reigns_back_a_month(client: &tokio_postgres::Client) {
+    let updated = client
+        .execute(
+            "UPDATE crown_reigns
+             SET month = (month - interval '1 month')::date,
+                 taken_at = taken_at - interval '1 month'",
+            &[],
+        )
+        .await
+        .expect("roll crown reigns back a month");
+    assert!(
+        updated > 0,
+        "roll_crown_reigns_back_a_month matched no reign"
+    );
+}
+
 /// Test-only clock control: push matching rows' `created` one second past
 /// `now()`, so `created > <cursor taken now>` comparisons are decisive
 /// instead of racing the clock's microsecond resolution. Tests must not

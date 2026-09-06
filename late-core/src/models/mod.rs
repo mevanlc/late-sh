@@ -1,9 +1,13 @@
 pub mod account_link;
+pub mod app_flag;
 pub mod arcade_handle;
 #[cfg(test)]
 mod arcade_handle_test;
 pub mod artboard;
 pub mod artboard_ban;
+pub mod artboard_piece;
+#[cfg(test)]
+mod artboard_piece_test;
 #[cfg(test)]
 mod artboard_test;
 pub mod article;
@@ -14,9 +18,9 @@ mod article_feed_read_test;
 mod article_test;
 pub mod asterion;
 pub mod audio_ban;
-pub mod birthday;
+pub mod bashquest_graduate;
 #[cfg(test)]
-mod birthday_test;
+mod bashquest_graduate_test;
 pub mod blackjack;
 pub mod bonsai;
 pub mod bonsai_decay_protection;
@@ -24,6 +28,9 @@ pub mod bonsai_decay_protection;
 mod bonsai_test;
 pub mod character_sheet;
 pub mod chat_message;
+pub mod chat_message_gild;
+#[cfg(test)]
+mod chat_message_gild_test;
 pub mod chat_message_reaction;
 #[cfg(test)]
 mod chat_message_test;
@@ -38,12 +45,26 @@ pub mod chat_slow_mode;
 pub mod chips;
 #[cfg(test)]
 mod chips_test;
+pub mod crown;
+#[cfg(test)]
+mod crown_test;
 pub mod cyberspace_account;
 pub mod daily_match;
 pub mod darkroom_save;
+pub mod darkroom_veteran;
+#[cfg(test)]
+mod darkroom_veteran_test;
+pub mod deadchannel_name_hit;
+pub mod deadchannel_runner;
+pub mod door_log_cursor;
+pub mod door_milestone;
 pub mod door_rc;
 #[cfg(test)]
 mod door_rc_test;
+pub mod door_run;
+pub mod drink_round;
+#[cfg(test)]
+mod drink_round_test;
 pub mod drinks;
 #[cfg(test)]
 mod drinks_test;
@@ -71,11 +92,19 @@ pub mod media_history_item;
 #[cfg(test)]
 mod media_history_item_test;
 pub mod media_queue_item;
+#[cfg(test)]
+mod media_queue_item_test;
 pub mod media_queue_vote;
 pub mod media_source;
 pub mod mention_feed_read;
 #[cfg(test)]
 mod mention_feed_read_test;
+pub mod message_translation;
+#[cfg(test)]
+mod message_translation_test;
+pub mod milestone;
+#[cfg(test)]
+mod milestone_test;
 pub mod minesweeper;
 #[cfg(test)]
 mod minesweeper_test;
@@ -84,14 +113,21 @@ pub mod mud_character;
 pub mod mud_world_state;
 pub mod nonogram;
 pub mod notification;
+#[cfg(test)]
+mod notification_test;
+pub mod paper;
 pub mod pet;
 #[cfg(test)]
 mod pet_test;
+pub mod pot;
+#[cfg(test)]
+mod pot_test;
 pub mod profile;
 pub mod profile_award;
 #[cfg(test)]
 mod profile_award_test;
 pub mod quest;
+pub mod rental;
 pub mod reward;
 #[cfg(test)]
 mod reward_test;
@@ -106,11 +142,15 @@ pub mod server_ban;
 pub mod shop_consumable_effect;
 pub mod showcase;
 pub mod showcase_feed_read;
+pub mod sliding_puzzle;
+#[cfg(test)]
+mod sliding_puzzle_test;
 pub mod snake;
 pub mod solitaire;
 pub mod statusline;
 #[cfg(test)]
 mod statusline_test;
+pub mod stream_ban;
 pub mod sudoku;
 pub mod tetris;
 pub mod traffic;

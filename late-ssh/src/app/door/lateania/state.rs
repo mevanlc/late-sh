@@ -16,10 +16,24 @@ use uuid::Uuid;
 use super::classes::Class;
 use super::svc::{LateaniaService, MudSnapshot, PlayerView, empty_player_view};
 use super::world::Dir;
-use super::worldmap::{Coord, MapCamera};
+use super::world::RoomId;
+use super::worldmap::{Coord, MapCamera, Route};
 
 /// Lines moved per `[` / `]` press when scrolling a text panel.
 const SCROLL_STEP: usize = 3;
+
+/// Where the player has marked they're going, resolved against where they are
+/// standing now. Rendered as one line under the room's exits: the exits say
+/// what is available, this says which of them to take.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Heading {
+    /// Standing in the marked room.
+    Arrived(&'static str),
+    /// The marked room, and the next exit to take toward it.
+    Toward(&'static str, Route),
+    /// Marked, but no walk over ground the player knows reaches it from here.
+    Unreachable(&'static str),
+}
 
 /// Which side panel the session is looking at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +48,9 @@ pub enum Panel {
     Examine,
     /// Earned titles: select one and press Enter to display it (or clear it).
     Titles,
-    /// The quest journal: the Frontier zone quests and their status (read-only).
+    /// The quest journal: the active starter step, accepted bounties, the Long
+    /// Road, and (once open) the Frontier zone quests. A list panel: Enter on
+    /// a row tracks its target on the compass/map.
     Quests,
     /// Adventurers in the room: select one and press Enter to auto-follow them.
     Follow,
@@ -59,6 +75,17 @@ pub enum Panel {
     /// The whole-world atlas: exploration progress per region (read-only,
     /// scrollable with `[` / `]`). Toggled with `m`.
     Map,
+    /// The leaderboard: top adventurers currently online, by level, pvp
+    /// kills, and gold (read-only, scrollable with `[` / `]`). Toggled
+    /// with `!` (not `?`, which late.sh reserves globally for a cross-door
+    /// help overlay).
+    Leaderboard,
+    /// A quest board's postings: ready-to-claim counter-bounties and bounties
+    /// still open to accept, in one explicit picker. Opened by choosing the
+    /// board feature in the Examine panel (there's no key left to spare for
+    /// a dedicated binding - every letter and the sensible symbols are
+    /// already taken).
+    Board,
 }
 
 /// A combat action a player can trigger by clicking its on-screen chip, mapping
@@ -74,6 +101,9 @@ pub enum ClickAction {
     Ability(u8),
     /// Lock onto the foe with this spawn id (a click on its roster row).
     AttackMob(u32),
+    /// Lock onto a hostile adventurer (a click on their roster row in a
+    /// `pvp` room's "Adventurers here" list).
+    AttackPlayer(Uuid),
 }
 
 /// The first recorded chip whose rect contains cell `(x, y)`. Pure so the click
@@ -87,6 +117,29 @@ fn hit_at(hits: &[(Rect, ClickAction)], x: u16, y: u16) -> Option<ClickAction> {
                 && y < r.y.saturating_add(r.height)
         })
         .map(|(_, action)| *action)
+}
+
+/// Whether a leave-confirmation deadline is still live at `now`. Pure so the
+/// "press Esc twice to leave" window logic can be unit-tested without
+/// standing up a whole `State` (which needs a real service to construct).
+fn is_leave_confirm_pending(until: Option<Instant>, now: Instant) -> bool {
+    until.is_some_and(|deadline| now < deadline)
+}
+
+/// A memoised route: the `(standing in, heading for)` pair it was computed for,
+/// and the walk it produced (`None` when no known-ground route exists).
+type CachedRoute = ((RoomId, RoomId), Option<Route>);
+
+/// The two pages of the `m` map. `m` cycles closed -> Field -> Lands -> closed,
+/// so one key walks the whole map from where your feet are to how the world
+/// hangs together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MapMode {
+    /// The room-level overhead field: your own neighbourhood, one land at a time.
+    Field,
+    /// The land graph: every country and the roads between them, no bosses and
+    /// no gates. The question it answers is "how do I get there".
+    Lands,
 }
 
 pub struct State {
@@ -119,10 +172,31 @@ pub struct State {
     /// mode captures keys). Chat is world-local via the service's `say`, so it
     /// never leaks into late.sh's global feed.
     chat_buffer: Option<String>,
+    /// Set by a first Esc press outside of chat: the deadline by which a
+    /// confirming second Esc must land to actually leave Lateania (see
+    /// `arm_leave_confirm`/`confirm_leave`). A single stray Esc - an easy
+    /// slip in a persistent world - must never instantly drop a player out.
+    leave_confirm_until: Option<Instant>,
     /// Where the overhead world map (Panel::Map) is looking, relative to the
     /// player. Reset whenever the panel changes, so opening the map always
     /// re-centres on them.
     map_camera: MapCamera,
+    /// Which page of the map `m` is showing. Always reopens on the field, so
+    /// `m` means the same thing every time it is pressed from the room.
+    map_mode: MapMode,
+    /// A room the player has marked to travel back to (`x` on the map's
+    /// crosshair, or Enter on a journal quest row). Local to the session and
+    /// never persisted: it is a note to oneself, not world truth.
+    map_dest: Option<RoomId>,
+    /// Whether the world map overlays active-quest targets (`!` markers and
+    /// border arrows). Toggled with `q` while the map is open; on by default.
+    map_quests: bool,
+    /// The last route computed, keyed by the (standing in, heading for) pair it
+    /// was computed for. A route only changes when one of those two changes, so
+    /// caching on that pair keeps the walk off the render path: the panel is
+    /// redrawn on every keystroke and every snapshot, but the search runs once
+    /// per room actually entered.
+    route_cache: RefCell<Option<CachedRoute>>,
 }
 
 impl State {
@@ -153,7 +227,12 @@ impl State {
             reset_version,
             reset_elsewhere: false,
             chat_buffer: None,
+            leave_confirm_until: None,
             map_camera: MapCamera::default(),
+            map_mode: MapMode::Field,
+            map_dest: None,
+            map_quests: true,
+            route_cache: RefCell::new(None),
         };
         state.svc.join_task(user_id, session_id);
         state
@@ -252,6 +331,32 @@ impl State {
         self.panel == Panel::Map
     }
 
+    /// Which page of the map is showing.
+    pub fn map_mode(&self) -> MapMode {
+        self.map_mode
+    }
+
+    /// `m`: closed -> the overhead field -> the land graph -> closed. One key
+    /// walks the whole map, from the ground under your feet out to how the
+    /// countries hang together.
+    pub fn cycle_map(&mut self) {
+        match (self.panel == Panel::Map, self.map_mode) {
+            (false, _) => {
+                self.map_mode = MapMode::Field;
+                self.set_panel(Panel::Map);
+            }
+            (true, MapMode::Field) => {
+                self.map_mode = MapMode::Lands;
+                self.cursor = 0;
+                self.list_scroll.set(0);
+            }
+            (true, MapMode::Lands) => {
+                self.map_mode = MapMode::Field;
+                self.set_panel(Panel::Room);
+            }
+        }
+    }
+
     /// Flip between the live-map RPG view and the plain text MUD view. The
     /// preference lives on the character (persisted), so this routes through the
     /// service; the next snapshot carries the new value into the view.
@@ -295,6 +400,80 @@ impl State {
         };
         self.map_camera
             .change_level(player, super::worldmap::bounds(), delta);
+    }
+
+    /// The room under the map's crosshair, resolved the same way the canvas
+    /// resolves it, or None when the cursor sits on blank or fog.
+    fn cursor_room(&self) -> Option<RoomId> {
+        let player_room = self.snapshot.players.get(&self.user_id)?.room?;
+        let at = self.map_camera.center(self.player_coord()?);
+        let visited = &self.snapshot.players.get(&self.user_id)?.visited;
+        super::worldmap::room_at(super::worldmap::world_coords(), at, visited, player_room)
+    }
+
+    /// Mark (or unmark) the room under the map crosshair as where the player is
+    /// trying to get to. Marking the room already marked clears it, so one key
+    /// both sets and cancels.
+    pub fn toggle_map_dest(&mut self) {
+        let picked = self.cursor_room();
+        self.map_dest = match (picked, self.map_dest) {
+            (Some(room), Some(current)) if room == current => None,
+            (picked, _) => picked,
+        };
+        self.route_cache.replace(None);
+    }
+
+    /// The room the player marked, for drawing it on the map.
+    pub fn dest_room(&self) -> Option<RoomId> {
+        self.map_dest
+    }
+
+    /// Whether the map overlays active-quest targets.
+    pub fn map_quests(&self) -> bool {
+        self.map_quests
+    }
+
+    /// Flip the map's quest overlay (`q` while the map is open).
+    pub fn toggle_map_quests(&mut self) {
+        self.map_quests = !self.map_quests;
+    }
+
+    /// Track (or untrack) a quest's target room from the journal: Enter on a
+    /// row with a target marks it exactly like `x` on the map's crosshair, so
+    /// the compass line under the exits starts guiding toward it.
+    fn toggle_quest_track(&mut self, target: RoomId) {
+        self.map_dest = match self.map_dest {
+            Some(current) if current == target => None,
+            _ => Some(target),
+        };
+        self.route_cache.replace(None);
+    }
+
+    /// Where the player marked they're going, and how to get there from the
+    /// room they're standing in right now. None when nothing is marked.
+    pub fn heading(&self) -> Option<Heading> {
+        let dest = self.map_dest?;
+        let name = super::worldmap::room_name(dest)?;
+        let player = self.snapshot.players.get(&self.user_id)?;
+        let here = player.room?;
+        if here == dest {
+            return Some(Heading::Arrived(name));
+        }
+        let mut cache = self.route_cache.borrow_mut();
+        let route = match *cache {
+            Some((key, route)) if key == (here, dest) => route,
+            _ => {
+                let route = super::worldmap::route(here, dest, &player.visited);
+                *cache = Some(((here, dest), route));
+                route
+            }
+        };
+        Some(match route {
+            Some(route) => Heading::Toward(name, route),
+            // Marked, reachable once, but no walk over known ground gets there
+            // from here now. Say so rather than showing a confident direction.
+            None => Heading::Unreachable(name),
+        })
     }
 
     /// Current list scroll offset (first visible line).
@@ -395,6 +574,10 @@ impl State {
             Panel::Taming => self.view().taming.map(|t| t.entries.len()).unwrap_or(0),
             Panel::Housing => self.view().housing.map(|h| h.entries.len()).unwrap_or(0),
             Panel::Portal => self.view().portal.map(|p| p.entries.len()).unwrap_or(0),
+            Panel::Board => self.view().board.map(|b| b.entries.len()).unwrap_or(0),
+            // The journal cursor walks the active quests and then the Long
+            // Road's milestones, so the panel's long tail stays reachable.
+            Panel::Quests => self.view().quests.len() + self.view().road.len(),
             Panel::Appearance => self.view().appearance.len(),
             // These panels' cursors walk headers + visible items, not the raw list.
             Panel::Inventory | Panel::Shop | Panel::Crafting => self.active_rows().len(),
@@ -450,6 +633,13 @@ impl State {
         }
     }
 
+    /// Place an earned attribute point on the `choice`-th score (point screen 1-6).
+    pub fn spend_score_point(&mut self, choice: usize) {
+        if self.ensure_player_present() {
+            self.svc.spend_score_point_task(self.user_id, choice);
+        }
+    }
+
     pub fn go(&mut self, dir: Dir) {
         if self.ensure_player_present() {
             self.svc.move_task(self.user_id, dir);
@@ -481,6 +671,35 @@ impl State {
     /// True while the player is typing a chat line (input capture is active).
     pub fn chat_active(&self) -> bool {
         self.chat_buffer.is_some()
+    }
+
+    /// How long a first Esc press keeps the "press again to leave" window
+    /// open (see `arm_leave_confirm`).
+    const LEAVE_CONFIRM_SECS: u64 = 6;
+
+    /// True while a first Esc press is waiting on a confirming second one.
+    /// The title bar shows a warning for as long as this is true. Factored
+    /// out as a pure function of the deadline so it can be unit-tested
+    /// without a live `State` (which needs a real service to construct).
+    pub fn leave_confirm_pending(&self) -> bool {
+        is_leave_confirm_pending(self.leave_confirm_until, Instant::now())
+    }
+
+    /// Arm the leave-confirmation window: called on a first Esc press
+    /// outside of chat compose. Any key other than a confirming second Esc
+    /// just lets the window lapse on its own.
+    pub fn arm_leave_confirm(&mut self) {
+        self.leave_confirm_until =
+            Some(Instant::now() + Duration::from_secs(Self::LEAVE_CONFIRM_SECS));
+    }
+
+    /// Consume the confirmation window: true only if it was armed and still
+    /// live, meaning this Esc is the confirming second press that should
+    /// actually leave Lateania.
+    pub fn confirm_leave(&mut self) -> bool {
+        let confirmed = self.leave_confirm_pending();
+        self.leave_confirm_until = None;
+        confirmed
     }
 
     /// The line being composed, for the input prompt (None when not composing).
@@ -651,6 +870,7 @@ impl State {
             ClickAction::Flee => self.flee(),
             ClickAction::Ability(slot) => self.use_ability(slot),
             ClickAction::AttackMob(mob_id) => self.attack_mob(mob_id),
+            ClickAction::AttackPlayer(target_id) => self.attack_player(target_id),
         }
         true
     }
@@ -660,6 +880,14 @@ impl State {
     pub fn attack_mob(&mut self, mob_id: u32) {
         if self.ensure_player_present() {
             self.svc.engage_mob_task(self.user_id, mob_id);
+        }
+    }
+
+    /// Lock onto a hostile adventurer in a `pvp` room (a click on their
+    /// roster row) and start duelling; the combat tick carries it from there.
+    pub fn attack_player(&mut self, target_id: Uuid) {
+        if self.ensure_player_present() {
+            self.svc.engage_player_task(self.user_id, target_id);
         }
     }
 
@@ -746,8 +974,52 @@ impl State {
                     None => {}
                 }
             }
-            Panel::Examine => self.svc.interact_task(self.user_id, self.cursor),
+            Panel::Examine => {
+                // Every feature reveals its description when looked at, boards
+                // included - that's the "look at things" rule. A board then
+                // also opens its picker on top, because choosing what to accept
+                // or claim must be an explicit decision rather than a blind
+                // draw (the same shape as the Portal's look + fast-travel menu).
+                let is_board = self
+                    .view()
+                    .features
+                    .get(self.cursor)
+                    .is_some_and(|f| f.kind == "board");
+                self.svc.interact_task(self.user_id, self.cursor);
+                if is_board {
+                    self.set_panel(Panel::Board);
+                }
+            }
+            Panel::Board => {
+                if let Some(board) = self.view().board
+                    && let Some(entry) = board.entries.get(self.cursor)
+                {
+                    if entry.ready {
+                        self.svc.claim_board_task(self.user_id, entry.quest_id);
+                    } else {
+                        self.svc.accept_board_task(self.user_id, entry.quest_id);
+                    }
+                }
+            }
             Panel::Titles => self.svc.set_active_title_task(self.user_id, self.cursor),
+            Panel::Quests => {
+                // Track the highlighted quest - or Long Road crown - on the
+                // compass/map (or untrack it if it is already the marked
+                // destination). Rows without a single meaningful place stay
+                // inert.
+                let target = {
+                    let view = self.view();
+                    let quests = view.quests.len();
+                    if self.cursor < quests {
+                        view.quests.get(self.cursor).and_then(|q| q.target)
+                    } else {
+                        view.road.get(self.cursor - quests).and_then(|s| s.target)
+                    }
+                };
+                if let Some(target) = target {
+                    self.toggle_quest_track(target);
+                }
+            }
             Panel::Follow => self.follow_selected(),
             Panel::Stable => {
                 if let Some(stable) = self.view().stable
@@ -777,10 +1049,8 @@ impl State {
             }
             Panel::Portal => {
                 if let Some(portal) = self.view().portal
-                    && let Some((_, room, _, _)) = portal.entries.get(self.cursor)
+                    && let Some((_, room, _)) = portal.entries.get(self.cursor)
                 {
-                    // Sealed gates are still sent; the service answers with
-                    // why the way refuses.
                     self.svc.travel_task(self.user_id, *room);
                     self.panel = Panel::Room;
                 }

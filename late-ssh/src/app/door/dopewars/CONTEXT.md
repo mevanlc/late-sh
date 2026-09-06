@@ -4,7 +4,7 @@
 - Scope: the dopewars door as a whole — the **client** in `late-ssh/src/app/door/dopewars` (proxy/identity/state/render/mod) plus its screen lifecycle wiring in `late-ssh/src/app` (state/input/render/tick) **and the standalone host crate `late-dopewars/`**. There is no separate `late-dopewars/CONTEXT.md`; this file is the single source for both halves.
 - Domain: dopewars, the real upstream curses "Drug Wars" trading game (GPLv2), run on a PTY inside a **dedicated `late-dopewars` SSH host** and reached by late-ssh as a network-proxied door (the same model as the NetHack door).
 - Primary audience: LLM agents changing the dopewars launcher UI, the SSH client transport, the host crate (PTY bridge / auth / TERM handling), input forwarding, or its config/deploy wiring.
-- Last updated: 2026-07-01 (extracted from a local-PTY child of late-ssh to a standalone `late-dopewars` SSH host, matching nethack, for blast-radius isolation of the foreign C binary + a persistent shared high-score PVC).
+- Last updated: 2026-08-24 (`keys_for_game` retypes cursor keys to the mode the game holds via the shared `app/door/keys.rs` translator; dopewars is a real ncursesw client whose `keypad(TRUE)` request stops at our vt100 parser, so arrows only work through this rewrite. Invariant write-up in the DCSS CONTEXT §4.)
 - Status: Active
 - Parent context: `../../../../../CONTEXT.md`
 - Stability note: `[STABLE]` sections change rarely; `[VOLATILE]` sections change with the launcher UI, keybindings, or build/deploy wiring.
@@ -36,7 +36,7 @@ Core shape:
 - While Running, raw client bytes are forwarded straight to the host→child (minus mouse/paste noise) — dopewars, not late.sh, interprets keys. There is **no** key remap (no F1→help; dopewars is menu-driven). **Ctrl-C** ends the game: dopewars traps only `SIGWINCH`, so `^C` raises the default `SIGINT` through the PTY and the child dies, returning the session to the hub.
 - **Persistence: the shared high-score table only.** dopewars has **no mid-game save** (upstream single-player has no savegame format), so a dropped connection or a pod restart *ends* any in-progress game — no architecture changes that. What *does* persist is the leaderboard: every session's `-f` points at **one shared `dopewars.sco` file on the host's PVC**, so scores survive restarts and are global across players (the dopewars analog of nethack's shared bones playground). There are **no milestones, chips, or awards** — deferred (see §9).
 
-The door is gated behind `LATE_DOPEWARS_ENABLED` (default `false`); when disabled, `connect` is a no-op and the launcher shows "Currently unavailable". The host pod is deployed unconditionally (the flag gates only the client).
+The door is gated by the `dopewars_enabled` profile flag in `late-ssh/src/config.rs` (enabled in every current profile); when disabled, `connect` is a no-op and the launcher shows "Currently unavailable". The host pod is deployed unconditionally (the flag gates only the client).
 
 ---
 
@@ -124,10 +124,8 @@ Input capture contract (client side):
 ## 6. Configuration And Deploy [VOLATILE]
 
 ### Client config (env → `Config` → `SessionConfig` → `App`)
-- `LATE_DOPEWARS_ENABLED` (default `false`): when false, `connect` is a no-op and the launcher shows "Currently unavailable".
-- `LATE_DOPEWARS_HOST` (default `127.0.0.1`): the host service. In compose it's `service-dopewars`; in prod the Service `late-dopewars-sv`.
-- `LATE_DOPEWARS_PORT` (default `2324`).
-- `LATE_DOPEWARS_SECRET`: shared secret; **must equal the host's**. Required when enabled.
+- Client enabled/host/port are profile literals in `late-ssh/src/config.rs` (dev `service-dopewars`, prod `late-dopewars-sv`, port 2324).
+- `LATE_DOPEWARS_SECRET`: the only env the client reads; shared secret, **must equal the host's**.
 
 ### Host config (`late-dopewars` env)
 - `LATE_DOPEWARS_SECRET` (required), `LATE_DOPEWARS_BIN` (default `/usr/games/dopewars`), `LATE_DOPEWARS_SCORE_FILE` (default `/var/lib/late-dopewars/dopewars.sco`, the one shared high-score file on the PVC), `LATE_DOPEWARS_LISTEN_ADDR` (default `0.0.0.0`), `LATE_DOPEWARS_PORT` (default `2324`), `LATE_DOPEWARS_IDLE_TIMEOUT`.
@@ -139,15 +137,15 @@ Input capture contract (client side):
 
 ### Images (Dockerfile)
 - dopewars now ships in its **own `runtime-dopewars` stage** (the late-dopewars host), copied from `dopewars-build`, alongside its runtime libs + `ncurses-term`. It was **removed from `runtime-ssh`** — `service-ssh` ships only the client. `builder` builds `late-dopewars` (no `otel` feature; it has a no-op `otel` feature only so workspace-wide `--features otel` stays valid). The from-source binary still lives in `base` for `dev-dopewars` (via `dev-base`).
-- `Makefile` + `.env` thread `LATE_DOPEWARS_ENABLED=1` / `LATE_DOPEWARS_HOST=service-dopewars` / `_PORT=2324` / `_SECRET` / `_SCORE_FILE` (mirroring the nethack block).
+- `Makefile` + `.env` thread `LATE_DOPEWARS_PORT` / `_SECRET` / `_SCORE_FILE` for the host container (client host/port/enabled live in config.rs).
 
 ### Prod (Kubernetes / terraform)
-- `infra/service-dopewars.tf`: the `late-dopewars` Deployment (replicas **1**, runtime-dopewars image, `dopewars-save` PVC mounted at the score dir, `dopewars-score-seed` initContainer that chowns the mount to `late`, `RUST_LOG`/`LATE_DOPEWARS_SECRET`/`LATE_DOPEWARS_SCORE_FILE` env) + `late-dopewars-sv` ClusterIP Service on 2324. **Deployed unconditionally** (the enable flag gates only the client); the rollout is **kill-before-create** (`maxSurge=0`/`maxUnavailable=1`) so the old pod releases the RWO volume before the new one mounts it.
-- `infra/dopewars.tf`: the RWO `dopewars-save` PVC (`local-path`, 256Mi, `prevent_destroy`) + the host/port/score-file locals.
-- `infra/secrets.tf`: `dopewars-identity-secret` (random 64-char), injected into **both** service-ssh and late-dopewars so they derive the same key.
-- `infra/service-ssh.tf` now only injects the client env (`LATE_DOPEWARS_HOST/PORT/SECRET`), not the binary path.
+- `infra/doors.tf` (`dopewars` entry, stamped out by the `infra/door` module): the `late-dopewars` Deployment (replicas **1**, runtime-dopewars image, `dopewars-save` PVC mounted at the score dir, `dopewars-score-seed` initContainer that chowns the mount to `late`, `RUST_LOG`/`LATE_DOPEWARS_SECRET`/`LATE_DOPEWARS_SCORE_FILE` env) + `late-dopewars-sv` ClusterIP Service on 2324. **Deployed unconditionally** (the enable flag gates only the client); the rollout is **kill-before-create** (`maxSurge=0`/`maxUnavailable=1`) so the old pod releases the RWO volume before the new one mounts it.
+- The RWO `dopewars-save` PVC (`local-path`, 256Mi, `prevent_destroy`) lives in the same doors.tf entry.
+- `dopewars-identity-secret` (random 64-char, from the door module) is injected into **both** service-ssh and late-dopewars so they derive the same key.
+- `infra/service-ssh.tf` now only injects `LATE_DOPEWARS_SECRET`; host/port live in the config.rs prod profile.
 - `replicas` must stay 1 (one RWO volume holds the shared score file; assumes the single-node `local-path` cluster).
-- CI: `.github/workflows/deploy_dopewars.yml` builds and rolls out dopewars, and only dopewars, for `-dopewars` releases: `ci` + `build`, then `kubectl set image` on the `late-dopewars` deployment (both the `dopewars-score-seed` init container and the main container) and a rollout wait. No terraform runs on ordinary releases, so nothing else in the cluster is touched. When the `late-dopewars` deployment is missing the run auto-bootstraps (a terraform apply `-target`-scoped to the dopewars resources only); other manifest changes go through `deploy_infra.yml`; other deploy workflows that do run terraform read the live tag off the `late-dopewars` deployment and pass it through the required Terraform input, so an ordinary release never rebuilds or restarts the door. Same rule as codekeep, nethack, dcss, brogue, and usurper. `dopewars.yml` build-validates `docker/doors/dopewars.Dockerfile` and publishes the pinned `door-dopewars` image on main pushes. License/source obligations tracked in `NOTICE` (GPLv2).
+- CI: `-dopewars` releases route through `release.yml` to the generic `deploy_service.yml`: `ci` + `build`, then `kubectl set image deployment/late-dopewars '*=<image>'` (covers the `dopewars-score-seed` init container and the main container) and a rollout wait. No terraform runs on ordinary releases, so nothing else in the cluster is touched; when the `late-dopewars` deployment is missing the run auto-bootstraps (a terraform apply `-target=module.door["dopewars"]`). Other manifest changes go through `deploy_infra.yml`; terraform never reads or rewrites live image tags (deployments carry `ignore_changes` on images), so an ordinary release never rebuilds or restarts the door. Same rule as every other door. `doors.yml` build-validates `docker/doors/dopewars.Dockerfile` via `docker/doors/smoke/dopewars.sh` and publishes the pinned `door-dopewars` image on main pushes at the tag pinned in the root Dockerfile. License/source obligations tracked in `NOTICE` (GPLv2).
 
 ---
 

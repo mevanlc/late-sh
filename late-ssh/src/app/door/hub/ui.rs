@@ -7,7 +7,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
-use super::state::{HubGame, HubGroup};
+use super::state::HubGame;
 use crate::app::common::{primitives::hint_line, theme};
 
 /// The rc config modal, when open: which game's file plus the stored content.
@@ -27,31 +27,45 @@ pub struct HubView<'a> {
     pub brogue_enabled: bool,
     pub usurper_enabled: bool,
     pub dopewars_enabled: bool,
+    pub bashquest_enabled: bool,
     pub codekeep_enabled: bool,
     /// Players currently in the Lateania world, shown on its landing card.
     pub lateania_online: usize,
+    /// This account's character slots, for the landing card's select list.
+    pub lateania_slots: Vec<crate::app::door::lateania::svc::SlotSummary>,
+    pub lateania_slot_cursor: usize,
+    /// Lateania's backtick-detach recency window is live: the sidebar marks
+    /// it as a game in progress (a hop or Enter re-joins the character).
+    pub lateania_live: bool,
     /// Roguelike doors with a live detached game this session: the sidebar
     /// marks them and their landing offers resume instead of launch.
     pub nethack_live: bool,
     pub dcss_live: bool,
     pub brogue_live: bool,
+    /// The native remakes still loaded on this session: hopped away from but
+    /// not left, and not yet idled out.
+    pub darkroom_live: bool,
+    pub greendragon_live: bool,
     /// The rc config modal, drawn over the hub while open.
     pub rc_modal: Option<RcModalView<'a>>,
 }
 
 impl HubView<'_> {
-    /// Whether this game has a live (detached) session to resume.
+    /// Whether this game counts as in progress: a detached roguelike session
+    /// to resume, a native remake still loaded on this session, or Lateania
+    /// inside its backtick-detach recency window.
     fn is_live(&self, game: HubGame) -> bool {
         match game {
+            HubGame::Lateania => self.lateania_live,
             HubGame::Nethack => self.nethack_live,
             HubGame::Dcss => self.dcss_live,
             HubGame::Brogue => self.brogue_live,
-            HubGame::Lateania
-            | HubGame::Rebels
+            HubGame::Darkroom => self.darkroom_live,
+            HubGame::GreenDragon => self.greendragon_live,
+            HubGame::Rebels
             | HubGame::Usurper
-            | HubGame::GreenDragon
             | HubGame::Dopewars
-            | HubGame::Darkroom
+            | HubGame::Bashquest
             | HubGame::Codekeep => false,
         }
     }
@@ -68,7 +82,8 @@ const MIN_HEIGHT: u16 = 6;
 
 /// One row of the sidebar: a muted group header, a selectable game (index
 /// into [`HubGame::ALL`]), a blank separator between groups, or the faint
-/// always-on backtick hint under the roguelikes (they detach and hop).
+/// always-on backtick hint at the top (the games that detach and hop:
+/// Lateania, the roguelikes, and the two native remakes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarRow {
     Header(&'static str),
@@ -77,12 +92,11 @@ enum SidebarRow {
     HopHint,
 }
 
-/// The sidebar rows in display order: each group opens with its header,
-/// groups separated by a blank row, and the ` hop hint sits directly under
-/// the roguelike games. Shared by the renderer and the click hit test so
-/// they cannot drift.
+/// The sidebar rows in display order: the ` hop hint leads the whole nav,
+/// then each group opens with its header, groups separated by a blank row.
+/// Shared by the renderer and the click hit test so they cannot drift.
 fn sidebar_rows() -> Vec<SidebarRow> {
-    let mut rows = Vec::new();
+    let mut rows = vec![SidebarRow::HopHint, SidebarRow::Blank];
     let mut current_group = None;
     for (i, game) in HubGame::ALL.iter().enumerate() {
         let group = game.group();
@@ -94,13 +108,6 @@ fn sidebar_rows() -> Vec<SidebarRow> {
             current_group = Some(group);
         }
         rows.push(SidebarRow::Game(i));
-    }
-    let last_roguelike = rows.iter().rposition(|row| {
-        matches!(row, SidebarRow::Game(i)
-            if HubGame::ALL[*i].group() == HubGroup::Roguelikes)
-    });
-    if let Some(idx) = last_roguelike {
-        rows.insert(idx + 1, SidebarRow::HopHint);
     }
     rows
 }
@@ -122,27 +129,32 @@ fn sidebar_scroll(rows: &[SidebarRow], selected: usize, height: usize) -> usize 
 
 pub fn draw_games_hub(frame: &mut Frame, area: Rect, view: &HubView<'_>) {
     if area.height < MIN_HEIGHT || area.width < MIN_WIDTH {
-        frame.render_widget(
-            Paragraph::new("Terminal too small for Games")
-                .alignment(ratatui::layout::Alignment::Center),
-            area,
-        );
+        crate::app::common::primitives::draw_too_small(frame, area, "Games", MIN_WIDTH, MIN_HEIGHT);
         return;
     }
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // breathing room under the top border
             Constraint::Min(0),    // sidebar + selected game's landing
             Constraint::Length(1), // footer hints
         ])
         .split(area);
 
-    let body = Layout::default()
+    // The sidebar column runs from the top border so its rule reaches the
+    // frame; the row under the border stays empty on both sides.
+    let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(0)])
-        .split(layout[1]);
+        .split(layout[0]);
+    let body = [
+        columns[0],
+        Rect {
+            y: columns[1].y + 1,
+            height: columns[1].height.saturating_sub(1),
+            ..columns[1]
+        },
+    ];
 
     let selected = view.selected.min(HubGame::ALL.len() - 1);
     draw_sidebar(frame, body[0], selected, view);
@@ -155,6 +167,8 @@ pub fn draw_games_hub(frame: &mut Frame, area: Rect, view: &HubView<'_>) {
             body[1],
             view.delete_confirm,
             view.lateania_online,
+            &view.lateania_slots,
+            view.lateania_slot_cursor,
         ),
         HubGame::Rebels => {
             crate::app::door::rebels::render::draw_landing(frame, body[1], view.rebels_enabled);
@@ -196,6 +210,13 @@ pub fn draw_games_hub(frame: &mut Frame, area: Rect, view: &HubView<'_>) {
         HubGame::Dopewars => {
             crate::app::door::dopewars::render::draw_landing(frame, body[1], view.dopewars_enabled);
         }
+        HubGame::Bashquest => {
+            crate::app::door::bashquest::render::draw_landing(
+                frame,
+                body[1],
+                view.bashquest_enabled,
+            );
+        }
         HubGame::Darkroom => {
             crate::app::door::darkroom::screen::draw_landing(frame, body[1], view.delete_confirm);
         }
@@ -204,7 +225,7 @@ pub fn draw_games_hub(frame: &mut Frame, area: Rect, view: &HubView<'_>) {
         }
     }
 
-    draw_footer(frame, layout[2]);
+    draw_footer(frame, layout[1]);
 
     if let Some(modal) = &view.rc_modal {
         draw_rc_modal(frame, area, modal);
@@ -315,7 +336,13 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, selected: usize, view: &HubView) 
     let block = Block::default()
         .borders(Borders::RIGHT)
         .border_style(Style::default().fg(theme::BORDER_DIM()));
-    let inner = block.inner(area);
+    // The list starts under the breathing row; the rule above it is the
+    // block's.
+    let inner = Rect {
+        y: area.y + 1,
+        height: area.height.saturating_sub(1),
+        ..block.inner(area)
+    };
     frame.render_widget(block, area);
 
     let rows = sidebar_rows();
@@ -353,9 +380,10 @@ fn draw_sidebar(frame: &mut Frame, area: Rect, selected: usize, view: &HubView) 
                     Line::from(Span::styled(format!("  {label:<pad$}"), style))
                 }
             }
-            // The standing invitation under the roguelikes: they detach on `
-            // and hop between each other and chat. Faint on purpose; the
-            // green pip carries the "live right now" signal.
+            // The standing invitation atop the nav: Lateania and the
+            // roguelikes detach on ` and hop between each other and chat.
+            // Faint on purpose; the green pip carries the "live right now"
+            // signal.
             SidebarRow::HopHint => Line::from(Span::styled(
                 "  ` hop in & out",
                 Style::default().fg(theme::TEXT_FAINT()),

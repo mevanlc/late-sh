@@ -172,15 +172,17 @@ fn resting_value(component: StatusComponent) -> String {
         StatusComponent::Pomodoro | StatusComponent::Voice | StatusComponent::Station => {
             "-".to_string()
         }
+        StatusComponent::Pot => "closed".to_string(),
         _ => "0".to_string(),
     }
 }
 
 /// Assemble one segment: the value always paints, and `LabelMode` picks what
-/// sits beside it. Text labels trail the value (`3 unread`) because that is
-/// how the count reads aloud; icons lead it (`📩 3`), which also keeps the
-/// glyph off the segment's right edge, where a terminal painting it a cell
-/// narrower than measured would drag the following divider with it.
+/// sits beside it. Text labels usually trail the value (`3 unread`) because
+/// that is how the count reads aloud; the pot keeps upstream's `pot 84,200`
+/// phrasing. Icons lead values (`📩 3`), which also keeps the glyph off the
+/// segment's right edge, where a terminal painting it a cell narrower than
+/// measured would drag the following divider with it.
 fn segment_spans(
     setting: &StatusComponentSetting,
     data: &StatusData<'_>,
@@ -193,6 +195,10 @@ fn segment_spans(
     let label_style = Style::default().fg(theme::TEXT_MUTED());
 
     match setting.label {
+        LabelMode::Text if component == StatusComponent::Pot => vec![
+            Span::styled(format!(" {} ", component.text_label()), label_style),
+            Span::styled(format!("{value} "), value_style),
+        ],
         LabelMode::Text if !component.text_label().is_empty() => vec![
             Span::styled(format!(" {value}"), value_style),
             Span::styled(format!(" {} ", component.text_label()), label_style),
@@ -217,7 +223,7 @@ fn segment_spans(
 fn accent(component: StatusComponent) -> ratatui::style::Color {
     match component {
         StatusComponent::Mentions | StatusComponent::Invites => theme::MENTION(),
-        StatusComponent::Chips => theme::AMBER(),
+        StatusComponent::Chips | StatusComponent::Pot => theme::AMBER(),
         StatusComponent::Voice => theme::SUCCESS(),
         StatusComponent::Turns | StatusComponent::Quests => theme::AMBER_GLOW(),
         StatusComponent::Users | StatusComponent::Station => theme::TEXT(),
@@ -228,10 +234,10 @@ fn accent(component: StatusComponent) -> ratatui::style::Color {
 /// Shrink the bar until it fits `spare_cols`, cheapest concession first.
 ///
 /// The ladder, each rung retried after every single change so the bar gives up
-/// the least it can: compact low-priority segments, compact normal ones, drop
-/// low-priority ones, drop normal ones. Dropping is strictly tiered — every
-/// low-priority segment goes before any normal segment does — and within a
-/// tier the segment nearest the colliding title yields first.
+/// the least it can within a tier: compact low-priority segments, drop them,
+/// then compact and drop normal ones. Every low-priority segment therefore
+/// goes before any normal segment yields, and within a tier the segment nearest
+/// the colliding title yields first.
 pub(crate) fn fit(
     mut segments: Vec<Segment>,
     spare_cols: u16,
@@ -260,9 +266,6 @@ pub(crate) fn fit(
                 segments[idx].compact_in_place();
             }
         }
-    }
-
-    for low_priority_tier in [true, false] {
         loop {
             if total_width(&segments) <= spare_cols {
                 return segments;
@@ -389,6 +392,9 @@ pub(crate) fn click_action(component: StatusComponent) -> Option<StatusClick> {
         StatusComponent::Users => Some(StatusClick::Profiles),
         // The clock, the countdown and the mic badge are readouts: there is no
         // screen a click on them obviously means.
-        StatusComponent::Time | StatusComponent::Pomodoro | StatusComponent::Voice => None,
+        StatusComponent::Time
+        | StatusComponent::Pomodoro
+        | StatusComponent::Voice
+        | StatusComponent::Pot => None,
     }
 }

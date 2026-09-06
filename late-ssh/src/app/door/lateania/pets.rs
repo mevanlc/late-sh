@@ -29,6 +29,12 @@ pub struct PetSpecies {
     /// buyable Stable companion (not tameable). Rises across the fifty wild
     /// beasts so taming gets harder and harder.
     pub tame_level: i32,
+    /// This species' own auto-skill unlock ladder. Every pre-Aelunor species
+    /// points at the shared `taming::PET_SKILLS` ladder (unchanged behaviour);
+    /// the five Aelunor companions each carry their own distinct ladder, so
+    /// "different pets, different spells" is real per-species data, not just
+    /// re-skinned flavour text on the same five abilities.
+    pub skills: &'static [super::taming::PetSkill],
 }
 
 /// The companions sold across the capital Stables. Ordered cheapest first.
@@ -42,6 +48,7 @@ pub const PET_SPECIES: &[PetSpecies] = &[
         base_attack: 6,
         desc: "A loyal hound bred for the shield-wall - eager, brave, and quick to the throat of your foe.",
         tame_level: 0,
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "dire_wolf",
@@ -52,6 +59,7 @@ pub const PET_SPECIES: &[PetSpecies] = &[
         base_attack: 10,
         desc: "A grey hunter of the deep wood, all sinew and patience, that brings down quarry far above its weight.",
         tame_level: 0,
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "moor_hawk",
@@ -62,6 +70,7 @@ pub const PET_SPECIES: &[PetSpecies] = &[
         base_attack: 14,
         desc: "A swift raptor that stoops from above in a blur of talons - fragile, but its strikes bite deep.",
         tame_level: 0,
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "cave_bear",
@@ -72,6 +81,7 @@ pub const PET_SPECIES: &[PetSpecies] = &[
         base_attack: 12,
         desc: "A mountain of fur and muscle from the frostline caverns; slow to rouse, ruinous once it does.",
         tame_level: 0,
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "emberdrake",
@@ -82,6 +92,7 @@ pub const PET_SPECIES: &[PetSpecies] = &[
         base_attack: 20,
         desc: "A hatchling wyrm with coals for eyes - rare, prized, and worth every coin to those who can afford it.",
         tame_level: 0,
+        skills: super::taming::PET_SKILLS,
     },
 ];
 
@@ -99,6 +110,7 @@ pub fn pet_species_by_key(key: &str) -> Option<&'static PetSpecies> {
     PET_SPECIES
         .iter()
         .chain(super::taming::TAMEABLE.iter())
+        .chain(super::taming::AELUNOR_TAMEABLE.iter())
         .find(|s| s.key == key)
 }
 
@@ -144,10 +156,16 @@ impl Pet {
         (base + base * (self.level() - 1) / 4).max(1)
     }
 
-    /// Per-round attack: the base bite plus a quarter of it per level gained.
+    /// The companion's own bite: the species base plus an eighth of it (at
+    /// least 1) per loyalty level gained. What actually lands is this plus a share of the
+    /// owner's attack rating (`svc::PET_COEF_PCT`), so a pet scales with the
+    /// build it fights beside instead of being a fixed lump that dwarfs a
+    /// level-30 character and fades by 100. Loyalty used to add a quarter per
+    /// level (3.25x at cap); that flat growth was the lump.
     pub fn attack(&self) -> i32 {
         let base = self.species.base_attack;
-        (base + base * (self.level() - 1) / 4).max(1)
+        let step = (base / 8).max(1);
+        (base + step * (self.level() - 1)).max(1)
     }
 
     /// Loyalty progress toward the next level, as a 0-100 percentage (100 at cap).

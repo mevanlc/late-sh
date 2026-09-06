@@ -387,3 +387,104 @@ async fn room_state_lists_the_same_rooms_in_the_same_order_as_list_for_user() {
         assert!(state.last_message_at.contains_key(&room.id));
     }
 }
+
+#[tokio::test]
+async fn test_stream_room_follows_the_account_not_the_username() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let alice = create_test_user(&test_db.db, "streamer-alice").await;
+    let usurper = create_test_user(&test_db.db, "streamer-mallory").await;
+
+    let original = ChatRoom::get_or_create_stream_room(&client, &alice.username, alice.id)
+        .await
+        .expect("alice stream room");
+    assert_eq!(original.created_by, Some(alice.id));
+
+    // A second /golive reuses the same room.
+    let again = ChatRoom::get_or_create_stream_room(&client, &alice.username, alice.id)
+        .await
+        .expect("alice stream room again");
+    assert_eq!(again.id, original.id);
+
+    // Alice renamed: her room follows her account, old slug and all.
+    let renamed = ChatRoom::get_or_create_stream_room(&client, "totally-new-name", alice.id)
+        .await
+        .expect("renamed stream room");
+    assert_eq!(renamed.id, original.id);
+
+    // Another account claiming alice's freed username must NOT inherit her
+    // room (and its chat history); it gets a room of its own.
+    let taken_over = ChatRoom::get_or_create_stream_room(&client, &alice.username, usurper.id)
+        .await
+        .expect("usurper stream room");
+    assert_ne!(taken_over.id, original.id);
+    assert_eq!(taken_over.created_by, Some(usurper.id));
+}
+
+#[tokio::test]
+async fn the_deadchannel_slug_is_reserved_for_the_game() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let user = create_test_user(&test_db.db, "dc-squatter").await;
+
+    // The game's home channel (GAME.md, First contact): the invitation DM
+    // ends in `/join #deadchannel`, so the name has to be waiting for the
+    // game, not for whoever typed it first. Same choke point as the lounge
+    // reservation; the lowercasing normalize catches case variants.
+    assert!(
+        ChatRoom::get_or_create_public_room(&client, "deadchannel")
+            .await
+            .is_err()
+    );
+    assert!(
+        ChatRoom::get_or_create_public_room(&client, "DeadChannel")
+            .await
+            .is_err()
+    );
+    assert!(
+        ChatRoom::create_private_room(&client, "deadchannel", user.id)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn the_deadchannel_room_is_seeded_once_and_hidden_from_every_listing() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let member = create_test_user(&test_db.db, "dc-runner").await;
+
+    let room = ChatRoom::get_or_create_deadchannel_room(&client)
+        .await
+        .expect("seed deadchannel");
+    assert_eq!(room.kind, "deadchannel");
+    assert_eq!(room.slug.as_deref(), Some("deadchannel"));
+    assert!(!room.auto_join);
+    let again = ChatRoom::get_or_create_deadchannel_room(&client)
+        .await
+        .expect("re-seed deadchannel");
+    assert_eq!(again.id, room.id);
+
+    // Never discoverable, even for a member: browse and IRC listings are
+    // kind whitelists, and the new kind is on none of them. The channel is
+    // only ever spoken of.
+    ChatRoomMember::join(&client, room.id, member.id)
+        .await
+        .expect("join member");
+    let discover = ChatRoom::list_discover_public_topic_rooms(&client)
+        .await
+        .expect("discover listing");
+    assert!(discover.iter().all(|entry| entry.room_id != room.id));
+    let summaries = ChatRoom::list_public_topic_room_summaries(&client)
+        .await
+        .expect("summary listing");
+    assert!(
+        summaries
+            .iter()
+            .all(|entry| entry.slug.as_deref() != Some("deadchannel"))
+    );
+    let irc = ChatRoom::list_irc_channels(&client, member.id)
+        .await
+        .expect("irc listing");
+    assert!(irc.iter().all(|entry| entry.id != room.id));
+}

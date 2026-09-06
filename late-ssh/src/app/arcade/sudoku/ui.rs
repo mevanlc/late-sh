@@ -47,6 +47,7 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, show_bottom_bar: 
             ("h/j/k/l", "move"),
             ("1-9", "place"),
             ("m", "pencil"),
+            ("u", "undo"),
             ("0", "clear"),
             ("d/p/n", "daily/pers/new"),
             ("[ ]", "diff"),
@@ -301,7 +302,9 @@ fn cell_span(state: &State, row: usize, col: usize) -> Span<'static> {
     // Background: selected cell strongest, then all cells sharing its number -
     // the modern-sudoku "light up the board" feel.
     if is_selected {
-        style = style.bg(theme::BG_SELECTION()).add_modifier(Modifier::BOLD);
+        style = style
+            .patch(theme::selection_style())
+            .add_modifier(Modifier::BOLD);
         if value == 0 {
             style = style.fg(theme::TEXT_BRIGHT());
         }

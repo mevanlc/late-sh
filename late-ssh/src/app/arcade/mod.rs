@@ -1,8 +1,10 @@
+pub mod daily;
 pub mod input;
 pub mod le_word;
 pub mod minesweeper;
 pub mod nonogram;
 pub mod rubiks_cube;
+pub mod sliding_puzzle;
 pub mod snake;
 pub mod solitaire;
 pub mod sudoku;
@@ -10,7 +12,6 @@ pub mod tetris;
 pub mod traffic;
 pub mod twenty_forty_eight;
 pub mod ui;
-pub mod workspace;
 
 #[cfg(test)]
 mod ui_test;

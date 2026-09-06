@@ -15,6 +15,8 @@ fn data() -> StatusData<'static> {
         chip_balance: 1204,
         mentions_unread: 3,
         dms_unread: 2,
+        pot_size: Some(84_200),
+        pot_draws_in: Some("3h12m"),
         online_count: 12,
         turns_waiting: 2,
         pomodoro: Some("12:04 deep work"),
@@ -109,6 +111,28 @@ fn label_modes_pick_what_sits_beside_the_value() {
     assert_eq!(
         roomy(&[on(StatusComponent::Chips, LabelMode::None)]),
         " 1204 ─"
+    );
+}
+
+#[test]
+fn pot_keeps_upstream_wording_and_compacts_before_it_drops() {
+    let pot = StatusComponentSetting {
+        low_priority: true,
+        ..on(StatusComponent::Pot, LabelMode::Text)
+    };
+    let chips = on(StatusComponent::Chips, LabelMode::Text);
+    let components = [pot, chips];
+    let full = " pot 84,200 · 3h12m ─ 1204 chips ─";
+    let compact = " pot 84,200 ─ 1204 chips ─";
+    let without_pot = " 1204 chips ─";
+    let width_for = |text: &str| 18 + 2 + text.chars().count() as u16;
+
+    assert_eq!(render(&components, width_for(full)), full);
+    assert_eq!(render(&components, width_for(full) - 1), compact);
+    assert_eq!(
+        render(&components, width_for(without_pot)),
+        without_pot,
+        "the low-priority pot drops before chips"
     );
 }
 
@@ -499,6 +523,7 @@ fn click_actions_cover_exactly_the_actionable_components() {
     assert_eq!(click_action(StatusComponent::Time), None);
     assert_eq!(click_action(StatusComponent::Pomodoro), None);
     assert_eq!(click_action(StatusComponent::Voice), None);
+    assert_eq!(click_action(StatusComponent::Pot), None);
 }
 
 /// A left title wider than the whole border row must not underflow the spare

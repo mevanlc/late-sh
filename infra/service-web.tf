@@ -34,7 +34,7 @@ resource "kubernetes_deployment_v1" "service_web" {
 
       spec {
         container {
-          image = var.WEB_IMAGE_TAG
+          image = local.image_tags["web"]
           name  = "service-web"
 
           port {
@@ -95,28 +95,13 @@ resource "kubernetes_deployment_v1" "service_web" {
             name  = "OTEL_RESOURCE_ATTRIBUTES"
             value = "service.instance.id=$(POD_NAME)"
           }
+          # Selects the config.rs profile; every non-secret value lives there.
           env {
-            name  = "LATE_WEB_PORT"
-            value = "3000"
-          }
-          env {
-            name  = "LATE_SSH_INTERNAL_URL"
-            value = "http://service-ssh-sv:4000"
-          }
-          env {
-            name  = "LATE_AUDIO_URL"
-            value = "http://icecast-sv:8000"
+            name  = "LATE_ENV"
+            value = "prod"
           }
 
-          # --- Database (CloudNativePG) ---
-          env {
-            name  = "LATE_DB_HOST"
-            value = "postgres-rw"
-          }
-          env {
-            name  = "LATE_DB_PORT"
-            value = "5432"
-          }
+          # --- Database (CloudNativePG operator-generated credentials) ---
           env {
             name = "LATE_DB_NAME"
             value_from {
@@ -144,10 +129,6 @@ resource "kubernetes_deployment_v1" "service_web" {
               }
             }
           }
-          env {
-            name  = "LATE_DB_POOL_SIZE"
-            value = var.DB_POOL_SIZE
-          }
         }
 
         image_pull_secrets {
@@ -155,6 +136,15 @@ resource "kubernetes_deployment_v1" "service_web" {
         }
       }
     }
+  }
+
+  # Images are deployed with `kubectl set image` (deploy_service.yml), never
+  # by terraform applies, so a full apply must not roll the service back to
+  # whatever tag it was created with.
+  lifecycle {
+    ignore_changes = [
+      spec[0].template[0].spec[0].container[0].image,
+    ]
   }
 }
 

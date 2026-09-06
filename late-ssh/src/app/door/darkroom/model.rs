@@ -21,8 +21,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
-use super::data::{self, Building, Fire, Job, Perk, Resource, Temperature};
+use super::data::{self, Blueprint, Building, Fabricable, Fire, Job, Perk, Resource, Temperature};
 use super::pace::Pace;
 use super::world_data::{self, Tile};
 
@@ -55,6 +56,7 @@ pub enum View {
     Outside,
     Path,
     World,
+    Fabricator,
     Ship,
 }
 
@@ -95,6 +97,64 @@ pub struct WorldMap {
     pub visited: Vec<String>,
 }
 
+/// One of the ravaged battleship's three decks. Upstream keeps a free-form
+/// flag per deck on `World.state`; a closed set means a save can never claim a
+/// deck the ship does not have.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Deck {
+    Engineering,
+    Medical,
+    Martial,
+}
+
+impl Deck {
+    pub const ALL: [Deck; 3] = [Deck::Engineering, Deck::Medical, Deck::Martial];
+
+    /// The event key of the wing this deck's elevator opens on. `const` so the
+    /// antechamber's buttons can be built from it rather than repeating it.
+    pub const fn scene(self) -> &'static str {
+        match self {
+            Deck::Engineering => "executioner-engineering",
+            Deck::Medical => "executioner-medical",
+            Deck::Martial => "executioner-martial",
+        }
+    }
+
+    /// What its button on the elevator bank says.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Deck::Engineering => "engineering",
+            Deck::Medical => "medical",
+            Deck::Martial => "martial",
+        }
+    }
+}
+
+/// How far into the ravaged battleship the wanderer has got. The three decks
+/// can be taken in any order, so this is honestly a set rather than a ladder;
+/// what stays closed is *which* decks exist.
+///
+/// Held on the trip as well as on the save, exactly like the map: upstream
+/// tracks it on `World.state`, so progress made on a trip that ends in death
+/// is lost with everything else, and only a safe return commits it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Battleship {
+    /// The entrance turret is down and the strange device is taken. Upstream's
+    /// `World.state.executioner`, which is also what opens the fabricator.
+    pub entered: bool,
+    pub decks: BTreeSet<Deck>,
+}
+
+impl Battleship {
+    /// Whether all three decks report clear, which is what unlocks the
+    /// command deck's elevator.
+    pub fn decks_clear(&self) -> bool {
+        Deck::ALL.iter().all(|deck| self.decks.contains(deck))
+    }
+}
+
 /// A fight in progress, kept only so a dropped session can pick it back up.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CombatSnapshot {
@@ -130,6 +190,9 @@ pub struct Expedition {
     pub cleared: BTreeSet<Building>,
     /// Whether the crashed starship was found this trip.
     pub found_ship: bool,
+    /// The working copy of the battleship's progress, started from the save on
+    /// embark and committed on a safe return.
+    pub battleship: Battleship,
     pub combat: Option<CombatSnapshot>,
 }
 
@@ -332,6 +395,19 @@ pub struct Game {
     /// A trip in progress, parked between sessions.
     pub expedition: Option<Expedition>,
     pub ship: Option<ShipState>,
+    /// How far into the ravaged battleship this save has got.
+    pub battleship: Battleship,
+    /// Whether the strange device has come home and the fabricator stands.
+    pub fabricator: bool,
+    /// Whether the fabricator has said its one arrival line.
+    pub seen_fabricator: bool,
+    /// Blueprints redeemed out of the pack, which is what the fabricator's
+    /// gated recipes read.
+    pub blueprints: BTreeSet<Blueprint>,
+    /// Whether the account had already finished the game when this save was
+    /// created. It is the only thing a run inherits from the ones before it,
+    /// and all it does is put the ravaged battleship on the map.
+    pub veteran: bool,
     /// Whether a ruined city has been cleared, which is what brings the
     /// military down on the village.
     pub city_cleared: bool,
@@ -340,13 +416,18 @@ pub struct Game {
     /// Whether the whole map has been uncovered, which retires the scout's
     /// map offer.
     pub seen_all_map: bool,
-    /// Latched the first time the ship leaves the ground for good.
-    pub completed: bool,
-
     // ---- pacing (ours, not upstream) ----
     pub pace: Pace,
     /// Unix seconds the sim last settled to. Zero on a fresh save.
     pub last_settled: i64,
+    /// This run's identity, which is what the ending's chip payout is keyed
+    /// on (migration 158: every run that gets out pays, and the run is the
+    /// gate). The ending wipes the save, so the next run gets a new one. A
+    /// blob written before this field existed deserializes with a fresh id
+    /// rather than a nil one, which is why the default is `now_v7` and not
+    /// `Default`.
+    #[serde(default = "Uuid::now_v7")]
+    pub run_id: Uuid,
 }
 
 /// What lighting the fire did. `drew_builder` marks the one moment the room
@@ -408,11 +489,19 @@ pub enum GatherOutcome {
 
 impl Game {
     /// A brand new save: a dark room, a dead fire, and nothing else.
-    pub fn new() -> Self {
+    ///
+    /// `veteran` says whether this account has ever finished the game before,
+    /// which is the one thing a fresh run inherits (the caller reads it off
+    /// `darkroom_veterans`, because the save it replaced was deleted on the way
+    /// out). It carries no stores, no perks and no pacing change: all it does
+    /// is put the ravaged battleship on the map when the path opens.
+    pub fn new(veteran: bool) -> Self {
         Self {
             temp_timer: data::ROOM_WARM_DELAY,
             fire_timer: data::FIRE_COOL_DELAY,
             income_timer: super::pace::slowed(data::INCOME_DELAY),
+            veteran,
+            run_id: Uuid::now_v7(),
             ..Self::default()
         }
     }
@@ -739,6 +828,51 @@ impl Game {
         }
         self.add_store(craftable.item, 1);
         CraftOutcome::Crafted(craftable.item)
+    }
+
+    /// Whether a fabricate row should be on screen. Unlike the workshop, this
+    /// does not latch on having once been affordable: upstream gates purely on
+    /// the blueprint, and three recipes need none at all.
+    pub fn fabricable_available(&self, fabricable: &Fabricable) -> bool {
+        match fabricable.blueprint {
+            Some(blueprint) => self.blueprints.contains(&blueprint),
+            None => true,
+        }
+    }
+
+    /// Fabricate one batch. Refuses whole, like everything else that spends
+    /// stores. No cold gate: the fabricator is wanderer machinery humming in
+    /// its own corner, not the builder working in a freezing room.
+    pub fn fabricate(&mut self, fabricable: &Fabricable) -> CraftOutcome {
+        let held = self.store(fabricable.item);
+        if fabricable
+            .maximum
+            .is_some_and(|max| held + 1 > i64::from(max))
+        {
+            return CraftOutcome::AtMaximum(fabricable.item);
+        }
+        if let Some((resource, _)) = fabricable.cost.iter().find(|(r, n)| self.store(*r) < *n) {
+            return CraftOutcome::Missing(*resource);
+        }
+        for (resource, amount) in fabricable.cost {
+            self.add_store(*resource, -amount);
+        }
+        self.add_store(fabricable.item, fabricable.quantity);
+        CraftOutcome::Crafted(fabricable.item)
+    }
+
+    /// Turn blueprint tokens carried home into recipes the fabricator knows,
+    /// consuming the tokens (upstream `World.redeemBlueprints`). Returns
+    /// whether anything was redeemed, which is what prints the line.
+    pub fn redeem_blueprints(&mut self, outfit: &mut BTreeMap<Resource, i64>) -> bool {
+        let mut redeemed = false;
+        for blueprint in Blueprint::ALL {
+            if outfit.remove(&blueprint.token()).is_some_and(|n| n > 0) {
+                self.blueprints.insert(blueprint);
+                redeemed = true;
+            }
+        }
+        redeemed
     }
 
     /// Buy one. Refuses whole, same as everything else.

@@ -111,6 +111,22 @@ fn render_landing(frame: &mut Frame, area: Rect, launch: Vec<Line<'static>>) {
         flavor_headline(),
         flavor_quote(),
         Line::from(""),
+        landing::heading("Rewards"),
+        landing::stat(
+            "Escape",
+            "20,000 chips, and the BRE badge the first time",
+            10,
+        ),
+        landing::stat(
+            "Mastery",
+            "50,000 chips, and the BRM badge the first time",
+            10,
+        ),
+        Line::from(Span::styled(
+            "  Each pays again 7 days after the last time it paid. One run, one payout.",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        Line::from(""),
         landing::heading("Launch"),
     ]);
     lines.extend(launch);

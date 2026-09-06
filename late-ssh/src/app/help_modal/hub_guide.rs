@@ -1,11 +1,18 @@
 use asterion_core::MAX_MAZE_ID;
 
+use crate::app::common::primitives::thousands;
 use crate::app::lobby::house::{
-    ssnake::svc::{SSNAKE_WIN_CHIPS, SSNAKE_WIN_PAYOUT_COOLDOWN},
+    ssnake::settings::{
+        SSNAKE_BONUS_FOOD_MULTIPLIER, SSNAKE_CLEAR_CHIPS, SSNAKE_CRASH_CHIPS,
+        SSNAKE_CRASH_LENGTH_PENALTY_PCT, SSNAKE_EDGE_BONUS_CHIPS, SSNAKE_FOOD_CHIPS,
+        SSNAKE_SKIP_COOLDOWN,
+    },
     tron::svc::{TRON_WIN_CHIPS, TRON_WIN_PAYOUT_COOLDOWN},
 };
 use late_core::models::{
     asterion::ASTERION_DAILY_ESCAPE_PAYOUT,
+    chat_message_gild::GildTier,
+    drink_round::{MAX_OPEN_CREDITS, ROUND_CREDIT_TTL_HOURS, ROUND_PRICE_PER_PATRON},
     drinks::{DRINK_PRICE_MAX, DRINK_PRICE_MIN, DRUNK_DECAY_PER_HOUR},
     quest::{DAILY_QUEST_STREAK_BONUS_CHIPS_PER_LEVEL, MAX_DAILY_QUEST_STREAK_BONUS_LEVEL},
 };
@@ -50,12 +57,28 @@ fn chip_sections() -> Vec<GuideSection> {
             ],
         },
         GuideSection {
+            title: "Gilds",
+            body: vec![
+                "Press g on someone else's message in a public room to gild it.".to_string(),
+                format!(
+                    "Three tiers: Bronze {}, Silver {}, Gold {} chips.",
+                    thousands(GildTier::Bronze.price()),
+                    thousands(GildTier::Silver.price()),
+                    thousands(GildTier::Gold.price())
+                ),
+                "Two thirds reaches the author; the last third is destroyed.".to_string(),
+                "The marker is permanent, and the count shows on the author's profile.".to_string(),
+                "No self-gilds, no gilding bots, and no un-gilding.".to_string(),
+            ],
+        },
+        GuideSection {
             title: "Top Chips",
             body: vec![
-                "Monthly Top Chips counts net chip delta.".to_string(),
-                "Betting losses offset betting wins; Shop spending does not lower your rank."
+                "Monthly Top Chips counts only chips the house paid you for playing.".to_string(),
+                "Poker and Blackjack money, gifts, and gilds stay off it on both sides."
                     .to_string(),
-                "Floor restores are excluded from the board.".to_string(),
+                "Spending never lowers your rank: drinks, rounds, the crown, the pot, the Shop."
+                    .to_string(),
             ],
         },
     ]
@@ -74,6 +97,19 @@ fn bar_sections() -> Vec<GuideSection> {
                 "Your first ever drink is on the house.".to_string(),
                 "He only pours for you; use /gift @user <n> to send someone else chips."
                     .to_string(),
+            ],
+        },
+        GuideSection {
+            title: "The Round",
+            body: vec![
+                "Tell @bartender \"round for everyone\" and you buy the house one.".to_string(),
+                format!("{ROUND_PRICE_PER_PATRON} chips a head, for everyone online but you."),
+                "Say it plainly; he only rings up those exact words, never a question.".to_string(),
+                "You drink yours on the spot. Each of them gets a drink waiting".to_string(),
+                format!(
+                    "at the bar, good for {ROUND_CREDIT_TTL_HOURS}h, claimed by ordering from him."
+                ),
+                format!("They can bank {MAX_OPEN_CREDITS}; past that a round passes them by."),
             ],
         },
         GuideSection {
@@ -124,7 +160,7 @@ fn leaderboard_sections() -> Vec<GuideSection> {
         GuideSection {
             title: "Arcade Wins",
             body: vec![
-                "Counts daily Sudoku, Nonograms, Solitaire, Minesweeper, Le Word, and Rubik's Cube."
+                "Counts daily Sudoku, Nonograms, Solitaire, Minesweeper, Le Word, Rubik's Cube, and Sliding Puzzle."
                     .to_string(),
                 "Each completed daily adds monthly points:".to_string(),
                 "easy / draw-1  1 pt".to_string(),
@@ -132,6 +168,7 @@ fn leaderboard_sections() -> Vec<GuideSection> {
                 "hard / draw-3  5 pts".to_string(),
                 "Le Word daily  1 pt".to_string(),
                 "Rubik's Cube   3 pts".to_string(),
+                "Sliding Puzzle 1 / 3 / 5 pts by difficulty".to_string(),
                 "More hard dailies across more games wins the board.".to_string(),
             ],
         },
@@ -171,7 +208,7 @@ fn arcade_sections() -> Vec<GuideSection> {
                     .to_string(),
                 "Open The Arcade with 2.".to_string(),
                 "High-score games: 2048, Lateris, Snake, Traffic.".to_string(),
-                "Daily games: Rubik's Cube, Sudoku, Nonograms, Minesweeper, Solitaire, Le Word."
+                "Daily games: Rubik's Cube, Sliding Puzzle, Sudoku, Nonograms, Minesweeper, Solitaire, Le Word."
                     .to_string(),
             ],
         },
@@ -234,6 +271,21 @@ fn arcade_sections() -> Vec<GuideSection> {
             ],
         },
         GuideSection {
+            title: "Sliding Puzzle",
+            body: vec![
+                "Daily and personal boards: easy 3x3, medium 4x4, hard 5x5."
+                    .to_string(),
+                "hjkl or arrows slide a tile in the indicated direction.".to_string(),
+                "Click an adjacent tile to slide it into the gap.".to_string(),
+                "d selects daily; p selects personal; n twice starts a new personal board."
+                    .to_string(),
+                "Personal boards persist but grant no chips, quest progress, or Arcade Win."
+                    .to_string(),
+                "[ and ] change difficulty.".to_string(),
+                "r or 0 twice resets the current scramble.".to_string(),
+            ],
+        },
+        GuideSection {
             title: "Daily Puzzle Common Keys",
             body: vec![
                 "d selects the daily board.".to_string(),
@@ -248,6 +300,8 @@ fn arcade_sections() -> Vec<GuideSection> {
             title: "Sudoku",
             body: vec![
                 "1-9 fills a digit.".to_string(),
+                "m toggles pencil (candidate mark) mode.".to_string(),
+                "u undoes the previous move.".to_string(),
                 "0 or Backspace clears a cell.".to_string(),
             ],
         },
@@ -303,7 +357,7 @@ fn room_game_sections() -> Vec<GuideSection> {
                 "The row shows live occupancy; empty tables are always joinable.".to_string(),
                 "q or Esc leaves the table screen; your seat follows that game's rules."
                     .to_string(),
-                "Only Poker and Blackjack put your chips at risk. Everywhere else the winner is paid by the house and losers lose nothing."
+                "Only Poker and Blackjack put your chips at risk, and Super Snake docks a small fee per crash. Everywhere else the winner is paid by the house and losers lose nothing."
                     .to_string(),
             ],
         },
@@ -404,16 +458,38 @@ fn room_game_sections() -> Vec<GuideSection> {
         GuideSection {
             title: "Super Snake",
             body: vec![
-                "Four-seat snake arena with warp tunnels, relaxed speed.".to_string(),
+                "A five-seat snake arena that never stops: nobody starts it, nobody wins it, and there is no round to wait for."
+                    .to_string(),
+                "Sit down mid-flight and you spawn well clear of the other snakes; stand up any time.".to_string(),
                 format!(
-                    "Wins pay {SSNAKE_WIN_CHIPS} chips, one payout per {} minutes.",
-                    SSNAKE_WIN_PAYOUT_COOLDOWN.as_secs() / 60
+                    "Every food is worth {SSNAKE_FOOD_CHIPS} chips times the number of snakes MOVING when you eat it."
+                ),
+                "What the arena owes you runs up in the seat row as a pending figure; it reaches your balance when you stand up, and the idle kick banks it for you if you just disconnect."
+                    .to_string(),
+                "Snakes that are seated but not moving count for nobody, so idling at a seat pays zero and inflates nothing."
+                    .to_string(),
+                format!(
+                    "Food touching an arena wall pays +{SSNAKE_EDGE_BONUS_CHIPS} per wall before any multiplier, so a corner pickup is worth more than one in open floor."
+                ),
+                format!("Pink food pays {SSNAKE_BONUS_FOOD_MULTIPLIER}x the usual rate."),
+                format!(
+                    "The orange food is the arena's last: eating it pays {SSNAKE_CLEAR_CHIPS} chips times the same multiplier and reshuffles the board to a new random level."
+                ),
+                "The new board counts 3, 2, 1, GO on screen before anyone can steer, so a key pressed on the old arena cannot drive you into a wall you have not seen."
+                    .to_string(),
+                format!(
+                    "Crashing costs {SSNAKE_CRASH_CHIPS} chips and respawns you {SSNAKE_CRASH_LENGTH_PENALTY_PCT}% shorter; there are no lives to lose, and shedding length is how a snake too long to steer gets back under control."
+                ),
+                format!(
+                    "v votes to skip the arena. It changes only once every seated player has voted, and no more than once every {}s — on a table of one you are the whole vote, so the cooldown is what stops anyone rerolling until they get the level they farm fastest.",
+                    SSNAKE_SKIP_COOLDOWN.as_secs()
                 ),
                 "s, Space, or Enter sits when not seated.".to_string(),
-                "n starts another round.".to_string(),
-                "w/a/s/d, hjkl, or arrows steer while seated.".to_string(),
-                "[ and ] browse the arena between matches.".to_string(),
-                "l leaves seat; q or Esc leaves the table.".to_string(),
+                "w/a/s/d, h, or arrows steer while seated.".to_string(),
+                format!(
+                    "l leaves your seat, but standing up while your snake is moving costs the same {SSNAKE_CRASH_CHIPS} chips as a crash — you cannot bail out of one for free. Stand up parked and it is free."
+                ),
+                "q or Esc leaves the table screen; your snake keeps its seat and keeps going.".to_string(),
             ],
         },
         GuideSection {

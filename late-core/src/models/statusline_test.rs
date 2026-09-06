@@ -30,11 +30,10 @@ fn default_list_covers_every_component_exactly_once() {
     }
 }
 
-/// Day one, nobody has a stored list, so the defaults ARE the bar every
-/// existing account sees. It must reproduce the hardcoded HUD this roster
-/// replaced: mentions, pomodoro, voice, chips, in that order, and nothing else.
+/// A user without a stored list sees the current upstream HUD content in its
+/// current order, plus nothing opt-in.
 #[test]
-fn default_enabled_set_reproduces_the_legacy_bar() {
+fn default_enabled_set_reproduces_the_upstream_bar() {
     let enabled: Vec<StatusComponent> = default_statusline_components()
         .into_iter()
         .filter(|s| s.enabled)
@@ -43,22 +42,23 @@ fn default_enabled_set_reproduces_the_legacy_bar() {
     assert_eq!(
         enabled,
         vec![
-            StatusComponent::Mentions,
             StatusComponent::Pomodoro,
             StatusComponent::Voice,
+            StatusComponent::Mentions,
+            StatusComponent::Pot,
             StatusComponent::Chips,
         ]
     );
 }
 
-/// The four legacy segments hold their ground under width pressure; everything
-/// opt-in yields first, so switching one on cannot cost a user their page tabs.
+/// The pot is visible by default but remains the first ambient segment to yield;
+/// everything opt-in also starts in that low-priority tier.
 #[test]
-fn only_opt_in_components_start_low_priority() {
+fn ambient_and_opt_in_components_start_low_priority() {
     for setting in default_statusline_components() {
         assert_eq!(
             setting.low_priority,
-            !setting.enabled,
+            setting.component == StatusComponent::Pot || !setting.enabled,
             "{} priority tier",
             setting.component.as_str()
         );
@@ -107,11 +107,11 @@ fn normalize_drops_duplicates_and_keeps_stored_order() {
     assert!(!normalized[1].enabled);
 }
 
-/// Backfill diverges from the sidebar's blanket enable: a component missing
-/// from a customized bar comes back at `backfill_existing()`, which is `false`
-/// for everything currently in the roster.
+/// Backfill diverges from the sidebar's blanket enable. The upstream pot is the
+/// one required addition; optional components stay off in an existing custom
+/// roster.
 #[test]
-fn normalize_backfills_missing_components_without_enabling_them() {
+fn normalize_backfills_each_component_at_its_own_policy() {
     let stored = vec![StatusComponentSetting::new(StatusComponent::Chips)];
     let normalized = normalize_statusline_components(&stored);
 
@@ -124,7 +124,11 @@ fn normalize_backfills_missing_components_without_enabling_them() {
             "{} backfilled at its own policy",
             setting.component.as_str()
         );
-        assert!(!setting.enabled, "no component currently forces itself on");
+        assert_eq!(
+            setting.enabled,
+            setting.component == StatusComponent::Pot,
+            "only the upstream pot forces itself on"
+        );
     }
 }
 
@@ -205,9 +209,13 @@ fn parse_of_an_empty_array_yields_the_full_default_list() {
     // normalize backfills rather than leaving the user with no roster at all.
     let parsed = parse_statusline_components(&[] as &[Value]);
     assert_eq!(parsed.len(), STATUS_COMPONENT_COUNT);
+    assert!(find(&parsed, StatusComponent::Pot).enabled);
     assert!(
-        parsed.iter().all(|s| !s.enabled),
-        "backfilled entries stay off"
+        parsed
+            .iter()
+            .filter(|setting| setting.component != StatusComponent::Pot)
+            .all(|setting| !setting.enabled),
+        "optional backfilled entries stay off"
     );
 }
 

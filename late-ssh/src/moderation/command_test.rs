@@ -49,11 +49,9 @@ fn command_help_explains_audit_arguments() {
 fn command_help_explains_ban_arguments() {
     let lines = mod_help_lines(Some("ban"));
 
-    assert!(
-        lines
-            .iter()
-            .any(|line| line == "ban <server|#room|artboard|audio> @name [duration] [reason...]")
-    );
+    assert!(lines.iter().any(
+        |line| line == "ban <server|#room|artboard|audio|stream> @name [duration] [reason...]"
+    ));
     assert!(
         lines.iter().any(|line| line.contains("s/m/h/d")),
         "ban help should explain duration syntax: {lines:?}"
@@ -77,10 +75,8 @@ fn command_help_uses_limited_grouped_surface() {
         "top-level help should show rename-user command: {lines:?}"
     );
     assert!(
-        lines
-            .iter()
-            .any(|line| line
-                == "ban    <server|#room|artboard|audio> @name [duration] [reason...]"),
+        lines.iter().any(|line| line
+            == "ban    <server|#room|artboard|audio|stream> @name [duration] [reason...]"),
         "top-level help should show verb-primary ban form: {lines:?}"
     );
 }
@@ -460,6 +456,30 @@ fn parses_artboard_curate_command() {
 }
 
 #[test]
+fn parses_artboard_gallery_commands() {
+    assert_eq!(
+        parse_mod_command("artboard remove 0192ABCD-1234 copied from @ann").unwrap(),
+        ModCommand::ArtboardRemovePiece {
+            id_prefix: "0192abcd-1234".to_string(),
+            reason: "copied from @ann".to_string(),
+        }
+    );
+    // Under eight characters, or not hex, never reaches the database.
+    assert!(parse_mod_command("artboard remove 0192").is_err());
+    assert!(parse_mod_command("artboard remove notanid1 reason").is_err());
+    assert!(parse_mod_command("artboard remove").is_err());
+    assert_eq!(
+        parse_mod_command("artboard gallery off").unwrap(),
+        ModCommand::ArtboardGallery { enabled: false }
+    );
+    assert_eq!(
+        parse_mod_command("artboard gallery on").unwrap(),
+        ModCommand::ArtboardGallery { enabled: true }
+    );
+    assert!(parse_mod_command("artboard gallery maybe").is_err());
+}
+
+#[test]
 fn rejects_deferred_server_ip_commands() {
     assert!(parse_mod_command("server ban-ip 203.0.113.10 2h subnet abuse").is_err());
     assert!(parse_mod_command("server unban-ip 2001:db8::1").is_err());
@@ -485,6 +505,59 @@ fn parses_voice_moderation_commands() {
     );
     // A target user is required.
     assert!(parse_mod_command("kick voice").is_err());
+}
+
+#[test]
+fn parses_stream_moderation_commands() {
+    // A kick is the one-shot: end this broadcast, block nothing.
+    assert_eq!(
+        parse_mod_command("kick stream @streamer wrong window").unwrap(),
+        ModCommand::Stream {
+            action: StreamAction::Kick,
+            username: "streamer".to_string(),
+            duration: None,
+            reason: "wrong window".to_string(),
+        }
+    );
+    // A ban takes the same optional duration as every other ban scope.
+    assert_eq!(
+        parse_mod_command("ban stream @streamer 7d nsfw").unwrap(),
+        ModCommand::Stream {
+            action: StreamAction::Ban,
+            username: "streamer".to_string(),
+            duration: Some(chrono::Duration::days(7)),
+            reason: "nsfw".to_string(),
+        }
+    );
+    // No duration means permanent, and the whole tail is the reason.
+    assert_eq!(
+        parse_mod_command("ban stream @streamer repeat offender").unwrap(),
+        ModCommand::Stream {
+            action: StreamAction::Ban,
+            username: "streamer".to_string(),
+            duration: None,
+            reason: "repeat offender".to_string(),
+        }
+    );
+    assert_eq!(
+        parse_mod_command("unban stream @streamer").unwrap(),
+        ModCommand::Stream {
+            action: StreamAction::Unban,
+            username: "streamer".to_string(),
+            duration: None,
+            reason: String::new(),
+        }
+    );
+    assert_eq!(
+        parse_mod_command("view bans stream 2").unwrap(),
+        ModCommand::Bans {
+            scope: BanListScope::Stream,
+            page: 2,
+        }
+    );
+    // A target user is required.
+    assert!(parse_mod_command("ban stream").is_err());
+    assert!(parse_mod_command("kick stream").is_err());
 }
 
 #[test]
@@ -519,6 +592,7 @@ fn primary_username(command: &ModCommand) -> &str {
         | ModCommand::Artboard { username, .. }
         | ModCommand::Audio { username, .. }
         | ModCommand::Voice { username, .. }
+        | ModCommand::Stream { username, .. }
         | ModCommand::Role { username, .. } => username,
         ModCommand::Help { .. }
         | ModCommand::AdminUltimateCast { .. }
@@ -530,7 +604,9 @@ fn primary_username(command: &ModCommand) -> &str {
         | ModCommand::RenameRoom { .. }
         | ModCommand::RoomVoice { .. }
         | ModCommand::ArtboardRestore { .. }
-        | ModCommand::ArtboardCurate { .. } => {
+        | ModCommand::ArtboardCurate { .. }
+        | ModCommand::ArtboardRemovePiece { .. }
+        | ModCommand::ArtboardGallery { .. } => {
             panic!("command does not have a primary username: {command:?}")
         }
     }

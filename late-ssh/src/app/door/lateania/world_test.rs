@@ -175,6 +175,21 @@ fn world_has_expected_size_and_every_mob_homes_to_a_real_room() {
         (1600..=BROCELIANDE_ZONES * BROCELIANDE_W * BROCELIANDE_H).contains(&broceliande),
         "Broceliande should be ~2000 rooms, got {broceliande}"
     );
+    // Aelunor, the Faewood: a sixth continent of twelve organic fae-glades
+    // (rooms 25000+, cavern-carved only - never a maze, never a grid). Each
+    // zone is sparse, so the total is a sane band rather than an exact count.
+    let aelunor = count_in(
+        AELUNOR_BASE,
+        AELUNOR_BASE + AELUNOR_ZONES as RoomId * AELUNOR_ZONE_STRIDE,
+    );
+    assert!(
+        (250..=AELUNOR_ZONES * AELUNOR_W * AELUNOR_H).contains(&aelunor),
+        "Aelunor should be ~300 rooms, got {aelunor}"
+    );
+    // Silvael: the Faewood's own city (rooms 26000+). A fixed, fully
+    // hand-authored set, so this is an exact count rather than a band.
+    let silvael = count_in(SILVAEL_BASE, SILVAEL_BASE + SILVAEL_ROOM_COUNT);
+    assert_eq!(silvael, 8, "eight Silvael rooms");
     // The Shattered Archipelago: portal villages + maze/cavern islands.
     use super::super::archipelago as arch;
     let villages = count_in(arch::VILLAGE_BASE, arch::VILLAGE_BASE + 1000);
@@ -187,6 +202,20 @@ fn world_has_expected_size_and_every_mob_homes_to_a_real_room() {
         (750..=1000).contains(&islands),
         "the archipelago should be ~900 rooms, got {islands}"
     );
+    // The Wildbound Waste: a fifth, pvp continent of three chained
+    // maze/cavern biomes plus their three small gate towns (rooms 30000+).
+    // Mazes fill their cell field; caverns are sparse, so the total is a sane
+    // band rather than an exact count.
+    let wildbound = count_in(WILDBOUND_BASE, WILDBOUND_BASE + 3 * WILDBOUND_BIOME_STRIDE);
+    assert!(
+        (900..=3 * WILDBOUND_BIOME_STRIDE as usize).contains(&wildbound),
+        "the Wildbound Waste should be ~1000+ rooms, got {wildbound}"
+    );
+    // Wayfarer's Hollow: the five-room new-player tutorial zone (rooms
+    // 40000+), hung off the Gilded Flagon. A fixed, fully hand-authored set,
+    // so this is an exact count rather than a band.
+    let tutorial = count_in(TUTORIAL_BASE, TUTORIAL_BASE + 10);
+    assert_eq!(tutorial, 5, "five tutorial rooms");
     // No stray rooms outside the known groups.
     assert_eq!(
         world.rooms.len(),
@@ -199,8 +228,12 @@ fn world_has_expected_size_and_every_mob_homes_to_a_real_room() {
             + kaelmyr
             + lakes
             + broceliande
+            + aelunor
+            + silvael
             + villages
-            + islands,
+            + islands
+            + wildbound
+            + tutorial,
         "every room should belong to a known region"
     );
     for spawn in &world.spawns {
@@ -961,7 +994,7 @@ fn the_atlas_covers_every_continent_including_kaelmyr() {
 #[test]
 fn continent_waystones_stand_in_real_safe_rooms() {
     let world = seed_world();
-    for (label, room, _) in CONTINENT_WAYSTONES {
+    for (label, room) in CONTINENT_WAYSTONES {
         let r = world
             .room(*room)
             .unwrap_or_else(|| panic!("waystone room for {label} exists"));
@@ -975,7 +1008,7 @@ fn continent_waystones_stand_in_real_safe_rooms() {
     }
     // Destinations are unique across the whole network.
     let dests = waystone_destinations();
-    let mut rooms: Vec<RoomId> = dests.iter().map(|(_, r, _)| *r).collect();
+    let mut rooms: Vec<RoomId> = dests.iter().map(|(_, r)| *r).collect();
     rooms.sort_unstable();
     rooms.dedup();
     assert_eq!(rooms.len(), dests.len(), "destination rooms are unique");
@@ -1115,17 +1148,17 @@ fn first_frontier_regulars_are_endgame_mobs_but_not_bosses() {
         .iter()
         .find(|spawn| spawn.id >= FRONTIER_SPAWN_ID_START && spawn.boss)
         .expect("frontier boss exists");
-    let strongest_living_boss_damage = world
-        .spawns
-        .iter()
-        .filter(|spawn| is_living_dark_spawn(spawn.id) && spawn.boss)
-        .map(|spawn| spawn.damage)
-        .max()
-        .expect("living-dark bosses exist");
 
+    // The Frontier assumes the living-dark arc is cleared: its first regulars
+    // read at or past the Archdemon, the crown that opens that arc.
+    let archdemon = CROWNS
+        .iter()
+        .find(|c| c.name == "the Archdemon Mal'gareth")
+        .expect("the Archdemon is a crown");
     assert!(
-        first_frontier_regular.damage > strongest_living_boss_damage,
-        "first Frontier regulars should assume the living-dark arc is cleared"
+        first_frontier_regular.level() >= archdemon.level,
+        "first Frontier regulars should assume the living-dark arc is cleared (L{})",
+        first_frontier_regular.level()
     );
     assert!(
         first_frontier_regular.damage < first_frontier_boss.damage
@@ -1458,70 +1491,100 @@ fn sunderlakes_mobs_are_peaceful_not_endgame_scaled() {
     );
 }
 
-// Wildbound doubled the player cap to 100, so the endgame must present a real
-// difficulty gradient across the new band instead of pinning every foe to the
-// clamp (the old single-slope `level()` made the whole Frontier->Kaelmyr arc
-// read as identically max-level). Verify: the displayed level tracks raw power
-// monotonically, the endgame spans a wide band rather than a flat wall, entry
-// endgame sits comfortably below the cap, and the world's toughest foe reaches
-// it - all while the early/mid roster keeps its familiar sub-60 levels.
+// The displayed level is "come at this level": a crown reads its target, and
+// everything else reads by its bite off the crown ladder (`MobSpawn::level`).
+// Verify the ladder holds together: crowns read their targets, a harder bite
+// never reads lower, the first road reads as a starting zone, the Frontier
+// opens past the Archdemon, Kaelmyr's deepest zone reads at the last crown,
+// and nothing reads past the cap.
 #[test]
-fn the_endgame_levels_span_a_gradient_up_to_the_new_cap() {
+fn displayed_levels_read_by_bite_along_the_crown_ladder() {
     let world = seed_world();
-    let is_endgame = |id: u32| (FRONTIER_SPAWN_ID_START..LAKES_SPAWN_ID_START).contains(&id);
-    let endgame: Vec<&MobSpawn> = world.spawns.iter().filter(|s| is_endgame(s.id)).collect();
-    assert!(
-        endgame.len() > 20,
-        "the endgame regions field a full roster"
-    );
-
-    // Monotonic in raw power: a tougher foe never reads as a lower level.
-    let mut ranked = endgame.clone();
-    ranked.sort_by_key(|s| s.max_hp + s.damage * 4);
-    for w in ranked.windows(2) {
-        assert!(
-            w[1].level() >= w[0].level(),
-            "level must not fall as raw power rises ({} L{} vs {} L{})",
-            w[0].name,
-            w[0].level(),
-            w[1].name,
-            w[1].level()
+    let crown_of = |name: &str| CROWNS.iter().find(|c| c.name == name).expect("a crown");
+    for crown in CROWNS {
+        let spawn = world
+            .spawns
+            .iter()
+            .find(|s| s.name == crown.name)
+            .expect("every crown spawns");
+        assert_eq!(
+            spawn.level(),
+            crown.level,
+            "{} reads its target",
+            crown.name
         );
     }
-
-    // A real spread, not a flat clamp: entry endgame well below the cap, the
-    // deepest content at it, and a wide gap between the two.
-    let min_lvl = endgame.iter().map(|s| s.level()).min().unwrap();
-    let max_lvl = endgame.iter().map(|s| s.level()).max().unwrap();
-    assert!(
-        (55..=78).contains(&min_lvl),
-        "entry endgame should read in the 55-78 band, not the cap (got L{min_lvl})"
-    );
-    assert_eq!(
-        max_lvl,
-        super::super::classes::Class::MAX_LEVEL,
-        "the world's toughest foe should read at the level cap"
-    );
-    assert!(
-        max_lvl - min_lvl >= 20,
-        "the endgame should span a wide gradient, got L{min_lvl}..L{max_lvl}"
-    );
-
-    // The early/mid world is untouched: below the knee, the displayed level is
-    // exactly the old single-slope formula, so every foe a sub-60 player meets
-    // keeps its familiar level to the number. Only power past the knee bends
-    // onto the gentler endgame slope.
-    for s in &world.spawns {
-        let power = s.max_hp + s.damage * 4;
-        if power <= 60 * 14 {
-            assert_eq!(
-                s.level(),
-                (power / 14).clamp(1, 60),
-                "{} (power {power}) should keep its pre-Wildbound level",
-                s.name
+    let is_crown = |s: &MobSpawn| CROWNS.iter().any(|c| c.name == s.name);
+    for boss in [false, true] {
+        let mut ranked: Vec<&MobSpawn> = world
+            .spawns
+            .iter()
+            .filter(|s| s.boss == boss && !is_crown(s))
+            .collect();
+        ranked.sort_by_key(|s| s.damage);
+        for w in ranked.windows(2) {
+            assert!(
+                w[1].level() >= w[0].level(),
+                "level must not fall as the bite rises ({} L{} vs {} L{})",
+                w[0].name,
+                w[0].level(),
+                w[1].name,
+                w[1].level()
             );
         }
     }
+    for s in &world.spawns {
+        assert!(
+            s.level() <= super::super::classes::Class::MAX_LEVEL,
+            "{} reads past the cap",
+            s.name
+        );
+    }
+    let zone_of = |s: &MobSpawn| world.room(s.home).expect("mob home exists").zone;
+    let treant_zone = zone_of(
+        world
+            .spawns
+            .iter()
+            .find(|s| s.name == "the Elder Treant")
+            .expect("the Treant"),
+    );
+    let treant = crown_of("the Elder Treant");
+    for s in world
+        .spawns
+        .iter()
+        .filter(|s| !s.boss && zone_of(s) == treant_zone)
+    {
+        assert!(
+            s.level() < treant.level,
+            "{} on the Treant's doorstep reads L{}, at or past the crown",
+            s.name,
+            s.level()
+        );
+    }
+    let first_frontier = world
+        .spawns
+        .iter()
+        .find(|s| s.id >= FRONTIER_SPAWN_ID_START && !s.boss)
+        .expect("frontier regular mob exists");
+    let archdemon = crown_of("the Archdemon Mal'gareth");
+    assert!(
+        first_frontier.level() >= archdemon.level,
+        "the Frontier opens past the Archdemon, got L{}",
+        first_frontier.level()
+    );
+    let ascendant = crown_of("Kaethyr Ascendant, Who Sang the God Awake");
+    let deepest = world
+        .spawns
+        .iter()
+        .filter(|s| band_of(s.id) == Band::Kaelmyr && !is_crown(s))
+        .map(|s| s.level())
+        .max()
+        .expect("kaelmyr spawns");
+    assert!(
+        (ascendant.level - 5..=ascendant.level).contains(&deepest),
+        "Kaelmyr's deepest reads L{deepest}, not at the last crown (L{})",
+        ascendant.level
+    );
 }
 
 // The iron rule of the minimap: a drawn line means you can walk it. The old
@@ -1759,4 +1822,839 @@ fn non_flying_critters_never_show_a_perch_note() {
             }
         }
     }
+}
+
+#[test]
+fn wildbound_waste_is_hung_off_the_sand_wyrms_maw() {
+    let world = seed_world();
+    let gateway = world
+        .room(WILDBOUND_GATEWAY)
+        .expect("Sand-Wyrm's Maw exists");
+    let town = gateway
+        .exits
+        .get(&Dir::South)
+        .copied()
+        .expect("the Maw's south exit leads into the Waste");
+    assert_eq!(
+        town, WILDBOUND_BASE,
+        "leads straight to the first gate town"
+    );
+    assert!(
+        world
+            .room(WILDBOUND_BASE)
+            .expect("first town square")
+            .exits
+            .values()
+            .any(|to| *to == WILDBOUND_GATEWAY),
+        "the walk back out is reciprocal"
+    );
+}
+
+#[test]
+fn wildbound_towns_are_safe_islands_in_a_pvp_continent() {
+    let world = seed_world();
+    let mut safe_towns = 0;
+    let mut pvp_fields = 0;
+    for b in 0..3u32 {
+        let base = WILDBOUND_BASE + b * WILDBOUND_BIOME_STRIDE;
+        // The four town rooms (square, shelter, outfitter, gate) are safe
+        // havens, never pvp ground.
+        for offset in 0..4 {
+            let room = world
+                .room(base + offset)
+                .unwrap_or_else(|| panic!("town room {} of biome {b} should exist", base + offset));
+            assert!(
+                room.safe && !room.pvp,
+                "town room {} must be a safe haven",
+                room.id
+            );
+            safe_towns += 1;
+        }
+        // Every other room in the biome's block is contested: pvp, never safe.
+        for id in (base + 10)..(base + WILDBOUND_BIOME_STRIDE) {
+            if let Some(room) = world.room(id) {
+                assert!(
+                    room.pvp && !room.safe,
+                    "field room {id} in biome {b} must be pvp ground, not a haven"
+                );
+                pvp_fields += 1;
+            }
+        }
+    }
+    assert_eq!(safe_towns, 12, "three towns of four rooms each");
+    assert!(pvp_fields >= 900, "a real continent of contested ground");
+}
+
+#[test]
+fn wildbound_biomes_are_mazes_and_caverns_not_grids() {
+    let world = seed_world();
+    for b in 0..3u32 {
+        let base = WILDBOUND_BASE + b * WILDBOUND_BIOME_STRIDE;
+        let field: Vec<&Room> = world
+            .rooms
+            .values()
+            .filter(|r| r.id >= base + 10 && r.id < base + WILDBOUND_BIOME_STRIDE)
+            .collect();
+        let dead_ends = field.iter().filter(|r| r.exits.len() == 1).count();
+        let junctions = field.iter().filter(|r| r.exits.len() >= 3).count();
+        assert!(
+            dead_ends > 0 && junctions > 0,
+            "biome {b} should read as a maze/cavern, not a uniform grid"
+        );
+    }
+}
+
+#[test]
+fn wildbound_template_pool_is_three_hundred_mobs_plus_three_apex_bosses() {
+    // The *template pool* (20 base creatures x 5 tiers x 3 biomes) is exactly
+    // 300, independent of which combinations this particular seeded world
+    // happens to roll into an actual room (see the variety check below).
+    let pool: usize = WILDBOUND_BIOMES
+        .iter()
+        .map(|b| b.creatures.len() * WILDBOUND_TIER_AFFIX.len())
+        .sum();
+    assert_eq!(pool, 300, "20 creatures x 5 tiers x 3 biomes");
+    assert_eq!(
+        WILDBOUND_BIOMES.len(),
+        3,
+        "three biomes, each with its apex"
+    );
+
+    let world = seed_world();
+    let wildbound: Vec<&MobSpawn> = world
+        .spawns
+        .iter()
+        // Bounded above by Aelunor's own spawn-id band (1,600,000+), which
+        // now sits just past Wildbound's - an unbounded `>=` here used to
+        // silently sweep Aelunor's dozen zone bosses in as "Wildbound apex
+        // bosses" too.
+        .filter(|s| (WILDBOUND_SPAWN_ID_START..AELUNOR_SPAWN_ID_START).contains(&s.id))
+        .collect();
+    let distinct_names: std::collections::HashSet<&str> =
+        wildbound.iter().map(|s| s.name).collect();
+    let bosses = wildbound.iter().filter(|s| s.boss).count();
+    assert_eq!(bosses, 3, "one apex boss per biome");
+    assert!(
+        distinct_names.len() >= 200,
+        "the seeded world should draw wide variety from the 300-mob pool, got {}",
+        distinct_names.len()
+    );
+    for spawn in &wildbound {
+        assert!(
+            world.rooms.contains_key(&spawn.home),
+            "{} homes to missing room {}",
+            spawn.name,
+            spawn.home
+        );
+    }
+    let levels: Vec<i32> = wildbound.iter().map(|s| s.level()).collect();
+    // Ungated and walked into off the Sahra: it spans from early levels up to
+    // the crowned endgame's doorstep, never the last crown itself.
+    assert!(
+        levels.iter().any(|&l| l < 30) && levels.iter().any(|&l| l > 50),
+        "the Waste should span from early levels to the endgame's doorstep, got {levels:?}"
+    );
+}
+
+#[test]
+fn a_wildbound_apex_boss_pays_off_its_own_biome_not_the_frontier_crown() {
+    // The Waste is walked into off the Sahra Wastes with no title at all, and
+    // its authored stats sit in `tune_spawn_balance`'s gentle overworld bucket
+    // on purpose, so what its apexes pay has to answer to the biome they
+    // guard. The boss branch of `wildbound_loot` used to hand all three the
+    // catalog's top table, which meant the 1500hp Duskmire boss dropped - on
+    // every kill, since `roll_loot` never rolls for a boss - what the King Who
+    // Was Promised Nothing guards at the end of twenty Frontier zones.
+    use super::super::items::{FRONTIER_TIERS, frontier_loot};
+    let world = seed_world();
+    let tier_of = |loot: &'static [u32]| {
+        (0..FRONTIER_TIERS)
+            .find(|t| frontier_loot(*t) == loot)
+            .expect("the Waste borrows the Frontier catalog, one tier per table")
+    };
+
+    for (b, biome) in WILDBOUND_BIOMES.iter().enumerate() {
+        let base = WILDBOUND_BASE + (b as u32) * WILDBOUND_BIOME_STRIDE;
+        let mobs: Vec<&MobSpawn> = world
+            .spawns
+            .iter()
+            .filter(|s| (base..base + WILDBOUND_BIOME_STRIDE).contains(&s.home))
+            .collect();
+        let boss = mobs.iter().find(|s| s.boss).expect("one apex per biome");
+        let boss_tier = tier_of(boss.loot);
+        let deepest_regular = mobs
+            .iter()
+            .filter(|s| !s.boss)
+            .map(|s| tier_of(s.loot))
+            .max()
+            .expect("the field is populated");
+
+        assert!(
+            boss_tier > deepest_regular,
+            "{} should out-pay {}'s own deep trash (tier {deepest_regular}), got tier {boss_tier}",
+            boss.name,
+            biome.zone
+        );
+        assert!(
+            boss_tier < FRONTIER_TIERS - 1,
+            "the catalog's top table belongs to the Frontier's crown, not {} (tier {boss_tier})",
+            boss.name
+        );
+        if let Some(next) = WILDBOUND_BIOMES.get(b + 1) {
+            assert!(
+                boss_tier <= next.loot_base,
+                "{} should not out-pay the shallow end of {} (tier {}), got tier {boss_tier}",
+                boss.name,
+                next.zone,
+                next.loot_base
+            );
+        }
+    }
+}
+
+#[test]
+fn aelunor_high_end_loot_is_a_lucky_find_not_the_default_drop() {
+    // Aelunor is a lottery, not a shortcut past the Frontier. Two rules make
+    // that true, and both live in `extend_aelunor`/`aelunor_loot`:
+    //
+    //   1. A Legendary spawn stays a genuinely rare roll at every depth. The
+    //      affix roll used to climb linearly with the zone, so every spawn
+    //      past zone 8 was Legendary - "rarity" was really just depth.
+    //   2. A plain spawn's table stays in the catalog's lower half. Only the
+    //      rare affixes reach the top bands, so the wood's ~660hp mobs can't
+    //      hand out what the Frontier's ~3280hp mobs guard behind four Bane
+    //      titles, on a walk in from the Amber Savanna with no gate at all.
+    use super::super::items::{Rarity, item};
+    let world = seed_world();
+    let wood: Vec<&MobSpawn> = world
+        .spawns
+        .iter()
+        .filter(|s| is_aelunor_room(s.home) && !s.boss)
+        .collect();
+    assert!(
+        wood.len() > 100,
+        "the wood should be populated, got {} spawns",
+        wood.len()
+    );
+
+    let legendary = |s: &MobSpawn| s.name.starts_with("Legendary ");
+    let share = |pool: &[&MobSpawn]| match pool.len() {
+        0 => 0,
+        n => pool.iter().filter(|s| legendary(s)).count() * 100 / n,
+    };
+    assert!(
+        share(&wood) < 15,
+        "a Legendary should be a lucky find across the wood, got {}% of spawns",
+        share(&wood)
+    );
+    let deepest: Vec<&MobSpawn> = wood
+        .iter()
+        .copied()
+        .filter(|s| (s.home - AELUNOR_BASE) / AELUNOR_ZONE_STRIDE == AELUNOR_ZONES as u32 - 1)
+        .collect();
+    assert!(
+        share(&deepest) < 25,
+        "even the Deep Heart keeps Legendaries a minority, got {}%",
+        share(&deepest)
+    );
+    assert!(
+        wood.iter().any(|s| legendary(s)),
+        "but the tail is real - some spawns do roll Legendary"
+    );
+
+    // A plain, unaffixed spawn never carries endgame gear, however deep it is.
+    for s in wood.iter().filter(|s| AELUNOR_CREATURES.contains(&s.name)) {
+        for id in s.loot {
+            let it = item(*id).unwrap_or_else(|| panic!("{} drops unknown item {id}", s.name));
+            assert!(
+                !matches!(it.rarity, Rarity::Epic | Rarity::Legendary),
+                "{} is a plain spawn but drops {} ({})",
+                s.name,
+                it.name,
+                it.rarity.label()
+            );
+        }
+    }
+    // The jackpot is real, though: the rare rolls do reach the top bands.
+    assert!(
+        wood.iter().any(|s| s
+            .loot
+            .iter()
+            .any(|id| item(*id).is_some_and(|it| it.rarity == Rarity::Legendary))),
+        "a Legendary spawn should be worth the walk"
+    );
+}
+
+#[test]
+fn a_legendary_aelunor_spawn_is_an_elite_that_guards_its_prize() {
+    // The affix jumps the drop table twelve tiers wherever it lands, so what
+    // carries it has to stand as far above the local floor as the prize does.
+    // Otherwise the lottery is only a shortcut: a first-glade Legendary would
+    // hand a wanderer Epic-band gear off an ordinary fight. The premium is
+    // quadratic in the affix and flat across zones for exactly that reason -
+    // the prize doesn't get smaller near the eaves, so neither does the guard.
+    let world = seed_world();
+    let wood: Vec<&MobSpawn> = world
+        .spawns
+        .iter()
+        .filter(|s| is_aelunor_room(s.home) && !s.boss)
+        .collect();
+    let zone_of = |s: &MobSpawn| (s.home - AELUNOR_BASE) / AELUNOR_ZONE_STRIDE;
+    let mut checked = 0;
+    for legend in wood.iter().filter(|s| s.name.starts_with("Legendary ")) {
+        // The toughest ordinary spawn in the same glade, deepest cell included.
+        let Some(plain) = wood
+            .iter()
+            .filter(|s| zone_of(s) == zone_of(legend) && AELUNOR_CREATURES.contains(&s.name))
+            .max_by_key(|s| s.max_hp)
+        else {
+            continue;
+        };
+        assert!(
+            legend.max_hp * 10 >= plain.max_hp * 16,
+            "{} ({} hp) barely outweighs the glade's toughest common {} ({} hp) - \
+             a Legendary should read as a mini-boss",
+            legend.name,
+            legend.max_hp,
+            plain.name,
+            plain.max_hp,
+        );
+        assert!(
+            legend.damage > plain.damage,
+            "{} ({} dmg) hits no harder than the common {} ({} dmg)",
+            legend.name,
+            legend.damage,
+            plain.name,
+            plain.damage,
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "some glade should hold a Legendary to check");
+}
+
+#[test]
+fn tutorial_zone_is_safe_reachable_and_teaches_every_core_system() {
+    let world = seed_world();
+    // All five rooms exist, and every one but the training yard is safe -
+    // the yard needs `safe: false` for its dummy to be fightable at all.
+    for offset in 0..5u32 {
+        let room = world
+            .room(TUTORIAL_BASE + offset)
+            .unwrap_or_else(|| panic!("tutorial room {} should exist", TUTORIAL_BASE + offset));
+        if offset == 1 {
+            assert!(!room.safe, "the Training Yard must allow combat");
+        } else {
+            assert!(room.safe, "room {} should be a haven", room.id);
+        }
+        assert!(!room.pvp, "no tutorial room is contested ground");
+    }
+    // Reachable from the real start room by a normal walk (via the tavern).
+    let can_reach = |from: RoomId, target: RoomId| -> bool {
+        let mut seen = std::collections::HashSet::from([from]);
+        let mut stack = vec![from];
+        while let Some(r) = stack.pop() {
+            if r == target {
+                return true;
+            }
+            if let Some(room) = world.room(r) {
+                for &to in room.exits.values() {
+                    if seen.insert(to) {
+                        stack.push(to);
+                    }
+                }
+            }
+        }
+        false
+    };
+    assert!(
+        can_reach(world.start_room, TUTORIAL_BASE),
+        "Wayfarer's Hollow must be reachable from Embergate"
+    );
+    assert!(
+        can_reach(TUTORIAL_BASE, world.start_room),
+        "and there must be a normal walk back"
+    );
+    // A brand-new join lands here, not at World::start_room directly.
+    assert_eq!(tutorial_start_room(), TUTORIAL_BASE);
+    assert_ne!(
+        tutorial_start_room(),
+        world.start_room,
+        "the tutorial is distinct from Embergate itself"
+    );
+    // Combat: a near-harmless training dummy lives in the Training Yard.
+    let dummy = world
+        .spawns
+        .iter()
+        .find(|s| s.home == TUTORIAL_BASE + 1)
+        .expect("the Training Yard has a dummy");
+    assert!(!dummy.boss);
+    assert!(
+        dummy.damage <= 2,
+        "the dummy must never meaningfully hurt a newcomer"
+    );
+    assert!(dummy.max_hp >= 30, "should survive a few practice rounds");
+    // Gathering: one node per trade, all in the Gathering Glade.
+    let glade_skills: std::collections::HashSet<GatherSkill> = NODES
+        .iter()
+        .filter(|n| n.home == TUTORIAL_BASE + 2)
+        .map(|n| n.skill)
+        .collect();
+    assert_eq!(
+        glade_skills.len(),
+        5,
+        "every gathering trade has a node here"
+    );
+    // Crafting: one station per trade, all in the Tinker's Hall.
+    let stations = craft_stations_at(TUTORIAL_BASE + 3);
+    assert_eq!(stations.len(), 5, "every craft trade has a station here");
+    // Classes: the Tome of the Seventeen Callings stands in the Hall of Callings.
+    assert!(
+        features_at(TUTORIAL_BASE + 4)
+            .iter()
+            .any(|f| f.kind == FeatureKind::Plaque && f.name.contains("Seventeen Callings")),
+        "the Hall of Callings should hold the class tome"
+    );
+    // Every safe tutorial room (all but the yard) has a villager, same
+    // invariant as everywhere else in the world.
+    for offset in [0u32, 2, 3, 4] {
+        let room = TUTORIAL_BASE + offset;
+        assert!(
+            VILLAGERS.iter().any(|v| v.room == room),
+            "safe tutorial room {room} needs a villager"
+        );
+    }
+}
+
+#[test]
+fn zone_level_bands_are_sane_and_cover_the_road() {
+    let world = seed_world();
+    // Every zone that homes a mob gets a band, and every band is ordered.
+    for spawn in &world.spawns {
+        let zone = world.room(spawn.home).expect("mob home exists").zone;
+        let (lo, hi) = world
+            .zone_band(zone)
+            .unwrap_or_else(|| panic!("zone {zone} homes a mob but has no band"));
+        assert!(lo <= hi, "zone {zone} band is inverted: {lo}-{hi}");
+        let level = spawn.level();
+        assert!(
+            (lo..=hi).contains(&level),
+            "zone {zone} band {lo}-{hi} misses its own mob at level {level}"
+        );
+    }
+    // The starting road reads as low-level ground, and a mob-less haven reads
+    // as no band at all rather than a made-up number.
+    let (lo, _) = world.zone_band("King's Road").expect("the road has mobs");
+    assert!(lo <= 3, "the King's Road should read as a starting zone");
+    assert!(world.zone_band("Hearthward Close").is_none());
+    // The atlas carries the same bands per region.
+    let progress = world.region_progress(&std::collections::HashSet::new(), 1);
+    let road = progress
+        .iter()
+        .find(|r| r.name.contains("King's Road"))
+        .expect("home region listed");
+    assert!(road.levels.is_some(), "the home region has hostile levels");
+}
+
+// ---- The world resist/weak pass (spec: CONTEXT.md, same-named section) -------------
+//
+// One theme per generated zone; regulars wear the theme's resist/weak, bosses
+// keep their authored profiles. The tests below pin the placement to the theme
+// tables, hold the school census inside declared bands, and run the routed
+// grind-rate model that keeps the pass meaningful without rebalancing anyone.
+
+/// Every themed region: name, theme table, base room id, and rooms per zone.
+/// A spawn's home maps back to its zone by `(home - base) / stride`.
+fn themed_regions() -> [(&'static str, &'static [ZoneTheme], u32, u32); 7] {
+    use super::super::archipelago;
+    [
+        (
+            "Frontier",
+            &FRONTIER_ZONE_THEMES,
+            FRONTIER_BASE,
+            FRONTIER_W * FRONTIER_H,
+        ),
+        (
+            "Reaches",
+            &REACHES_ZONE_THEMES,
+            REACHES_BASE,
+            REACHES_ZONE_STRIDE,
+        ),
+        (
+            "Kaelmyr",
+            &KAELMYR_ZONE_THEMES,
+            KAELMYR_BASE,
+            KAELMYR_ZONE_STRIDE,
+        ),
+        (
+            "Sunderlakes",
+            &LAKES_ZONE_THEMES,
+            LAKES_BASE,
+            LAKES_ZONE_STRIDE,
+        ),
+        (
+            "Broceliande",
+            &BROCELIANDE_ZONE_THEMES,
+            BROCELIANDE_BASE,
+            BROCELIANDE_ZONE_STRIDE,
+        ),
+        (
+            "Aelunor",
+            &AELUNOR_ZONE_THEMES,
+            AELUNOR_BASE,
+            AELUNOR_ZONE_STRIDE,
+        ),
+        (
+            "Archipelago",
+            &archipelago::ISLAND_THEMES,
+            archipelago::ARCH_BASE,
+            archipelago::ARCH_STRIDE,
+        ),
+    ]
+}
+
+fn zone_index(home: RoomId, base: u32, stride: u32, zones: usize) -> Option<usize> {
+    (home >= base && home < base + stride * zones as u32).then(|| ((home - base) / stride) as usize)
+}
+
+/// The seven schools a theme may name (Physical is banned from both slots).
+const THEMED_SCHOOLS: [DamageType; 7] = [
+    DamageType::Fire,
+    DamageType::Frost,
+    DamageType::Holy,
+    DamageType::Shadow,
+    DamageType::Poison,
+    DamageType::Arcane,
+    DamageType::Lightning,
+];
+
+#[test]
+fn every_generated_zone_spawn_wears_its_zone_theme() {
+    // Aelunor's glade bosses are the one authored exception inside a themed
+    // region: they carry a hand-written Shadow/resist-Physical/weak-Holy
+    // profile that is the region's whole school game, so they are named here
+    // rather than silently skipped.
+    const AELUNOR: &str = "Aelunor";
+    let world = seed_world();
+    let mut regulars = 0usize;
+    let mut bosses = 0usize;
+    for (region, themes, base, stride) in themed_regions() {
+        for spawn in &world.spawns {
+            let Some(z) = zone_index(spawn.home, base, stride, themes.len()) else {
+                continue;
+            };
+            let theme = themes[z];
+            if spawn.boss {
+                bosses += 1;
+                if region == AELUNOR {
+                    continue;
+                }
+                // A zone boss wears the zone's weakness and never its resist:
+                // the fight players provision for is where the prep mechanic
+                // has to exist, and a resist there would be a class tax with
+                // no counterplay. Asserted, not assumed - this branch used to
+                // `continue` on a comment claiming bosses were untouched,
+                // which stopped being true the moment they were.
+                assert_eq!(
+                    spawn.profile.resist, None,
+                    "{region} zone {z}: boss {} must not resist a school",
+                    spawn.name
+                );
+                assert_eq!(
+                    spawn.profile.weak,
+                    theme.weak(),
+                    "{region} zone {z}: boss {} wears the zone weakness",
+                    spawn.name
+                );
+                continue;
+            }
+            regulars += 1;
+            assert_eq!(
+                spawn.profile.resist,
+                theme.resist(),
+                "{region} zone {z}: {} wears the zone resist",
+                spawn.name
+            );
+            assert_eq!(
+                spawn.profile.weak,
+                theme.weak(),
+                "{region} zone {z}: {} wears the zone weakness",
+                spawn.name
+            );
+        }
+    }
+    assert!(
+        regulars > 2000,
+        "the pass covers the generated regions ({regulars} regulars seen)"
+    );
+    assert!(
+        bosses >= 100,
+        "the zone bosses were seen and checked ({bosses})"
+    );
+}
+
+#[test]
+fn no_regular_resists_physical_and_nothing_is_weak_to_physical() {
+    let world = seed_world();
+    // Nothing in the whole world, authored or generated, boss or regular, is
+    // ever weak to Physical: the neutral auto-attack baseline never inflates.
+    for spawn in &world.spawns {
+        assert_ne!(
+            spawn.profile.weak,
+            Some(DamageType::Physical),
+            "{} must not be weak to Physical",
+            spawn.name
+        );
+    }
+    // No regular anywhere resists Physical: a Physical resist is a 50% tax on
+    // the seven Physical-locked classes with no counterplay, so it lives on
+    // bosses only, where "bring a caster, an oil, or the smith" is the point.
+    for spawn in world.spawns.iter().filter(|s| !s.boss) {
+        assert_ne!(
+            spawn.profile.resist,
+            Some(DamageType::Physical),
+            "regular {} must not resist Physical",
+            spawn.name
+        );
+    }
+    // The theme vocabulary itself can never emit Physical, and every theme
+    // carries a weakness (weak-forward).
+    for theme in ZoneTheme::ALL {
+        assert_ne!(theme.resist(), Some(DamageType::Physical), "{theme:?}");
+        assert_ne!(theme.weak(), Some(DamageType::Physical), "{theme:?}");
+        assert!(theme.weak().is_some(), "{theme:?} must carry a weakness");
+    }
+}
+
+#[test]
+fn every_boss_carries_a_weakness() {
+    // Bosses are the fights players actually prepare for, so the prep
+    // mechanic must exist there: every boss in the world names a weakness
+    // (weak-forward: pure reward - an unprepared fighter loses nothing,
+    // a provisioned one is paid). Resists stay rare authored events.
+    let world = seed_world();
+    let neutral: Vec<&str> = world
+        .spawns
+        .iter()
+        .filter(|s| s.boss && s.profile.weak.is_none())
+        .map(|s| s.name)
+        .collect();
+    assert!(neutral.is_empty(), "bosses without a weakness: {neutral:?}");
+}
+
+#[test]
+fn the_school_census_stays_inside_its_declared_bands() {
+    let regions = themed_regions();
+    let total_zones: usize = regions.iter().map(|(_, t, _, _)| t.len()).sum();
+    let school_pos = |d: DamageType| {
+        THEMED_SCHOOLS
+            .iter()
+            .position(|s| *s == d)
+            .expect("themed school")
+    };
+
+    let mut weak = [0usize; 7];
+    let mut resist = [0usize; 7];
+    for (region, themes, _, _) in &regions {
+        let mut region_weak = [0usize; 7];
+        let mut region_resists = 0usize;
+        for theme in *themes {
+            let w = school_pos(theme.weak().expect("weak-forward"));
+            weak[w] += 1;
+            region_weak[w] += 1;
+            if let Some(r) = theme.resist() {
+                resist[school_pos(r)] += 1;
+                region_resists += 1;
+            }
+        }
+        // Walls are events: resist zones stay a rough third of a region at
+        // most, and no single school owns more than a quarter of a region's
+        // weaknesses, so every region offers several different answers.
+        assert!(
+            region_resists <= themes.len().div_ceil(3),
+            "{region}: {region_resists} resist zones of {}",
+            themes.len()
+        );
+        let lanes = region_weak.iter().filter(|c| **c > 0).count();
+        assert!(
+            lanes >= 5,
+            "{region}: only {lanes} weak schools represented"
+        );
+        let max_lane = region_weak.iter().max().copied().unwrap_or(0);
+        assert!(
+            max_lane <= themes.len().div_ceil(4),
+            "{region}: one school owns {max_lane} of {} zones",
+            themes.len()
+        );
+    }
+    // Global bands per school. Holy keeps predators (rule 4: without resist
+    // zones the two Holy classes silently become the school winners), no
+    // school's weakness count runs away, and every school has a real lane.
+    for (i, school) in THEMED_SCHOOLS.iter().enumerate() {
+        assert!(
+            (10..=30).contains(&weak[i]),
+            "{school:?}: {} weak zones of {total_zones} is outside 10..=30",
+            weak[i]
+        );
+        assert!(
+            resist[i] <= 10,
+            "{school:?}: {} resist zones is past the band",
+            resist[i]
+        );
+    }
+    assert!(
+        resist[school_pos(DamageType::Holy)] >= 4,
+        "Holy needs its predators"
+    );
+    let total_resists: usize = resist.iter().sum();
+    assert!(
+        total_resists * 3 <= total_zones,
+        "{total_resists} resist zones of {total_zones}: walls must stay rare"
+    );
+}
+
+/// The per-class offensive school mix at the Lv45 anchor, read from the real
+/// ability roster: each Strike/DoT/Finisher unlocked by 45 contributes its
+/// total effect per cooldown tick, normalized to shares per school.
+fn class_school_mix(class: super::super::classes::Class) -> Vec<(DamageType, f64)> {
+    use super::super::abilities::{ABILITIES, AbilityEffect};
+    let mut weights: Vec<(DamageType, f64)> = Vec::new();
+    for a in ABILITIES {
+        if a.class != class || a.level_req > 45 {
+            continue;
+        }
+        let ticks = match a.effect {
+            AbilityEffect::Strike | AbilityEffect::Finisher => 1.0,
+            AbilityEffect::DamageOverTime => 1.0 + a.duration as f64,
+            _ => continue,
+        };
+        let dps = a.magnitude as f64 * ticks / a.cooldown_ticks.max(1) as f64;
+        match weights.iter_mut().find(|(d, _)| *d == a.damage_type) {
+            Some((_, w)) => *w += dps,
+            None => weights.push((a.damage_type, dps)),
+        }
+    }
+    let total: f64 = weights.iter().map(|(_, w)| w).sum();
+    for (_, w) in &mut weights {
+        *w /= total;
+    }
+    weights
+}
+
+#[test]
+fn the_world_pass_redistributes_grind_rates_but_never_rebalances_a_class() {
+    // The grind-rate model, from CONTEXT.md ("The world resist/weak pass"): at band
+    // gear every class is ~75% auto damage (always Physical, and regulars are
+    // never weak to or resistant against it), ~25% abilities in the class's
+    // school mix, and a weapon oil adds a flat rider in the coat's school.
+    // Before this pass every generated regular was (None, None), so the
+    // "before" rate is exactly 1.0 in every zone: each assertion below is a
+    // live before/after budget.
+    //
+    // The rider is *derived from the engine*, never declared here. It used to
+    // be a bare 0.15 and the real coat was worth three to six times that,
+    // which no assertion in this file could see. Now it is read off the real
+    // coat curve against the real attack bar (both pinned to a live character
+    // by svc_test), at the tier where the coat weighs heaviest - so if anyone
+    // retunes a coat, this budget moves with it.
+    use super::super::svc::{AUTO_SHARE, OIL_PER_TICK, TIER_ATTACK_BAR};
+    const AUTO: f64 = AUTO_SHARE;
+    const ABILITIES_SHARE: f64 = 1.0 - AUTO_SHARE;
+    // The rider a typical coated character carries: the coat curve's mean
+    // share of the attack bar, converted to a share of total output. The mean
+    // is the right input because the model asks what routing is worth to a
+    // player, not what the worst-rounded tier looks like - and no tier can
+    // hide behind it, because `the_coat_curves_stay_inside_their_share_of_the
+    // _bar` pins every tier to a tight band on the same two constants.
+    let oil_rider = (0..6)
+        .map(|t| OIL_PER_TICK[t] as f64 / TIER_ATTACK_BAR[t] as f64 * AUTO_SHARE)
+        .sum::<f64>()
+        / 6.0;
+    assert!(
+        oil_rider <= 0.16,
+        "the oil rider is worth {oil_rider:.3} of output: past what this budget was written for"
+    );
+    let oil_schools = super::super::items::OIL_SCHOOLS;
+
+    let mult = |theme: ZoneTheme, school: DamageType| -> f64 {
+        if theme.weak() == Some(school) {
+            1.5
+        } else if theme.resist() == Some(school) {
+            0.5
+        } else {
+            1.0
+        }
+    };
+
+    let regions = themed_regions();
+    let mut routed_best: Vec<(super::super::classes::Class, f64)> = Vec::new();
+    for class in super::super::classes::Class::ALL {
+        let mix = class_school_mix(class);
+        let ability_mult =
+            |theme: ZoneTheme| -> f64 { mix.iter().map(|(d, w)| w * mult(theme, *d)).sum::<f64>() };
+
+        // Uncoated redistribution budget: within a zone a class may swing up
+        // to +-15%, and its average across every themed zone stays within a
+        // few percent of the old all-neutral world. Redistribution yes,
+        // rebalancing no.
+        let mut rates: Vec<f64> = Vec::new();
+        for (region, themes, _, _) in &regions {
+            for (z, theme) in themes.iter().enumerate() {
+                let rate = AUTO + ABILITIES_SHARE * ability_mult(*theme);
+                assert!(
+                    (0.85..=1.15).contains(&rate),
+                    "{class:?} in {region} zone {z}: {rate:.3} is outside the +-15% band"
+                );
+                rates.push(rate);
+            }
+        }
+        let avg = rates.iter().sum::<f64>() / rates.len() as f64;
+        assert!(
+            (0.97..=1.03).contains(&avg),
+            "{class:?}: themed-zone average {avg:.3} moved past the budget"
+        );
+
+        // The routed model: a player picks the zone and the coat. Neutral
+        // play is a coated weapon on unthemed ground (1 + the rider).
+        // Floor: in every region there is a zone-and-coat answer worth at
+        // least +5%, so the school game is worth playing everywhere, for
+        // everyone. The legacy poison coat is left out of the model; it only
+        // adds options, never removes one.
+        let mut global_best: f64 = 0.0;
+        for (region, themes, _, _) in &regions {
+            let mut region_best: f64 = 0.0;
+            for theme in *themes {
+                let coat_best = oil_schools
+                    .iter()
+                    .map(|s| mult(*theme, *s))
+                    .fold(0.0f64, f64::max);
+                let rate = AUTO + ABILITIES_SHARE * ability_mult(*theme) + oil_rider * coat_best;
+                region_best = region_best.max(rate);
+            }
+            let edge = region_best / (1.0 + oil_rider);
+            assert!(
+                edge >= 1.05,
+                "{class:?} in {region}: best routed edge {edge:.3} is under the +5% floor"
+            );
+            global_best = global_best.max(edge);
+        }
+        routed_best.push((class, global_best));
+    }
+
+    // Ceiling: nobody's best-case routing runs away. The two mono-Holy
+    // classes top the table by design (a Holy oil stacks with their own
+    // school in the Undead/Haunted lanes - the deliberate buff to today's
+    // weakest classes), and even they stay under +18%; the spread between
+    // the best- and worst-served class stays within 12 points.
+    let max = routed_best.iter().map(|(_, e)| *e).fold(0.0f64, f64::max);
+    let min = routed_best.iter().map(|(_, e)| *e).fold(f64::MAX, f64::min);
+    for (class, edge) in &routed_best {
+        assert!(
+            *edge <= 1.18,
+            "{class:?}: routed best {edge:.3} is past the +18% ceiling"
+        );
+    }
+    assert!(
+        max - min <= 0.12,
+        "routed spread {max:.3} - {min:.3} is past 12 points"
+    );
 }

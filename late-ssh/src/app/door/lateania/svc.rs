@@ -30,7 +30,10 @@ use late_core::{
             LATEANIA_KAETHYR_ASCENDANT_AWARD_CATEGORY, LATEANIA_SUNDERING_DEEP_AWARD_CATEGORY,
             award_badge, grant_unique_milestone_award,
         },
-        reward::{LATEANIA_ARCHDEMON_REWARD_KEY, LATEANIA_FRONTIER_KING_REWARD_KEY},
+        reward::{
+            LATEANIA_ARCHDEMON_REWARD_KEY, LATEANIA_FRONTIER_KING_REWARD_KEY,
+            LATEANIA_KAETHYR_ASCENDANT_REWARD_KEY, LATEANIA_SUNDERING_DEEP_REWARD_KEY,
+        },
         user::User,
     },
 };
@@ -57,13 +60,19 @@ use super::persist::{
 };
 use super::pets::{Pet, pet_species_by_key};
 use super::skills::{CraftSkill, GatherSkill, TamingSkill, skill_level_for_xp, skill_progress};
-use super::stats::AbilityScores;
-use super::taming::{PetSkillEffect, TAMEABLE, beasts_at, pet_skills_at, tame_chance, tame_xp};
+use super::stats::{
+    AbilityScores, CritOutcome, SCORE_CAP, Score, ScoreOfferView, crit_outcome, modifier,
+    points_earned,
+};
+use super::taming::{PetSkillEffect, beast_species, beasts_at, tame_chance, tame_xp};
 use super::world::{
     CritterKind, Dir, FeatureKind, MiniMap, MobBehavior, MobSpawn, Perk, RegionProgress,
     ResourceNode, RoomId, World, craft_stations_at, critter_index, critters_at, features_at,
     frontier_entrance_room, is_frontier_room, node_index, nodes_at, seed_world,
+    tutorial_start_room,
 };
+
+// ---- Tuning: tick rate, timers, gate titles, boss achievements -----------
 
 /// World heartbeat. One combat round resolves per tick.
 const TICK_SECS: u64 = 2;
@@ -72,6 +81,18 @@ const TICK_SECS: u64 = 2;
 const SUMMON_ID_START: u32 = 990_000_000;
 /// A roamer takes a step at most this often (in ticks); at 2s/tick that is ~8s.
 const MOB_MOVE_COOLDOWN: u8 = 4;
+/// Ticks a wounded, stunned, or festering mob may go with nobody targeting it
+/// before it recovers in full (health, stuns, DoTs). The grace (~6s) absorbs
+/// a dropped connection that comes straight back and a target switched for a
+/// moment, not a death and the walk back from the temple; it is far shorter
+/// than any ability cooldown, so a foe can never be whittled down across
+/// engagements. Fleeing skips the grace: the foe you turn your back on
+/// recovers on the spot.
+const MOB_RESET_TICKS: u8 = 3;
+/// Ticks between two gulps of any heal/restore consumable. Draughts used to
+/// be spammable inside a fight, bounded by gold alone; a breath between them
+/// makes a potion a decision instead of a second health bar.
+const QUAFF_COOLDOWN_TICKS: u8 = 5;
 /// Ticks per time-of-day phase. Four phases => a ~16-minute day at 2s/tick.
 const PHASE_TICKS: u64 = 120;
 /// Ticks the weather holds before it rolls over (~3 minutes).
@@ -85,6 +106,23 @@ const WORLD_BOSS_INTERVAL: u64 = 300;
 
 fn now_unix_secs() -> u64 {
     Utc::now().timestamp().max(0) as u64
+}
+
+/// A short "Xh Ym" (or "Ym") countdown to the next UTC midnight, for
+/// once-a-real-day mechanics (currently just stray adoption). Spelled out in
+/// player-facing messages rather than a bare "come back tomorrow", since the
+/// day boundary here is a real calendar day at UTC midnight - easy to
+/// confuse with the visible in-game Dawn/Day/Dusk/Night clock, which is a
+/// completely different, much faster (~16 real minutes) cycle.
+fn time_until_next_utc_day() -> String {
+    let remaining = 86_400 - (now_unix_secs() % 86_400);
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
 }
 
 /// The world clock's coarse phase, derived from the tick count. Dusk and Night
@@ -112,6 +150,18 @@ impl TimeOfDay {
             Self::Day => "day",
             Self::Dusk => "dusk",
             Self::Night => "night",
+        }
+    }
+    /// A phase-of-the-sun glyph (same `●○` dot family the character sheet's
+    /// ability scores already use, so it reads as an existing house style,
+    /// not a new one), so the world clock is legible at a glance instead of
+    /// blending into the rest of the room panel's dim text.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            Self::Dawn => "\u{25D0}",  // ◐
+            Self::Day => "\u{25CB}",   // ○
+            Self::Dusk => "\u{25D1}",  // ◑
+            Self::Night => "\u{25CF}", // ●
         }
     }
     fn is_dark(self) -> bool {
@@ -178,6 +228,12 @@ const IRON_BODY_PCT: i32 = 15;
 /// same fraction, its effective toughness against wounds) plus a share knocked
 /// off its auto-skill cooldowns.
 const BEASTLORD_PET_PCT: i32 = 30;
+/// Percent of the owner's attack rating a companion adds to its own bite
+/// (`Pet::attack`). The same shape as an ability (a flat floor plus a share
+/// of the rating), so the pet multiplies the build instead of replacing it:
+/// tuned in the arena to keep a band-appropriate companion at 12-30% of a
+/// character's output (`a_companion_is_a_share_of_the_fight_not_the_fight`).
+const PET_COEF_PCT: i32 = 20;
 /// Gold every new adventurer starts with.
 const STARTING_GOLD: i64 = 120;
 /// Normal death removes this share of carried gold; banked gold is protected.
@@ -211,8 +267,9 @@ const LATEANIA_WORLD_KEY: &str = "lateania";
 struct BossAchievement {
     mob_name: &'static str,
     award_category: &'static str,
-    /// Once-per-account chip payout via a reward template. `None` means the
-    /// profile badge is the whole prize.
+    /// Chip payout via a reward template: once per character, and at most once
+    /// every 7 days per account (migration 158). `None` means the profile
+    /// badge is the whole prize.
     payout: Option<BossPayout>,
 }
 
@@ -243,16 +300,19 @@ const FRONTIER_KING_ACHIEVEMENT: BossAchievement = BossAchievement {
 const SUNDERING_DEEP_ACHIEVEMENT: BossAchievement = BossAchievement {
     mob_name: "Yssgar, the Sundering Deep",
     award_category: LATEANIA_SUNDERING_DEEP_AWARD_CATEGORY,
-    // The deepest crown pays no chips: the LYS badge alone marks it.
-    payout: None,
+    payout: Some(BossPayout {
+        reward_key: LATEANIA_SUNDERING_DEEP_REWARD_KEY,
+        chip_move: ChipMove::LateaniaSunderingDeepDefeat,
+    }),
 };
 
 const KAETHYR_ASCENDANT_ACHIEVEMENT: BossAchievement = BossAchievement {
     mob_name: "Kaethyr Ascendant, Who Sang the God Awake",
     award_category: LATEANIA_KAETHYR_ASCENDANT_AWARD_CATEGORY,
-    // Kaelmyr's last fight follows Yssgar's pattern: badge only, no chips,
-    // keeping the chip economy flat past the two paying crowns.
-    payout: None,
+    payout: Some(BossPayout {
+        reward_key: LATEANIA_KAETHYR_ASCENDANT_REWARD_KEY,
+        chip_move: ChipMove::LateaniaKaethyrAscendantDefeat,
+    }),
 };
 
 /// Account age (in days) at which an adventurer is a "citizen" of Lateania and
@@ -261,6 +321,9 @@ const VETERAN_DAYS: i64 = 20;
 /// In-place resurrections a veteran gets per adventure (refreshed at a capital
 /// fountain). Newer accounts get none and respawn at the temple as before.
 const VETERAN_RESURRECTIONS: u8 = 2;
+
+/// A character within an account: which slot of whose saves.
+type CharKey = (Uuid, i16);
 
 #[derive(Clone)]
 pub struct LateaniaService {
@@ -271,11 +334,30 @@ pub struct LateaniaService {
     snapshot_rx: watch::Receiver<MudSnapshot>,
     state: Arc<Mutex<WorldState>>,
     active_sessions: Arc<StdMutex<HashMap<Uuid, HashSet<Uuid>>>>,
-    persist_versions: Arc<StdMutex<HashMap<Uuid, u64>>>,
-    persist_locks: Arc<StdMutex<HashMap<Uuid, Arc<Mutex<()>>>>>,
-    prepared_saves: Arc<StdMutex<HashMap<Uuid, (u64, SavedCharacter)>>>,
-    character_resets: Arc<StdMutex<HashSet<Uuid>>>,
-    character_reset_versions: Arc<StdMutex<HashMap<Uuid, u64>>>,
+    // Keyed by (account, slot): a save in flight for one slot must never be
+    // mistaken for another slot's, or a fast slot switch could hydrate a join
+    // from the wrong character's still-in-flight blob.
+    persist_versions: Arc<StdMutex<HashMap<CharKey, u64>>>,
+    persist_locks: Arc<StdMutex<HashMap<CharKey, Arc<Mutex<()>>>>>,
+    prepared_saves: Arc<StdMutex<HashMap<CharKey, (u64, SavedCharacter)>>>,
+    character_resets: Arc<StdMutex<HashSet<CharKey>>>,
+    character_reset_versions: Arc<StdMutex<HashMap<CharKey, u64>>>,
+    /// Which character slot the landing last *asked* to play, set by
+    /// `select_slot` before `join_task` fires. Absent means slot 0, so accounts
+    /// that never see the slot picker (or predate it) keep loading their one
+    /// existing character. This is intent only: it is read exactly once, by the
+    /// `join_task` that creates the world player, and never by a save.
+    active_slot: Arc<StdMutex<HashMap<Uuid, i16>>>,
+    /// Which slot the character *currently in the world* was loaded from, bound
+    /// the moment `join` creates that player and released when it leaves. Every
+    /// save resolves its slot from here (see `prepare_persist`), never from
+    /// `active_slot`: the picker is account-wide and a second session selecting
+    /// a different slot would otherwise redirect the live character's saves on
+    /// top of the character saved there.
+    live_slot: Arc<StdMutex<HashMap<Uuid, i16>>>,
+    /// Cached slot summaries for the character-select landing, refreshed by
+    /// `character_slots_task` and read synchronously by the render path.
+    slot_summaries: Arc<StdMutex<HashMap<Uuid, Vec<SlotSummary>>>>,
 }
 
 // ---- Snapshot (what sessions render) -------------------------------------
@@ -334,15 +416,63 @@ pub struct MobView {
     pub boss: bool,
     /// True when this is the foe you're currently locked onto.
     pub targeted: bool,
+    /// The damage school this foe strikes with (e.g. "fire").
+    pub school: &'static str,
+    /// The school this foe is weak to, if any - the tactical opening.
+    pub weak: Option<&'static str>,
+    /// The school this foe shrugs off, if any.
+    pub resist: Option<&'static str>,
+    /// Damage-over-time stacks currently ticking on this foe.
+    pub dot_stacks: u8,
+    /// True while this foe is stunned (skipping its actions).
+    pub stunned: bool,
+}
+
+/// Which kind of quest a journal row is; closed so the panel matches
+/// exhaustively when grouping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuestKind {
+    /// The auto-granted new-player chain (one active step at a time).
+    Starter,
+    /// An accepted board bounty.
+    Board,
+    /// A Frontier zone-clear quest (only listed once the Frontier is open).
+    Frontier,
 }
 
 /// One quest row in the journal.
 #[derive(Clone, Debug)]
 pub struct QuestView {
     pub name: String,
+    /// What the quest actually asks for, so it's still readable long after
+    /// the one-time accept-time log line has scrolled off - a board bounty's
+    /// blurb plus its mechanical objective, or a Frontier quest's plain
+    /// "slay X" restated here for the same reason.
+    pub desc: String,
     pub done: bool,
     pub reward: String,
-    pub frontier: bool,
+    pub kind: QuestKind,
+    /// A room this quest points at, for tracking it on the world map (Enter in
+    /// the journal). None when no single meaningful place exists.
+    pub target: Option<RoomId>,
+}
+
+/// One milestone on the Long Road - the realm's spine of great bosses whose
+/// titles gate the next land. Derived purely from the player's titles.
+#[derive(Clone, Debug)]
+pub struct RoadStepView {
+    /// The boss to bring down, as named in the world.
+    pub boss: String,
+    /// Where the fight happens.
+    pub place: &'static str,
+    /// What falls open once it's done ("" when it is glory alone).
+    pub unlocks: &'static str,
+    pub done: bool,
+    /// The first undone milestone - the one the player walks toward now.
+    pub current: bool,
+    /// The boss's lair, for tracking the crown on the compass/map (Enter in
+    /// the journal). Resolved from the spawn table at world build.
+    pub target: Option<RoomId>,
 }
 
 /// One wild creature in the room, for the Wildlife list.
@@ -492,8 +622,73 @@ pub struct OccupantView {
     pub bio: String,
     /// This adventurer's stable class key (empty if unclassed), for their portrait.
     pub class_key: String,
+    /// This adventurer's character level, shown alongside their name.
+    pub level: i32,
     /// This adventurer's raw appearance selections, for composing their portrait.
     pub appearance_idx: Vec<u8>,
+    /// True when this room is a `pvp` zone and this adventurer is a valid
+    /// target: alive, classed, and not you. Drives the clickable roster row
+    /// and the hostile marker (see `engage_player`).
+    pub attackable: bool,
+    /// True when this adventurer is who you're currently duelling.
+    pub targeted: bool,
+}
+
+/// One row of a leaderboard: who, their level and class (for the portrait
+/// glyph/colour), and the ranked value itself (meaning depends on which
+/// board it's in - level, pvp kills, or total gold).
+#[derive(Clone, Debug)]
+pub struct LeaderboardEntry {
+    pub user_id: Uuid,
+    pub level: i32,
+    pub class_key: String,
+    pub value: i64,
+}
+
+/// The top ten currently-connected, classed adventurers by three measures.
+/// Identical for every player this tick (nothing here depends on who's
+/// asking), so `WorldState::snapshot` computes it once and shares it via
+/// `Arc` rather than rebuilding/cloning it per player.
+#[derive(Clone, Debug, Default)]
+pub struct LeaderboardView {
+    pub by_level: Vec<LeaderboardEntry>,
+    pub by_pvp_kills: Vec<LeaderboardEntry>,
+    pub by_gold: Vec<LeaderboardEntry>,
+}
+
+/// How many characters an account may keep, so trying another class doesn't
+/// mean wiping the one you already have.
+pub const CHARACTER_SLOTS: i16 = 5;
+
+/// One row of the character-select landing: a slot is either empty (never
+/// saved, or just reset) or shows enough of the saved character to recognize
+/// it at a glance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SlotSummary {
+    pub slot: i16,
+    pub occupied: bool,
+    pub class: Option<Class>,
+    pub level: i32,
+}
+
+impl SlotSummary {
+    fn empty(slot: i16) -> Self {
+        Self {
+            slot,
+            occupied: false,
+            class: None,
+            level: 0,
+        }
+    }
+
+    fn from_saved(slot: i16, saved: &SavedCharacter) -> Self {
+        Self {
+            slot,
+            occupied: true,
+            class: saved.class.as_deref().and_then(Class::from_key),
+            level: saved.level,
+        }
+    }
 }
 
 /// One lookable thing in the current room, as shown in the Examine panel.
@@ -535,6 +730,8 @@ pub struct InvView {
     /// The collapsible category this item groups under (Weapons / Armor /
     /// Consumables / Valuables).
     pub category: &'static str,
+    /// The item's flavor/description text.
+    pub desc: &'static str,
 }
 
 /// A batch-sell request at a merchant. Consumables and equipped gear are never
@@ -566,15 +763,23 @@ pub struct ShopEntryView {
     /// The collapsible category this item groups under (Weapons / Armor /
     /// Consumables / Valuables).
     pub category: &'static str,
+    /// The item's flavor/description text.
+    pub desc: &'static str,
 }
 
-/// The collapsible-panel category an item belongs to.
+/// The collapsible-panel category an item belongs to. Split from a single
+/// "Consumables" bucket so a batch-sell of loose gear/valuables never risks
+/// a buff item that happened to be lumped in with them: "Heals" is anything
+/// that actually restores HP/resource, "Consumables" is everything else you
+/// use from the pack (poisons and future non-heal effect items) - a player
+/// can bulk-sell Valuables without checking every item for a hidden buff.
 pub(super) fn item_category(kind: &super::items::ItemKind) -> &'static str {
     use super::items::{ItemKind, Slot};
     match kind {
         ItemKind::Equipment(Slot::Weapon) => "Weapons",
         ItemKind::Equipment(_) => "Armor",
-        ItemKind::Consumable { .. } => "Consumables",
+        ItemKind::Consumable { heal, restore } if *heal > 0 || *restore > 0 => "Heals",
+        ItemKind::Consumable { .. } | ItemKind::Utility => "Consumables",
         ItemKind::Valuable => "Valuables",
     }
 }
@@ -671,9 +876,47 @@ pub struct HousingView {
 /// The waystone fast-travel menu, present when standing on a portal.
 #[derive(Clone, Debug)]
 pub struct PortalView {
-    /// Each destination: `(label, room id, is_here, is_sealed)`. Sealed gates
-    /// (a continent whose title the player lacks) render dimmed and refuse.
-    pub entries: Vec<(String, RoomId, bool, bool)>,
+    /// Each offered destination: `(label, room id, is_here)`. A mainland gate
+    /// the player has never stood in is absent entirely rather than dimmed;
+    /// the archipelago is always listed (it has no walking route in).
+    pub entries: Vec<(String, RoomId, bool)>,
+    /// How many leading entries are mainland gates, so the panel can head its
+    /// three blocks (gates, villages, islands) without index arithmetic over a
+    /// list whose first block varies in length.
+    pub known_gates: usize,
+    /// Mainland gates not yet found, so the panel can say the network is larger
+    /// than what it lists without naming what is missing.
+    pub unknown_gates: usize,
+}
+
+/// A quest board's postings, present whenever the player stands where a
+/// board feature is. Replaces the old "examine auto-assigns the next bounty"
+/// flow: every ready-to-claim and still-open bounty for this board is listed
+/// so taking one is an explicit choice, not the luck of whatever was first in
+/// the static list - that's what let a low-level player get handed a bounty
+/// for a foe they'd never even seen yet.
+#[derive(Clone, Debug)]
+pub struct BoardView {
+    pub entries: Vec<BoardEntryView>,
+}
+
+/// One posting on a board: either a finished counter-bounty ready to turn in
+/// (`ready`), or one still open to accept.
+#[derive(Clone, Debug)]
+pub struct BoardEntryView {
+    pub quest_id: u32,
+    pub title: String,
+    pub blurb: String,
+    pub objective: String,
+    pub reward: String,
+    pub ready: bool,
+    /// Where the work is and how to walk there, in plain words.
+    pub hint: String,
+    /// A rough level at which the bounty is a fair fight.
+    pub suggested_level: i32,
+    /// True when the bounty's hunting ground sits behind a progression gate
+    /// the player has not opened; shown sealed and refused on accept.
+    pub locked: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -710,6 +953,11 @@ pub struct PlayerView {
     pub hp: i32,
     pub max_hp: i32,
     pub attack: i32,
+    /// What the Physical auto-attack lands for (the attack by the calling's
+    /// `auto_pct`).
+    pub swing: i32,
+    /// Spell power: what every ability adds to its base (by effect).
+    pub spell_power: i32,
     pub armor: i32,
     pub xp: i64,
     pub xp_into_level: i64,
@@ -728,7 +976,18 @@ pub struct PlayerView {
     pub room_name: String,
     pub room_desc: String,
     pub zone: String,
+    /// The (min, max) mob level of the zone the player stands in, so the zone
+    /// line reads "King's Road · Lv 2-5". None where nothing hostile lives.
+    pub zone_band: Option<(i32, i32)>,
     pub safe: bool,
+    /// True in a Wildbound-style contested zone (see `Room::pvp`), where the
+    /// "Adventurers here" roster shows hostile marks and is clickable to duel.
+    pub pvp: bool,
+    /// Lifetime adventurers this character has slain in pvp combat.
+    pub pvp_kills: i64,
+    /// Top-ten currently-connected adventurers by level/pvp kills/gold.
+    /// Shared (not per-player data), see `LeaderboardView`. Opened with `?`.
+    pub leaderboard: Arc<LeaderboardView>,
     pub exits: Vec<(Dir, String)>,
     pub mobs: Vec<MobView>,
     /// Rooms near you that hold a living, revealed foe, so the live field can
@@ -755,6 +1014,14 @@ pub struct PlayerView {
     /// The player's gathering skills and their progress, for the Skills block.
     pub skills: Vec<SkillView>,
     pub in_combat_with: Option<String>,
+    /// Absorb shield remaining on the player, for the battle frame.
+    pub shield: i32,
+    /// Outgoing-damage buff magnitude currently active (0 when none).
+    pub empower: i32,
+    /// True while the player is stunned (skipping their actions).
+    pub stunned: bool,
+    /// The active weapon coat as a display line ("fire coat x8"), if any.
+    pub coat: Option<String>,
     pub abilities: Vec<AbilityView>,
     pub inventory: Vec<InvView>,
     pub shop: Option<ShopView>,
@@ -773,6 +1040,8 @@ pub struct PlayerView {
     pub crafting: Option<CraftView>,
     /// The waystone fast-travel menu, present when standing on a portal.
     pub portal: Option<PortalView>,
+    /// The quest board's postings, present when standing where a board is.
+    pub board: Option<BoardView>,
     /// The composed character bio (from the appearance choices).
     pub bio: String,
     /// The appearance/bio builder rows: (field label, chosen option).
@@ -795,8 +1064,14 @@ pub struct PlayerView {
     pub title_levels: Vec<i32>,
     /// Index of the displayed title, if one is chosen.
     pub active_title: Option<usize>,
-    /// The Frontier zone quests and their completion state.
+    /// The journal's quest rows: the active starter step, accepted board
+    /// bounties, and (once the Frontier is open) its zone quests.
     pub quests: Vec<QuestView>,
+    /// The Long Road: the realm's great-boss spine, derived from titles.
+    pub road: Vec<RoadStepView>,
+    /// True once the player holds every title the Frontier stair demands (the
+    /// journal shows the 20 zone quests only then; sealed reads as one line).
+    pub frontier_open: bool,
     /// Veteran in-place resurrections remaining / total this adventure.
     pub resurrections_left: u8,
     pub resurrection_cap: u8,
@@ -808,6 +1083,14 @@ pub struct PlayerView {
     pub atlas: Vec<RegionProgress>,
     /// The world clock phase, e.g. "dawn"/"day"/"dusk"/"night".
     pub time_of_day: &'static str,
+    /// A phase-of-the-sun glyph for `time_of_day` (see `TimeOfDay::glyph`),
+    /// so the clock reads at a glance rather than blending into dim text.
+    pub time_of_day_glyph: &'static str,
+    /// True during dusk/night, when mobs hit 25% harder (`TimeOfDay::is_dark`).
+    /// Surfaced so the UI can colour the clock as a real danger cue, not
+    /// just flavour text - the day/night cycle otherwise reads as
+    /// decoration even though it has a real mechanical effect.
+    pub time_of_day_dark: bool,
     /// The current weather, e.g. "clear"/"rain"/"fog"/"storm".
     pub weather: &'static str,
     /// An active escort, if any: (name, hp, max_hp, destination zone).
@@ -817,6 +1100,11 @@ pub struct PlayerView {
     /// When eligible to pick an archetype but not yet chosen, the offered paths
     /// as (name, role label, description); empty otherwise. Drives the select UI.
     pub archetype_choices: Vec<(String, String, String)>,
+    /// Attribute points earned and not yet placed.
+    pub score_points: i32,
+    /// While a point waits to be placed (and no archetype crossroads is open),
+    /// one row per score for the point screen; empty otherwise.
+    pub score_offer: Vec<ScoreOfferView>,
 }
 
 impl PlayerView {
@@ -837,6 +1125,8 @@ impl PlayerView {
             hp: 0,
             max_hp: 0,
             attack: 0,
+            swing: 0,
+            spell_power: 0,
             armor: 0,
             xp: 0,
             xp_into_level: 0,
@@ -847,7 +1137,11 @@ impl PlayerView {
             room_name: String::new(),
             room_desc: String::new(),
             zone: String::new(),
+            zone_band: None,
             safe: true,
+            pvp: false,
+            pvp_kills: 0,
+            leaderboard: Arc::new(LeaderboardView::default()),
             exits: Vec::new(),
             mobs: Vec::new(),
             nearby_foes: Vec::new(),
@@ -861,6 +1155,10 @@ impl PlayerView {
             nodes: Vec::new(),
             skills: Vec::new(),
             in_combat_with: None,
+            shield: 0,
+            empower: 0,
+            stunned: false,
+            coat: None,
             abilities: Vec::new(),
             inventory: Vec::new(),
             shop: None,
@@ -871,6 +1169,7 @@ impl PlayerView {
             housing: None,
             crafting: None,
             portal: None,
+            board: None,
             bio: String::new(),
             appearance: Vec::new(),
             appearance_idx: Vec::new(),
@@ -884,16 +1183,22 @@ impl PlayerView {
             title_levels: Vec::new(),
             active_title: None,
             quests: Vec::new(),
+            road: Vec::new(),
+            frontier_open: false,
             resurrections_left: 0,
             resurrection_cap: 0,
             features: Vec::new(),
             minimap: MiniMap::default(),
             atlas: Vec::new(),
             time_of_day: "day",
+            time_of_day_glyph: "\u{25CB}",
+            time_of_day_dark: false,
             weather: "clear",
             escort: None,
             archetype: None,
             archetype_choices: Vec::new(),
+            score_points: 0,
+            score_offer: Vec::new(),
         }
     }
 }
@@ -933,6 +1238,8 @@ fn compare_to_worn(equipped: &HashMap<Slot, u32>, it: &Item) -> String {
     }
 }
 
+// ---- The service: command tasks, autosave loops, and snapshots -----------
+
 impl LateaniaService {
     pub fn new(activity: ActivityPublisher, chip_svc: ChipService, db: Db) -> Self {
         let room_id = Uuid::from_u128(0x4c41_5445_414e_4941_0000_0000_0000_0001);
@@ -952,11 +1259,24 @@ impl LateaniaService {
             prepared_saves: Arc::new(StdMutex::new(HashMap::new())),
             character_resets: Arc::new(StdMutex::new(HashSet::new())),
             character_reset_versions: Arc::new(StdMutex::new(HashMap::new())),
+            active_slot: Arc::new(StdMutex::new(HashMap::new())),
+            live_slot: Arc::new(StdMutex::new(HashMap::new())),
+            slot_summaries: Arc::new(StdMutex::new(HashMap::new())),
         };
         // Build the overhead map's coordinate field and POI index now. Both are
         // lazy statics costing a world-gen apiece, and their first caller is
         // `draw_world_map`, which runs on the render task under the app mutex.
-        tokio::task::spawn_blocking(super::worldmap::warm);
+        // A panic in here would poison the lazies and then panic every later
+        // map render on a server that looked healthy at boot, so it is fatal
+        // instead: the world data itself already proved sound (`seed_world`
+        // ran synchronously above), which makes a warm-up panic a code bug.
+        let warm = tokio::task::spawn_blocking(super::worldmap::warm);
+        tokio::spawn(async move {
+            if let Err(error) = warm.await {
+                tracing::error!(?error, "world map warm-up panicked, exiting");
+                std::process::exit(1);
+            }
+        });
         svc.load_world_state_task();
         svc.start_tick_loop();
         svc.start_autosave_loop();
@@ -987,6 +1307,96 @@ impl LateaniaService {
             .players
             .get(&user_id)
             .is_some_and(|p| p.joined)
+    }
+
+    // ---- Character slots ---------------------------------------------------
+    //
+    // An account can keep up to `CHARACTER_SLOTS` saved characters, but the
+    // world only ever holds one player per account, so only one of those
+    // characters is live at a time. Two different questions therefore need two
+    // different answers, and conflating them loses saves:
+    //
+    //   `active_slot` - which slot the landing last asked for. Account-wide,
+    //     changes on every Enter from any connection, read only by the
+    //     `join_task` that actually creates the world player.
+    //   `live_slot`   - which slot the character in the world came from. Bound
+    //     at that same join and released at leave; the only thing a save is
+    //     ever allowed to consult.
+    //
+    // Everything downstream of join still keys off the account's own `user_id`,
+    // unchanged.
+
+    /// The slot the landing last asked to play for this account. Defaults to 0
+    /// so accounts that never touch the slot picker keep their one character.
+    fn active_slot(&self, user_id: Uuid) -> i16 {
+        self.active_slot
+            .lock_recover()
+            .get(&user_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Which slot the account's live character was loaded from, if one is in
+    /// the world at all.
+    fn live_slot(&self, user_id: Uuid) -> Option<i16> {
+        self.live_slot.lock_recover().get(&user_id).copied()
+    }
+
+    /// Bind the account's live character to the slot it was just loaded from.
+    /// Called only where `join` creates the world player.
+    fn bind_live_slot(&self, user_id: Uuid, slot: i16) {
+        self.live_slot.lock_recover().insert(user_id, slot);
+    }
+
+    /// Release the binding once the character has left the world. Called only
+    /// where the world player is removed.
+    fn unbind_live_slot(&self, user_id: Uuid) {
+        self.live_slot.lock_recover().remove(&user_id);
+    }
+
+    /// Pick which character slot the next `join_task` for this account loads.
+    pub fn select_slot(&self, user_id: Uuid, slot: i16) {
+        self.active_slot.lock_recover().insert(user_id, slot);
+    }
+
+    /// Cached slot summaries for the character-select landing; empty until
+    /// `character_slots_task` resolves at least once (the landing then just
+    /// shows every slot as empty for a frame or two).
+    pub fn character_slots(&self, user_id: Uuid) -> Vec<SlotSummary> {
+        self.slot_summaries
+            .lock_recover()
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_else(|| (0..CHARACTER_SLOTS).map(SlotSummary::empty).collect())
+    }
+
+    /// Refresh the cached slot summaries for the landing. Safe to call often;
+    /// it's a handful of small-blob reads, not the world lock.
+    pub fn character_slots_task(&self, user_id: Uuid) {
+        let svc = self.clone();
+        tokio::spawn(async move {
+            let Ok(client) = svc.db.get().await else {
+                return;
+            };
+            let rows = match MudCharacter::list(&client, user_id).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    tracing::warn!(%user_id, ?error, "failed to list mud character slots");
+                    return;
+                }
+            };
+            let mut by_slot: HashMap<i16, SavedCharacter> = rows
+                .into_iter()
+                .filter_map(|(slot, blob)| SavedCharacter::from_json(&blob).map(|s| (slot, s)))
+                .collect();
+            let summaries = (0..CHARACTER_SLOTS)
+                .map(|slot| match by_slot.remove(&slot) {
+                    Some(saved) => SlotSummary::from_saved(slot, &saved),
+                    None => SlotSummary::empty(slot),
+                })
+                .collect();
+            svc.slot_summaries.lock_recover().insert(user_id, summaries);
+        });
     }
 
     // ---- Commands (fire-and-forget, *_task convention) -------------------
@@ -1024,31 +1434,32 @@ impl LateaniaService {
         self.mark_session_joined(user_id, session_id);
         let svc = self.clone();
         tokio::spawn(async move {
+            let slot = svc.active_slot(user_id);
             if !svc.has_active_session(user_id) {
                 return;
             }
-            if svc.character_reset_in_progress(user_id) {
+            if svc.character_reset_in_progress(user_id, slot) {
                 return;
             }
-            let load_version = svc.current_persist_version(user_id);
+            let load_version = svc.current_persist_version(user_id, slot);
 
             // Load any saved character before exposing a fresh player. A DB
             // failure must not become "no save", otherwise later autosave or
             // logout can overwrite an existing character with a starter one.
-            let saved = if let Some(saved) = svc.prepared_saved(user_id) {
+            let saved = if let Some(saved) = svc.prepared_saved(user_id, slot) {
                 Some(saved)
             } else {
                 match svc.db.get().await {
-                    Ok(client) => match MudCharacter::load(&client, user_id).await {
+                    Ok(client) => match MudCharacter::load(&client, user_id, slot).await {
                         Ok(Some(blob)) => SavedCharacter::from_json(&blob),
                         Ok(None) => None,
                         Err(error) => {
-                            tracing::warn!(%user_id, ?error, "failed to load mud character");
+                            tracing::warn!(%user_id, slot, ?error, "failed to load mud character");
                             return;
                         }
                     },
                     Err(error) => {
-                        tracing::warn!(%user_id, ?error, "no db client for mud character load");
+                        tracing::warn!(%user_id, slot, ?error, "no db client for mud character load");
                         return;
                     }
                 }
@@ -1068,24 +1479,47 @@ impl LateaniaService {
             if !svc.has_active_session(user_id) {
                 return;
             }
-            if svc.character_reset_in_progress(user_id) {
+            if svc.character_reset_in_progress(user_id, slot) {
                 return;
             }
-            let saved = if svc.current_persist_version(user_id) == load_version {
+            let saved = if svc.current_persist_version(user_id, slot) == load_version {
                 saved
             } else {
-                svc.prepared_saved(user_id)
+                svc.prepared_saved(user_id, slot)
             };
-            if !state.players.contains_key(&user_id) {
-                state.join(user_id);
-                state.set_veteran(user_id, veteran);
-                if let Some(saved) = saved {
-                    state.hydrate(user_id, &saved);
+            match state.players.contains_key(&user_id) {
+                false => {
+                    state.join(user_id);
+                    // Bind before hydrating: from here until this character
+                    // leaves, every save for the account goes to `slot` and
+                    // nowhere else, whatever the landing is later asked for.
+                    svc.bind_live_slot(user_id, slot);
+                    state.set_veteran(user_id, veteran);
+                    if let Some(saved) = saved {
+                        state.hydrate(user_id, &saved);
+                    }
+                    // A player materialized in the world (fresh join, not an
+                    // already-present session). The lounge feed's repeat window
+                    // absorbs quick leave/rejoin ping-pong.
+                    svc.activity.game_started_task(user_id, ActivityGame::Mud);
                 }
-                // A player materialized in the world (fresh join, not an
-                // already-present session). The lounge feed's repeat window
-                // absorbs quick leave/rejoin ping-pong.
-                svc.activity.game_started_task(user_id, ActivityGame::Mud);
+                // Already in the world: a second connection for the same
+                // account attaches to the character that is already playing.
+                // One world identity per account means the slot it asked for
+                // simply loses, and it must be told so, or it looks like the
+                // pick silently failed.
+                true => {
+                    if svc.live_slot(user_id).is_some_and(|live| live != slot) {
+                        state.log_to(
+                            user_id,
+                            LogKind::System,
+                            "You're already adventuring on another connection. \
+                             Both are playing that character; close the other \
+                             session first to switch."
+                                .to_string(),
+                        );
+                    }
+                }
             }
             svc.publish(&state);
         });
@@ -1106,10 +1540,14 @@ impl LateaniaService {
                 if svc.has_active_session(user_id) {
                     return;
                 }
+                // Stage the save while the character is still live (that is
+                // what resolves its slot), then remove it and release the
+                // binding, so nothing that runs later can save it again.
                 let saved = state
                     .export_saved(user_id)
                     .and_then(|saved| svc.prepare_persist(user_id, saved));
                 state.leave(user_id);
+                svc.unbind_live_slot(user_id);
                 svc.publish(&state);
                 saved
             };
@@ -1154,97 +1592,112 @@ impl LateaniaService {
         self.active_sessions.lock_recover().remove(&user_id);
     }
 
-    fn begin_character_reset(&self, user_id: Uuid) {
-        self.character_resets.lock_recover().insert(user_id);
+    fn begin_character_reset(&self, user_id: Uuid, slot: i16) {
+        let key = (user_id, slot);
+        self.character_resets.lock_recover().insert(key);
         self.character_reset_versions
             .lock_recover()
-            .entry(user_id)
+            .entry(key)
             .and_modify(|version| *version += 1)
             .or_insert(1);
         let mut versions = self.persist_versions.lock_recover();
         versions
-            .entry(user_id)
+            .entry(key)
             .and_modify(|version| *version += 1)
             .or_insert(1);
-        self.prepared_saves.lock_recover().remove(&user_id);
+        self.prepared_saves.lock_recover().remove(&key);
     }
 
-    fn finish_character_reset(&self, user_id: Uuid) {
-        self.character_resets.lock_recover().remove(&user_id);
+    fn finish_character_reset(&self, user_id: Uuid, slot: i16) {
+        self.character_resets
+            .lock_recover()
+            .remove(&(user_id, slot));
     }
 
-    fn character_reset_in_progress(&self, user_id: Uuid) -> bool {
-        self.character_resets.lock_recover().contains(&user_id)
+    fn character_reset_in_progress(&self, user_id: Uuid, slot: i16) -> bool {
+        self.character_resets
+            .lock_recover()
+            .contains(&(user_id, slot))
     }
 
-    fn current_persist_version(&self, user_id: Uuid) -> u64 {
+    fn current_persist_version(&self, user_id: Uuid, slot: i16) -> u64 {
         self.persist_versions
             .lock_recover()
-            .get(&user_id)
+            .get(&(user_id, slot))
             .copied()
             .unwrap_or(0)
     }
 
+    /// Stage one character blob for writing, targeting the slot its character
+    /// was loaded from. The slot is resolved here rather than passed in, so no
+    /// caller can name the wrong one: a save exists only for a character that
+    /// is in the world, and that character has exactly one slot for its whole
+    /// stay. Returns None when nothing is live to save (a leave that already
+    /// released the binding, or a reset in flight).
     fn prepare_persist(&self, user_id: Uuid, saved: SavedCharacter) -> Option<PendingSave> {
+        let slot = self.live_slot(user_id)?;
+        let key = (user_id, slot);
         let resets = self.character_resets.lock_recover();
-        if resets.contains(&user_id) {
+        if resets.contains(&key) {
             return None;
         }
         let mut versions = self.persist_versions.lock_recover();
-        let version = versions.entry(user_id).and_modify(|v| *v += 1).or_insert(1);
+        let version = versions.entry(key).and_modify(|v| *v += 1).or_insert(1);
         self.prepared_saves
             .lock_recover()
-            .insert(user_id, (*version, saved.clone()));
+            .insert(key, (*version, saved.clone()));
         Some(PendingSave {
             user_id,
+            slot,
             version: *version,
             saved,
         })
     }
 
-    fn prepared_saved(&self, user_id: Uuid) -> Option<SavedCharacter> {
+    fn prepared_saved(&self, user_id: Uuid, slot: i16) -> Option<SavedCharacter> {
         self.prepared_saves
             .lock_recover()
-            .get(&user_id)
+            .get(&(user_id, slot))
             .map(|(_, saved)| saved.clone())
     }
 
     fn clear_prepared_save(&self, save: &PendingSave) {
+        let key = (save.user_id, save.slot);
         let mut prepared_saves = self.prepared_saves.lock_recover();
         if prepared_saves
-            .get(&save.user_id)
+            .get(&key)
             .is_some_and(|(version, _)| *version == save.version)
         {
-            prepared_saves.remove(&save.user_id);
+            prepared_saves.remove(&key);
         }
     }
 
     fn is_latest_persist(&self, save: &PendingSave) -> bool {
         self.persist_versions
             .lock_recover()
-            .get(&save.user_id)
+            .get(&(save.user_id, save.slot))
             .is_some_and(|version| *version == save.version)
     }
 
-    fn persist_lock(&self, user_id: Uuid) -> Arc<Mutex<()>> {
+    fn persist_lock(&self, user_id: Uuid, slot: i16) -> Arc<Mutex<()>> {
         self.persist_locks
             .lock_recover()
-            .entry(user_id)
+            .entry((user_id, slot))
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
 
     /// Write one character blob to the database (best-effort).
     async fn persist(&self, save: PendingSave) {
-        if self.character_reset_in_progress(save.user_id) {
+        if self.character_reset_in_progress(save.user_id, save.slot) {
             return;
         }
         if !self.is_latest_persist(&save) {
             return;
         }
-        let lock = self.persist_lock(save.user_id);
+        let lock = self.persist_lock(save.user_id, save.slot);
         let _guard = lock.lock().await;
-        if self.character_reset_in_progress(save.user_id) {
+        if self.character_reset_in_progress(save.user_id, save.slot) {
             return;
         }
         if !self.is_latest_persist(&save) {
@@ -1252,15 +1705,17 @@ impl LateaniaService {
         }
         match self.db.get().await {
             Ok(client) => {
-                match MudCharacter::save(&client, save.user_id, save.saved.to_json()).await {
+                match MudCharacter::save(&client, save.user_id, save.slot, save.saved.to_json())
+                    .await
+                {
                     Ok(()) => self.clear_prepared_save(&save),
                     Err(error) => {
-                        tracing::warn!(user_id = %save.user_id, ?error, "failed to save mud character");
+                        tracing::warn!(user_id = %save.user_id, slot = save.slot, ?error, "failed to save mud character");
                     }
                 }
             }
             Err(error) => {
-                tracing::warn!(user_id = %save.user_id, ?error, "no db client for mud character save");
+                tracing::warn!(user_id = %save.user_id, slot = save.slot, ?error, "no db client for mud character save");
             }
         }
     }
@@ -1410,6 +1865,12 @@ impl LateaniaService {
         self.mutate(user_id, move |s| s.choose_archetype(user_id, choice));
     }
 
+    /// Place one earned attribute point on the `choice`-th score (the point
+    /// screen's 1-6, in `Score::ALL` order).
+    pub fn spend_score_point_task(&self, user_id: Uuid, choice: usize) {
+        self.mutate(user_id, move |s| s.spend_score_point(user_id, choice));
+    }
+
     /// Release a lingering spirit to the temple (only when dead).
     pub fn release_task(&self, user_id: Uuid) {
         self.mutate(user_id, move |s| s.release_to_temple(user_id));
@@ -1524,6 +1985,10 @@ impl LateaniaService {
         self.mutate(user_id, move |s| s.engage_mob(user_id, mob_id));
     }
 
+    pub fn engage_player_task(&self, user_id: Uuid, target_id: Uuid) {
+        self.mutate(user_id, move |s| s.engage_player(user_id, target_id));
+    }
+
     pub fn ability_task(&self, user_id: Uuid, slot: u8) {
         self.mutate(user_id, move |s| s.use_ability(user_id, slot));
     }
@@ -1579,32 +2044,51 @@ impl LateaniaService {
         self.mutate(user_id, move |s| s.travel(user_id, dest));
     }
 
-    pub fn delete_character_task(&self, user_id: Uuid) {
+    /// Turn in a finished counter-bounty chosen from the board's picker.
+    pub fn claim_board_task(&self, user_id: Uuid, quest_id: u32) {
+        self.mutate(user_id, move |s| s.claim_board_quest(user_id, quest_id));
+    }
+
+    /// Accept a bounty chosen from the board's picker.
+    pub fn accept_board_task(&self, user_id: Uuid, quest_id: u32) {
+        self.mutate(user_id, move |s| s.accept_board_quest(user_id, quest_id));
+    }
+
+    /// Delete one character slot. Only kicks a live session out (and clears
+    /// its sessions/in-memory player) when that slot is the one actually
+    /// being played right now - deleting an idle slot from the landing must
+    /// never disturb a session mid-adventure on a different one.
+    pub fn delete_character_task(&self, user_id: Uuid, slot: i16) {
         let svc = self.clone();
         tokio::spawn(async move {
-            svc.begin_character_reset(user_id);
-            svc.clear_sessions(user_id);
-
-            {
+            svc.begin_character_reset(user_id, slot);
+            // "Live" means the character actually in the world came from this
+            // slot, not that the landing happens to be pointing at it: a
+            // cursor sitting on slot 3 must never evict the slot-0 character
+            // someone is mid-fight with.
+            if svc.live_slot(user_id) == Some(slot) {
+                svc.clear_sessions(user_id);
                 let mut state = svc.state.lock().await;
                 state.delete_character(user_id);
+                svc.unbind_live_slot(user_id);
                 svc.publish(&state);
             }
 
-            let lock = svc.persist_lock(user_id);
+            let lock = svc.persist_lock(user_id, slot);
             let _guard = lock.lock().await;
             match svc.db.get().await {
                 Ok(client) => {
-                    if let Err(error) = MudCharacter::delete_by_user_id(&client, user_id).await {
-                        tracing::warn!(%user_id, ?error, "failed to delete mud character");
+                    if let Err(error) = MudCharacter::delete_slot(&client, user_id, slot).await {
+                        tracing::warn!(%user_id, slot, ?error, "failed to delete mud character");
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(%user_id, ?error, "no db client for mud character delete");
+                    tracing::warn!(%user_id, slot, ?error, "no db client for mud character delete");
                 }
             }
-            svc.prepared_saves.lock_recover().remove(&user_id);
-            svc.finish_character_reset(user_id);
+            svc.prepared_saves.lock_recover().remove(&(user_id, slot));
+            svc.character_slots_task(user_id);
+            svc.finish_character_reset(user_id, slot);
         });
     }
 
@@ -1649,37 +2133,22 @@ impl LateaniaService {
         let chip_svc = self.chip_svc.clone();
         let activity = self.activity.clone();
         let db = self.db.clone();
+        // Which character took the crown. The world does not carry the slot,
+        // so it is read here, one step after the tick that produced the kill,
+        // from the same binding every save resolves against.
+        let slot = self
+            .live_slot(outcome.user_id)
+            .unwrap_or_else(|| self.active_slot(outcome.user_id));
         tokio::spawn(async move {
-            // The badge's recorded score is the chip amount for paying bosses
-            // and 0 for badge-only crowns like Yssgar.
+            // The badge's recorded score is the crown's chip amount; every
+            // crown pays now, so the fallback 0 only covers a payout-less
+            // achievement, which no current crown is.
             let mut badge_score = 0_i64;
             let mut grant_badge = true;
             if let Some(pay) = achievement.payout {
-                let payout = chip_svc
-                    .credit_lifetime_reward_template(outcome.user_id, pay.reward_key, pay.chip_move)
-                    .await;
-                match &payout {
-                    Ok(grant) if !grant.credited => {
-                        tracing::info!(
-                            user_id = %outcome.user_id,
-                            payout = grant.amount,
-                            boss = achievement.mob_name,
-                            "suppressed Lateania boss chips because lifetime payout was already claimed"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            ?error,
-                            user_id = %outcome.user_id,
-                            boss = achievement.mob_name,
-                            "failed to credit Lateania boss chips"
-                        );
-                    }
-                }
-                match &payout {
-                    Ok(grant) => badge_score = grant.amount,
-                    Err(_) => grant_badge = false,
+                match crown_payout(&db, &chip_svc, outcome.user_id, slot, achievement, pay).await {
+                    Some(amount) => badge_score = amount,
+                    None => grant_badge = false,
                 }
             }
 
@@ -1723,8 +2192,114 @@ impl LateaniaService {
 
     fn publish(&self, state: &WorldState) {
         let mut snapshot = state.snapshot();
-        snapshot.reset_versions = self.character_reset_versions.lock_recover().clone();
+        // The "reset elsewhere" signal exists to stop a live session from
+        // silently becoming a different character, so it is scoped to the slot
+        // that session is actually playing - not the one the landing points at
+        // (deleting an idle slot from another tab must not kick anyone). With
+        // no live character there is nothing to kick, so fall back to the
+        // picker's choice for a session still on its way in.
+        snapshot.reset_versions = self
+            .character_reset_versions
+            .lock_recover()
+            .iter()
+            .filter(|((user_id, slot), _)| {
+                *slot
+                    == self
+                        .live_slot(*user_id)
+                        .unwrap_or_else(|| self.active_slot(*user_id))
+            })
+            .map(|((user_id, _), version)| (*user_id, *version))
+            .collect();
         let _ = self.snapshot_tx.send(snapshot);
+    }
+}
+
+/// Pay one realm crown, behind two gates at once (migration 158): the
+/// character persists, so a maxed one would take the easy crowns nightly
+/// without the 7-day account lockout, and `d` deletes the character, so the
+/// lockout alone would be a reroll farm. The character row id is what the
+/// per-character half keys on.
+///
+/// `Some(amount)` is what the profile badge records, whether the gates paid or
+/// refused. `None` means the payout could not be attempted at all, which
+/// suppresses the badge too: a badge whose payout never ran leaves no way to
+/// tell later whether it paid.
+async fn crown_payout(
+    db: &Db,
+    chip_svc: &ChipService,
+    user_id: Uuid,
+    slot: i16,
+    achievement: BossAchievement,
+    pay: BossPayout,
+) -> Option<i64> {
+    let character_id = character_row_id(db, user_id, slot, achievement.mob_name).await?;
+    let grant = chip_svc
+        .credit_run_cooldown_reward_template(
+            user_id,
+            pay.reward_key,
+            &character_id.to_string(),
+            pay.chip_move,
+        )
+        .await;
+    match grant {
+        Ok(grant) if grant.credited => Some(grant.amount),
+        Ok(grant) => {
+            tracing::info!(
+                user_id = %user_id,
+                payout = grant.amount,
+                boss = achievement.mob_name,
+                "suppressed Lateania boss chips: this character already took the crown, or the account is inside the lockout"
+            );
+            Some(grant.amount)
+        }
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                user_id = %user_id,
+                boss = achievement.mob_name,
+                "failed to credit Lateania boss chips"
+            );
+            None
+        }
+    }
+}
+
+/// The character row a crown's payout keys on. `None` means the row is gone or
+/// unreadable.
+async fn character_row_id(db: &Db, user_id: Uuid, slot: i16, boss: &str) -> Option<Uuid> {
+    let client = match db.get().await {
+        Ok(client) => client,
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                user_id = %user_id,
+                boss,
+                "no db client for the Lateania crown payout"
+            );
+            return None;
+        }
+    };
+    match MudCharacter::id_for_slot(&client, user_id, slot).await {
+        Ok(Some(id)) => Some(id),
+        Ok(None) => {
+            tracing::error!(
+                user_id = %user_id,
+                slot,
+                boss,
+                "no Lateania character row to key the crown payout on"
+            );
+            None
+        }
+        Err(error) => {
+            tracing::error!(
+                ?error,
+                user_id = %user_id,
+                slot,
+                boss,
+                "failed to read the Lateania character id for the crown payout"
+            );
+            None
+        }
     }
 }
 
@@ -1741,6 +2316,7 @@ struct TickOutput {
 
 struct PendingSave {
     user_id: Uuid,
+    slot: i16,
     version: u64,
     saved: SavedCharacter,
 }
@@ -1782,6 +2358,14 @@ struct PlayerState {
     /// a refcount instead of a deep copy per player.
     visited: Arc<HashSet<RoomId>>,
     target: Option<u32>,
+    /// Another adventurer this character is trading blows with, in a `pvp`
+    /// room (see `Room::pvp`). Distinct from `target` (mobs) so a fight with
+    /// a mob and a duel with a player never collide. Cleared on death, flee,
+    /// or leaving the room.
+    pvp_target: Option<Uuid>,
+    /// Adventurers slain in `pvp` combat, lifetime. Drives the Wildbound
+    /// reaver title track (see `pvp_title_for`) and is persisted.
+    pvp_kills: i64,
     /// Another player this character auto-follows when they move (set with `f`).
     following: Option<Uuid>,
     /// True from engaging until the first auto-attack lands (Rogue opening crit).
@@ -1794,6 +2378,9 @@ struct PlayerState {
     shield_ticks: u8,
     /// Ticks the player is stunned (skips their action).
     stunned: u8,
+    /// Ticks until the next heal/restore consumable may be used
+    /// (`QUAFF_COOLDOWN_TICKS`). Transient.
+    quaff_cd: u8,
     /// Healing-over-time on self.
     self_effects: Vec<ActiveEffect>,
     /// Per-ability cooldowns: ability id -> ticks remaining.
@@ -1802,8 +2389,12 @@ struct PlayerState {
     equipped: HashMap<Slot, u32>,
     /// True once the class trait's death-save has been spent this life (Warrior).
     death_save_used: bool,
-    /// Rolled D&D ability scores; feed bonus HP (CON) and attack (class key).
+    /// Rolled D&D ability scores, grown by placed points; every score feeds
+    /// one mechanic, see `stats::Score::rule`.
     scores: AbilityScores,
+    /// Attribute points placed so far; what is left to place is
+    /// `points_earned(level)` less this, so a save can never drift.
+    score_points_spent: i32,
     /// Titles earned by slaying notable foes.
     titles: Vec<String>,
     /// Level for each title, parallel to `titles`.
@@ -1818,6 +2409,12 @@ struct PlayerState {
     board_done: Vec<u32>,
     /// Unix time at which each repeatable bounty was last claimed (id, seconds).
     quest_cooldowns: Vec<(u32, u64)>,
+    /// Index of the next uncompleted starter-chain quest; equal to
+    /// `STARTER_QUESTS.len()` once the chain is done. Persisted.
+    starter_stage: u8,
+    /// Kills counted toward the current starter stage, when it is a slay
+    /// stage. Persisted alongside.
+    starter_kills: u32,
     /// The chosen archetype path (from `ARCHETYPES`), once level 10 is reached.
     archetype: Option<&'static ArchetypeDef>,
     /// The combat companion bought from a Stable; travels with and fights for
@@ -1849,9 +2446,12 @@ struct PlayerState {
     last_broadcast: Option<Instant>,
     /// Riding the companion (Wildbound mounts). Session-only.
     mounted: bool,
-    /// A weapon coated with poison: (damage per tick, strikes remaining). Each
-    /// landed melee hit leaves a poison DoT and spends one charge. Transient.
-    weapon_poison: Option<(i32, u8)>,
+    /// A coated weapon: the coat's school, damage per tick, and strikes
+    /// remaining. The poison vials and the four alchemy oils share this one
+    /// slot, so applying any coat replaces the last. Each landed melee hit
+    /// leaves a DoT of the coat's school (through the foe's resist/weak
+    /// profile) and spends one charge. Transient.
+    weapon_coat: Option<(DamageType, i32, u8)>,
     /// The friendly NPC the player is currently escorting, if any (transient).
     escort: Option<EscortState>,
     /// Transient warning gate for the start-room Frontier entrance.
@@ -1928,17 +2528,128 @@ impl PlayerState {
         (base + base * hp_pct / 100).max(1)
     }
 
-    fn attack(&self) -> i32 {
+    /// The attack rating before the archetype: class curve, gear, and an
+    /// active empower. Both the swing and spell power derive from it; the
+    /// archetype's `attack_pct` is applied once, downstream, and the scores
+    /// act on the two branches (Strength on the swing, Intelligence on spell
+    /// power), never on the rating itself.
+    fn attack_rating(&self) -> i32 {
         let (atk, _, _) = self.equipment_mods();
-        let stat = self.class.map(|c| self.scores.attack_bonus(c)).unwrap_or(0);
-        let base = self.base_attack + atk + self.empower + stat;
+        (self.base_attack + atk + self.empower).max(1)
+    }
+
+    /// The sheet's attack: the rating with the archetype applied.
+    fn attack(&self) -> i32 {
+        let base = self.attack_rating();
         let (atk_pct, _, _, _) = self.archetype_mods();
         (base + base * atk_pct / 100).max(1)
+    }
+
+    /// What the Physical auto-attack lands for: the attack scaled by the
+    /// calling's `auto_pct` (a Mage swings at half, a Warrior in full), then
+    /// by Strength. An unclassed character cannot engage, so its swing is
+    /// never read.
+    fn swing(&self) -> i32 {
+        let auto_pct = match self.class {
+            Some(c) => c.damage_weights().auto_pct,
+            None => 100,
+        };
+        let base = self.attack() * auto_pct / 100;
+        (base + base * self.scores.swing_pct() / 100).max(1)
+    }
+
+    /// Spell power: the share of the attack rating an ability adds on top of
+    /// its table magnitude (times `ability_coef_pct`). The archetype is left
+    /// out here and applied once to the whole hit in `ability_damage`.
+    fn spell_power(&self) -> i32 {
+        self.spell_power_of(self.attack_rating())
+    }
+
+    /// Spell power for an arbitrary rating (the Empower arm feeds the rating
+    /// *without* the running empower, so a buff never compounds itself),
+    /// then Intelligence on top.
+    fn spell_power_of(&self, rating: i32) -> i32 {
+        let spell_pct = match self.class {
+            Some(c) => c.damage_weights().spell_pct,
+            None => 0,
+        };
+        let power = rating * spell_pct / 100;
+        power + power * self.scores.spell_power_pct() / 100
+    }
+
+    /// Resource regained per tick: the class regen plus Wisdom, never below 1.
+    fn regen(&self) -> i32 {
+        (self.resource_regen + self.scores.regen_bonus()).max(1)
+    }
+
+    /// What a shop charges this character for `it`: the list price less the
+    /// Charisma discount (or plus its markup), never below 1 gold.
+    fn buy_price(&self, it: &Item) -> i64 {
+        let pct = self.scores.price_pct() as i64;
+        (it.price - it.price * pct / 100).max(1)
+    }
+
+    /// What a merchant pays this character for `it`: half the list price plus
+    /// the Charisma premium (or less its penalty), never below 1 gold.
+    fn sell_price(&self, it: &Item) -> i64 {
+        let base = it.sell_price();
+        let pct = self.scores.price_pct() as i64;
+        (base + base * pct / 100).max(1)
+    }
+
+    /// Attribute points earned by level and not yet placed, never more than
+    /// the scores can still take (`AbilityScores::headroom`): a point with no
+    /// slot to go in is not owed, so the point screen, which holds every key
+    /// until the point is placed, can always be satisfied.
+    fn score_points(&self) -> i32 {
+        (points_earned(self.level) - self.score_points_spent)
+            .max(0)
+            .min(self.scores.headroom())
+    }
+
+    /// The point screen's rows while a point waits to be placed: every score
+    /// with what it does now and what it would do after the point. Empty when
+    /// there is nothing to place, while the archetype crossroads is open (so
+    /// the two screens never fight for the keys), and while dead (a corpse
+    /// sees the corpse view and its release key, and places the point once
+    /// it rises).
+    fn score_offer(&self) -> Vec<ScoreOfferView> {
+        let crossroads = self.archetype.is_none() && self.level >= ARCHETYPE_LEVEL;
+        if self.class.is_none() || crossroads || self.dead || self.score_points() <= 0 {
+            return Vec::new();
+        }
+        Score::ALL
+            .iter()
+            .map(|&which| {
+                let value = self.scores.score(which);
+                let mut raised = self.scores;
+                let after = raised
+                    .raise(which)
+                    .then(|| raised.effect(which, self.level));
+                ScoreOfferView {
+                    label: which.label().to_string(),
+                    name: which.name().to_string(),
+                    value,
+                    modifier: modifier(value),
+                    now: self.scores.effect(which, self.level),
+                    after,
+                    rule: which.rule().to_string(),
+                    hint: which.hint().to_string(),
+                }
+            })
+            .collect()
     }
 
     fn armor(&self) -> i32 {
         let (_, _, armor) = self.equipment_mods();
         armor
+    }
+
+    /// True while trading blows with a mob or another adventurer. Movement,
+    /// recall, mounting, and waypoints all gate on this, same as a plain mob
+    /// fight - a pvp duel holds you in place exactly like combat always has.
+    fn in_combat(&self) -> bool {
+        self.target.is_some() || self.pvp_target.is_some()
     }
 
     /// Total xp trained in a gathering skill (0 if untrained).
@@ -1973,6 +2684,8 @@ impl PlayerState {
         });
     }
 }
+
+// ---- Board quests: objectives, repeats, escorts, the bounty table --------
 
 /// A board-quest objective. `Reach` completes the moment the player enters any
 /// room of the named zone; the others count up to a target.
@@ -2044,6 +2757,16 @@ struct BoardQuest {
     reward_title: Option<&'static str>,
     repeat: Repeat,
     blurb: &'static str,
+    /// Where the work is and how to walk there, in plain words. The blurb sets
+    /// the scene; this answers "so where do I actually go".
+    hint: &'static str,
+    /// A rough level at which the bounty is a fair fight, shown on the board
+    /// so a fresh adventurer can tell a chore from a death sentence.
+    suggested_level: i32,
+    /// Gate titles the bounty's hunting ground sits behind (empty when the
+    /// ground is open country). A player missing any of them sees the posting
+    /// sealed and cannot accept it.
+    requires: &'static [&'static str],
 }
 
 /// Ticks/seconds in a world day (four phases) and the escortee's starting health.
@@ -2067,6 +2790,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Skeletons walk the crypt below Tasmania. Put five back to rest.",
+        hint: "The crypt mouth opens from Tasmania's own square - but the living dark needs the Archdemon's fall before it will let you in.",
+        suggested_level: 32,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 2,
@@ -2080,6 +2806,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "The chapel will pay for three relics recovered from the Catacombs.",
+        hint: "Relics drop from the dead of the Sunken Catacombs, entered from Tasmania's square once the Archdemon has fallen.",
+        suggested_level: 32,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 3,
@@ -2092,6 +2821,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Crypt-Delver"),
         repeat: Repeat::Once,
         blurb: "No one has mapped the new crypt. Descend, and live to tell of it.",
+        hint: "The way down lies in Tasmania's square itself; it opens only to a Bane of the Archdemon.",
+        suggested_level: 30,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 4,
@@ -2105,6 +2837,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Dire wolves harry the lake road. Cull four from the Thornwood.",
+        hint: "The Thornwood opens from Melvanala's lakeside square - post-Archdemon country; its packs are no roadside wolves.",
+        suggested_level: 32,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 5,
@@ -2118,6 +2853,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Bring back three spoils taken from the Thornwood Hollows.",
+        hint: "Spoils drop from the beasts and fae of the Thornwood Hollows, below Melvanala's square, once the Archdemon has fallen.",
+        suggested_level: 32,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 6,
@@ -2130,6 +2868,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Wood-Warden"),
         repeat: Repeat::Once,
         blurb: "Step beneath the eaves and find your way to the heart-tree's grove.",
+        hint: "The Hollows open from Melvanala's square, to a Bane of the Archdemon.",
+        suggested_level: 30,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 7,
@@ -2143,6 +2884,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Things lie in wait in the flooded caves. Clear four of them out.",
+        hint: "The flooded caves open from Matlatesh's square - post-Archdemon country, the hardest of the three living darks.",
+        suggested_level: 34,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 8,
@@ -2156,6 +2900,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Salvage three finds from the depths of the Drowned Caverns.",
+        hint: "Salvage drops from the aberrations of the Drowned Caverns, below Matlatesh's square, once the Archdemon has fallen.",
+        suggested_level: 34,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 9,
@@ -2168,6 +2915,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Deep-Walker"),
         repeat: Repeat::Once,
         blurb: "Find the tide-mouth beneath Matlatesh and enter the drowned dark.",
+        hint: "The Caverns open from Matlatesh's square, to a Bane of the Archdemon.",
+        suggested_level: 30,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 10,
@@ -2181,6 +2931,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Crypt Shepherd"),
         repeat: Repeat::Once,
         blurb: "An old priest must bless the crypt. Keep him alive and see him in.",
+        hint: "Brother Aldric waits by this board; the Catacombs he must reach open from Tasmania's square, past the Archdemon's gate.",
+        suggested_level: 33,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 11,
@@ -2194,6 +2947,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Wood-Shepherd"),
         repeat: Repeat::Once,
         blurb: "A scholar would study the heart-tree. Guard her through the Hollows.",
+        hint: "Mira waits by this board; the Hollows she studies open from Melvanala's square, past the Archdemon's gate.",
+        suggested_level: 33,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     BoardQuest {
         id: 12,
@@ -2207,6 +2963,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Tide Shepherd"),
         repeat: Repeat::Once,
         blurb: "Old Pell knows the tides. Bring him safe to the drowned dark.",
+        hint: "Old Pell waits by this board; the Caverns he would dive open from Matlatesh's square, past the Archdemon's gate.",
+        suggested_level: 35,
+        requires: &[FRONTIER_GATE_TITLE],
     },
     // ---- The Sundered Reaches (off Matlatesh) ----------------------------
     BoardQuest {
@@ -2221,6 +2980,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "The Reaches vomit up their dead onto the shore. Put six of the drowned down again.",
+        hint: "The drowned walk the Drowned Crypts on the old road below Duskhollow - and thicker still in the Reaches, for those who hold the sea-gate.",
+        suggested_level: 12,
+        requires: &[],
     },
     BoardQuest {
         id: 14,
@@ -2234,6 +2996,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Restless revenants stalk the sunken cities. Lay five of them to their long rest.",
+        hint: "Revenants stalk the Drowned Crypts below Duskhollow and the frozen heights of Frostspire, on the old road east of Embergate.",
+        suggested_level: 14,
+        requires: &[],
     },
     BoardQuest {
         id: 15,
@@ -2246,6 +3011,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Reach-Walker"),
         repeat: Repeat::Once,
         blurb: "A drowned realm lies beyond the desert's edge. Pass the sea-gate and set foot in it.",
+        hint: "The sea-gate stands in Matlatesh's shallows; it opens only to a Bane of the King Who Was Promised Nothing.",
+        suggested_level: 52,
+        requires: &[REACHES_GATE_TITLE],
     },
     BoardQuest {
         id: 16,
@@ -2258,6 +3026,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Sounder of the Deep"),
         repeat: Repeat::Once,
         blurb: "Few return from the floor of all seas. Reach the Sundering Deep and prove it can be done.",
+        hint: "The Sundering Deep is the floor of the Sundered Reaches - twenty zones down from the sea-gate.",
+        suggested_level: 60,
+        requires: &[REACHES_GATE_TITLE],
     },
     // ---- Kaelmyr, the Ashen Reach (the ash-cairn board, off Yssgar) -------
     BoardQuest {
@@ -2271,6 +3042,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Ash-Walker"),
         repeat: Repeat::Once,
         blurb: "A burnt continent lies below the drowned wound. Descend the ash-gate and set foot on Kaelmyr.",
+        hint: "The ash-gate descends from Yssgar's drowned chamber at the bottom of the Reaches; it opens only to a Bane of Yssgar.",
+        suggested_level: 62,
+        requires: &[KAELMYR_GATE_TITLE],
     },
     BoardQuest {
         id: 18,
@@ -2284,6 +3058,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "The Reaches' dead wash up and rise again on the burnt strand. Put six of the cinder-dead down.",
+        hint: "The cinder-dead shamble along Kaelmyr's Cinderfall Shore, just past the ash-gate.",
+        suggested_level: 64,
+        requires: &[KAELMYR_GATE_TITLE],
     },
     BoardQuest {
         id: 19,
@@ -2297,6 +3074,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "The ash-shamans keep their pyres lit with the living. Scatter four of the Emberkin from the terraces.",
+        hint: "The Emberkin keep their pyres in the caldera terraces west of the Cinderfall Shore.",
+        suggested_level: 66,
+        requires: &[KAELMYR_GATE_TITLE],
     },
     BoardQuest {
         id: 20,
@@ -2310,6 +3090,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "Relics of the world's first age wash up on the cinder shore. Bring back three from Kaelmyr.",
+        hint: "Shore relics drop from the dead along Kaelmyr's Cinderfall Shore, past the ash-gate.",
+        suggested_level: 64,
+        requires: &[KAELMYR_GATE_TITLE],
     },
     BoardQuest {
         id: 21,
@@ -2322,6 +3105,9 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: Some("Throne-Seeker of Kaelmyr"),
         repeat: Repeat::Once,
         blurb: "Kaethyr the Unquenched has ruled the ash since the Sundering. Walk to his burning throne and look upon it.",
+        hint: "The Unquenched Throne stands near Kaelmyr's far end - a long march east and down through the ash.",
+        suggested_level: 75,
+        requires: &[KAELMYR_GATE_TITLE],
     },
     BoardQuest {
         id: 22,
@@ -2335,12 +3121,252 @@ const BOARD_QUESTS: &[BoardQuest] = &[
         reward_title: None,
         repeat: Repeat::Daily,
         blurb: "The Hollow Choir sings to wake the drowned god beneath the wound. Silence four of the choristers.",
+        hint: "The Hollow Choir sings in Kaelmyr's deepest zones, on the way to the Sundering Wound.",
+        suggested_level: 78,
+        requires: &[KAELMYR_GATE_TITLE],
     },
 ];
 
 fn board_quest(id: u32) -> Option<&'static BoardQuest> {
     BOARD_QUESTS.iter().find(|q| q.id == id)
 }
+
+// ---- The starter chain and the Long Road ---------------------------------
+
+/// A goal for one starter-chain step. Separate from `Objective` because the
+/// chain needs "slay anything in a zone", which boards never ask for.
+#[derive(Clone, Copy, Debug)]
+enum StarterGoal {
+    /// Set foot in the named zone.
+    Reach { zone: &'static str },
+    /// Slay this many foes anywhere in the named zone.
+    SlayIn { zone: &'static str, count: u32 },
+    /// Slay one foe whose name contains this fragment.
+    SlayNamed { name_contains: &'static str },
+}
+
+fn starter_goal_target(goal: StarterGoal) -> u32 {
+    match goal {
+        StarterGoal::Reach { .. } | StarterGoal::SlayNamed { .. } => 1,
+        StarterGoal::SlayIn { count, .. } => count,
+    }
+}
+
+/// One step of the auto-granted new-player chain. Sequential: exactly one is
+/// active at a time, finishing it opens the next, and the whole chain hands a
+/// fresh character from Wayfarer's Hollow to the first real gate title.
+struct StarterQuest {
+    title: &'static str,
+    goal: StarterGoal,
+    /// Where to go and what to do, in plain words - shown in the journal and
+    /// as the room panel's "next" line.
+    hint: &'static str,
+    /// The room the step points at, for tracking on the world map.
+    target: RoomId,
+    reward_gold: i64,
+    reward_xp: i64,
+}
+
+const STARTER_QUESTS: &[StarterQuest] = &[
+    StarterQuest {
+        title: "First Steps",
+        goal: StarterGoal::Reach { zone: "Embergate" },
+        hint: "Leave Wayfarer's Hollow for Embergate proper: press r to recall to the Town Square, or walk south through the Gilded Flagon.",
+        target: 1,
+        reward_gold: 25,
+        reward_xp: 20,
+    },
+    StarterQuest {
+        title: "The Open Road",
+        goal: StarterGoal::SlayIn {
+            zone: "King's Road",
+            count: 3,
+        },
+        hint: "Head south past the South Gate. Goblins, bandits and gaunt wolves prowl the King's Road - put down three of them.",
+        target: 6,
+        reward_gold: 40,
+        reward_xp: 40,
+    },
+    StarterQuest {
+        title: "Under the Eaves",
+        goal: StarterGoal::Reach {
+            zone: "Whisperwood",
+        },
+        hint: "Follow the King's Road south until the trees close in and the Whisperwood begins.",
+        target: 11,
+        reward_gold: 40,
+        reward_xp: 40,
+    },
+    StarterQuest {
+        title: "The Elder Treant",
+        goal: StarterGoal::SlayNamed {
+            name_contains: "Elder Treant",
+        },
+        hint: "Deep in Whisperwood the Elder Treant keeps the way down into Duskhollow. Bring it down, and its leave to descend is yours.",
+        target: 28,
+        reward_gold: 80,
+        reward_xp: 120,
+    },
+    StarterQuest {
+        title: "Into the Dark Below",
+        goal: StarterGoal::Reach {
+            zone: "Duskhollow Caverns",
+        },
+        hint: "Descend past the Treant's grove into Duskhollow Caverns. From here the deeps chain onward, boss by boss.",
+        target: 31,
+        reward_gold: 60,
+        reward_xp: 80,
+    },
+];
+
+fn starter_quest(stage: u8) -> Option<&'static StarterQuest> {
+    STARTER_QUESTS.get(stage as usize)
+}
+
+/// One milestone of the Long Road: the realm's spine of great bosses. `boss`
+/// must match the spawn's name exactly - the view derives each milestone's
+/// required title via `title_for`, so the roadmap can never drift from what a
+/// kill actually grants (a drift test pins the gate consts to this table).
+struct RoadMilestone {
+    boss: &'static str,
+    place: &'static str,
+    unlocks: &'static str,
+}
+
+const LONG_ROAD: &[RoadMilestone] = &[
+    RoadMilestone {
+        boss: "the Elder Treant",
+        place: "Whisperwood",
+        unlocks: "the descent into Duskhollow",
+    },
+    RoadMilestone {
+        boss: "the Archdemon Mal'gareth",
+        place: "the Obsidian Throne, at the authored road's end",
+        unlocks: "the living dark below the three capitals",
+    },
+    RoadMilestone {
+        boss: "The Bonewright Lich",
+        place: "the Sunken Catacombs, below Tasmania",
+        unlocks: "one of the three Frontier seals",
+    },
+    RoadMilestone {
+        boss: "the Elder Dryad",
+        place: "the Thornwood Hollows, below Melvanala",
+        unlocks: "one of the three Frontier seals",
+    },
+    RoadMilestone {
+        boss: "the Abyss-Thing",
+        place: "the Drowned Caverns, below Matlatesh",
+        unlocks: "one of the three Frontier seals",
+    },
+    RoadMilestone {
+        boss: "the King Who Was Promised Nothing",
+        place: "the Frontier's deepest zone",
+        unlocks: "the sea-gate into the Sundered Reaches",
+    },
+    RoadMilestone {
+        boss: "Yssgar, the Sundering Deep",
+        place: "the deepest chamber of the Sundered Reaches",
+        unlocks: "the ash-gate down into Kaelmyr",
+    },
+    RoadMilestone {
+        boss: "Kaethyr the Unquenched, Ashen King of Kaelmyr",
+        place: "the Unquenched Throne",
+        unlocks: "",
+    },
+    RoadMilestone {
+        boss: "Kaethyr Ascendant, Who Sang the God Awake",
+        place: "the Sundering Wound",
+        unlocks: "the last crown of the realm",
+    },
+];
+
+/// The one line that always answers "where do I go now": the active starter
+/// step, else the Long Road's first unconquered milestone. None only once the
+/// realm is fully conquered.
+fn next_step_for(starter_stage: u8, titles: &[String]) -> Option<String> {
+    if let Some(q) = starter_quest(starter_stage) {
+        return Some(format!("{}: {}", q.title, q.hint));
+    }
+    LONG_ROAD
+        .iter()
+        .find(|m| !titles.iter().any(|t| *t == title_for(m.boss, true)))
+        .map(|m| format!("bring down {} in {}", m.boss, m.place))
+}
+
+/// The Long Road rows for a set of earned titles: each milestone checked off
+/// by its boss title, the first undone one flagged as current. `targets` is
+/// the per-milestone lair room (see `road_targets`), parallel to `LONG_ROAD`.
+fn road_view(titles: &[String], targets: &[Option<RoomId>]) -> Vec<RoadStepView> {
+    let mut current_found = false;
+    LONG_ROAD
+        .iter()
+        .zip(targets.iter().copied().chain(std::iter::repeat(None)))
+        .map(|(m, target)| {
+            let title = title_for(m.boss, true);
+            let done = titles.contains(&title);
+            let current = !done && !current_found;
+            if current {
+                current_found = true;
+            }
+            RoadStepView {
+                boss: m.boss.to_string(),
+                place: m.place,
+                unlocks: m.unlocks,
+                done,
+                current,
+                target,
+            }
+        })
+        .collect()
+}
+
+/// Each Long Road milestone's lair: the home room of the spawn whose name the
+/// milestone carries. Computed once at world build; the drift test pins every
+/// milestone to a real spawn, so a `None` here means the table rotted.
+fn road_targets(world: &World) -> Vec<Option<RoomId>> {
+    LONG_ROAD
+        .iter()
+        .map(|m| {
+            world
+                .spawns
+                .iter()
+                .find(|s| s.name == m.boss)
+                .map(|s| s.home)
+        })
+        .collect()
+}
+
+/// One board posting's picker-menu row, for a `BoardView`.
+fn board_entry(q: &BoardQuest, ready: bool, locked: bool) -> BoardEntryView {
+    BoardEntryView {
+        quest_id: q.id,
+        title: q.title.to_string(),
+        blurb: q.blurb.to_string(),
+        objective: q.objective.describe(),
+        reward: format!(
+            "{} gold{}",
+            q.reward_gold,
+            match q.reward_title {
+                Some(t) => format!(" + title: {t}"),
+                None => String::new(),
+            }
+        ),
+        ready,
+        hint: q.hint.to_string(),
+        suggested_level: q.suggested_level,
+        locked,
+    }
+}
+
+/// True when the bounty's hunting ground sits behind a gate title the player
+/// does not hold: the posting shows sealed and cannot be accepted, so a fresh
+/// adventurer is never handed work in a land that will refuse them the door.
+fn board_quest_locked(q: &BoardQuest, titles: &[String]) -> bool {
+    !titles_include_all(titles, q.requires)
+}
+
+// ---- Live mobs, and the world state they live in -------------------------
 
 struct MobInstance {
     spawn: MobSpawn,
@@ -2361,17 +3387,65 @@ struct MobInstance {
     revealed: bool,
     /// Ticks until a Summoner may call another add.
     summon_cooldown: u8,
+    /// Consecutive ticks this mob has been wounded, stunned, or festering with
+    /// nobody targeting it. At `MOB_RESET_TICKS` it recovers in full. Reset
+    /// to zero whenever a player holds it as a target.
+    untargeted: u8,
+}
+
+/// Where a damage-over-time stack came from. The two behave differently on
+/// re-application and the difference is load-bearing: an ability DoT is one
+/// wound per cast and stacks, because a cooldown rations how often it can be
+/// cast. A weapon coat re-seeds on *every* landed strike, at the same cadence
+/// the DoT itself ticks, so stacking it would multiply the coat's rider by its
+/// duration (a 3-tick DoT reseeded every tick pays three times over). A coat
+/// therefore keeps exactly one stack per attacker and refreshes it in place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DotSource {
+    Ability,
+    Coat,
+}
+
+/// One live damage-over-time stack on a mob. `per_tick` already has the
+/// target's resist/weak baked in (see `seed_mob_dot`).
+#[derive(Clone, Copy, Debug)]
+struct MobDot {
+    owner: Uuid,
+    per_tick: i32,
+    remaining: u8,
+    source: DotSource,
+}
+
+/// One live damage-over-time stack on a player. Unlike `MobDot` this carries
+/// its school live, since every tick re-applies the victim's armor.
+#[derive(Clone, Copy, Debug)]
+struct PvpDot {
+    owner: Uuid,
+    per_tick: i32,
+    school: DamageType,
+    remaining: u8,
+    source: DotSource,
 }
 
 struct WorldState {
     room_id: Uuid,
     world: World,
+    /// Each Long Road milestone's lair room, parallel to `LONG_ROAD` (see
+    /// `road_targets`). Computed once here so snapshots never scan the spawns.
+    road_targets: Vec<Option<RoomId>>,
     players: HashMap<Uuid, PlayerState>,
     mobs: HashMap<u32, MobInstance>,
     /// mob id -> stun ticks remaining.
     mob_stuns: HashMap<u32, u8>,
-    /// mob id -> active damage-over-time stacks (owner, per-tick, remaining).
-    mob_dots: HashMap<u32, Vec<(Uuid, i32, u8)>>,
+    /// mob id -> active damage-over-time stacks.
+    mob_dots: HashMap<u32, Vec<MobDot>>,
+    /// Pvp equivalents of `mob_stuns`/`mob_dots`, keyed by the victim's user
+    /// id instead of a mob id (see `strike_pvp_target`/`seed_pvp_dot`). Each
+    /// dot stack also carries its `DamageType`, since (unlike a mob's baked-in
+    /// resist/weak) a player's `strike_player` needs the real school on every
+    /// tick to apply the right armor reduction.
+    pvp_stuns: HashMap<Uuid, u8>,
+    pvp_dots: HashMap<Uuid, Vec<PvpDot>>,
     /// Kills accumulated during a tick, drained for the activity feed.
     pending_kills: Vec<KillOutcome>,
     generation: u64,
@@ -2416,16 +3490,73 @@ const TAME_COOLDOWN: Duration = Duration::from_secs(30);
 /// self-limiting (only co-located players hear it); a global channel needs a
 /// brake or one voice can flood every log in Lateania.
 const BROADCAST_COOLDOWN: Duration = Duration::from_secs(10);
-/// Poison damage per tick applied by a coated weapon, by poison tier (0..5).
-const POISON_PER_TICK: [i32; 5] = [4, 8, 14, 22, 34];
+/// The auto-attack bar a tier-`t` coat is measured against: `attack()` for a
+/// character at that tier's crafting gate wearing that tier's crafted weapon.
+/// Measured from the engine, not guessed - `the_attack_bar_still_matches_a_real
+/// _character` rebuilds a real player at each gate and pins every entry. The
+/// coat curves below and the world pass's grind-rate budget are both written as
+/// a share of this, so neither can drift away from what a fight actually looks
+/// like (they once did: the oil rider was certified at 15% of output while
+/// really running three to six times that).
+#[cfg(test)]
+pub(super) const TIER_ATTACK_BAR: [i32; 6] = [12, 31, 52, 77, 106, 148];
+/// Character level at each crafting tier's gate, the level `TIER_ATTACK_BAR` is
+/// measured at (mirrors `crafting::LEVEL_REQ`).
+#[cfg(test)]
+pub(super) const TIER_GATE_LEVEL: [i32; 6] = [1, 8, 16, 26, 38, 55];
+/// Poison damage per tick applied by a coated weapon, by poison tier (0..6).
+/// The burst half of the coat family: about 30% of the auto bar but only
+/// `POISON_CHARGES` strikes of it, so a vial is roughly three quarters of an
+/// oil's damage packed into half the window. Cheap, and the right answer when
+/// the fight will be over quickly.
+pub(super) const POISON_PER_TICK: [i32; 6] = [3, 9, 15, 23, 32, 45];
 /// Strikes a single weapon-coating lasts before the poison is spent.
-const POISON_CHARGES: u8 = 5;
-/// Ticks each poisoned strike festers in the foe.
-const POISON_DOT_TICKS: u8 = 3;
+pub(super) const POISON_CHARGES: u8 = 5;
+/// Ticks each coated strike (poison or oil) festers in the foe. A coat re-seeds
+/// every landed strike and refreshes rather than stacks (see `DotSource`), so
+/// this is the wound's lifetime after the last swing, not a multiplier on it.
+pub(super) const POISON_DOT_TICKS: u8 = 3;
+/// Oil damage per tick, by oil tier (0..6). The sustain half: about a fifth of
+/// the auto bar, held for `OIL_CHARGES` strikes, which is the whole of a boss
+/// fight. Sized so a coated character gains roughly 15% of total output, the
+/// figure the world pass's routed budget is written against.
+pub(super) const OIL_PER_TICK: [i32; 6] = [2, 6, 10, 15, 21, 30];
+/// Strikes a single oil coating lasts. Several fights' worth, so choosing an
+/// oil is a route decision made at the zone gate, not per-fight busywork.
+pub(super) const OIL_CHARGES: u8 = 12;
+/// Share of a character's output that comes from the Physical auto-attack at
+/// band gear; the rest is abilities in the class's school mix. The routed
+/// grind-rate budget in `world_test.rs` splits output this way, and the coat
+/// rider converts through it (a rider worth 20% of the auto is worth
+/// `0.20 * AUTO_SHARE` of total output).
+#[cfg(test)]
+pub(super) const AUTO_SHARE: f64 = 0.75;
 /// Ticks a cooked meal's well-fed regen lasts.
 const WELL_FED_TICKS: u8 = 8;
 
+/// Percent of the caster's spell power an ability adds to its table
+/// magnitude, by effect. Instant hits get the most, a finisher more still,
+/// control less, and the over-time effects a slice per tick (a 5-tick DoT at
+/// 30% lands 150% over its life, rationed by its cooldown). Heals, wards and
+/// empowers scale the same way, so a level-55 Mend is not a level-3 Mend
+/// with better gear. The table magnitude stays the flat floor every ability
+/// keeps at level 1.
+const fn ability_coef_pct(effect: AbilityEffect) -> i32 {
+    match effect {
+        AbilityEffect::Strike => 100,
+        AbilityEffect::Finisher => 150,
+        AbilityEffect::Stun => 50,
+        AbilityEffect::DamageOverTime => 30,
+        AbilityEffect::Heal => 50,
+        AbilityEffect::HealOverTime => 20,
+        AbilityEffect::Ward => 60,
+        AbilityEffect::Empower => 25,
+    }
+}
+
 impl WorldState {
+    // ---- Construction, the world clock, and broadcast -------------------
+
     fn new(room_id: Uuid, world: World) -> Self {
         let mobs = world
             .spawns
@@ -2444,18 +3575,23 @@ impl WorldState {
                         move_cooldown: 0,
                         revealed: !matches!(behavior, MobBehavior::Ambusher),
                         summon_cooldown: 0,
+                        untargeted: 0,
                         spawn: spawn.clone(),
                     },
                 )
             })
             .collect();
+        let road_targets = road_targets(&world);
         Self {
             room_id,
             world,
+            road_targets,
             players: HashMap::new(),
             mobs,
             mob_stuns: HashMap::new(),
             mob_dots: HashMap::new(),
+            pvp_stuns: HashMap::new(),
+            pvp_dots: HashMap::new(),
             pending_kills: Vec::new(),
             generation: 0,
             dirty: false,
@@ -2498,11 +3634,18 @@ impl WorldState {
         self.world_revision = self.world_revision.wrapping_add(1);
     }
 
+    // ---- Joining, class choice, and character reset ---------------------
+
     fn join(&mut self, user_id: Uuid) -> bool {
         if self.players.contains_key(&user_id) {
             return false;
         }
-        let start = self.world.start_room;
+        // Brand-new characters land in Wayfarer's Hollow, the tutorial zone -
+        // never `World::start_room` directly, which stays Embergate's square
+        // so map anchoring, recall, and every "home is room 1" assumption
+        // elsewhere is untouched. A returning character's saved room (from
+        // `hydrate`) is unaffected by this.
+        let start = tutorial_start_room();
         let mut player = PlayerState {
             user_id,
             class: None,
@@ -2521,6 +3664,8 @@ impl WorldState {
             waypoint: None,
             visited: Arc::new(HashSet::from([start])),
             target: None,
+            pvp_target: None,
+            pvp_kills: 0,
             following: None,
             opening_strike: false,
             empower: 0,
@@ -2528,12 +3673,14 @@ impl WorldState {
             shield: 0,
             shield_ticks: 0,
             stunned: 0,
+            quaff_cd: 0,
             self_effects: Vec::new(),
             cooldowns: HashMap::new(),
             inventory: vec![1000, 1300, 1300], // a rusty sword and two minor draughts
             equipped: HashMap::new(),
             death_save_used: false,
             scores: AbilityScores::roll(),
+            score_points_spent: 0,
             titles: Vec::new(),
             title_levels: Vec::new(),
             active_title: None,
@@ -2541,6 +3688,8 @@ impl WorldState {
             board_progress: Vec::new(),
             board_done: Vec::new(),
             quest_cooldowns: Vec::new(),
+            starter_stage: 0,
+            starter_kills: 0,
             archetype: None,
             pet: None,
             stray: None,
@@ -2552,7 +3701,7 @@ impl WorldState {
             rpg_mode: true,
             last_broadcast: None,
             mounted: false,
-            weapon_poison: None,
+            weapon_coat: None,
             escort: None,
             frontier_descent_pending: false,
             resurrection_cap: 0,
@@ -2600,9 +3749,19 @@ impl WorldState {
         self.log_to(
             user_id,
             LogKind::System,
-            "New adventurers usually leave by the South Gate. Stranger paths from the square lead into much older danger."
+            "Welcome to Wayfarer's Hollow, a safe place to learn your trade before the real world asks anything of you. Explore it at your own pace - press r anytime to leave for Embergate, the real town, whenever you're ready."
                 .to_string(),
         );
+        // The chain's first step, so a brand-new player has a concrete goal
+        // from their very first breath (it also rides the journal and the
+        // room panel's Next line from here on).
+        if let Some(q) = starter_quest(0) {
+            self.log_to(
+                user_id,
+                LogKind::System,
+                format!("Next - {}: {}", q.title, q.hint),
+            );
+        }
         self.describe_room(user_id);
     }
 
@@ -2636,6 +3795,53 @@ impl WorldState {
             ),
         );
         self.describe_room(user_id);
+    }
+
+    /// Place one earned attribute point on `Score::ALL[choice]`. Nothing
+    /// happens with no point to place, and a score at `SCORE_CAP` says so and
+    /// keeps the point.
+    fn spend_score_point(&mut self, user_id: Uuid, choice: usize) {
+        let Some(which) = Score::ALL.get(choice).copied() else {
+            return;
+        };
+        let placed = match self.players.get_mut(&user_id) {
+            Some(p) if p.class.is_some() && p.score_points() > 0 => {
+                if p.scores.raise(which) {
+                    p.score_points_spent += 1;
+                    Some((
+                        p.scores.score(which),
+                        p.scores.effect(which, p.level),
+                        p.score_points(),
+                    ))
+                } else {
+                    None
+                }
+            }
+            _ => return,
+        };
+        match placed {
+            Some((value, effect, left)) => {
+                self.log_to(
+                    user_id,
+                    LogKind::Loot,
+                    format!("{} rises to {value}: {effect}.", which.name()),
+                );
+                if left > 0 {
+                    self.log_to(
+                        user_id,
+                        LogKind::System,
+                        format!("{left} attribute point(s) still to place."),
+                    );
+                }
+            }
+            None => {
+                self.log_to(
+                    user_id,
+                    LogKind::System,
+                    format!("{} is already at its peak of {SCORE_CAP}.", which.name()),
+                );
+            }
+        }
     }
 
     /// Grant (or clear) the veteran resurrection allowance for this adventure.
@@ -2687,7 +3893,7 @@ impl WorldState {
         self.players.remove(&user_id);
         let before: usize = self.mob_dots.values().map(Vec::len).sum();
         for stacks in self.mob_dots.values_mut() {
-            stacks.retain(|(owner, _, _)| *owner != user_id);
+            stacks.retain(|dot| dot.owner != user_id);
         }
         self.mob_dots.retain(|_, stacks| !stacks.is_empty());
         let after: usize = self.mob_dots.values().map(Vec::len).sum();
@@ -2697,9 +3903,13 @@ impl WorldState {
         self.dirty = true;
     }
 
+    // ---- Persistence: hydrate a save, export one, the shared world ------
+
     /// Apply a saved character onto a freshly-joined player. Restores class,
-    /// progression, gold, gear, and inventory; reloads at a safe room with full
-    /// vitals so a logged-out fight never resumes mid-swing.
+    /// progression, gold, gear, inventory, and the room they logged out in.
+    /// Nothing hostile acts on its own here (every fight is player-started and
+    /// no combat state is saved), so coming back where you stood is safe; only
+    /// a room that no longer exists falls back to the start room.
     fn hydrate(&mut self, user_id: Uuid, saved: &SavedCharacter) {
         let Some(class) = saved.class() else {
             // No class chosen last time; leave the player at the select screen.
@@ -2709,10 +3919,9 @@ impl WorldState {
         let saved_level = saved.level.clamp(1, Class::MAX_LEVEL);
         let level = saved_level.max(level_for_xp(xp)).clamp(1, Class::MAX_LEVEL);
         let stats = class.stats_at(level);
-        let room = if self.world.room(saved.room).is_some_and(|r| r.safe) {
-            saved.room
-        } else {
-            self.world.start_room
+        let room = match self.world.room(saved.room) {
+            Some(_) => saved.room,
+            None => self.world.start_room,
         };
         if let Some(p) = self.players.get_mut(&user_id) {
             p.class = Some(class);
@@ -2746,8 +3955,12 @@ impl WorldState {
                     p.equipped.insert(slot, *id);
                 }
             }
-            // Rolled scores and earned titles persist across sessions.
+            // Rolled scores, placed points, and earned titles persist across
+            // sessions. Points are bounded by what the level has earned, so a
+            // character saved before the points existed simply has them all
+            // still to place.
             p.scores = saved.scores;
+            p.score_points_spent = saved.score_points_spent.clamp(0, points_earned(level));
             p.titles = saved.titles.clone();
             p.title_levels = saved.title_levels.clone();
             p.title_levels.resize(p.titles.len(), 1);
@@ -2770,6 +3983,18 @@ impl WorldState {
                 .collect();
             // Restore Animal Taming xp (0 for pre-taming saves).
             p.taming_xp = saved.taming_xp.max(0);
+            // Restore lifetime PvP kills (0 for pre-Wildbound-Waste saves).
+            p.pvp_kills = saved.pvp_kills.max(0);
+            // Restore the starter chain. Pre-v19 saves default to stage 0; a
+            // character already past level 10 has long outgrown the tutorial
+            // chain, so it is marked complete rather than handed to a veteran.
+            let chain_len = STARTER_QUESTS.len() as u8;
+            p.starter_stage = if saved.version < 19 && level >= 10 {
+                chain_len
+            } else {
+                saved.starter_stage.min(chain_len)
+            };
+            p.starter_kills = saved.starter_kills;
             p.rpg_mode = saved.rpg_mode;
             // Restore the chosen archetype (ignored if the key is unknown or no
             // longer matches the class, e.g. a respec/rename).
@@ -2828,6 +4053,15 @@ impl WorldState {
             LogKind::System,
             format!("Welcome back. Your {name} stands ready (level {level})."),
         );
+        // Re-orientation that survives any scrollback: say what the next goal
+        // is every time a character comes back to the world.
+        let step = self
+            .players
+            .get(&user_id)
+            .and_then(|p| next_step_for(p.starter_stage, &p.titles));
+        if let Some(step) = step {
+            self.log_to(user_id, LogKind::System, format!("Next - {step}"));
+        }
         self.describe_room(user_id);
     }
 
@@ -2858,6 +4092,7 @@ impl WorldState {
             inventory: p.inventory.clone(),
             equipped,
             scores: p.scores,
+            score_points_spent: p.score_points_spent,
             titles: p.titles.clone(),
             title_levels: p.title_levels.clone(),
             active_title: p.active_title,
@@ -2888,6 +4123,9 @@ impl WorldState {
                 .collect(),
             taming_xp: p.taming_xp,
             rpg_mode: p.rpg_mode,
+            pvp_kills: p.pvp_kills,
+            starter_stage: p.starter_stage,
+            starter_kills: p.starter_kills,
         }))
     }
 
@@ -2997,16 +4235,15 @@ impl WorldState {
             .mob_dots
             .iter()
             .flat_map(|(mob_id, stacks)| {
-                stacks
-                    .iter()
-                    .filter_map(|(owner, damage, remaining_ticks)| {
-                        (*remaining_ticks > 0).then_some(SavedMobDot {
-                            mob_id: *mob_id,
-                            owner: *owner,
-                            damage: *damage,
-                            remaining_ticks: *remaining_ticks,
-                        })
+                stacks.iter().filter_map(|dot| {
+                    (dot.remaining > 0).then_some(SavedMobDot {
+                        mob_id: *mob_id,
+                        owner: dot.owner,
+                        damage: dot.per_tick,
+                        remaining_ticks: dot.remaining,
+                        from_coat: dot.source == DotSource::Coat,
                     })
+                })
             })
             .collect::<Vec<_>>();
         mob_dots.sort_by_key(|dot| (dot.mob_id, dot.owner));
@@ -3046,11 +4283,16 @@ impl WorldState {
         self.mob_dots.clear();
         for dot in &saved.mob_dots {
             if dot.remaining_ticks > 0 && self.mobs.contains_key(&dot.mob_id) {
-                self.mob_dots.entry(dot.mob_id).or_default().push((
-                    dot.owner,
-                    dot.damage,
-                    dot.remaining_ticks,
-                ));
+                self.mob_dots.entry(dot.mob_id).or_default().push(MobDot {
+                    owner: dot.owner,
+                    per_tick: dot.damage,
+                    remaining: dot.remaining_ticks,
+                    source: if dot.from_coat {
+                        DotSource::Coat
+                    } else {
+                        DotSource::Ability
+                    },
+                });
             }
         }
 
@@ -3071,6 +4313,8 @@ impl WorldState {
         }
     }
 
+    // ---- Movement, and the gates a road may not cross -------------------
+
     fn move_player(&mut self, user_id: Uuid, dir: Dir) {
         if !self.is_classed(user_id) {
             return;
@@ -3082,7 +4326,7 @@ impl WorldState {
             self.log_to(user_id, LogKind::System, "You are recovering.".to_string());
             return;
         }
-        if player.target.is_some() {
+        if player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -3168,7 +4412,7 @@ impl WorldState {
         let Some(player) = self.players.get(&user_id) else {
             return;
         };
-        if !player.mounted || player.target.is_some() {
+        if !player.mounted || player.in_combat() {
             return;
         }
         let stride = player
@@ -3183,7 +4427,7 @@ impl WorldState {
             let Some(player) = self.players.get(&user_id) else {
                 return;
             };
-            if player.target.is_some() || player.respawn_at.is_some() {
+            if player.in_combat() || player.respawn_at.is_some() {
                 return;
             }
             let has_way = self
@@ -3216,7 +4460,7 @@ impl WorldState {
         let Some(player) = self.players.get(&user_id) else {
             return;
         };
-        if player.target.is_some() {
+        if player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -3459,6 +4703,8 @@ impl WorldState {
         self.dirty = true;
     }
 
+    // ---- Recall, waypoints, retreat, and following ----------------------
+
     /// Speak the word of recall: return to Embergate's Town Square from anywhere,
     /// so long as you are not in combat. A universal escape, not a class spell.
     fn recall(&mut self, user_id: Uuid) {
@@ -3472,7 +4718,7 @@ impl WorldState {
             self.log_to(user_id, LogKind::System, "You are recovering.".to_string());
             return;
         }
-        if player.target.is_some() {
+        if player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -3517,7 +4763,7 @@ impl WorldState {
         let Some(player) = self.players.get(&user_id) else {
             return;
         };
-        if player.target.is_some() {
+        if player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -3552,7 +4798,7 @@ impl WorldState {
             self.log_to(user_id, LogKind::System, "You are recovering.".to_string());
             return;
         }
-        if player.target.is_some() {
+        if player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -3634,7 +4880,7 @@ impl WorldState {
             self.log_to(user_id, LogKind::System, "You are recovering.".to_string());
             return;
         }
-        if player.target.is_some() {
+        if player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -3788,6 +5034,8 @@ impl WorldState {
         self.dirty = true;
     }
 
+    // ---- Gathering, hunting, and crafting -------------------------------
+
     /// Apply any Boon-creature perks for the room a player just entered.
     fn apply_critter_perks(&mut self, user_id: Uuid) {
         let room_id = match self.players.get(&user_id) {
@@ -3808,9 +5056,12 @@ impl WorldState {
                         p.empower = p.empower.max(3);
                         p.empower_ticks = p.empower_ticks.max(6);
                     }
+                    // A full heal, not a small top-up: the old partial-heal
+                    // amount meant walking in and out of the room over and
+                    // over just to fully mend, which reads as tedious rather
+                    // than as a real rest stop.
                     Perk::Mend => {
-                        let max = p.max_hp();
-                        p.hp = (p.hp + max / 8 + 2).min(max);
+                        p.hp = p.max_hp();
                     }
                     Perk::Quicken => {
                         p.resource = (p.resource + p.max_resource / 4 + 1).min(p.max_resource);
@@ -4083,6 +5334,8 @@ impl WorldState {
         self.dirty = true;
     }
 
+    // ---- Looking at a room, examining it, and the Ways ------------------
+
     fn look(&mut self, user_id: Uuid) {
         self.describe_room_context(user_id, Arrival::Silent);
     }
@@ -4154,6 +5407,7 @@ impl WorldState {
             self.bump_quests(user_id, |o| {
                 u32::from(matches!(o, Objective::Reach { zone } if zone == here_zone))
             });
+            self.bump_starter_reach(user_id, here_zone);
             self.check_escort_arrival(user_id, here_zone);
         }
         let Some(player) = self.players.get(&user_id) else {
@@ -4272,11 +5526,11 @@ impl WorldState {
             return;
         };
         if feat.kind == FeatureKind::Villager {
-            self.log_to(
-                user_id,
-                LogKind::Normal,
-                format!("You ask {} for a moment.", feat.name),
-            );
+            // No "you ask X for a moment" preamble: that phrasing implied an
+            // exchange was starting when the line *is* the whole interaction,
+            // which read as "...and? that's it?" A villager's dialogue is the
+            // payoff, not a placeholder for one - present it directly, same
+            // as the "look at" default below does for its own `desc`.
             self.log_to(
                 user_id,
                 LogKind::Room,
@@ -4312,8 +5566,6 @@ impl WorldState {
             if safe {
                 self.use_bank(user_id);
             }
-        } else if feat.kind == FeatureKind::Board {
-            self.use_board(user_id, room_id);
         } else if feat.kind == FeatureKind::Housing {
             self.log_to(
                 user_id,
@@ -4336,7 +5588,7 @@ impl WorldState {
         let Some(p) = self.players.get(&user_id) else {
             return;
         };
-        if p.target.is_some() {
+        if p.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Combat,
@@ -4355,25 +5607,24 @@ impl WorldState {
             );
             return;
         }
-        let Some((_, _, required)) = super::world::waystone_destinations()
+        let Some((label, _)) = super::world::waystone_destinations()
             .into_iter()
-            .find(|(_, r, _)| *r == dest)
+            .find(|(_, r)| *r == dest)
         else {
             return;
         };
         if dest == p.room {
             return;
         }
-        // The Ways honor the same locks as the walking gates: a sealed
-        // continent's waystone refuses until its title is earned.
-        if let Some(title) = required
-            && !self.player_has_title(user_id, title)
-        {
+        // The Ways carry no progression rules of their own; they only shorten a
+        // road the player has already walked. Titles are checked where you walk
+        // in, in `can_cross_progression_gate`.
+        if !super::world::waystone_is_known(dest, &p.visited) {
             self.log_to(
                 user_id,
                 LogKind::System,
                 format!(
-                    "The waystone hums against your palm, then stills. That far gate is sealed to any but a crowned {title}."
+                    "The waystone hums against your palm, then stills. The Ways carry you only where your own feet have already gone, and you have never stood at {label}."
                 ),
             );
             return;
@@ -4390,6 +5641,8 @@ impl WorldState {
         );
         self.describe_room(user_id);
     }
+
+    // ---- Board quests, escorts, and the starter chain -------------------
 
     fn board_quest_available(&self, p: &PlayerState, q: &BoardQuest) -> bool {
         self.board_quest_available_at(p, q, now_unix_secs())
@@ -4420,59 +5673,110 @@ impl WorldState {
         }
     }
 
-    /// Examine a quest board: claim a finished bounty if one is ready here,
-    /// otherwise take up the next available posting for this capital's region.
-    fn use_board(&mut self, user_id: Uuid, board_room: RoomId) {
-        let (progress, level) = match self.players.get(&user_id) {
-            Some(p) => (p.board_progress.clone(), p.level),
-            None => return,
+    /// Every posting for a board in the player's room: ready-to-claim
+    /// counter-bounties first, then bounties still open to accept. Backs the
+    /// picker menu (`Panel::Board`) - the player chooses, rather than
+    /// `examine` silently auto-assigning whatever came first in the static
+    /// list (which is how a fresh adventurer could get handed a bounty for a
+    /// foe several zones above them with no way to preview or decline it).
+    fn board_entries(&self, user_id: Uuid, board_room: RoomId) -> Vec<BoardEntryView> {
+        let Some(p) = self.players.get(&user_id) else {
+            return Vec::new();
         };
-        // 1) A finished counter-bounty for this board takes priority - claim it.
-        let claimable = progress.iter().find_map(|(id, prog)| {
-            board_quest(*id).filter(|q| q.board == board_room && *prog >= q.objective.target())
+        let mut entries: Vec<BoardEntryView> = p
+            .board_progress
+            .iter()
+            .filter_map(|(id, prog)| {
+                let q = board_quest(*id)?;
+                (q.board == board_room && *prog >= q.objective.target())
+                    .then(|| board_entry(q, true, false))
+            })
+            .collect();
+        entries.extend(
+            BOARD_QUESTS
+                .iter()
+                .filter(|q| q.board == board_room && self.board_quest_available(p, q))
+                .map(|q| board_entry(q, false, board_quest_locked(q, &p.titles))),
+        );
+        entries
+    }
+
+    /// Turn in a finished counter-bounty chosen from the board's picker. A
+    /// stale selection (already claimed elsewhere, or not actually ready) is
+    /// silently a no-op rather than an error the player has to parse.
+    fn claim_board_quest(&mut self, user_id: Uuid, quest_id: u32) {
+        let Some(q) = board_quest(quest_id) else {
+            return;
+        };
+        let ready = self.players.get(&user_id).is_some_and(|p| {
+            p.board_progress
+                .iter()
+                .any(|(id, prog)| *id == quest_id && *prog >= q.objective.target())
         });
-        if let Some(q) = claimable {
-            if let Some(p) = self.players.get_mut(&user_id) {
-                p.board_progress.retain(|(qid, _)| *qid != q.id);
-                p.gold += q.reward_gold;
-                // Repeatable bounties go on cooldown; one-offs are done for good.
-                if q.repeat == Repeat::Once {
-                    p.board_done.push(q.id);
-                } else {
-                    p.quest_cooldowns.retain(|(id, _)| *id != q.id);
-                    p.quest_cooldowns.push((q.id, now_unix_secs()));
-                }
-            }
-            self.log_to(
-                user_id,
-                LogKind::Loot,
-                format!("Bounty claimed: {} (+{} gold).", q.title, q.reward_gold),
-            );
-            if let Some(title) = q.reward_title {
-                self.award_title(user_id, title.to_string(), level);
-            }
-            self.dirty = true;
+        if !ready {
             return;
         }
-        // 2) Otherwise post the next available bounty for this board.
-        let next = match self.players.get(&user_id) {
-            Some(p) => BOARD_QUESTS
-                .iter()
-                .find(|q| q.board == board_room && self.board_quest_available(p, q)),
-            None => None,
-        };
-        let Some(q) = next else {
-            let pending = progress
-                .iter()
-                .any(|(id, _)| board_quest(*id).is_some_and(|qq| qq.board == board_room));
-            let msg = if pending {
-                "Every bounty here is already in your hands - go and finish them."
+        let level = self.players[&user_id].level;
+        if let Some(p) = self.players.get_mut(&user_id) {
+            p.board_progress.retain(|(id, _)| *id != quest_id);
+            p.gold += q.reward_gold;
+            // Repeatable bounties go on cooldown; one-offs are done for good.
+            if q.repeat == Repeat::Once {
+                p.board_done.push(q.id);
             } else {
-                "The board has no new bounties for you. Come back when more are posted."
-            };
-            self.log_to(user_id, LogKind::Normal, msg.to_string());
+                p.quest_cooldowns.retain(|(id, _)| *id != q.id);
+                p.quest_cooldowns.push((q.id, now_unix_secs()));
+            }
+        }
+        self.log_to(
+            user_id,
+            LogKind::Loot,
+            format!("Bounty claimed: {} (+{} gold).", q.title, q.reward_gold),
+        );
+        if let Some(title) = q.reward_title {
+            self.award_title(user_id, title.to_string(), level);
+        }
+        self.dirty = true;
+    }
+
+    /// Accept a bounty explicitly chosen from the board's picker.
+    fn accept_board_quest(&mut self, user_id: Uuid, quest_id: u32) {
+        let Some(q) = board_quest(quest_id) else {
             return;
         };
+        let available = self
+            .players
+            .get(&user_id)
+            .is_some_and(|p| self.board_quest_available(p, q));
+        if !available {
+            return;
+        }
+        // A sealed posting cannot be taken: its hunting ground refuses the
+        // player at the door, so accepting it would only hand out dead weight.
+        let locked = self
+            .players
+            .get(&user_id)
+            .is_some_and(|p| board_quest_locked(q, &p.titles));
+        if locked {
+            let missing = q
+                .requires
+                .iter()
+                .filter(|t| {
+                    !self
+                        .players
+                        .get(&user_id)
+                        .is_some_and(|p| p.titles.iter().any(|owned| owned == **t))
+                })
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.log_to(
+                user_id,
+                LogKind::System,
+                format!("The posting is sealed to you - that ground opens only to: {missing}."),
+            );
+            return;
+        }
         if let Objective::Escort { npc, dest_zone } = q.objective {
             if self
                 .players
@@ -4611,6 +5915,95 @@ impl WorldState {
         }
     }
 
+    /// Advance the starter chain when `inc` reports progress for its active
+    /// goal. Completing a step pays out and announces the next; completing the
+    /// last hands the player over to the Long Road and the capital boards.
+    fn bump_starter(&mut self, user_id: Uuid, inc: impl Fn(StarterGoal) -> u32) {
+        enum Outcome {
+            Progress(&'static StarterQuest, u32, u32),
+            Complete(&'static StarterQuest),
+        }
+        let outcome = {
+            let Some(p) = self.players.get_mut(&user_id) else {
+                return;
+            };
+            let Some(q) = starter_quest(p.starter_stage) else {
+                return;
+            };
+            let step = inc(q.goal);
+            if step == 0 {
+                return;
+            }
+            let need = starter_goal_target(q.goal);
+            p.starter_kills = (p.starter_kills + step).min(need);
+            if p.starter_kills < need {
+                Outcome::Progress(q, p.starter_kills, need)
+            } else {
+                p.starter_stage += 1;
+                p.starter_kills = 0;
+                p.gold += q.reward_gold;
+                p.xp += q.reward_xp;
+                Outcome::Complete(q)
+            }
+        };
+        match outcome {
+            Outcome::Progress(q, done, need) => {
+                self.log_to(
+                    user_id,
+                    LogKind::System,
+                    format!("{} - {done}/{need}.", q.title),
+                );
+            }
+            Outcome::Complete(q) => {
+                self.log_to(
+                    user_id,
+                    LogKind::Loot,
+                    format!(
+                        "{} - done (+{} xp, +{} gold).",
+                        q.title, q.reward_xp, q.reward_gold
+                    ),
+                );
+                let next_stage = self
+                    .players
+                    .get(&user_id)
+                    .map(|p| p.starter_stage)
+                    .unwrap_or(0);
+                match starter_quest(next_stage) {
+                    Some(next) => self.log_to(
+                        user_id,
+                        LogKind::System,
+                        format!("Next - {}: {}", next.title, next.hint),
+                    ),
+                    None => self.log_to(
+                        user_id,
+                        LogKind::System,
+                        "You know the land now. The Long Road in your journal (j) names every crown between you and the realm's end; the capital boards post the daily work."
+                            .to_string(),
+                    ),
+                }
+                self.check_level_up(user_id);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// Room-enter half of the starter chain: Reach goals.
+    fn bump_starter_reach(&mut self, user_id: Uuid, here_zone: &'static str) {
+        self.bump_starter(user_id, |g| {
+            u32::from(matches!(g, StarterGoal::Reach { zone } if zone == here_zone))
+        });
+    }
+
+    /// Kill half of the starter chain: SlayIn (by the zone the fight happened
+    /// in) and SlayNamed (by the slain foe's name).
+    fn bump_starter_kill(&mut self, user_id: Uuid, mob_name: &str, here_zone: &str) {
+        self.bump_starter(user_id, |g| match g {
+            StarterGoal::SlayIn { zone, .. } => u32::from(zone == here_zone),
+            StarterGoal::SlayNamed { name_contains } => u32::from(mob_name.contains(name_contains)),
+            StarterGoal::Reach { .. } => 0,
+        });
+    }
+
     fn use_bank(&mut self, user_id: Uuid) {
         let Some(p) = self.players.get_mut(&user_id) else {
             return;
@@ -4633,6 +6026,8 @@ impl WorldState {
         };
         self.log_to(user_id, LogKind::Loot, message);
     }
+
+    // ---- Combat: targeting, abilities, damage, and the kill -------------
 
     fn engage(&mut self, user_id: Uuid) {
         if !self.is_classed(user_id) {
@@ -4725,16 +6120,113 @@ impl WorldState {
                 "You slide from the saddle - this is foot work.".to_string(),
             );
         }
+        // Taking a mob target breaks off any duel. `target` and `pvp_target`
+        // are mutually exclusive by contract - `damage_target` and the `Stun`
+        // arm both resolve pvp first, so a player holding two targets at once
+        // would have their abilities damage the rival while the stun landed on
+        // the mob. `engage_player` clears `target`; this is the other half.
+        let dropped_duel = self
+            .players
+            .get_mut(&user_id)
+            .and_then(|p| p.pvp_target.take())
+            .is_some();
+        if dropped_duel {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                "You break off the duel.".to_string(),
+            );
+        }
         if let Some(player) = self.players.get_mut(&user_id) {
             player.target = Some(mob_id);
             // Opportunist: the Rogue's first strike of a fight always crits.
             player.opening_strike = player.class == Some(Class::Rogue);
+        }
+        // A named boss is an event, not another roster row - open with a bark.
+        let boss = self
+            .mobs
+            .get(&mob_id)
+            .is_some_and(|m| m.spawn.boss && m.alive);
+        if boss {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                format!(
+                    "{mob_name} turns its full attention on you. The air itself seems to brace."
+                ),
+            );
         }
         self.log_to(
             user_id,
             LogKind::Combat,
             format!("You close with {mob_name}!"),
         );
+    }
+
+    /// Lock onto another adventurer in a `pvp` room (a click on their roster
+    /// row in the "Adventurers here" list). Mirrors [`Self::engage_mob`] but
+    /// keeps a separate `pvp_target` so a mob fight and a duel never collide;
+    /// the victim auto-retaliates if they weren't already fighting anything.
+    fn engage_player(&mut self, user_id: Uuid, target_id: Uuid) {
+        if !self.is_classed(user_id) || user_id == target_id {
+            return;
+        }
+        let Some(player) = self.players.get(&user_id) else {
+            return;
+        };
+        if player.respawn_at.is_some() {
+            return;
+        }
+        let room_id = player.room;
+        if !self.world.room(room_id).is_some_and(|r| r.pvp) {
+            self.log_to(
+                user_id,
+                LogKind::System,
+                "There's no dueling ground here.".to_string(),
+            );
+            return;
+        }
+        let valid = self
+            .players
+            .get(&target_id)
+            .is_some_and(|t| t.room == room_id && t.class.is_some() && t.respawn_at.is_none());
+        if !valid {
+            self.log_to(
+                user_id,
+                LogKind::System,
+                "That adventurer is no longer here to fight.".to_string(),
+            );
+            return;
+        }
+        if let Some(p) = self.players.get_mut(&user_id) {
+            if p.mounted {
+                p.mounted = false;
+            }
+            p.pvp_target = Some(target_id);
+            p.target = None;
+            p.opening_strike = p.class == Some(Class::Rogue);
+        }
+        self.log_to(
+            user_id,
+            LogKind::Combat,
+            "You draw on a fellow adventurer!".to_string(),
+        );
+        // The victim rounds on their attacker at once, unless they were
+        // already mid-fight with someone or something else.
+        let victim_free = self
+            .players
+            .get(&target_id)
+            .is_some_and(|t| t.pvp_target.is_none() && t.target.is_none());
+        if victim_free {
+            if let Some(t) = self.players.get_mut(&target_id) {
+                t.pvp_target = Some(user_id);
+            }
+            self.log_to(
+                target_id,
+                LogKind::Combat,
+                "You are set upon by a fellow adventurer!".to_string(),
+            );
+        }
     }
 
     /// Cast/use the ability in the given action-bar slot (1-based).
@@ -4787,7 +6279,7 @@ impl WorldState {
                 | AbilityEffect::Stun
                 | AbilityEffect::Finisher
         );
-        if needs_target && player.target.is_none() {
+        if needs_target && player.target.is_none() && player.pvp_target.is_none() {
             self.log_to(user_id, LogKind::Combat, "You have no target.".to_string());
             return;
         }
@@ -4802,7 +6294,8 @@ impl WorldState {
     fn apply_ability(&mut self, user_id: Uuid, class: Class, ability: &Ability) {
         match ability.effect {
             AbilityEffect::Heal => {
-                let amount = self.amplified_heal(class, ability.magnitude);
+                let power = self.ability_power(ability, user_id);
+                let amount = self.amplified_heal(class, power);
                 self.heal_player(user_id, amount);
                 self.log_to(
                     user_id,
@@ -4811,10 +6304,11 @@ impl WorldState {
                 );
             }
             AbilityEffect::HealOverTime => {
+                let power = self.ability_power(ability, user_id);
                 if let Some(p) = self.players.get_mut(&user_id) {
                     p.self_effects.push(ActiveEffect {
                         kind: AbilityEffect::HealOverTime,
-                        magnitude: ability.magnitude,
+                        magnitude: power,
                         remaining: ability.duration,
                     });
                 }
@@ -4825,73 +6319,123 @@ impl WorldState {
                 );
             }
             AbilityEffect::Empower => {
+                // Fed the rating without the running empower, so recasting
+                // never stacks a buff on top of itself.
+                let power = self
+                    .players
+                    .get(&user_id)
+                    .map(|p| {
+                        let sp = p.spell_power_of(p.attack_rating() - p.empower);
+                        ability.magnitude + sp * ability_coef_pct(ability.effect) / 100
+                    })
+                    .unwrap_or(ability.magnitude);
                 if let Some(p) = self.players.get_mut(&user_id) {
-                    p.empower = ability.magnitude;
+                    p.empower = power;
                     p.empower_ticks = ability.duration;
                 }
                 self.log_to(
                     user_id,
                     LogKind::Combat,
-                    format!(
-                        "{} surges through you (+{} damage).",
-                        ability.name, ability.magnitude
-                    ),
+                    format!("{} surges through you (+{} damage).", ability.name, power),
                 );
             }
             AbilityEffect::Ward => {
+                let power = self.ability_power(ability, user_id);
                 if let Some(p) = self.players.get_mut(&user_id) {
-                    p.shield = ability.magnitude;
+                    p.shield = power;
                     p.shield_ticks = ability.duration;
                 }
                 self.log_to(
                     user_id,
                     LogKind::Combat,
-                    format!(
-                        "{} shields you ({} absorb).",
-                        ability.name, ability.magnitude
-                    ),
+                    format!("{} shields you ({} absorb).", ability.name, power),
                 );
             }
             AbilityEffect::Strike => {
-                let dmg = self.spell_damage(class, ability.magnitude, user_id);
+                let dmg = self.ability_damage(class, ability, user_id);
                 self.damage_target(user_id, dmg, ability.damage_type, ability.name);
             }
             AbilityEffect::Finisher => {
-                let dmg = self.spell_damage(class, ability.magnitude, user_id);
+                let dmg = self.ability_damage(class, ability, user_id);
                 if let Some(p) = self.players.get_mut(&user_id) {
-                    p.empower = p.empower.max(ability.magnitude / 8);
+                    p.empower = p.empower.max(dmg / 8);
                     p.empower_ticks = p.empower_ticks.max(ability.duration);
                 }
                 self.damage_target(user_id, dmg, ability.damage_type, ability.name);
             }
             AbilityEffect::DamageOverTime => {
-                let tick = self.spell_damage(class, ability.magnitude, user_id);
-                self.seed_mob_dot(
-                    user_id,
-                    tick,
-                    ability.damage_type,
-                    ability.duration,
-                    ability.name,
-                );
+                let tick = self.ability_damage(class, ability, user_id);
+                if self
+                    .players
+                    .get(&user_id)
+                    .is_some_and(|p| p.pvp_target.is_some())
+                {
+                    self.seed_pvp_dot(
+                        user_id,
+                        tick,
+                        ability.damage_type,
+                        ability.duration,
+                        DotSource::Ability,
+                        ability.name,
+                    );
+                } else {
+                    self.seed_mob_dot(
+                        user_id,
+                        tick,
+                        ability.damage_type,
+                        ability.duration,
+                        DotSource::Ability,
+                        ability.name,
+                    );
+                }
             }
             AbilityEffect::Stun => {
                 let target = self.players.get(&user_id).and_then(|p| p.target);
-                let dmg = self.spell_damage(class, ability.magnitude, user_id);
+                let pvp_target = self.players.get(&user_id).and_then(|p| p.pvp_target);
+                let dmg = self.ability_damage(class, ability, user_id);
                 self.damage_target(user_id, dmg, ability.damage_type, ability.name);
                 // Only stun if the target survived the hit.
                 if let Some(mob_id) = target
                     && self.mobs.get(&mob_id).is_some_and(|m| m.alive)
                 {
-                    self.mob_stuns.insert(mob_id, ability.duration);
+                    // A fresh daze never cuts a longer one short.
+                    self.mob_stuns
+                        .entry(mob_id)
+                        .and_modify(|t| *t = (*t).max(ability.duration))
+                        .or_insert(ability.duration);
                     self.mark_world_dirty();
                     self.log_to(
                         user_id,
                         LogKind::Combat,
                         format!("{} leaves the foe reeling!", ability.name),
                     );
+                } else if let Some(victim_id) = pvp_target
+                    && self.players.get(&victim_id).is_some_and(|v| !v.dead)
+                {
+                    self.pvp_stuns
+                        .entry(victim_id)
+                        .and_modify(|t| *t = (*t).max(ability.duration))
+                        .or_insert(ability.duration);
+                    self.log_to(
+                        user_id,
+                        LogKind::Combat,
+                        format!("{} leaves your rival reeling!", ability.name),
+                    );
                 }
             }
         }
+    }
+
+    /// An ability's power: its table magnitude plus the caster's spell power
+    /// weighted by the effect (see `ability_coef_pct`). No class traits, no
+    /// archetype: the raw number every effect arm starts from.
+    fn ability_power(&self, ability: &Ability, user_id: Uuid) -> i32 {
+        let sp = self
+            .players
+            .get(&user_id)
+            .map(|p| p.spell_power())
+            .unwrap_or(0);
+        ability.magnitude + sp * ability_coef_pct(ability.effect) / 100
     }
 
     fn amplified_heal(&self, class: Class, base: i32) -> i32 {
@@ -4902,8 +6446,8 @@ impl WorldState {
         }
     }
 
-    fn spell_damage(&self, class: Class, base: i32, user_id: Uuid) -> i32 {
-        let mut dmg = base;
+    fn ability_damage(&self, class: Class, ability: &Ability, user_id: Uuid) -> i32 {
+        let mut dmg = self.ability_power(ability, user_id);
         if class == Class::Mage || class == Class::Runemaster {
             dmg += dmg / 5; // Arcane Mastery / Runic Overflow
         }
@@ -4937,6 +6481,19 @@ impl WorldState {
     }
 
     fn damage_target(&mut self, user_id: Uuid, raw: i32, dtype: DamageType, source: &str) {
+        // A pvp duel takes priority. The two targets never coexist: taking a
+        // duel clears the mob target (`engage_player`) and taking a mob target
+        // breaks off the duel (`set_target`). Checking pvp first keeps that
+        // invariant explicit here.
+        if let Some(victim_id) = self.players.get(&user_id).and_then(|p| p.pvp_target) {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                format!("{source} hits your rival for {raw} {}.", dtype.label()),
+            );
+            self.strike_pvp_target(user_id, victim_id, raw, dtype, source);
+            return;
+        }
         let Some(mob_id) = self.players.get(&user_id).and_then(|p| p.target) else {
             return;
         };
@@ -4974,6 +6531,7 @@ impl WorldState {
         per_tick: i32,
         dtype: DamageType,
         duration: u8,
+        origin: DotSource,
         source: &str,
     ) {
         let Some(mob_id) = self.players.get(&user_id).and_then(|p| p.target) else {
@@ -4985,17 +6543,254 @@ impl WorldState {
             .get(&mob_id)
             .map(|m| m.spawn.profile.apply(per_tick, dtype).0)
             .unwrap_or(per_tick);
-        self.mob_dots
-            .entry(mob_id)
-            .or_default()
-            .push((user_id, scaled, duration));
+        let stacks = self.mob_dots.entry(mob_id).or_default();
+        // A coat refreshes its own single wound; an ability opens a new one.
+        let existing = match origin {
+            DotSource::Coat => stacks
+                .iter_mut()
+                .find(|d| d.owner == user_id && d.source == DotSource::Coat),
+            DotSource::Ability => None,
+        };
+        let opened = match existing {
+            Some(dot) => {
+                dot.per_tick = scaled;
+                dot.remaining = duration;
+                false
+            }
+            None => {
+                stacks.push(MobDot {
+                    owner: user_id,
+                    per_tick: scaled,
+                    remaining: duration,
+                    source: origin,
+                });
+                true
+            }
+        };
         self.mark_world_dirty();
-        self.log_to(
-            user_id,
-            LogKind::Combat,
-            format!("{source} festers in the foe ({} damage).", dtype.label()),
-        );
+        // Only the wound opening is worth a line. A coat re-seeds every swing,
+        // so logging refreshes would bury the fight in its own upkeep.
+        if opened {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                format!("{source} festers in the foe ({} damage).", dtype.label()),
+            );
+        }
         self.dirty = true;
+    }
+
+    /// Pvp counterpart of `seed_mob_dot`: seeds a damage-over-time on the
+    /// caster's `pvp_target`. Unlike a mob dot, the resist/weak multiplier is
+    /// *not* baked in up front - each tick goes through `strike_pvp_target`
+    /// (`strike_player`), which needs the real `DamageType` to apply the
+    /// victim's armor correctly every time.
+    fn seed_pvp_dot(
+        &mut self,
+        user_id: Uuid,
+        per_tick: i32,
+        dtype: DamageType,
+        duration: u8,
+        origin: DotSource,
+        source: &str,
+    ) {
+        let Some(victim_id) = self.players.get(&user_id).and_then(|p| p.pvp_target) else {
+            return;
+        };
+        let stacks = self.pvp_dots.entry(victim_id).or_default();
+        // Same one-wound-per-coat rule as `seed_mob_dot`.
+        let existing = match origin {
+            DotSource::Coat => stacks
+                .iter_mut()
+                .find(|d| d.owner == user_id && d.source == DotSource::Coat),
+            DotSource::Ability => None,
+        };
+        let opened = match existing {
+            Some(dot) => {
+                dot.per_tick = per_tick;
+                dot.school = dtype;
+                dot.remaining = duration;
+                false
+            }
+            None => {
+                stacks.push(PvpDot {
+                    owner: user_id,
+                    per_tick,
+                    school: dtype,
+                    remaining: duration,
+                    source: origin,
+                });
+                true
+            }
+        };
+        if opened {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                format!("{source} festers in your rival ({} damage).", dtype.label()),
+            );
+        }
+        self.dirty = true;
+    }
+
+    /// Deal `raw` pvp damage from `attacker_id` to `victim_id` via
+    /// `strike_player` (armor, shields, Monk/Tank mitigation, the Warrior
+    /// death-save, and veteran in-place resurrection all apply exactly as
+    /// they do against a mob), then handle a real kill: the victim's lost
+    /// carried gold becomes the killer's spoils, plus a flat xp bonus, a
+    /// `pvp_kills` tick, and the reaver title track. Shared by the tick's
+    /// auto-attack pass, offensive abilities, pet bites, and pvp dots.
+    fn strike_pvp_target(
+        &mut self,
+        attacker_id: Uuid,
+        victim_id: Uuid,
+        raw: i32,
+        dtype: DamageType,
+        source: &str,
+    ) -> bool {
+        let gold_before = self.players.get(&victim_id).map(|v| v.gold).unwrap_or(0);
+        let survived = self.strike_player(victim_id, raw, dtype, source);
+        self.dirty = true;
+        if !survived && self.players.get(&victim_id).is_some_and(|v| v.dead) {
+            let gold_gain = (gold_before
+                - self
+                    .players
+                    .get(&victim_id)
+                    .map(|v| v.gold)
+                    .unwrap_or(gold_before))
+            .max(0);
+            let victim_level = self.players.get(&victim_id).map(|v| v.level).unwrap_or(1);
+            let xp_gain = (15 + victim_level as i64 * 5).max(15);
+            let mut new_kill_count = 0;
+            let mut atk_level = 1;
+            if let Some(a) = self.players.get_mut(&attacker_id) {
+                a.pvp_target = None;
+                a.gold += gold_gain;
+                a.xp += xp_gain;
+                a.pvp_kills += 1;
+                new_kill_count = a.pvp_kills;
+                atk_level = a.level;
+            }
+            self.log_to(
+                attacker_id,
+                LogKind::Loot,
+                format!("You have slain a rival adventurer! (+{xp_gain} xp, +{gold_gain} gold)"),
+            );
+            if let Some(title) = pvp_title_for(new_kill_count) {
+                self.award_title(attacker_id, title.to_string(), atk_level);
+            }
+            self.check_level_up(attacker_id);
+        }
+        survived
+    }
+
+    /// Pvp counterpart of `fire_pet_skills`: the owner's companion's unlocked
+    /// auto-skills fire against a `pvp_target` instead of a mob. `SavageBite`/
+    /// `Pounce` and `Rend` route through `strike_pvp_target`/`seed_pvp_dot` so
+    /// they respect the victim's armor exactly like every other pvp blow;
+    /// `Roar`/`Guard` are pure self-buffs and work identically either way.
+    /// Returns true if the companion's blow finished the victim off.
+    #[allow(clippy::too_many_arguments)]
+    fn fire_pet_skills_pvp(
+        &mut self,
+        user_id: Uuid,
+        victim_id: Uuid,
+        pet_level: i32,
+        pet_atk: i32,
+        pet_name: &str,
+        pet_skills: &'static [super::taming::PetSkill],
+        beastlord: bool,
+    ) -> bool {
+        let now_tick = self.world_ticks;
+        for (si, skill) in pet_skills
+            .iter()
+            .filter(|s| s.level <= pet_level)
+            .enumerate()
+        {
+            let ready = self
+                .pet_skill_cd
+                .get(&(user_id, si))
+                .is_none_or(|&next| now_tick >= next);
+            if !ready {
+                continue;
+            }
+            let base_cd = skill.cooldown as u64;
+            let cd = if beastlord {
+                (base_cd - base_cd * BEASTLORD_PET_PCT as u64 / 100).max(1)
+            } else {
+                base_cd
+            };
+            self.pet_skill_cd.insert((user_id, si), now_tick + cd);
+            match skill.effect {
+                PetSkillEffect::SavageBite | PetSkillEffect::Pounce => {
+                    let bonus = skill.power + pet_atk * skill.power / 20;
+                    self.log_to(
+                        user_id,
+                        LogKind::Combat,
+                        format!("Your {pet_name}'s {} rips into your rival!", skill.name),
+                    );
+                    self.strike_pvp_target(
+                        user_id,
+                        victim_id,
+                        bonus,
+                        DamageType::Physical,
+                        pet_name,
+                    );
+                    if self.players.get(&victim_id).is_some_and(|v| v.dead) {
+                        return true;
+                    }
+                }
+                PetSkillEffect::Rend => {
+                    let per_tick = skill.power + pet_atk / 8;
+                    self.seed_pvp_dot(
+                        user_id,
+                        per_tick,
+                        DamageType::Physical,
+                        3,
+                        DotSource::Ability,
+                        &format!("Your {pet_name}'s Rend"),
+                    );
+                }
+                PetSkillEffect::Roar => {
+                    let mag = skill.power + pet_atk / 10;
+                    if let Some(p) = self.players.get_mut(&user_id) {
+                        p.empower = p.empower.max(mag);
+                        p.empower_ticks = p.empower_ticks.max(4);
+                    }
+                    self.log_to(
+                        user_id,
+                        LogKind::Combat,
+                        format!(
+                            "Your {pet_name} looses an intimidating roar - you feel emboldened!"
+                        ),
+                    );
+                    self.dirty = true;
+                }
+                PetSkillEffect::Guard => {
+                    let mag = skill.power + pet_atk / 4;
+                    if let Some(p) = self.players.get_mut(&user_id) {
+                        p.shield = p.shield.max(mag);
+                        p.shield_ticks = p.shield_ticks.max(4);
+                    }
+                    self.log_to(
+                        user_id,
+                        LogKind::Combat,
+                        format!("Your {pet_name} guards you closely, warding the next blows."),
+                    );
+                    self.dirty = true;
+                }
+                PetSkillEffect::Mend => {
+                    let mag = skill.power + pet_atk / 6;
+                    self.heal_player(user_id, mag);
+                    self.log_to(
+                        user_id,
+                        LogKind::Combat,
+                        format!("Your {pet_name} nuzzles you with a mending glow."),
+                    );
+                }
+            }
+        }
+        false
     }
 
     fn kill_mob(&mut self, user_id: Uuid, mob_id: u32) {
@@ -5055,25 +6850,34 @@ impl WorldState {
         self.bump_quests(user_id, |o| {
             u32::from(matches!(o, Objective::Bounty { name_contains, .. } if mob_name.contains(name_contains)))
         });
+        // The starter chain's slay steps: the fight happened in the player's
+        // own room, so its zone is the hunting ground.
+        let here_zone = self
+            .players
+            .get(&user_id)
+            .and_then(|p| self.world.room(p.room))
+            .map(|r| r.zone);
+        if let Some(here_zone) = here_zone {
+            self.bump_starter_kill(user_id, &mob_name, here_zone);
+        }
         if boss && let Some(zone) = super::world::frontier_zone_of_boss(&mob_name) {
-            self.complete_quest(user_id, zone, mob_level);
+            self.complete_quest(user_id, zone);
         }
         let achievement = boss_achievement_for(&mob_name);
         if let Some(achievement) = achievement {
-            let prize = if achievement.payout.is_some() {
-                "chips and badge"
-            } else {
-                "badge"
-            };
-            self.log_to(
-                user_id,
-                LogKind::Loot,
-                format!(
-                    "First defeat of {} can award {prize} {} once per account.",
+            let line = match achievement.payout.is_some() {
+                true => format!(
+                    "Defeating {} pays chips once per character, and at most once every 7 days; the {} badge is yours the first time.",
                     achievement.mob_name,
                     award_badge(achievement.award_category, 1)
                 ),
-            );
+                false => format!(
+                    "First defeat of {} can award the {} badge, once per account.",
+                    achievement.mob_name,
+                    award_badge(achievement.award_category, 1)
+                ),
+            };
+            self.log_to(user_id, LogKind::Loot, line);
         }
         self.check_level_up(user_id);
         self.pending_kills.push(KillOutcome {
@@ -5084,6 +6888,8 @@ impl WorldState {
         self.dirty = true;
         self.mark_world_dirty();
     }
+
+    // ---- What a kill pays: titles, quests, loot, and levels -------------
 
     /// Set the displayed title to the one at `idx`; selecting the active title
     /// again (or an out-of-range index) clears it.
@@ -5129,8 +6935,9 @@ impl WorldState {
     }
 
     /// Complete the Frontier quest for `zone` (slaying its boss) the first time:
-    /// award the "Champion of the ..." title plus an xp/gold bounty.
-    fn complete_quest(&mut self, user_id: Uuid, zone: usize, boss_level: i32) {
+    /// award the "Champion of the ..." title plus an xp/gold bounty, both
+    /// keyed to the level the zone is pitched at (`frontier_zone_level`).
+    fn complete_quest(&mut self, user_id: Uuid, zone: usize) {
         let already = self
             .players
             .get(&user_id)
@@ -5142,9 +6949,9 @@ impl WorldState {
         let Some((zname, _boss)) = super::world::frontier_zone_info(zone) else {
             return;
         };
-        // Wildbound only widened the level DISPLAYED over a foe's head; the
-        // bounty stays pinned to the old ceiling so that change pays nothing.
-        let reward_level = boss_level.min(super::world::LEVEL_KNEE);
+        // Never the level over the boss's head: that reads by bite and moves
+        // with every retune of the ladder, and a one-time payout must not.
+        let reward_level = super::world::frontier_zone_level(zone);
         let bonus_xp = (80 + reward_level * 24) as i64;
         let bonus_gold = (35 + reward_level * 6) as i64;
         if let Some(p) = self.players.get_mut(&user_id) {
@@ -5159,7 +6966,7 @@ impl WorldState {
                 "Quest complete - the {zname} is cleared! (+{bonus_xp} xp, +{bonus_gold} gold)"
             ),
         );
-        self.award_title(user_id, format!("Champion of the {zname}"), boss_level);
+        self.award_title(user_id, format!("Champion of the {zname}"), reward_level);
         self.dirty = true;
     }
 
@@ -5268,6 +7075,13 @@ impl WorldState {
                     "A hero rises: an adventurer has reached the rank of {name}."
                 ));
             }
+            if lvl % super::stats::POINT_EVERY_LEVELS == 0 {
+                self.log_to(
+                    user_id,
+                    LogKind::Loot,
+                    "  ✦ An attribute point is yours to place.".to_string(),
+                );
+            }
             if lvl == Class::MAX_LEVEL {
                 self.log_to(
                     user_id,
@@ -5282,11 +7096,85 @@ impl WorldState {
         }
     }
 
+    // ---- Fleeing, and world-local chat ----------------------------------
+
+    /// Restore a living mob to full: health, stuns, and every festering wound.
+    /// Returns whether there was anything to shed, so callers can announce it
+    /// only when it happened.
+    fn recover_mob(&mut self, mob_id: u32) -> bool {
+        let Some(m) = self.mobs.get_mut(&mob_id) else {
+            return false;
+        };
+        if !m.alive {
+            return false;
+        }
+        let wounded = m.hp < m.spawn.max_hp;
+        m.hp = m.spawn.max_hp;
+        m.untargeted = 0;
+        let stunned = self.mob_stuns.remove(&mob_id).is_some_and(|t| t > 0);
+        let festering = self.mob_dots.remove(&mob_id).is_some();
+        let shed = wounded || stunned || festering;
+        if shed {
+            self.dirty = true;
+            self.mark_world_dirty();
+        }
+        shed
+    }
+
+    /// The recovery sweep, once per tick after every round has resolved: a
+    /// mob that has gone `MOB_RESET_TICKS` with nobody holding it as a target
+    /// while wounded, stunned, or festering recovers in full, and everyone in
+    /// its room is told. Covers the attacker dying, disconnecting, or walking
+    /// off in any way `flee` does not see.
+    fn recover_abandoned_mobs(&mut self) {
+        let targeted: HashSet<u32> = self.players.values().filter_map(|p| p.target).collect();
+        let mut due: Vec<u32> = Vec::new();
+        for (id, m) in self.mobs.iter_mut() {
+            if !m.alive || targeted.contains(id) {
+                m.untargeted = 0;
+                continue;
+            }
+            let afflicted = m.hp < m.spawn.max_hp
+                || self.mob_stuns.get(id).is_some_and(|t| *t > 0)
+                || self.mob_dots.contains_key(id);
+            if !afflicted {
+                m.untargeted = 0;
+                continue;
+            }
+            m.untargeted = m.untargeted.saturating_add(1);
+            if m.untargeted >= MOB_RESET_TICKS {
+                due.push(*id);
+            }
+        }
+        for mob_id in due {
+            if !self.recover_mob(mob_id) {
+                continue;
+            }
+            let (room, name) = match self.mobs.get(&mob_id) {
+                Some(m) => (m.current_room, m.spawn.name.to_string()),
+                None => continue,
+            };
+            let watchers: Vec<Uuid> = self
+                .players
+                .iter()
+                .filter(|(_, p)| p.room == room)
+                .map(|(id, _)| *id)
+                .collect();
+            for uid in watchers {
+                self.log_to(
+                    uid,
+                    LogKind::Combat,
+                    format!("{name} shakes off its wounds."),
+                );
+            }
+        }
+    }
+
     fn flee(&mut self, user_id: Uuid) {
         let Some(player) = self.players.get(&user_id) else {
             return;
         };
-        if player.target.is_none() {
+        if !player.in_combat() {
             self.log_to(
                 user_id,
                 LogKind::Normal,
@@ -5295,12 +7183,60 @@ impl WorldState {
             return;
         }
         let room_id = player.room;
+        let fled_mob = player.target;
+        // Turning your back on a foe is not free: it strikes once more as you
+        // run, unless it is reeling from a stun. A blow that fells you ends
+        // the flight where you stand (a death-save or veteran rising still
+        // gets away).
+        let parting = fled_mob.and_then(|mob_id| {
+            let m = self.mobs.get(&mob_id)?;
+            let reeling = self.mob_stuns.get(&mob_id).copied().unwrap_or(0) > 0;
+            if !m.alive || m.current_room != room_id || reeling {
+                return None;
+            }
+            Some((
+                mob_id,
+                m.spawn.damage,
+                m.spawn.profile.attack_type,
+                m.spawn.name.to_string(),
+            ))
+        });
+        if let Some((_, dmg, dtype, name)) = parting {
+            self.log_to(
+                user_id,
+                LogKind::Combat,
+                format!("{name} strikes at your back as you run!"),
+            );
+            self.strike_player(user_id, dmg, dtype, &name);
+            if self.players.get(&user_id).is_some_and(|p| p.dead) {
+                return;
+            }
+        }
         let exit = self
             .world
             .room(room_id)
             .and_then(|r| r.exits.iter().next().map(|(dir, dest)| (*dir, *dest)));
         if let Some(player) = self.players.get_mut(&user_id) {
             player.target = None;
+            player.pvp_target = None;
+        }
+        // The foe you leave recovers on the spot, unless someone else is still
+        // fighting it: whittling a boss down across engagements is not a
+        // strategy, it is the hole this closes.
+        if let Some(mob_id) = fled_mob {
+            let still_fought = self.players.values().any(|p| p.target == Some(mob_id));
+            if !still_fought && self.recover_mob(mob_id) {
+                let name = self
+                    .mobs
+                    .get(&mob_id)
+                    .map(|m| m.spawn.name.to_string())
+                    .unwrap_or_default();
+                self.log_to(
+                    user_id,
+                    LogKind::Combat,
+                    format!("{name} shakes off its wounds as you run."),
+                );
+            }
         }
         match exit {
             Some((dir, dest)) => {
@@ -5535,9 +7471,21 @@ impl WorldState {
 
     fn use_item(&mut self, user_id: Uuid, item_id: u32) {
         let Some(it) = item(item_id) else { return };
-        // Poisons aren't drunk - they coat your weapon.
+        // Poisons and oils aren't drunk - they coat your weapon.
         if let Some(tier) = super::items::poison_tier(item_id) {
-            self.coat_weapon(user_id, item_id, tier);
+            let per_tick = POISON_PER_TICK[(tier as usize).min(POISON_PER_TICK.len() - 1)];
+            self.coat_weapon(
+                user_id,
+                item_id,
+                DamageType::Poison,
+                per_tick,
+                POISON_CHARGES,
+            );
+            return;
+        }
+        if let Some((school, tier)) = super::items::oil_school_tier(item_id) {
+            let per_tick = OIL_PER_TICK[(tier as usize).min(OIL_PER_TICK.len() - 1)];
+            self.coat_weapon(user_id, item_id, school, per_tick, OIL_CHARGES);
             return;
         }
         let ItemKind::Consumable { heal, restore } = it.kind else {
@@ -5556,6 +7504,18 @@ impl WorldState {
         if !has {
             return;
         }
+        let queasy = self.players.get(&user_id).map(|p| p.quaff_cd).unwrap_or(0);
+        if queasy > 0 {
+            self.log_to(
+                user_id,
+                LogKind::System,
+                format!(
+                    "You are still queasy from the last draught ({}s).",
+                    u64::from(queasy) * TICK_SECS
+                ),
+            );
+            return;
+        }
         // Cooked food grants a well-fed regen on top of its immediate heal, and
         // so do the rarest Sunderlakes fish (their "special" - see fish_well_fed).
         let well_fed = super::items::food_tier(item_id)
@@ -5568,6 +7528,7 @@ impl WorldState {
             let max = p.max_hp();
             p.hp = (p.hp + heal).min(max);
             p.resource = (p.resource + restore).min(p.max_resource);
+            p.quaff_cd = QUAFF_COOLDOWN_TICKS;
             if let Some(regen) = well_fed {
                 p.self_effects.push(ActiveEffect {
                     kind: AbilityEffect::HealOverTime,
@@ -5581,9 +7542,17 @@ impl WorldState {
         self.dirty = true;
     }
 
-    /// Coat the player's weapon with a poison: each landed melee hit will leave a
-    /// poison DoT until the charges run out. Consumes the vial.
-    fn coat_weapon(&mut self, user_id: Uuid, item_id: u32, tier: u32) {
+    /// Coat the player's weapon with a poison or an oil: each landed melee hit
+    /// will leave a DoT of the coat's school until the charges run out. One
+    /// coat slot: applying a new coat replaces the old. Consumes the vial.
+    fn coat_weapon(
+        &mut self,
+        user_id: Uuid,
+        item_id: u32,
+        school: DamageType,
+        per_tick: i32,
+        charges: u8,
+    ) {
         let has = self
             .players
             .get(&user_id)
@@ -5592,18 +7561,17 @@ impl WorldState {
         if !has {
             return;
         }
-        let per_tick = POISON_PER_TICK[(tier as usize).min(POISON_PER_TICK.len() - 1)];
-        let name = item(item_id).map(|i| i.name).unwrap_or("poison");
+        let name = item(item_id).map(|i| i.name).unwrap_or("coating");
         if let Some(p) = self.players.get_mut(&user_id) {
             if let Some(pos) = p.inventory.iter().position(|i| *i == item_id) {
                 p.inventory.remove(pos);
             }
-            p.weapon_poison = Some((per_tick, POISON_CHARGES));
+            p.weapon_coat = Some((school, per_tick, charges));
         }
         self.log_to(
             user_id,
             LogKind::Combat,
-            format!("You coat your weapon with {name} ({POISON_CHARGES} strikes)."),
+            format!("You coat your weapon with {name} ({charges} strikes)."),
         );
         self.dirty = true;
     }
@@ -5625,23 +7593,26 @@ impl WorldState {
             return;
         }
         let Some(it) = item(item_id) else { return };
-        let gold = self.players.get(&user_id).map(|p| p.gold).unwrap_or(0);
-        if gold < it.price {
+        let (gold, price) = match self.players.get(&user_id) {
+            Some(p) => (p.gold, p.buy_price(it)),
+            None => return,
+        };
+        if gold < price {
             self.log_to(
                 user_id,
                 LogKind::System,
-                format!("You can't afford {} ({}g).", it.name, it.price),
+                format!("You can't afford {} ({price}g).", it.name),
             );
             return;
         }
         if let Some(p) = self.players.get_mut(&user_id) {
-            p.gold -= it.price;
+            p.gold -= price;
             p.inventory.push(item_id);
         }
         self.log_to(
             user_id,
             LogKind::Loot,
-            format!("You buy {} for {}g.", it.name, it.price),
+            format!("You buy {} for {price}g.", it.name),
         );
     }
 
@@ -5655,13 +7626,19 @@ impl WorldState {
             return;
         }
         let Some(it) = item(item_id) else { return };
-        let price = it.sell_price();
+        let price = match self.players.get(&user_id) {
+            Some(p) => p.sell_price(it),
+            None => return,
+        };
         // Worn gear is listed in the inventory panel but lives in `equipped`,
-        // so say why rather than doing nothing.
+        // so say why rather than doing nothing. A loose duplicate in the pack
+        // is still fair game even while the other copy is worn.
         let worn = self
             .players
             .get(&user_id)
-            .map(|p| p.equipped.values().any(|id| *id == item_id))
+            .map(|p| {
+                p.equipped.values().any(|id| *id == item_id) && !p.inventory.contains(&item_id)
+            })
             .unwrap_or(false);
         if worn {
             self.log_to(
@@ -5709,6 +7686,7 @@ impl WorldState {
                 let Some(it) = item(*id) else { return false };
                 match it.kind {
                     ItemKind::Consumable { .. } => false, // never dump potions
+                    ItemKind::Utility => false,           // never dump poisons/buff items either
                     ItemKind::Valuable => true,           // pure sell-fodder, always goes
                     ItemKind::Equipment(_) => match kind {
                         SellBatch::All => true,
@@ -5733,7 +7711,7 @@ impl WorldState {
             for id in &doomed {
                 if let Some(pos) = p.inventory.iter().position(|i| i == id) {
                     p.inventory.remove(pos);
-                    let price = item(*id).map(|it| it.sell_price()).unwrap_or(1);
+                    let price = item(*id).map(|it| p.sell_price(it)).unwrap_or(1);
                     p.gold += price;
                     total += price;
                     count += 1;
@@ -5812,14 +7790,14 @@ impl WorldState {
             let mut total = 0;
             let mut owner = None;
             if let Some(stacks) = self.mob_dots.get_mut(&mob_id) {
-                for (uid, per, rem) in stacks.iter_mut() {
-                    if *rem > 0 {
-                        total += *per;
-                        *rem -= 1;
-                        owner = Some(*uid);
+                for dot in stacks.iter_mut() {
+                    if dot.remaining > 0 {
+                        total += dot.per_tick;
+                        dot.remaining -= 1;
+                        owner = Some(dot.owner);
                     }
                 }
-                stacks.retain(|(_, _, rem)| *rem > 0);
+                stacks.retain(|dot| dot.remaining > 0);
                 if stacks.is_empty() {
                     self.mob_dots.remove(&mob_id);
                 }
@@ -5861,7 +7839,7 @@ impl WorldState {
             let mut hot_heal = 0;
             if let Some(p) = self.players.get_mut(uid) {
                 if p.class.is_some() && p.respawn_at.is_none() {
-                    p.resource = (p.resource + p.resource_regen).min(p.max_resource);
+                    p.resource = (p.resource + p.regen()).min(p.max_resource);
                     // Bard "Battle Hymn" and Skald "War-Chant": Tempo keeps perfect
                     // time and returns faster than other resources.
                     if matches!(p.class, Some(Class::Bard) | Some(Class::Skald)) {
@@ -5894,6 +7872,9 @@ impl WorldState {
                 if p.stunned > 0 {
                     p.stunned -= 1;
                 }
+                if p.quaff_cd > 0 {
+                    p.quaff_cd -= 1;
+                }
                 for e in p.self_effects.iter_mut() {
                     if e.kind == AbilityEffect::HealOverTime && e.remaining > 0 {
                         hot_heal += e.magnitude;
@@ -5921,21 +7902,33 @@ impl WorldState {
             .collect();
 
         for user_id in fighters {
-            let (mob_id, base_atk, opening, frenzy_pct, class) = match self.players.get(&user_id) {
-                Some(p) => {
-                    // Berserker "Frenzy": no bonus above half health, then up to
-                    // +50% damage as it falls from half toward death.
-                    let frenzy = if p.class == Some(Class::Berserker) {
-                        let max = p.max_hp().max(1);
-                        let missing = ((max - p.hp).max(0) * 100) / max;
-                        (missing.saturating_sub(50)).clamp(0, 50)
-                    } else {
-                        0
-                    };
-                    (p.target, p.attack(), p.opening_strike, frenzy, p.class)
-                }
-                None => continue,
-            };
+            let (mob_id, base_atk, opening, frenzy_pct, class, crit_pct) =
+                match self.players.get(&user_id) {
+                    Some(p) => {
+                        // Berserker "Frenzy": the more it bleeds the harder it
+                        // swings, half a percent of damage per percent of health
+                        // missing, up to +50% at death's door. It used to start
+                        // only below half health, which a fighter who drinks under
+                        // 40% almost never sees: a trait gated past the point of
+                        // use, and the Berserker read as a Warrior with less HP.
+                        let frenzy = if p.class == Some(Class::Berserker) {
+                            let max = p.max_hp().max(1);
+                            let missing = ((max - p.hp).max(0) * 100) / max;
+                            (missing / 2).clamp(0, 50)
+                        } else {
+                            0
+                        };
+                        (
+                            p.target,
+                            p.swing(),
+                            p.opening_strike,
+                            frenzy,
+                            p.class,
+                            p.scores.crit_pct(),
+                        )
+                    }
+                    None => continue,
+                };
             let Some(mob_id) = mob_id else { continue };
             let alive = self.mobs.get(&mob_id).map(|m| m.alive).unwrap_or(false);
             if !alive {
@@ -5961,6 +7954,23 @@ impl WorldState {
             } else {
                 player_atk
             };
+            // Dexterity: the swing may crit for double, or, below 10, glance
+            // for half.
+            let roll = rand::thread_rng().gen_range(0..100);
+            let (player_atk, dex_line) = match crit_outcome(crit_pct, roll) {
+                CritOutcome::Plain => (player_atk, None),
+                CritOutcome::Critical => (
+                    player_atk * 2,
+                    Some("Critical hit! Your swing lands for double."),
+                ),
+                CritOutcome::Glancing => (
+                    player_atk / 2,
+                    Some("A glancing blow. Your swing lands for half."),
+                ),
+            };
+            if let Some(line) = dex_line {
+                self.log_to(user_id, LogKind::Combat, line.to_string());
+            }
             if opening {
                 if let Some(p) = self.players.get_mut(&user_id) {
                     p.opening_strike = false;
@@ -5973,22 +7983,42 @@ impl WorldState {
             }
             // Auto-attack is physical and runs through the mob's resistances,
             // so a physical-resistant foe rewards switching to spells.
-            let (mob_name, dealt, defense, dead) = {
+            let (mob_name, dealt, defense, dead, big_hit, staggered) = {
                 let Some(mob) = self.mobs.get_mut(&mob_id) else {
                     continue;
                 };
                 let (dealt, defense) = mob.spawn.profile.apply(player_atk, DamageType::Physical);
+                let hp_before = mob.hp;
                 mob.hp -= dealt;
                 self.dirty = true;
-                (mob.spawn.name.to_string(), dealt, defense, mob.hp <= 0)
+                (
+                    mob.spawn.name.to_string(),
+                    dealt,
+                    defense,
+                    mob.hp <= 0,
+                    dealt * 4 >= mob.spawn.max_hp,
+                    hp_before * 4 > mob.spawn.max_hp
+                        && mob.hp * 4 <= mob.spawn.max_hp
+                        && mob.hp > 0,
+                )
             };
             self.mark_world_dirty();
             let tag = defense_tag(defense, DamageType::Physical);
+            // A blow worth a quarter of the foe's whole life deserves a louder
+            // sentence than the tick-by-tick chip damage.
+            let verb = if big_hit { "crush into" } else { "strike" };
             self.log_to(
                 user_id,
                 LogKind::Combat,
-                format!("You strike {mob_name} for {dealt} physical{tag}."),
+                format!("You {verb} {mob_name} for {dealt} physical{tag}."),
             );
+            if staggered {
+                self.log_to(
+                    user_id,
+                    LogKind::Combat,
+                    format!("{mob_name} staggers - the fight turns your way!"),
+                );
+            }
             // Valewalker "Reaping Harvest": each landed melee strike draws a little
             // of the wild's vigour back into the reaper.
             if class == Some(Class::Valewalker) {
@@ -6005,26 +8035,29 @@ impl WorldState {
                 self.kill_mob(user_id, mob_id);
                 continue;
             }
-            // A poison-coated weapon leaves a festering DoT in the struck foe and
-            // spends one charge (the target is the player's current mob).
-            let poison = self.players.get(&user_id).and_then(|p| p.weapon_poison);
-            if let Some((per_tick, charges)) = poison {
+            // A coated weapon (poison or oil) leaves a festering DoT of the
+            // coat's school in the struck foe, through the foe's resist/weak
+            // profile, and spends one charge (the target is the player's
+            // current mob).
+            let coat = self.players.get(&user_id).and_then(|p| p.weapon_coat);
+            if let Some((school, per_tick, charges)) = coat {
                 self.seed_mob_dot(
                     user_id,
                     per_tick,
-                    DamageType::Poison,
+                    school,
                     POISON_DOT_TICKS,
-                    "Your poison",
+                    DotSource::Coat,
+                    coat_source(school),
                 );
                 if let Some(p) = self.players.get_mut(&user_id) {
                     let left = charges.saturating_sub(1);
-                    p.weapon_poison = (left > 0).then_some((per_tick, left));
+                    p.weapon_coat = (left > 0).then_some((school, per_tick, left));
                 }
                 if charges <= 1 {
                     self.log_to(
                         user_id,
                         LogKind::System,
-                        "The last of the poison is spent.".to_string(),
+                        "The last of the coating is spent.".to_string(),
                     );
                 }
             }
@@ -6036,17 +8069,19 @@ impl WorldState {
             } else {
                 0
             };
-            if let Some((pet_glyph, pet_name, pet_atk, pet_level)) = self
+            if let Some((pet_glyph, pet_name, pet_atk, pet_level, pet_skills)) = self
                 .players
                 .get(&user_id)
-                .and_then(|p| p.pet.as_ref())
-                .filter(|pet| !pet.downed)
-                .map(|pet| {
+                .and_then(|p| p.pet.as_ref().map(|pet| (pet, p.attack_rating())))
+                .filter(|(pet, _)| !pet.downed)
+                .map(|(pet, rating)| {
+                    let bite = pet.attack() + rating * PET_COEF_PCT / 100;
                     (
                         pet.species.glyph,
                         pet.species.name,
-                        pet.attack() + pet.attack() * pet_bonus / 100,
+                        bite + bite * pet_bonus / 100,
                         pet.level(),
+                        pet.species.skills,
                     )
                 })
             {
@@ -6073,7 +8108,7 @@ impl WorldState {
                 // own cooldown (savage bite / rend / roar / guard / pounce).
                 let beastlord = class == Some(Class::Beastlord);
                 if self.fire_pet_skills(
-                    user_id, mob_id, pet_level, pet_atk, pet_name, &mob_name, beastlord,
+                    user_id, mob_id, pet_level, pet_atk, pet_name, &mob_name, pet_skills, beastlord,
                 ) {
                     // A killing pounce may have finished the foe.
                     continue;
@@ -6118,6 +8153,216 @@ impl WorldState {
             self.resolve_mob_behavior(user_id, mob_id);
         }
 
+        // Resolve a combat round for each pvp-engaged player: the same shape
+        // as the mob loop above, but the foe is another adventurer. Both
+        // sides of a duel carry their own `pvp_target` (set on the victim by
+        // `engage_player`'s auto-retaliation), so two duelling players each
+        // land a blow this same tick, same as trading blows with a mob.
+        let pvp_fighters: Vec<(Uuid, Uuid)> = self
+            .players
+            .iter()
+            .filter(|(_, p)| p.pvp_target.is_some() && p.respawn_at.is_none())
+            .filter_map(|(id, p)| p.pvp_target.map(|t| (*id, t)))
+            .collect();
+
+        for (attacker_id, victim_id) in pvp_fighters {
+            // Snapshot everything needed from the attacker up front so no
+            // live immutable borrow survives into the `get_mut` calls below.
+            let Some((room_id, atk_class, opening, atk_hp, atk_max_hp, base_atk, crit_pct)) =
+                self.players.get(&attacker_id).map(|a| {
+                    (
+                        a.room,
+                        a.class,
+                        a.opening_strike,
+                        a.hp,
+                        a.max_hp(),
+                        a.swing(),
+                        a.scores.crit_pct(),
+                    )
+                })
+            else {
+                continue;
+            };
+            let room_is_pvp = self.world.room(room_id).is_some_and(|r| r.pvp);
+            let valid_victim = self.players.get(&victim_id).is_some_and(|v| {
+                room_is_pvp && v.room == room_id && v.respawn_at.is_none() && v.class.is_some()
+            });
+            if !valid_victim {
+                // The foe left, died, changed rooms, or the ground stopped
+                // being contested (e.g. dragged into a safe room). Drop the
+                // duel quietly, same as a mob fight ending.
+                if let Some(a) = self.players.get_mut(&attacker_id) {
+                    a.pvp_target = None;
+                }
+                continue;
+            }
+            // A stunned adventurer skips their own swing this round, same as
+            // a stunned mob does.
+            let stunned = self.pvp_stuns.get(&attacker_id).copied().unwrap_or(0) > 0;
+            if let Some(v) = self.pvp_stuns.get_mut(&attacker_id)
+                && *v > 0
+            {
+                *v -= 1;
+            }
+            if stunned {
+                self.log_to(
+                    attacker_id,
+                    LogKind::Combat,
+                    "You are stunned and cannot strike.".to_string(),
+                );
+                continue;
+            }
+            let ranger_wounded = atk_class == Some(Class::Ranger)
+                && self
+                    .players
+                    .get(&victim_id)
+                    .is_some_and(|v| v.hp * 2 < v.max_hp());
+            let frenzy_pct = if atk_class == Some(Class::Berserker) {
+                let missing = ((atk_max_hp - atk_hp).max(0) * 100) / atk_max_hp.max(1);
+                (missing / 2).clamp(0, 50)
+            } else {
+                0
+            };
+            let atk = if opening { base_atk * 2 } else { base_atk };
+            let atk = atk * (100 + frenzy_pct) / 100;
+            let atk = if ranger_wounded { atk + atk / 4 } else { atk };
+            let roll = rand::thread_rng().gen_range(0..100);
+            let (atk, dex_line) = match crit_outcome(crit_pct, roll) {
+                CritOutcome::Plain => (atk, None),
+                CritOutcome::Critical => {
+                    (atk * 2, Some("Critical hit! Your swing lands for double."))
+                }
+                CritOutcome::Glancing => {
+                    (atk / 2, Some("A glancing blow. Your swing lands for half."))
+                }
+            };
+            if let Some(line) = dex_line {
+                self.log_to(attacker_id, LogKind::Combat, line.to_string());
+            }
+            if opening && let Some(a) = self.players.get_mut(&attacker_id) {
+                a.opening_strike = false;
+            }
+            self.log_to(
+                attacker_id,
+                LogKind::Combat,
+                format!("You strike your rival for {atk} physical."),
+            );
+            self.strike_pvp_target(attacker_id, victim_id, atk, DamageType::Physical, "a rival");
+            if self.players.get(&victim_id).is_some_and(|v| v.dead) {
+                continue;
+            }
+            // A coated weapon works in a duel exactly as against a mob: the
+            // landed swing seeds a DoT of the coat's school on the rival
+            // (through their armor each tick, via the pvp dot pass) and
+            // spends a charge.
+            let coat = self.players.get(&attacker_id).and_then(|p| p.weapon_coat);
+            if let Some((school, per_tick, charges)) = coat {
+                self.seed_pvp_dot(
+                    attacker_id,
+                    per_tick,
+                    school,
+                    POISON_DOT_TICKS,
+                    DotSource::Coat,
+                    coat_source(school),
+                );
+                if let Some(p) = self.players.get_mut(&attacker_id) {
+                    let left = charges.saturating_sub(1);
+                    p.weapon_coat = (left > 0).then_some((school, per_tick, left));
+                }
+                if charges <= 1 {
+                    self.log_to(
+                        attacker_id,
+                        LogKind::System,
+                        "The last of the coating is spent.".to_string(),
+                    );
+                }
+            }
+            // A living, fighting companion piles onto the same target, same as
+            // it does against a mob - biting through `strike_pvp_target` so it
+            // respects the victim's armor/shield/death-save exactly like a
+            // player's own blow does.
+            let pet_bonus = if atk_class == Some(Class::Beastlord) {
+                BEASTLORD_PET_PCT
+            } else {
+                0
+            };
+            if let Some((pet_glyph, pet_name, pet_atk, pet_level, pet_skills)) = self
+                .players
+                .get(&attacker_id)
+                .and_then(|p| p.pet.as_ref().map(|pet| (pet, p.attack_rating())))
+                .filter(|(pet, _)| !pet.downed)
+                .map(|(pet, rating)| {
+                    let bite = pet.attack() + rating * PET_COEF_PCT / 100;
+                    (
+                        pet.species.glyph,
+                        pet.species.name,
+                        bite + bite * pet_bonus / 100,
+                        pet.level(),
+                        pet.species.skills,
+                    )
+                })
+            {
+                self.log_to(
+                    attacker_id,
+                    LogKind::Combat,
+                    format!("{pet_glyph} Your {pet_name} tears into your rival for {pet_atk}."),
+                );
+                self.strike_pvp_target(
+                    attacker_id,
+                    victim_id,
+                    pet_atk,
+                    DamageType::Physical,
+                    "your companion",
+                );
+                if self.players.get(&victim_id).is_some_and(|v| v.dead) {
+                    continue;
+                }
+                let beastlord = atk_class == Some(Class::Beastlord);
+                if self.fire_pet_skills_pvp(
+                    attacker_id,
+                    victim_id,
+                    pet_level,
+                    pet_atk,
+                    pet_name,
+                    pet_skills,
+                    beastlord,
+                ) {
+                    continue;
+                }
+            }
+        }
+
+        // Pvp damage-over-time from player abilities (poison, DoT spells).
+        // Same shape as the mob DoT pass above, but the victim is a player,
+        // so each tick routes through `strike_pvp_target` for full armor/
+        // shield/death handling instead of a raw hp subtraction.
+        let pvp_dot_victims: Vec<Uuid> = self.pvp_dots.keys().copied().collect();
+        for victim_id in pvp_dot_victims {
+            let mut ticks: Vec<(Uuid, i32, DamageType)> = Vec::new();
+            if let Some(stacks) = self.pvp_dots.get_mut(&victim_id) {
+                for dot in stacks.iter_mut() {
+                    if dot.remaining > 0 {
+                        ticks.push((dot.owner, dot.per_tick, dot.school));
+                        dot.remaining -= 1;
+                    }
+                }
+                stacks.retain(|dot| dot.remaining > 0);
+                if stacks.is_empty() {
+                    self.pvp_dots.remove(&victim_id);
+                }
+            }
+            for (attacker_id, per, dtype) in ticks {
+                let alive = self.players.get(&victim_id).is_some_and(|v| !v.dead);
+                if !alive {
+                    continue;
+                }
+                self.strike_pvp_target(attacker_id, victim_id, per, dtype, "A lingering wound");
+            }
+        }
+
+        // Foes nobody is fighting any more shed their wounds (see MOB_RESET_TICKS).
+        self.recover_abandoned_mobs();
+
         // No idle timeout: a player stays put in Lateania for as long as their
         // session is actually open, however long they go without touching a
         // key. Real disconnects/leaving the door are already handled by
@@ -6131,6 +8376,8 @@ impl WorldState {
             kills: std::mem::take(&mut self.pending_kills),
         }
     }
+
+    // ---- Mobs between rounds: the world boss, roaming, behaviour --------
 
     /// Raise the lone wandering world boss after the Frontier seals are claimed.
     /// It hunts as a roaming boss across the living-dark and Frontier regions.
@@ -6190,6 +8437,7 @@ impl WorldState {
                 move_cooldown: 0,
                 revealed: true,
                 summon_cooldown: 0,
+                untargeted: 0,
                 spawn,
             },
         );
@@ -6446,6 +8694,7 @@ impl WorldState {
                 move_cooldown: 0,
                 revealed: true,
                 summon_cooldown: 0,
+                untargeted: 0,
                 spawn,
             },
         );
@@ -6624,6 +8873,8 @@ impl WorldState {
         }
     }
 
+    // ---- Death, the temple, and resurrection ----------------------------
+
     /// Send a (usually dead) player to the Temple of the Dawn, fully restored,
     /// clearing the corpse state. Shared by the auto-release tick and the manual
     /// release action. A fallen escort cannot be led from beyond the temple.
@@ -6743,6 +8994,8 @@ impl WorldState {
         self.mark_world_dirty();
     }
 
+    // ---- Companions: the stable, feeding, and wounds --------------------
+
     /// Whether a companion Stable stands in this room.
     fn room_has_stable(&self, room: RoomId) -> bool {
         features_at(room)
@@ -6839,11 +9092,19 @@ impl WorldState {
         let same_critter = matches!(bond, Some((bi, ..)) if bi == idx);
         let already_today = matches!(bond, Some((bi, _, ld)) if bi == idx && ld == today);
 
+        // The streak tracks real calendar days (UTC midnight), not the
+        // visible in-game Dawn/Day/Dusk/Night clock (which cycles every
+        // ~16 minutes) - the two are easy to conflate, so every message here
+        // spells out the concrete real-world countdown rather than just
+        // saying "today"/"tomorrow" and leaving the player to guess.
+        let until_reset = time_until_next_utc_day();
         if already_today {
             self.log_to(
                 user_id,
                 LogKind::System,
-                format!("You've already fed {name} today. Come back tomorrow."),
+                format!(
+                    "You've already fed {name} today. The day resets at midnight UTC, in {until_reset} - come back after that."
+                ),
             );
             return;
         }
@@ -6863,7 +9124,7 @@ impl WorldState {
                     (
                         Some((idx, new_streak, today)),
                         format!(
-                            "You feed {name} again. It trusts you a little more. ({new_streak}/{STRAY_ADOPTION_DAYS} days)"
+                            "You feed {name} again. It trusts you a little more. ({new_streak}/{STRAY_ADOPTION_DAYS} days; next feed opens at midnight UTC, in {until_reset})"
                         ),
                         false,
                     )
@@ -6872,14 +9133,14 @@ impl WorldState {
             Some(_) if same_critter => (
                 Some((idx, 1, today)),
                 format!(
-                    "{name} has grown wary again - you'll need to start over. (1/{STRAY_ADOPTION_DAYS} days)"
+                    "{name} has grown wary again - you'll need to start over. (1/{STRAY_ADOPTION_DAYS} days; next feed opens at midnight UTC, in {until_reset})"
                 ),
                 false,
             ),
             _ => (
                 Some((idx, 1, today)),
                 format!(
-                    "You offer {name} something to eat. It watches you carefully, but doesn't run. (1/{STRAY_ADOPTION_DAYS} days)"
+                    "You offer {name} something to eat. It watches you carefully, but doesn't run. (1/{STRAY_ADOPTION_DAYS} days; next feed opens at midnight UTC, in {until_reset})"
                 ),
                 false,
             ),
@@ -6989,10 +9250,15 @@ impl WorldState {
         pet_atk: i32,
         pet_name: &str,
         mob_name: &str,
+        pet_skills: &'static [super::taming::PetSkill],
         beastlord: bool,
     ) -> bool {
         let now_tick = self.world_ticks;
-        for (si, skill) in pet_skills_at(pet_level).enumerate() {
+        for (si, skill) in pet_skills
+            .iter()
+            .filter(|s| s.level <= pet_level)
+            .enumerate()
+        {
             // Respect the per-skill cooldown.
             let ready = self
                 .pet_skill_cd
@@ -7041,6 +9307,7 @@ impl WorldState {
                         per_tick,
                         DamageType::Physical,
                         3,
+                        DotSource::Ability,
                         &format!("Your {pet_name}'s Rend"),
                     );
                 }
@@ -7071,6 +9338,15 @@ impl WorldState {
                         format!("Your {pet_name} guards you closely, warding the next blows."),
                     );
                     self.dirty = true;
+                }
+                PetSkillEffect::Mend => {
+                    let mag = skill.power + pet_atk / 6;
+                    self.heal_player(user_id, mag);
+                    self.log_to(
+                        user_id,
+                        LogKind::Combat,
+                        format!("Your {pet_name} nuzzles you with a mending glow."),
+                    );
                 }
             }
         }
@@ -7104,7 +9380,7 @@ impl WorldState {
             );
             return;
         };
-        let species = &TAMEABLE[wb.species];
+        let species = beast_species(wb.species);
         let bi = wb.species;
         let now = Instant::now();
         // A spooked beast will not be approached again until it settles.
@@ -7119,6 +9395,7 @@ impl WorldState {
             return;
         }
         let taming_xp = player.taming_xp;
+        let cha_pct = player.scores.tame_pct();
         let level = skill_level_for_xp(taming_xp);
         // Under-level: refused outright, with a clear reason.
         if level < species.tame_level {
@@ -7134,7 +9411,7 @@ impl WorldState {
             );
             return;
         }
-        let chance = tame_chance(taming_xp, species);
+        let chance = tame_chance(taming_xp, species, cha_pct);
         // The approach: a beat of warily-earned trust before the roll.
         self.log_to(
             user_id,
@@ -7323,6 +9600,8 @@ impl WorldState {
         self.dirty = true;
     }
 
+    // ---- Appearance, per-player logging, and the snapshot ---------------
+
     /// Cycle one appearance/bio field forward (+1) or back (-1), wrapping.
     fn cycle_appearance(&mut self, user_id: Uuid, field: usize, delta: i8) {
         if field >= appearance::N_FIELDS {
@@ -7343,9 +9622,52 @@ impl WorldState {
         }
     }
 
+    /// Top-ten currently-connected, classed adventurers by level, lifetime
+    /// pvp kills, and total gold (carried + banked). See `LeaderboardView`.
+    fn build_leaderboard(&self) -> LeaderboardView {
+        const TOP_N: usize = 10;
+        fn entry(p: &PlayerState, value: i64) -> LeaderboardEntry {
+            LeaderboardEntry {
+                user_id: p.user_id,
+                level: p.level,
+                class_key: p.class.map(|c| c.as_key().to_string()).unwrap_or_default(),
+                value,
+            }
+        }
+        let classed: Vec<&PlayerState> = self
+            .players
+            .values()
+            .filter(|p| p.class.is_some())
+            .collect();
+
+        let mut by_level = classed.clone();
+        by_level.sort_by_key(|p| std::cmp::Reverse(p.level));
+        by_level.truncate(TOP_N);
+
+        let mut by_pvp_kills = classed.clone();
+        by_pvp_kills.sort_by_key(|p| std::cmp::Reverse(p.pvp_kills));
+        by_pvp_kills.truncate(TOP_N);
+
+        let mut by_gold = classed;
+        by_gold.sort_by_key(|p| std::cmp::Reverse(p.gold + p.banked_gold));
+        by_gold.truncate(TOP_N);
+
+        LeaderboardView {
+            by_level: by_level.iter().map(|p| entry(p, p.level as i64)).collect(),
+            by_pvp_kills: by_pvp_kills.iter().map(|p| entry(p, p.pvp_kills)).collect(),
+            by_gold: by_gold
+                .iter()
+                .map(|p| entry(p, p.gold + p.banked_gold))
+                .collect(),
+        }
+    }
+
     fn snapshot(&self) -> MudSnapshot {
         let mut players = HashMap::new();
-        let time_of_day = self.time_of_day().label();
+        let time_of_day_now = self.time_of_day();
+        let time_of_day = time_of_day_now.label();
+        let time_of_day_glyph = time_of_day_now.glyph();
+        let time_of_day_dark = time_of_day_now.is_dark();
         let weather = self.weather().label();
         // ONE pass over the world's mobs and players per snapshot, shared by
         // every player's view below. Snapshots run on every publish inside the
@@ -7380,9 +9702,13 @@ impl WorldState {
                 }
             }
         }
+        // Computed once for every player this snapshot, not per-player: the
+        // three top-ten boards only depend on who's classed and online right
+        // now, never on who's asking.
+        let leaderboard = Arc::new(self.build_leaderboard());
         for (user_id, player) in &self.players {
             let room = self.world.room(player.room);
-            let (room_name, room_desc, zone, safe, exits) = match room {
+            let (room_name, room_desc, zone, safe, pvp, exits) = match room {
                 Some(room) => {
                     let mut exits: Vec<(Dir, String)> = room
                         .exits
@@ -7395,6 +9721,7 @@ impl WorldState {
                         room.desc.to_string(),
                         room.zone.to_string(),
                         room.safe,
+                        room.pvp,
                         exits,
                     )
                 }
@@ -7403,9 +9730,11 @@ impl WorldState {
                     String::new(),
                     String::new(),
                     true,
+                    false,
                     Vec::new(),
                 ),
             };
+            let zone_band = room.and_then(|r| self.world.zone_band(r.zone));
             let mobs: Vec<MobView> = mobs_by_room
                 .get(&player.room)
                 .into_iter()
@@ -7419,28 +9748,41 @@ impl WorldState {
                     rank: m.spawn.rank().to_string(),
                     boss: m.spawn.boss,
                     targeted: player.target == Some(m.spawn.id),
+                    school: m.spawn.profile.attack_type.label(),
+                    weak: m.spawn.profile.weak.map(|d| d.label()),
+                    resist: m.spawn.profile.resist.map(|d| d.label()),
+                    dot_stacks: self
+                        .mob_dots
+                        .get(&m.spawn.id)
+                        .map(|stacks| stacks.len().min(u8::MAX as usize) as u8)
+                        .unwrap_or(0),
+                    stunned: self.mob_stuns.get(&m.spawn.id).is_some_and(|t| *t > 0),
                 })
                 .collect();
             // Foes lairing in nearby rooms (not this one) and other adventurers
             // in the same window, so the live field can mark where danger and
             // company sit. Bounded to a window around the player on the same
             // level; the field's own fog still hides rooms never seen. Only the
-            // field draws these, so a session without it pays nothing.
+            // field draws these, so a session without it pays nothing. The
+            // cell window is an honest "near me" ever since the coordinate
+            // field stopped folding unrelated zones together (worldmap's
+            // `zone_interleaves` pin keeps it that way): what sits within a
+            // few cells really is a few moves away.
             let (nearby_foes, nearby_players): (Vec<RoomId>, Vec<RoomId>) =
                 match coords.get(&player.room) {
                     Some(&pc) if player.rpg_mode => {
-                        let in_window = |c: &super::worldmap::Coord| {
+                        let near = |c: &super::worldmap::Coord| {
                             c.z == pc.z && (c.x - pc.x).abs() <= 16 && (c.y - pc.y).abs() <= 12
                         };
                         (
                             foe_rooms
                                 .iter()
-                                .filter(|(r, c)| *r != player.room && in_window(c))
+                                .filter(|(r, c)| *r != player.room && near(c))
                                 .map(|(r, _)| *r)
                                 .collect(),
                             occupied_rooms
                                 .iter()
-                                .filter(|(r, c)| *r != player.room && in_window(c))
+                                .filter(|(r, c)| *r != player.room && near(c))
                                 .map(|(r, _)| *r)
                                 .collect(),
                         )
@@ -7455,14 +9797,17 @@ impl WorldState {
                     user_id: other.user_id,
                     hp: other.hp,
                     max_hp: other.max_hp(),
-                    in_combat: other.target.is_some(),
+                    in_combat: other.in_combat(),
                     alive: !other.dead,
                     bio: appearance::compose_bio(&other.appearance),
                     class_key: other
                         .class
                         .map(|c| c.as_key().to_string())
                         .unwrap_or_default(),
+                    level: other.level,
                     appearance_idx: other.appearance.to_vec(),
+                    attackable: pvp && !other.dead && other.class.is_some(),
+                    targeted: player.pvp_target == Some(other.user_id),
                 })
                 .collect();
             let corpse_here = occupants.iter().any(|o| !o.alive);
@@ -7666,11 +10011,12 @@ impl WorldState {
                     rarity: it.rarity.label().to_string(),
                     slot: it.slot().map(|s| s.label().to_string()),
                     equipped: false,
-                    sell_price: it.sell_price(),
+                    sell_price: player.sell_price(it),
                     stats: it.stat_summary(),
                     compare: compare_to_worn(&player.equipped, it),
                     compare_pct: player.compare_gear(it),
                     category: item_category(&it.kind),
+                    desc: it.desc,
                 })
                 .chain(
                     player
@@ -7683,11 +10029,12 @@ impl WorldState {
                             rarity: it.rarity.label().to_string(),
                             slot: it.slot().map(|s| s.label().to_string()),
                             equipped: true,
-                            sell_price: it.sell_price(),
+                            sell_price: player.sell_price(it),
                             stats: it.stat_summary(),
                             compare: String::new(),
                             compare_pct: None,
                             category: item_category(&it.kind),
+                            desc: it.desc,
                         }),
                 )
                 .collect();
@@ -7704,26 +10051,32 @@ impl WorldState {
                         item_id: it.id,
                         name: it.name.to_string(),
                         rarity: it.rarity.label().to_string(),
-                        price: it.price,
-                        affordable: player.gold >= it.price,
+                        price: player.buy_price(it),
+                        affordable: player.gold >= player.buy_price(it),
                         stats: it.stat_summary(),
                         compare: compare_to_worn(&player.equipped, it),
                         compare_pct: player.compare_gear(it),
                         category: item_category(&it.kind),
+                        desc: it.desc,
                     })
                     .collect(),
             });
 
+            let owner_rating = player.attack_rating();
             let pet = player.pet.as_ref().map(|pet| PetView {
                 name: pet.species.name.to_string(),
                 glyph: pet.species.glyph.to_string(),
                 level: pet.level(),
                 hp: pet.hp,
                 max_hp: pet.max_hp(),
-                attack: pet.attack(),
+                attack: pet.attack() + owner_rating * PET_COEF_PCT / 100,
                 downed: pet.downed,
                 loyalty_pct: pet.loyalty_pct(),
-                skills: pet_skills_at(pet.level())
+                skills: pet
+                    .species
+                    .skills
+                    .iter()
+                    .filter(|s| s.level <= pet.level())
                     .map(|s| (s.name.to_string(), s.level))
                     .collect(),
             });
@@ -7761,7 +10114,7 @@ impl WorldState {
                         .iter()
                         .enumerate()
                         .map(|(i, wb)| {
-                            let sp = &TAMEABLE[wb.species];
+                            let sp = beast_species(wb.species);
                             let spooked = self
                                 .tame_cooldowns
                                 .get(&(*user_id, wb.species))
@@ -7769,7 +10122,7 @@ impl WorldState {
                             let odds = if spooked {
                                 0
                             } else {
-                                tame_chance(player.taming_xp, sp)
+                                tame_chance(player.taming_xp, sp, player.scores.tame_pct())
                             };
                             let reason = if taming_level < sp.tame_level {
                                 format!("needs Taming {}", sp.tame_level)
@@ -7845,15 +10198,29 @@ impl WorldState {
             let portal = features_at(player.room)
                 .iter()
                 .any(|f| f.kind == FeatureKind::Portal)
-                .then(|| PortalView {
-                    entries: super::world::waystone_destinations()
-                        .into_iter()
-                        .map(|(label, room, required)| {
-                            let sealed = required
-                                .is_some_and(|t| !player.titles.iter().any(|owned| owned == t));
-                            (label.to_string(), room, room == player.room, sealed)
-                        })
-                        .collect(),
+                .then(|| {
+                    let known_gates = super::world::CONTINENT_WAYSTONES
+                        .iter()
+                        .filter(|(_, room)| player.visited.contains(room))
+                        .count();
+                    PortalView {
+                        entries: super::world::waystone_destinations()
+                            .into_iter()
+                            .filter(|(_, room)| {
+                                super::world::waystone_is_known(*room, &player.visited)
+                            })
+                            .map(|(label, room)| (label.to_string(), room, room == player.room))
+                            .collect(),
+                        known_gates,
+                        unknown_gates: super::world::CONTINENT_WAYSTONES.len() - known_gates,
+                    }
+                });
+
+            let board = features_at(player.room)
+                .iter()
+                .any(|f| f.kind == FeatureKind::Board)
+                .then(|| BoardView {
+                    entries: self.board_entries(*user_id, player.room),
                 });
 
             let xp_into = player.xp - xp_for_level(player.level);
@@ -7875,16 +10242,27 @@ impl WorldState {
                 self.world
                     .minimap(player.room, player.previous_room, &player.visited, 3, 2);
             let atlas = self.world.region_progress(&player.visited, player.room);
-            let mut quests: Vec<QuestView> = (0..super::world::frontier_zone_count())
-                .filter_map(|z| {
-                    super::world::frontier_zone_info(z).map(|(zname, boss)| QuestView {
-                        name: format!("{zname} - slay {boss}"),
-                        done: player.completed_quests.contains(&z),
-                        reward: format!("title: Champion of the {zname}"),
-                        frontier: true,
-                    })
-                })
-                .collect();
+            // The journal, in reading order: the active starter step first,
+            // then accepted board bounties, then - only once the Frontier's
+            // gate titles are held - its twenty zone quests. A locked Frontier
+            // used to dump all twenty endgame rows on a level-2 character and
+            // drown everything that actually applied to them.
+            let mut quests: Vec<QuestView> = Vec::new();
+            if let Some(q) = starter_quest(player.starter_stage) {
+                let need = starter_goal_target(q.goal);
+                quests.push(QuestView {
+                    name: if need > 1 {
+                        format!("{} ({}/{})", q.title, player.starter_kills, need)
+                    } else {
+                        q.title.to_string()
+                    },
+                    desc: q.hint.to_string(),
+                    done: false,
+                    reward: format!("{} gold + {} xp", q.reward_gold, q.reward_xp),
+                    kind: QuestKind::Starter,
+                    target: Some(q.target),
+                });
+            }
             // Accepted board bounties, with live progress and a claim hint.
             for (id, prog) in &player.board_progress {
                 if let Some(q) = board_quest(*id) {
@@ -7896,6 +10274,7 @@ impl WorldState {
                         } else {
                             format!("{} ({}/{})", q.title, prog, need)
                         },
+                        desc: format!("{} ({}) {}", q.blurb, q.objective.describe(), q.hint),
                         done: ready,
                         reward: format!(
                             "{} gold{}",
@@ -7905,10 +10284,25 @@ impl WorldState {
                                 None => String::new(),
                             }
                         ),
-                        frontier: false,
+                        kind: QuestKind::Board,
+                        target: None,
                     });
                 }
             }
+            let frontier_open = titles_include_all(&player.titles, &FRONTIER_REQUIRED_TITLES);
+            if frontier_open {
+                quests.extend((0..super::world::frontier_zone_count()).filter_map(|z| {
+                    super::world::frontier_zone_info(z).map(|(zname, boss)| QuestView {
+                        name: format!("{zname} - slay {boss}"),
+                        desc: format!("Hunt down and slay {boss}, {zname}'s zone boss."),
+                        done: player.completed_quests.contains(&z),
+                        reward: format!("title: Champion of the {zname}"),
+                        kind: QuestKind::Frontier,
+                        target: Some(super::world::frontier_zone_entrance(z)),
+                    })
+                }));
+            }
+            let road = road_view(&player.titles, &self.road_targets);
 
             players.insert(
                 *user_id,
@@ -7928,6 +10322,8 @@ impl WorldState {
                     hp: player.hp,
                     max_hp: player.max_hp(),
                     attack: player.attack(),
+                    swing: player.swing(),
+                    spell_power: player.spell_power(),
                     armor: player.armor(),
                     xp: player.xp,
                     xp_into_level: xp_into.max(0),
@@ -7938,7 +10334,11 @@ impl WorldState {
                     room_name,
                     room_desc,
                     zone,
+                    zone_band,
                     safe,
+                    pvp,
+                    pvp_kills: player.pvp_kills,
+                    leaderboard: leaderboard.clone(),
                     exits,
                     mobs,
                     nearby_foes,
@@ -7959,6 +10359,12 @@ impl WorldState {
                     nodes,
                     skills,
                     in_combat_with,
+                    shield: player.shield,
+                    empower: player.empower,
+                    stunned: player.stunned > 0,
+                    coat: player
+                        .weapon_coat
+                        .map(|(school, _, charges)| format!("{} coat x{charges}", school.label())),
                     abilities,
                     inventory,
                     shop,
@@ -7969,6 +10375,7 @@ impl WorldState {
                     housing,
                     crafting,
                     portal,
+                    board,
                     bio: appearance::compose_bio(&player.appearance),
                     appearance: (0..appearance::N_FIELDS)
                         .map(|i| {
@@ -7989,12 +10396,16 @@ impl WorldState {
                     title_levels: player.title_levels.clone(),
                     active_title: player.active_title,
                     quests,
+                    road,
+                    frontier_open,
                     resurrections_left: player.resurrections_left,
                     resurrection_cap: player.resurrection_cap,
                     features,
                     minimap,
                     atlas,
                     time_of_day,
+                    time_of_day_glyph,
+                    time_of_day_dark,
                     weather,
                     escort: player
                         .escort
@@ -8025,6 +10436,8 @@ impl WorldState {
                     } else {
                         Vec::new()
                     },
+                    score_points: player.score_points(),
+                    score_offer: player.score_offer(),
                 },
             );
         }
@@ -8034,6 +10447,22 @@ impl WorldState {
             players,
             reset_versions: HashMap::new(),
         }
+    }
+}
+
+// ---- Free helpers: titles, tags, gold, and the log buffer ----------------
+
+/// The combat-log voice of a weapon coat's school ("Your burning oil ...").
+fn coat_source(school: DamageType) -> &'static str {
+    match school {
+        DamageType::Poison => "Your poison",
+        DamageType::Fire => "Your burning oil",
+        DamageType::Frost => "Your freezing oil",
+        DamageType::Holy => "Your blessed oil",
+        DamageType::Lightning => "Your crackling oil",
+        DamageType::Shadow => "Your darkened oil",
+        DamageType::Arcane => "Your humming oil",
+        DamageType::Physical => "Your coating",
     }
 }
 
@@ -8079,6 +10508,19 @@ fn title_for(mob_name: &str, boss: bool) -> String {
         None => "Foe".to_string(),
     };
     format!("{capitalized}bane")
+}
+
+/// The Wildbound Waste's reaver title track: awarded the tick a lifetime pvp
+/// kill count first crosses a threshold (see the pvp-fighters tick loop).
+fn pvp_title_for(kills: i64) -> Option<&'static str> {
+    match kills {
+        1 => Some("Blooded"),
+        10 => Some("Reaver of the Waste"),
+        50 => Some("Dread of the Wildbound"),
+        150 => Some("Warlord of the Waste"),
+        500 => Some("Deathless Sovereign of the Waste"),
+        _ => None,
+    }
 }
 
 fn titles_include_all(titles: &[String], required: &[&str]) -> bool {
@@ -8142,3 +10584,9 @@ fn push_log(log: &mut Vec<LogLine>, kind: LogKind, text: String) {
 #[cfg(test)]
 #[path = "svc_test.rs"]
 mod svc_test;
+
+/// The test battle arena (see `arena.rs`): drives the real engine with
+/// scripted characters against real spawns and reports who survives.
+#[cfg(test)]
+#[path = "arena.rs"]
+mod arena;

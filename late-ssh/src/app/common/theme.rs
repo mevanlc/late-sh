@@ -4357,6 +4357,41 @@ pub fn BG_SELECTION() -> Color {
     current_palette().bg_selection
 }
 
+/// Style for a selected row or cell whose text must stay readable on it.
+/// Palettes with a paintable canvas keep the flat `bg_selection` fill. A
+/// `Color::Reset` canvas means the text follows the terminal's own
+/// foreground, and no fixed fill can guarantee contrast against an unknown
+/// color, so those palettes invert instead: `REVERSED` swaps the terminal's
+/// own fg/bg pair, the one pair the user has already made legible.
+///
+/// The invert arm carries explicit `Reset` colors because call sites compose
+/// via `Style::patch`, which only overwrites `Some` fields: without them a
+/// pre-set accent fg or board fill would survive the patch and the swapped
+/// pair would not be the terminal's own. The tradeoff is that the swap wins
+/// over any color set before the patch; a color that must survive because it
+/// means something (a piece, a suit) goes on after the patch, where it
+/// becomes the fill of the swapped cell.
+pub fn selection_style() -> Style {
+    match BG_CANVAS() {
+        Color::Reset => Style::default()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::REVERSED),
+        _ => Style::default().bg(BG_SELECTION()),
+    }
+}
+
+/// Base style for a list row: the selection treatment when selected,
+/// otherwise an explicit default background so unselected rows clear any
+/// inherited fill.
+pub fn row_style(selected: bool) -> Style {
+    if selected {
+        selection_style()
+    } else {
+        Style::default().bg(Color::Reset)
+    }
+}
+
 #[allow(non_snake_case)]
 pub fn BG_HIGHLIGHT() -> Color {
     current_palette().bg_highlight
@@ -4405,15 +4440,15 @@ pub fn CHAT_REPLY_BG() -> Color {
 /// An accent color blended most of the way to the active canvas, so it reads
 /// as a quiet wash behind body text on dark and light themes alike. Derived,
 /// so no per-palette field is needed. When the accent or the canvas has no
-/// RGB reading, the wash falls back to the flat highlight background: these
-/// washes sit under body text, and on the terminal palette that text follows
-/// the terminal's own foreground, which a black-anchored blend would swallow
-/// on a light profile.
+/// RGB reading, the wash is dropped entirely (`Color::Reset`): these washes
+/// sit under body text, and on the terminal palette that text follows the
+/// terminal's own foreground, so no fixed wash color can promise contrast.
+/// The mention/author accents on the text itself carry the emphasis there.
 fn attention_bg(accent: Color) -> Color {
     const TOWARD_CANVAS: f32 = 0.84;
     match (color_rgb(accent), color_rgb(BG_CANVAS())) {
         (Some(_), Some(_)) => blend_toward_canvas(accent, TOWARD_CANVAS),
-        _ => BG_HIGHLIGHT(),
+        _ => Color::Reset,
     }
 }
 
@@ -4441,6 +4476,75 @@ pub(crate) fn blend_toward(a: Color, b: Color, t: f32) -> Color {
         }
         _ => a,
     }
+}
+
+/// WCAG relative luminance of an sRGB color, 0.0 (black) to 1.0 (white).
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f32 {
+    let channel = |v: u8| {
+        let v = v as f32 / 255.0;
+        if v <= 0.04045 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+}
+
+/// WCAG contrast ratio between two colors, 1.0 (identical) to 21.0. `None`
+/// when either side has no RGB reading (`Color::Reset`, unknown ANSI), since
+/// the terminal owns those and no ratio can be computed.
+pub(crate) fn contrast_ratio(a: Color, b: Color) -> Option<f32> {
+    let a = relative_luminance(color_rgb(a)?);
+    let b = relative_luminance(color_rgb(b)?);
+    let (lighter, darker) = if a >= b { (a, b) } else { (b, a) };
+    Some((lighter + 0.05) / (darker + 0.05))
+}
+
+/// Minimum contrast for a board glyph against the fill it sits on. Below the
+/// WCAG text threshold on purpose: game glyphs are chunky solid marks, and a
+/// palette's deliberate tone-on-tone relationships should survive when they
+/// are still tellable apart.
+pub(crate) const MIN_GLYPH_CONTRAST: f32 = 2.5;
+
+/// An accent guaranteed to stay legible on the palette's selection fill,
+/// where board games paint their cells. Twelve AMOLED palettes reuse the
+/// accent as `bg_selection` (e.g. `success` on Greenery), so a raw token can
+/// land byte-identical to the fill and vanish. An accent already contrasting
+/// enough passes through untouched; one that does not is stepped toward
+/// whichever of black or white sits farther from the fill, keeping as much
+/// of its own hue as the legibility floor allows. When the fill has no RGB
+/// reading (the terminal palette) the accent is returned as is, matching
+/// `attention_bg`: no fixed adjustment can promise contrast against a color
+/// the terminal owns.
+pub fn legible_on_selection(accent: Color) -> Color {
+    let fill = BG_SELECTION();
+    let Some(fill_rgb) = color_rgb(fill) else {
+        return accent;
+    };
+    match contrast_ratio(accent, fill) {
+        None => return accent,
+        Some(ratio) if ratio >= MIN_GLYPH_CONTRAST => return accent,
+        Some(_) => {}
+    }
+    // Whichever pole actually contrasts more with the fill; a mid-luminance
+    // fill can be unreachable for white (ratio < 2.5) while black clears it
+    // easily, so a plain lightness threshold picks wrong there.
+    let fill_luminance = relative_luminance(fill_rgb);
+    let white_ratio = 1.05 / (fill_luminance + 0.05);
+    let black_ratio = (fill_luminance + 0.05) / 0.05;
+    let target = if white_ratio >= black_ratio {
+        Color::Rgb(255, 255, 255)
+    } else {
+        Color::Rgb(0, 0, 0)
+    };
+    for step in 1..=8 {
+        let candidate = blend_toward(accent, target, step as f32 / 8.0);
+        if contrast_ratio(candidate, fill).is_some_and(|ratio| ratio >= MIN_GLYPH_CONTRAST) {
+            return candidate;
+        }
+    }
+    target
 }
 
 #[allow(non_snake_case)]

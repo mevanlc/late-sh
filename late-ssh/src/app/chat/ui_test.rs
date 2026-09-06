@@ -51,6 +51,32 @@ fn poll_row_widths_shrinks_labels_only_when_row_is_full() {
 }
 
 #[test]
+fn poll_title_shows_who_started_it() {
+    let (question, byline) = poll_title_parts("Which editor wins?", Some("mat"), 12, 80);
+
+    assert_eq!(question, "Which editor wins?");
+    assert_eq!(byline, " · @mat");
+}
+
+#[test]
+fn poll_title_drops_the_byline_before_it_eats_the_question() {
+    // Narrow strip: the question has to survive, the attribution does not.
+    let (question, byline) = poll_title_parts("Which editor wins?", Some("mat"), 12, 34);
+
+    assert_eq!(byline, "");
+    // The whole 12-cell budget goes to the question once the byline is gone.
+    assert_eq!(question, "Which edito…");
+}
+
+#[test]
+fn poll_title_without_an_author_reads_as_it_always_did() {
+    let (question, byline) = poll_title_parts("Which editor wins?", None, 12, 80);
+
+    assert_eq!(question, "Which editor wins?");
+    assert_eq!(byline, "");
+}
+
+#[test]
 fn author_badge_suffix_keeps_badges_compact() {
     assert_eq!(
         format_author_badge_suffix(&["mod", "dev"], None, None),
@@ -68,6 +94,49 @@ fn author_badge_suffix_keeps_badges_compact() {
     assert_eq!(format_author_badge_suffix(&[], None, None), "");
 }
 
+fn live_stream_view(watch_url: &str) -> crate::app::stream::registry::LiveStreamView {
+    crate::app::stream::registry::LiveStreamView {
+        user_id: Uuid::from_u128(7),
+        username: "mat".to_string(),
+        title: "hacking on late".to_string(),
+        room_id: Uuid::from_u128(8),
+        voice_channel_id: Uuid::from_u128(9),
+        stream_id: "abc123".to_string(),
+        live: true,
+        watching: 3,
+        watch_url: watch_url.to_string(),
+    }
+}
+
+#[test]
+fn stream_header_never_lets_the_watch_url_touch_the_right_edge() {
+    let url = "https://late.sh/live/abc123";
+    let width = 80;
+    let line = stream_header_line(&live_stream_view(url), width);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    // Terminals detect links over the cell grid, so a URL flush against the
+    // last column absorbs the pane border `│` and the `────` rule below it.
+    assert_eq!(UnicodeWidthStr::width(text.as_str()), width);
+    assert!(text.ends_with(&format!("{url} ")), "got {text:?}");
+}
+
+#[test]
+fn stream_header_drops_the_watch_url_when_the_row_is_too_tight() {
+    let line = stream_header_line(&live_stream_view("https://late.sh/live/abc123"), 30);
+    let text: String = line
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect();
+
+    assert!(!text.contains("watch:"), "got {text:?}");
+}
+
 #[test]
 fn chat_composer_layout_keeps_one_blank_row_gap() {
     let area = Rect::new(0, 0, 80, 20);
@@ -81,14 +150,242 @@ fn chat_composer_layout_keeps_one_blank_row_gap() {
 
 #[test]
 fn effective_chat_scroll_keeps_selected_message_off_top_edge() {
-    let scroll = effective_chat_scroll(40, 10, Some((24, 25)));
+    let (scroll, overflow) = effective_chat_scroll(40, 10, Some((24, 25)), 0);
     assert_eq!(scroll, 8);
+    assert_eq!(overflow, 0);
 }
 
 #[test]
 fn effective_chat_scroll_keeps_selected_message_off_bottom_edge() {
-    let scroll = effective_chat_scroll(40, 10, Some((29, 31)));
+    let (scroll, overflow) = effective_chat_scroll(40, 10, Some((29, 31)), 0);
     assert_eq!(scroll, 3);
+    assert_eq!(overflow, 0);
+}
+
+#[test]
+fn effective_chat_scroll_reports_overflow_for_a_message_taller_than_the_pane() {
+    // 25 rows of message in a 10-row pane: the top pins at start - margin
+    // (row 8), the pane shows rows 8..18, and rows 18..37 (message end 35
+    // plus the 2-row margin) are left to walk through.
+    let (scroll, overflow) = effective_chat_scroll(40, 10, Some((10, 35)), 0);
+    assert_eq!(scroll, 40 - 18);
+    assert_eq!(overflow, 19);
+}
+
+#[test]
+fn effective_chat_scroll_offset_walks_a_tall_message_bottom_into_view() {
+    let (base_scroll, overflow) = effective_chat_scroll(40, 10, Some((10, 35)), 0);
+    // Each offset step reveals one more row below.
+    let (scroll, _) = effective_chat_scroll(40, 10, Some((10, 35)), 5);
+    assert_eq!(scroll, base_scroll - 5);
+    // At full overflow the message's last row plus the margin is visible.
+    let (scroll, _) = effective_chat_scroll(40, 10, Some((10, 35)), overflow);
+    assert_eq!(40 - scroll, 35 + 2);
+    // An offset past the overflow clamps rather than scrolling into the
+    // messages below.
+    let (clamped, _) = effective_chat_scroll(40, 10, Some((10, 35)), overflow + 50);
+    assert_eq!(clamped, scroll);
+}
+
+#[test]
+fn effective_chat_scroll_overflow_stops_at_the_newest_row() {
+    // A tall message at the very tail: nothing below it, so the walk ends
+    // exactly at the bottom of the loaded rows.
+    let (_, overflow) = effective_chat_scroll(40, 10, Some((15, 40)), 0);
+    let (scroll, _) = effective_chat_scroll(40, 10, Some((15, 40)), overflow);
+    assert_eq!(scroll, 0);
+}
+
+#[test]
+fn a_rented_title_renders_after_the_author_name_in_chat() {
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let author_id = Uuid::from_u128(3);
+    let created = Utc::now();
+    let message = ChatMessage {
+        id: Uuid::from_u128(10),
+        created,
+        updated: created,
+        reply_to_message_id: None,
+        reply_to_user_id: None,
+        room_id,
+        user_id: author_id,
+        body: "rain again".to_string(),
+    };
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (author_id, "bob".to_string()),
+    ]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::from([(author_id, "🐱".to_string())]);
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_flair = HashMap::from([(
+        author_id,
+        crate::app::common::username_effect::ResolvedName {
+            style: None,
+            title: Some("the night clerk".to_string()),
+            crown: false,
+            milestone: None,
+        },
+    )]);
+    let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
+        current_user_id,
+        afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
+        show_flag_fallback: false,
+        usernames: &username_lookup,
+        countries: &countries,
+        friend_user_ids: &friend_user_ids,
+        bonsai_glyphs: &bonsai_glyphs,
+        chat_badges: &chat_badges,
+        profile_award_badges: &profile_award_badges,
+        message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
+        inline_images: &inline_images,
+        dividers: ChatDividers::default(),
+        drunk_levels: &drunk_levels,
+        name_flair: &name_flair,
+        peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
+    };
+
+    let mut cache = ChatRowsCache::default();
+    ensure_chat_rows_cache(&mut cache, vec![&message], 60, ctx);
+
+    let rendered: Vec<String> = cache
+        .all_rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    // The title reads as an aside on the name and still lets the badge trail
+    // the whole label.
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.contains("bob, the night clerk 🐱")),
+        "no titled author header in {rendered:#?}"
+    );
+}
+
+/// The crown is glued to the name, ahead of a rented title and ahead of the
+/// badge stack, and it never displaces either.
+#[test]
+fn the_crown_glyph_renders_between_the_author_name_and_their_title() {
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let author_id = Uuid::from_u128(3);
+    let created = Utc::now();
+    let message = ChatMessage {
+        id: Uuid::from_u128(10),
+        created,
+        updated: created,
+        reply_to_message_id: None,
+        reply_to_user_id: None,
+        room_id,
+        user_id: author_id,
+        body: "mine now".to_string(),
+    };
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (author_id, "bob".to_string()),
+    ]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::from([(author_id, "🐱".to_string())]);
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_flair = HashMap::from([(
+        author_id,
+        crate::app::common::username_effect::ResolvedName {
+            style: None,
+            title: Some("the night clerk".to_string()),
+            crown: true,
+            milestone: None,
+        },
+    )]);
+    let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
+        current_user_id,
+        afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
+        show_flag_fallback: false,
+        usernames: &username_lookup,
+        countries: &countries,
+        friend_user_ids: &friend_user_ids,
+        bonsai_glyphs: &bonsai_glyphs,
+        chat_badges: &chat_badges,
+        profile_award_badges: &profile_award_badges,
+        message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
+        inline_images: &inline_images,
+        dividers: ChatDividers::default(),
+        drunk_levels: &drunk_levels,
+        name_flair: &name_flair,
+        peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
+    };
+
+    let mut cache = ChatRowsCache::default();
+    ensure_chat_rows_cache(&mut cache, vec![&message], 60, ctx);
+
+    let rendered: Vec<String> = cache
+        .all_rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    assert!(
+        rendered
+            .iter()
+            .any(|row| row.contains("bob \u{1F451}, the night clerk 🐱")),
+        "no crowned author header in {rendered:#?}"
+    );
 }
 
 #[test]
@@ -100,18 +397,23 @@ fn chat_rows_cache_key_changes_when_theme_changes() {
     let chat_badges = HashMap::new();
     let friend_user_ids = HashSet::new();
     let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
     let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
     let inline_images = HashMap::new();
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
-    let name_styles = HashMap::new();
+    let name_flair = HashMap::new();
     let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
 
     let ctx = ChatRowsContext {
         versions: ChatRowsVersions::default(),
         current_user_id: user_id,
         afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
         show_flag_fallback: false,
         usernames: &username_lookup,
         countries: &countries,
@@ -120,11 +422,16 @@ fn chat_rows_cache_key_changes_when_theme_changes() {
         chat_badges: &chat_badges,
         profile_award_badges: &profile_award_badges,
         message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
         inline_images: &inline_images,
-        unread_marker: None,
+        dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
-        name_styles: &name_styles,
+        name_flair: &name_flair,
         peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
     };
 
     theme::set_current_by_id("late");
@@ -147,12 +454,16 @@ fn chat_rows_cache_key_changes_with_any_version_counter() {
     let chat_badges = HashMap::new();
     let friend_user_ids = HashSet::new();
     let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
     let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
     let inline_images = HashMap::new();
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
-    let name_styles = HashMap::new();
+    let name_flair = HashMap::new();
     let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
 
     let base_versions = ChatRowsVersions {
@@ -165,6 +476,7 @@ fn chat_rows_cache_key_changes_with_any_version_counter() {
         versions,
         current_user_id: user_id,
         afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
         show_flag_fallback: false,
         usernames: &username_lookup,
         countries: &countries,
@@ -173,11 +485,16 @@ fn chat_rows_cache_key_changes_with_any_version_counter() {
         chat_badges: &chat_badges,
         profile_award_badges: &profile_award_badges,
         message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
         inline_images: &inline_images,
-        unread_marker: None,
+        dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
-        name_styles: &name_styles,
+        name_flair: &name_flair,
         peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
     };
 
     let base_key = chat_rows_cache_key(&ctx(base_versions), 80);
@@ -203,6 +520,109 @@ fn chat_rows_cache_key_changes_with_any_version_counter() {
         assert_ne!(base_key, chat_rows_cache_key(&ctx(versions), 80));
     }
     assert_ne!(base_key, chat_rows_cache_key(&ctx(base_versions), 40));
+}
+
+/// "(edited)" rides in the author header's stamp, and a message grouped under
+/// the one above it has no header, so editing the second message in a run
+/// used to leave no trace at all. An edit breaks the run instead.
+#[test]
+fn editing_a_grouped_message_gives_it_its_own_header() {
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let author_id = Uuid::from_u128(3);
+    let created = Utc::now();
+    let make_message = |id: u128, body: &str, updated| ChatMessage {
+        id: Uuid::from_u128(id),
+        created,
+        updated,
+        reply_to_message_id: None,
+        reply_to_user_id: None,
+        room_id,
+        user_id: author_id,
+        body: body.to_string(),
+    };
+
+    let first = make_message(10, "first thing", created);
+    let second = make_message(11, "second thing", created + chrono::Duration::seconds(30));
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (author_id, "bob".to_string()),
+    ]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_flair = HashMap::new();
+    let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
+        current_user_id,
+        afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
+        show_flag_fallback: false,
+        usernames: &username_lookup,
+        countries: &countries,
+        friend_user_ids: &friend_user_ids,
+        bonsai_glyphs: &bonsai_glyphs,
+        chat_badges: &chat_badges,
+        profile_award_badges: &profile_award_badges,
+        message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
+        inline_images: &inline_images,
+        dividers: ChatDividers::default(),
+        drunk_levels: &drunk_levels,
+        name_flair: &name_flair,
+        peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
+    };
+
+    let mut cache = ChatRowsCache::default();
+    // `ensure_chat_rows_cache` walks the slice newest-first.
+    ensure_chat_rows_cache(&mut cache, vec![&second, &first], 60, ctx);
+
+    let rendered: Vec<String> = cache
+        .all_rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    assert!(
+        rendered.iter().any(|row| row.contains("(edited)")),
+        "no edited marker anywhere in {rendered:#?}"
+    );
+    assert_eq!(
+        cache
+            .row_kind
+            .iter()
+            .zip(&cache.row_message)
+            .filter(|(kind, owner)| {
+                matches!(kind, RowKindLite::Header) && **owner == Some(second.id)
+            })
+            .count(),
+        1,
+        "the edited message should carry its own author header"
+    );
 }
 
 #[test]
@@ -349,17 +769,22 @@ fn mentions_and_replies_paint_a_background_wash() {
     let chat_badges = HashMap::new();
     let friend_user_ids = HashSet::new();
     let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
     let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
     let inline_images = HashMap::new();
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
-    let name_styles = HashMap::new();
+    let name_flair = HashMap::new();
     let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
     let ctx = ChatRowsContext {
         versions: ChatRowsVersions::default(),
         current_user_id,
         afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
         show_flag_fallback: false,
         usernames: &username_lookup,
         countries: &countries,
@@ -368,11 +793,16 @@ fn mentions_and_replies_paint_a_background_wash() {
         chat_badges: &chat_badges,
         profile_award_badges: &profile_award_badges,
         message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
         inline_images: &inline_images,
-        unread_marker: None,
+        dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
-        name_styles: &name_styles,
+        name_flair: &name_flair,
         peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
     };
 
     let width = 60;
@@ -385,7 +815,7 @@ fn mentions_and_replies_paint_a_background_wash() {
             .iter()
             .position(|owner| *owner == Some(message_id))
             .expect("message should own at least one row");
-        let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len());
+        let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len(), None);
         visible.lines[row].spans[0].style.bg
     };
 
@@ -424,17 +854,22 @@ fn background_wash_fills_the_whole_row_width() {
     let chat_badges = HashMap::new();
     let friend_user_ids = HashSet::new();
     let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
     let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
     let inline_images = HashMap::new();
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
-    let name_styles = HashMap::new();
+    let name_flair = HashMap::new();
     let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
     let ctx = ChatRowsContext {
         versions: ChatRowsVersions::default(),
         current_user_id,
         afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
         show_flag_fallback: false,
         usernames: &username_lookup,
         countries: &countries,
@@ -443,17 +878,22 @@ fn background_wash_fills_the_whole_row_width() {
         chat_badges: &chat_badges,
         profile_award_badges: &profile_award_badges,
         message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
         inline_images: &inline_images,
-        unread_marker: None,
+        dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
-        name_styles: &name_styles,
+        name_flair: &name_flair,
         peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: None,
     };
 
     let width = 60;
     let mut cache = ChatRowsCache::default();
     ensure_chat_rows_cache(&mut cache, vec![&mention], width, ctx);
-    let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len());
+    let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len(), None);
 
     for (index, line) in visible.lines.iter().enumerate() {
         if cache.row_message.get(index).copied().flatten() != Some(mention.id) {
@@ -514,14 +954,21 @@ fn chat_view<'a>(
     static VOICE_CHANNELS: OnceLock<HashMap<Uuid, late_core::models::voice_channel::VoiceChannel>> =
         OnceLock::new();
     static COLLAPSED_SECTIONS: OnceLock<HashSet<RoomSection>> = OnceLock::new();
+    static TRANSLATIONS: OnceLock<HashMap<Uuid, crate::app::chat::state::TranslationDisplay>> =
+        OnceLock::new();
+    static TRANSLATION_HIDDEN: OnceLock<HashSet<Uuid>> = OnceLock::new();
     static ACTIVE_ROOM_EFFECTS: OnceLock<HashMap<Uuid, Vec<ActiveChatRoomEffect>>> =
         OnceLock::new();
     static ROOM_LAST_MESSAGE_AT: OnceLock<HashMap<Uuid, Option<DateTime<Utc>>>> = OnceLock::new();
-    static ROOM_UNREAD_MARKERS: OnceLock<HashMap<Uuid, Option<DateTime<Utc>>>> = OnceLock::new();
+    static AFK_LINES: OnceLock<HashMap<Uuid, DateTime<Utc>>> = OnceLock::new();
     static DRUNK_LEVELS: OnceLock<HashMap<Uuid, u8>> = OnceLock::new();
-    static NAME_STYLES: OnceLock<HashMap<Uuid, NameStyle>> = OnceLock::new();
+    static NAME_STYLES: OnceLock<HashMap<Uuid, crate::app::common::username_effect::ResolvedName>> =
+        OnceLock::new();
     static PEER_POMODOROS: OnceLock<HashMap<Uuid, String>> = OnceLock::new();
+    static RUNNER_LOOKS: OnceLock<HashMap<Uuid, crate::app::deadchannel::runner::state::Look>> =
+        OnceLock::new();
     static ROOM_VERSIONS: OnceLock<HashMap<Uuid, u64>> = OnceLock::new();
+    static MESSAGE_GILDS: OnceLock<HashMap<Uuid, ChatMessageGildSummary>> = OnceLock::new();
 
     ChatRenderInput {
         pet_strip: None,
@@ -530,7 +977,14 @@ fn chat_view<'a>(
         feeds_processing: false,
         feeds_unread_count: 0,
         cyberspace_selected: false,
-        cyberspace_unread_count: 0,
+        cyberspace_notifications_selected: false,
+        cyberspace_rooms: &[],
+        cyberspace_room_selected: None,
+        cyberspace_mail: &[],
+        cyberspace_mail_selected: None,
+        cyberspace_feeds_unread: 0,
+        cyberspace_notifications_unread: 0,
+        cyberspace_unread_saturated: false,
         cyberspace: None,
         feeds_view: crate::app::chat::feeds::ui::FeedListView {
             entries: &[],
@@ -553,20 +1007,24 @@ fn chat_view<'a>(
             loading: false,
             filtering: false,
             query: "",
+            sort: crate::app::chat::discover::state::SortMode::default(),
         },
         rows_cache,
         room_versions: ROOM_VERSIONS.get_or_init(HashMap::new),
         chat_ctx_epoch: 0,
         app_ctx_epoch: 0,
         chat_rooms: rooms,
+        live_streams: &[],
         overlay: None,
         image_modal: None,
         usernames,
         countries,
         friend_user_ids: FRIEND_USER_IDS.get_or_init(HashSet::new),
         message_reactions,
+        message_gilds: MESSAGE_GILDS.get_or_init(HashMap::new),
         inline_images: INLINE_IMAGES.get_or_init(HashMap::new),
-        room_unread_markers: ROOM_UNREAD_MARKERS.get_or_init(HashMap::new),
+        afk_lines: AFK_LINES.get_or_init(HashMap::new),
+        device_left_at: None,
         unread_counts,
         room_last_message_at: ROOM_LAST_MESSAGE_AT.get_or_init(HashMap::new),
         favorite_room_ids: &[],
@@ -585,6 +1043,7 @@ fn chat_view<'a>(
         composing: false,
         current_user_id: Uuid::nil(),
         afk_user_ids: AFK_USER_IDS.get_or_init(HashSet::new),
+        live_user_ids: AFK_USER_IDS.get_or_init(HashSet::new),
         ignored_user_ids: IGNORED_USER_IDS.get_or_init(HashSet::new),
         sticky_unread_dm: None,
         show_flag_fallback: false,
@@ -598,8 +1057,12 @@ fn chat_view<'a>(
         chat_badges,
         profile_award_badges,
         drunk_levels: DRUNK_LEVELS.get_or_init(HashMap::new),
-        name_styles: NAME_STYLES.get_or_init(HashMap::new),
+        name_flair: NAME_STYLES.get_or_init(HashMap::new),
+        runner_looks: RUNNER_LOOKS.get_or_init(HashMap::new),
         peer_pomodoros: PEER_POMODOROS.get_or_init(HashMap::new),
+        name_flicker: None,
+        translations: TRANSLATIONS.get_or_init(HashMap::new),
+        translation_hidden: TRANSLATION_HIDDEN.get_or_init(HashSet::new),
         news_composer,
         news_composing: false,
         news_processing: false,
@@ -642,6 +1105,7 @@ fn chat_view<'a>(
         composer_rect_slot: None,
         composer_viewport_top_slot: None,
         chat_hit_slot: None,
+        selection_scroll: None,
     }
 }
 
@@ -769,7 +1233,7 @@ fn visible_rows_paint_background_for_selected_highlighted_message() {
     cache.selected_ranges.insert(message_id, (1, 2));
     cache.highlighted_ranges.insert(message_id, (0, 2));
 
-    let visible = visible_chat_rows(&cache, Some(message_id), Some(message_id), 4);
+    let visible = visible_chat_rows(&cache, Some(message_id), Some(message_id), 4, None);
     assert_eq!(
         visible.lines.len(),
         visible.hits.len(),
@@ -782,6 +1246,61 @@ fn visible_rows_paint_background_for_selected_highlighted_message() {
             .flat_map(|row| row.spans.iter())
             .any(|span| span.style.bg == Some(theme::BG_SELECTION())),
         "expected selected highlighted message to receive background"
+    );
+}
+
+#[test]
+fn selection_marker_takes_the_gutter_over_a_gild_bar() {
+    // A gilded message paints its tier bar in the gutter cell; selecting it
+    // must still show the marker there. Selection always sits on top.
+    let message_id = Uuid::now_v7();
+    let bar = Span::styled("┃", Style::default().fg(theme::BADGE_GOLD()));
+    let mut cache = ChatRowsCache {
+        all_rows: vec![
+            Line::from(vec![bar.clone(), Span::raw("alice [1m]")]),
+            Line::from(vec![bar.clone(), Span::raw("hello")]),
+            Line::from(vec![bar, Span::raw("◆◆◆")]),
+        ],
+        ..Default::default()
+    };
+    cache.selected_ranges.insert(message_id, (0, 3));
+
+    let visible = visible_chat_rows(&cache, Some(message_id), None, 3, None);
+    for (row, line) in visible.lines.iter().enumerate() {
+        let marker = &line.spans[0];
+        assert_eq!(marker.content, "▸", "row {row}: {:?}", marker.content);
+        assert_eq!(marker.style.fg, Some(theme::AMBER()), "row {row}");
+    }
+}
+
+#[test]
+fn selection_marker_keeps_the_highlight_inversion_on_reset_canvas() {
+    // On the terminal palette the highlighted row carries no bg, only
+    // `REVERSED`; the marker must inherit the row's whole treatment, not
+    // just its bg, or it punches a one-cell hole in the inversion.
+    theme::set_current_by_id("terminal");
+    let message_id = Uuid::now_v7();
+    let mut cache = ChatRowsCache {
+        all_rows: vec![Line::from(vec![Span::raw(" "), Span::raw("hello")])],
+        ..Default::default()
+    };
+    cache.selected_ranges.insert(message_id, (0, 1));
+    cache.highlighted_ranges.insert(message_id, (0, 1));
+
+    let visible = visible_chat_rows(&cache, Some(message_id), Some(message_id), 1, None);
+    let marker_fg = theme::AMBER();
+    theme::set_current_by_id("contrast");
+
+    let marker = &visible.lines[0].spans[0];
+    assert_eq!(marker.content, "▸");
+    assert_eq!(marker.style.fg, Some(marker_fg));
+    assert!(
+        marker
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::REVERSED),
+        "marker dropped the row inversion: {:?}",
+        marker.style
     );
 }
 
@@ -1002,6 +1521,30 @@ fn empty_composer_placeholder_uses_hint_text_when_not_composing() {
     let rendered: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
     assert_eq!(rendered, expected);
     assert_eq!(buf[(0, 0)].fg, theme::TEXT_DIM());
+}
+
+#[test]
+fn empty_composer_placeholder_names_the_gild_key_for_a_selected_message() {
+    use ratatui::{Terminal, backend::TestBackend};
+
+    let ta = TextArea::default();
+    let mut view = composer_view(&ta);
+    view.composing = false;
+    view.selected_message = true;
+
+    let expected = "f react · r reply · e edit · d delete · g gild · p profile · t translate · Enter jump to reply";
+    let width = expected.chars().count() as u16;
+    let placeholder = empty_composer_placeholder(&view, width as usize);
+    let backend = TestBackend::new(width, 1);
+    let mut terminal = Terminal::new(backend).expect("term");
+
+    terminal
+        .draw(|f| f.render_widget(placeholder, Rect::new(0, 0, width, 1)))
+        .unwrap();
+
+    let buf = terminal.backend().buffer();
+    let rendered: String = (0..width).map(|x| buf[(x, 0)].symbol()).collect();
+    assert_eq!(rendered, expected);
 }
 
 #[test]
@@ -1874,21 +2417,148 @@ fn header_segments_split_chat_flag_from_regular_badge() {
         (HeaderTarget::StoreBadge, "🐱"),
         (HeaderTarget::StoreFlag, "US"),
     ];
-    let (prefix, segs, author_range) = build_author_prefix_and_segments_with_chat_badges(
-        false,
-        "bob",
-        &[],
-        &chat_badges,
-        None,
-        None,
-        &[],
-    );
+    let AuthorPrefix {
+        prefix,
+        segments: segs,
+        author_range,
+        crown_range: _,
+        title_range,
+    } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "bob",
+        crown: false,
+        title: None,
+        milestone: None,
+        special_badges: &[],
+        chat_badges: &chat_badges,
+        bonsai_glyph: None,
+        profile_award_badges: None,
+        presence_badges: &[],
+    });
     assert_eq!(prefix, "bob 🐱 US");
     assert_eq!(author_range, (0, 3));
+    assert_eq!(title_range, None);
     assert_eq!(segs.len(), 3);
     assert_eq!(segs[0].target, HeaderTarget::Profile);
     assert_eq!(segs[1].target, HeaderTarget::StoreBadge);
     assert_eq!(segs[2].target, HeaderTarget::StoreFlag);
+}
+
+/// The whole point of a burn milestone: a hundred-chip rental cannot cover
+/// it. Badge, flag, and milestone all show at once, in that order, and the
+/// milestone clicks through to the tab that sells it rather than to Badges.
+#[test]
+fn header_segments_show_a_burn_milestone_on_top_of_a_rented_badge_and_flag() {
+    let chat_badges = [
+        (HeaderTarget::StoreBadge, "\u{1F431}"),
+        (HeaderTarget::StoreFlag, "US"),
+    ];
+    let AuthorPrefix {
+        prefix,
+        segments: segs,
+        author_range: _,
+        crown_range: _,
+        title_range: _,
+    } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "bob",
+        crown: false,
+        title: None,
+        milestone: Some("\u{1F30B}"),
+        special_badges: &[],
+        chat_badges: &chat_badges,
+        bonsai_glyph: None,
+        profile_award_badges: None,
+        presence_badges: &[],
+    });
+    assert_eq!(prefix, "bob \u{1F431} US \u{1F30B}");
+    assert_eq!(segs.len(), 4);
+    assert_eq!(segs[0].target, HeaderTarget::Profile);
+    assert_eq!(segs[1].target, HeaderTarget::StoreBadge);
+    assert_eq!(segs[2].target, HeaderTarget::StoreFlag);
+    assert_eq!(segs[3].target, HeaderTarget::StoreMilestone);
+}
+
+/// A milestone owner who rents nothing still wears it, and it never displaces
+/// the crown or a title: those are marks on the name, this is a badge.
+#[test]
+fn header_prefix_wears_a_milestone_with_no_rentals_at_all() {
+    let AuthorPrefix {
+        prefix,
+        segments: segs,
+        author_range: _,
+        crown_range,
+        title_range: _,
+    } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "bob",
+        crown: true,
+        title: Some("the night clerk"),
+        milestone: Some("\u{1F9E8}"),
+        special_badges: &[],
+        chat_badges: &[],
+        bonsai_glyph: None,
+        profile_award_badges: None,
+        presence_badges: &[],
+    });
+    assert_eq!(prefix, "bob \u{1F451}, the night clerk \u{1F9E8}");
+    assert!(crown_range.is_some());
+    assert_eq!(segs.len(), 2);
+    assert_eq!(segs[1].target, HeaderTarget::StoreMilestone);
+}
+
+#[test]
+fn header_prefix_puts_a_rented_title_between_the_name_and_the_badges() {
+    let chat_badges = [(HeaderTarget::StoreBadge, "🐱")];
+    let AuthorPrefix {
+        prefix,
+        segments: segs,
+        author_range,
+        crown_range: _,
+        title_range,
+    } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "bob",
+        crown: false,
+        title: Some("the insufferable"),
+        milestone: None,
+        special_badges: &[],
+        chat_badges: &chat_badges,
+        bonsai_glyph: None,
+        profile_award_badges: None,
+        presence_badges: &[],
+    });
+    assert_eq!(prefix, "bob, the insufferable 🐱");
+    assert_eq!(author_range, (0, 3));
+    // The title starts where the name ends, so the two runs stay adjacent.
+    assert_eq!(title_range, Some((3, 21)));
+    assert_eq!(&prefix[3..21], ", the insufferable");
+    // The title carries no clickable segment; the badge keeps its own, and
+    // its column has moved past the title.
+    assert_eq!(segs.len(), 2);
+    assert_eq!(segs[0].target, HeaderTarget::Profile);
+    assert_eq!(segs[1].target, HeaderTarget::StoreBadge);
+    assert_eq!(segs[1].start_col, 23);
+
+    // A blank title is not a title: nothing is printed and no range is set.
+    let AuthorPrefix {
+        prefix,
+        title_range,
+        ..
+    } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "bob",
+        crown: false,
+        title: Some("   "),
+        milestone: None,
+        special_badges: &[],
+        chat_badges: &[],
+        bonsai_glyph: None,
+        profile_award_badges: None,
+        presence_badges: &[],
+    });
+    assert_eq!(prefix, "bob");
+    assert_eq!(title_range, None);
 }
 
 #[test]
@@ -1897,15 +2567,19 @@ fn header_prefix_orders_all_badge_classes() {
         (HeaderTarget::StoreBadge, "badge"),
         (HeaderTarget::StoreFlag, "flag"),
     ];
-    let (prefix, _segs, _author_range) = build_author_prefix_and_segments_with_chat_badges(
-        false,
-        "alice",
-        &["mod", "developer", "artist"],
-        &chat_badges,
-        Some("bonsai"),
-        Some("AW1 CHIP2"),
-        &["brb"],
-    );
+    let prefix = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "alice",
+        crown: false,
+        title: None,
+        milestone: None,
+        special_badges: &["mod", "developer", "artist"],
+        chat_badges: &chat_badges,
+        bonsai_glyph: Some("bonsai"),
+        profile_award_badges: Some("AW1 CHIP2"),
+        presence_badges: &["brb"],
+    })
+    .prefix;
 
     assert_eq!(
         prefix,
@@ -1957,7 +2631,7 @@ fn visible_chat_rows_pads_top_with_none_hits() {
         ..Default::default()
     };
 
-    let visible = visible_chat_rows(&cache, None, None, 5);
+    let visible = visible_chat_rows(&cache, None, None, 5, None);
     assert_eq!(visible.lines.len(), 5);
     assert_eq!(visible.hits.len(), 5);
     // Top two are padding.
@@ -2009,6 +2683,7 @@ fn room_header_puts_the_topic_left_and_the_rules_hint_right() {
                 f,
                 area,
                 super::RoomHeader {
+                    stream: None,
                     voice: None,
                     topic: super::room_topic(&room),
                     has_rules: super::room_has_rules(&room),
@@ -2049,6 +2724,7 @@ fn room_header_is_absent_without_a_topic_or_voice() {
                 f,
                 area,
                 super::RoomHeader {
+                    stream: None,
                     voice: None,
                     topic: super::room_topic(&room),
                     has_rules: super::room_has_rules(&room),
@@ -2071,6 +2747,7 @@ fn room_header_omits_the_hint_when_there_are_no_rules() {
                 f,
                 area,
                 super::RoomHeader {
+                    stream: None,
                     voice: None,
                     topic: super::room_topic(&room),
                     has_rules: super::room_has_rules(&room),
@@ -2081,6 +2758,83 @@ fn room_header_omits_the_hint_when_there_are_no_rules() {
     let row = row_text(terminal.backend().buffer(), 0, 40);
     assert!(row.contains("A cozy corner"));
     assert!(!row.contains("/rules"));
+}
+
+fn live_stream(title: &str, watch_url: &str) -> crate::app::stream::registry::LiveStreamView {
+    crate::app::stream::registry::LiveStreamView {
+        user_id: Uuid::from_u128(1),
+        username: "mat".to_string(),
+        title: title.to_string(),
+        room_id: Uuid::from_u128(2),
+        voice_channel_id: Uuid::from_u128(3),
+        stream_id: "s1".to_string(),
+        live: true,
+        watching: 3,
+        watch_url: watch_url.to_string(),
+    }
+}
+
+/// A real stream id is 16 random bytes in base64url (`registry::capability_id`),
+/// so `watch: <url>` plus its trailing cell runs 51 columns, wider than the
+/// slack an ordinary chat pane has left over. The link is the point of the
+/// row, so the title and then the watcher count yield to it; a budget guessed
+/// ahead of the hint used to push the URL off the row entirely.
+const REAL_WATCH_URL: &str = "https://late.sh/live/HdRl3AJfRhWc7_BdvUEFrQ";
+
+#[test]
+fn stream_header_clips_the_title_rather_than_drop_the_watch_url() {
+    const WIDTH: usize = 110;
+    let stream = live_stream(
+        "a stream title long enough to swallow the whole row on its own, and then some",
+        REAL_WATCH_URL,
+    );
+
+    let line = super::stream_header_line(&stream, WIDTH);
+    let text = line.to_string();
+    assert!(text.contains(REAL_WATCH_URL), "the link survives: {text:?}");
+    assert!(text.starts_with("● LIVE "), "{text:?}");
+    assert!(text.contains('…'), "the title is what gives way: {text:?}");
+    assert!(
+        text.contains("· 3 watching"),
+        "there is room for the count here: {text:?}"
+    );
+    // The hint's own trailing cell is still the last thing on the row, so the
+    // URL never ends flush against whatever the terminal paints next.
+    assert!(
+        text.ends_with(&format!("{REAL_WATCH_URL} ")),
+        "the link keeps its blank cell: {text:?}"
+    );
+}
+
+/// Below 73 columns the watcher count goes too: a link nobody can see is
+/// worse than a count nobody misses. That floor was 83 while ids were hex.
+#[test]
+fn stream_header_drops_the_watcher_count_before_the_watch_url() {
+    const WIDTH: usize = 70;
+    let stream = live_stream("bug hunt", REAL_WATCH_URL);
+
+    let line = super::stream_header_line(&stream, WIDTH);
+    let text = line.to_string();
+    assert!(text.contains(REAL_WATCH_URL), "the link survives: {text:?}");
+    assert!(!text.contains("watching"), "the count yielded: {text:?}");
+    assert!(line.width() <= WIDTH, "{}", line.width());
+
+    // One column higher than the floor the count needs, it comes back.
+    let roomy = super::stream_header_line(&stream, 73).to_string();
+    assert!(roomy.contains("· 3 watching"), "{roomy:?}");
+    assert!(roomy.contains(REAL_WATCH_URL), "{roomy:?}");
+}
+
+#[test]
+fn stream_header_keeps_a_short_title_whole() {
+    let stream = live_stream("bug hunt", "https://late.sh/live/abc");
+    let text = super::stream_header_line(&stream, 80).to_string();
+    assert!(text.contains("bug hunt"), "{text:?}");
+    assert!(!text.contains('…'), "nothing to clip: {text:?}");
+    assert!(
+        text.trim_end().ends_with("https://late.sh/live/abc"),
+        "{text:?}"
+    );
 }
 
 #[test]
@@ -2102,4 +2856,387 @@ fn unread_badge_collapses_at_the_cap() {
         format_unread_badge(ChatRoomMember::UNREAD_COUNT_CAP + 500),
         "99+"
     );
+}
+
+/// The `you left` rule carries the `/summary` tip, because the rule and the
+/// bare command read from the same mark. A room too narrow to hold both
+/// keeps the stamp and drops the tip rather than squeezing the rule away.
+#[test]
+fn the_you_left_rule_offers_summary_and_drops_the_tip_when_narrow() {
+    theme::set_current_by_id("late");
+
+    let left_at = Utc::now() - chrono::Duration::hours(9);
+    let text = |width: usize| -> String {
+        left_app_divider_line(width, left_at)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect()
+    };
+
+    let wide = text(80);
+    assert!(wide.contains("you left 9 hrs ago"));
+    assert!(wide.contains("· /summary to catch up"));
+    assert_eq!(UnicodeWidthStr::width(wide.as_str()), 80);
+
+    // 20 columns of stamp plus 23 of tip cannot leave 4 columns of rule at
+    // this width, so only the stamp survives.
+    let narrow = text(44);
+    assert!(narrow.contains("you left 9 hrs ago"));
+    assert!(!narrow.contains("/summary"));
+    assert_eq!(UnicodeWidthStr::width(narrow.as_str()), 44);
+}
+
+/// The two marks draw as two rules. The `you left` rule sits above the first
+/// message from someone else past the left-app mark, your own post after the
+/// mark does not trip it, and when the AFK line lands on the same message the
+/// `new messages` rule draws alone.
+#[test]
+fn the_you_left_rule_draws_above_the_first_message_past_the_left_app_mark() {
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let other_id = Uuid::from_u128(3);
+    let now = Utc::now();
+    let message = |id: u128, user_id: Uuid, hours_ago: i64, body: &str| {
+        let created = now - chrono::Duration::hours(hours_ago);
+        ChatMessage {
+            id: Uuid::from_u128(id),
+            created,
+            updated: created,
+            reply_to_message_id: None,
+            reply_to_user_id: None,
+            room_id,
+            user_id,
+            body: body.to_string(),
+        }
+    };
+    // Newest first, the order the tail hands the cache.
+    let messages = [
+        message(14, other_id, 1, "and another"),
+        message(13, other_id, 2, "first thing you missed"),
+        message(12, current_user_id, 3, "posting from the phone"),
+        message(11, other_id, 10, "before you left"),
+    ];
+    let left_at = now - chrono::Duration::hours(9);
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (other_id, "bob".to_string()),
+    ]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_flair = HashMap::new();
+    let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+
+    // One entry per painted row (a message is a header row plus a body
+    // row): the rule's label, the message it belongs to, or a blank
+    // separator.
+    let rows_for = |dividers: ChatDividers| -> Vec<String> {
+        let ctx = ChatRowsContext {
+            versions: ChatRowsVersions::default(),
+            current_user_id,
+            afk_user_ids: &afk_user_ids,
+            live_user_ids: &live_user_ids,
+            show_flag_fallback: false,
+            usernames: &username_lookup,
+            countries: &countries,
+            friend_user_ids: &friend_user_ids,
+            bonsai_glyphs: &bonsai_glyphs,
+            chat_badges: &chat_badges,
+            profile_award_badges: &profile_award_badges,
+            message_reactions: &message_reactions,
+            message_gilds: &message_gilds,
+            inline_images: &inline_images,
+            dividers,
+            drunk_levels: &drunk_levels,
+            name_flair: &name_flair,
+            peer_pomodoros: &peer_pomodoros,
+            name_flicker: None,
+            translations: &translations,
+            translation_hidden: &translation_hidden,
+            runner_looks: None,
+        };
+        let mut cache = ChatRowsCache::default();
+        ensure_chat_rows_cache(&mut cache, messages.iter().collect(), 60, ctx);
+        cache
+            .all_rows
+            .iter()
+            .zip(&cache.row_message)
+            .map(|(line, owner)| {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                match owner {
+                    Some(id) => format!("msg {}", id.as_u128()),
+                    None if text.contains("you left 9 hrs ago") => "you left".to_string(),
+                    None if text.contains("new messages") => "new messages".to_string(),
+                    None => "blank".to_string(),
+                }
+            })
+            .collect()
+    };
+
+    // Only the left-app mark: the rule skips your own post and lands above
+    // bob's first message after it.
+    assert_eq!(
+        rows_for(ChatDividers {
+            afk_line: None,
+            left_app: Some(left_at),
+        }),
+        [
+            "msg 11", "msg 11", "blank", "msg 12", "msg 12", "blank", "you left", "msg 13",
+            "msg 13", "blank", "msg 14", "msg 14",
+        ]
+    );
+
+    // Both marks above the same message: one rule, the heavy one.
+    assert_eq!(
+        rows_for(ChatDividers {
+            afk_line: Some(now - chrono::Duration::minutes(150)),
+            left_app: Some(left_at),
+        }),
+        [
+            "msg 11",
+            "msg 11",
+            "blank",
+            "msg 12",
+            "msg 12",
+            "blank",
+            "new messages",
+            "msg 13",
+            "msg 13",
+            "blank",
+            "msg 14",
+            "msg 14",
+        ]
+    );
+
+    // Marks on different messages: both rules, each above its own.
+    assert_eq!(
+        rows_for(ChatDividers {
+            afk_line: Some(now - chrono::Duration::minutes(90)),
+            left_app: Some(left_at),
+        }),
+        [
+            "msg 11",
+            "msg 11",
+            "blank",
+            "msg 12",
+            "msg 12",
+            "blank",
+            "you left",
+            "msg 13",
+            "msg 13",
+            "blank",
+            "new messages",
+            "msg 14",
+            "msg 14",
+        ]
+    );
+
+    // No mark, no rule.
+    assert!(
+        !rows_for(ChatDividers::default())
+            .iter()
+            .any(|row| row == "you left" || row == "new messages")
+    );
+}
+
+/// The #deadchannel portrait gutter (`app/deadchannel/runner`): a runner's
+/// face rides the blank separator above their block plus the header and
+/// first body row, the text wraps short of the gutter for every entry in
+/// the room, a continuation shares the face above it, and the first block
+/// in the list (no separator above) seats all three rows on the entry.
+/// A mention's wash covers the hood row too: the face is one block.
+#[test]
+fn the_wire_seats_a_runners_portrait_beside_their_message() {
+    use crate::app::deadchannel::runner::state::Look;
+    use unicode_width::UnicodeWidthStr;
+
+    theme::set_current_by_id("late");
+
+    let room_id = Uuid::from_u128(1);
+    let current_user_id = Uuid::from_u128(2);
+    let runner_id = Uuid::from_u128(3);
+    let civilian_id = Uuid::from_u128(4);
+    let elder_id = Uuid::from_u128(5);
+    let created = Utc::now();
+    let message = |id: u128, user_id: Uuid, body: &str| ChatMessage {
+        id: Uuid::from_u128(id),
+        created: created + chrono::Duration::seconds(id as i64),
+        updated: created + chrono::Duration::seconds(id as i64),
+        reply_to_message_id: None,
+        reply_to_user_id: None,
+        room_id,
+        user_id,
+        body: body.to_string(),
+    };
+    // Newest first, the order the builder walks. Oldest is a runner's
+    // one-liner opening the list, then a civilian, then mira's block.
+    let messages = [
+        message(13, runner_id, "gg"),
+        message(
+            12,
+            runner_id,
+            "dax get in here, the static is thick tonight and it is not waiting @alice",
+        ),
+        message(11, civilian_id, "who took the last hit"),
+        message(10, elder_id, "o7"),
+    ];
+
+    let usernames = HashMap::from([
+        (current_user_id, "alice".to_string()),
+        (runner_id, "mira".to_string()),
+        (civilian_id, "afterglow".to_string()),
+        (elder_id, "dax".to_string()),
+    ]);
+    let look = Look::parse(&serde_json::json!({
+        "hood": {"piece": "hood.cross", "tint": "amber"},
+        "eyes": {"piece": "eyes.gem", "tint": "white"},
+        "coat": {"piece": "coat.heavy", "tint": "static"},
+        "mark": {"glyph": "▚"}
+    }))
+    .expect("parse look");
+    let looks = HashMap::from([(runner_id, look), (elder_id, look)]);
+    let countries = HashMap::new();
+    let bonsai_glyphs = HashMap::new();
+    let chat_badges = HashMap::new();
+    let friend_user_ids = HashSet::new();
+    let afk_user_ids = HashSet::new();
+    let live_user_ids = HashSet::new();
+    let message_reactions = HashMap::new();
+    let message_gilds = HashMap::new();
+    let inline_images = HashMap::new();
+    let profile_award_badges = HashMap::new();
+    let drunk_levels = HashMap::new();
+    let name_flair = HashMap::new();
+    let peer_pomodoros = HashMap::new();
+    let translations = HashMap::new();
+    let translation_hidden = HashSet::new();
+    let username_lookup = UsernameLookup::new(&usernames, None);
+    let ctx = ChatRowsContext {
+        versions: ChatRowsVersions::default(),
+        current_user_id,
+        afk_user_ids: &afk_user_ids,
+        live_user_ids: &live_user_ids,
+        show_flag_fallback: false,
+        usernames: &username_lookup,
+        countries: &countries,
+        friend_user_ids: &friend_user_ids,
+        bonsai_glyphs: &bonsai_glyphs,
+        chat_badges: &chat_badges,
+        profile_award_badges: &profile_award_badges,
+        message_reactions: &message_reactions,
+        message_gilds: &message_gilds,
+        inline_images: &inline_images,
+        dividers: ChatDividers::default(),
+        drunk_levels: &drunk_levels,
+        name_flair: &name_flair,
+        peer_pomodoros: &peer_pomodoros,
+        name_flicker: None,
+        translations: &translations,
+        translation_hidden: &translation_hidden,
+        runner_looks: Some(&looks),
+    };
+
+    let width = 40;
+    let mut cache = ChatRowsCache::default();
+    ensure_chat_rows_cache(&mut cache, messages.iter().collect(), width, ctx);
+
+    let rendered: Vec<String> = cache
+        .all_rows
+        .iter()
+        .map(|line| {
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>()
+        })
+        .collect();
+
+    // The list opens with dax's one-liner: no separator above it, so the
+    // face takes the header, the body row, and one padded row under them.
+    assert!(rendered[0].contains("dax"), "{rendered:?}");
+    assert!(rendered[0].ends_with(" ╬═╬ "), "{rendered:?}");
+    assert!(rendered[1].contains("o7"), "{rendered:?}");
+    assert!(rendered[1].ends_with("▐◈ ◈▌"), "{rendered:?}");
+    assert_eq!(rendered[2].trim(), "▟▓▙", "{rendered:?}");
+    // Mira's block sits below the civilian: the hood rides the blank
+    // separator above her header, so the face ends level with her first
+    // body row and nothing is padded under it.
+    let mira = rendered
+        .iter()
+        .position(|row| row.contains("mira"))
+        .expect("mira's header");
+    assert_eq!(rendered[mira - 1].trim(), "╬═╬", "{rendered:?}");
+    assert!(rendered[mira].ends_with("▐◈ ◈▌"), "{rendered:?}");
+    // The mention's margin bar is the row's first cell.
+    assert!(
+        rendered[mira + 1]
+            .trim_start_matches(['│', ' '])
+            .starts_with("dax get"),
+        "{rendered:?}"
+    );
+    assert!(rendered[mira + 1].ends_with(" ▟▓▙ "), "{rendered:?}");
+    assert!(!rendered[mira + 2].contains('▟'), "{rendered:?}");
+    // Mira mentioned alice, so her block washes, hood row included: the
+    // face never tears between the separator and the header.
+    let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len(), None);
+    for index in [mira - 1, mira, mira + 1] {
+        assert_eq!(
+            visible.lines[index].spans[0].style.bg,
+            Some(theme::CHAT_MENTION_BG()),
+            "row {index} of mira's block is not washed: {rendered:?}"
+        );
+    }
+    assert_eq!(
+        visible.lines[mira - 2].spans[0].style.bg,
+        None,
+        "{rendered:?}"
+    );
+    assert!(matches!(visible.hits[mira - 1].kind, ChatRowKind::None));
+    for row in [
+        &rendered[0],
+        &rendered[1],
+        &rendered[2],
+        &rendered[mira - 1],
+        &rendered[mira],
+        &rendered[mira + 1],
+    ] {
+        assert_eq!(row.width(), width, "{row:?}");
+    }
+    // Every row in the room wraps short of the gutter: nothing but a face
+    // ever reaches the last six cells.
+    for row in &rendered {
+        let text = row
+            .trim_end_matches(" ╬═╬ ")
+            .trim_end_matches("▐◈ ◈▌")
+            .trim_end_matches(" ▟▓▙ ")
+            .trim_end();
+        assert!(text.width() <= width - 6, "{row:?} runs into the gutter");
+    }
+    // The continuation ("gg") and the civilian's message carry no face.
+    let gg = rendered
+        .iter()
+        .position(|row| row.contains("gg"))
+        .expect("continuation row");
+    assert!(!rendered[gg].contains('▟'), "{rendered:?}");
+    let civilian = rendered
+        .iter()
+        .position(|row| row.contains("afterglow"))
+        .expect("civilian header");
+    assert!(!rendered[civilian].contains('◈'), "{rendered:?}");
+    assert!(!rendered[civilian + 1].contains('◈'), "{rendered:?}");
 }

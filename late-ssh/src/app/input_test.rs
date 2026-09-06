@@ -283,6 +283,13 @@ fn vt_parser_emits_alt_c_for_explicit_clipboard_chord() {
 }
 
 #[test]
+fn vt_parser_emits_alt_k_for_the_artboard_eyedropper() {
+    let mut parser = VtInputParser::default();
+    assert_eq!(parser.feed(b"\x1bk"), vec![ParsedInput::AltK]);
+    assert_eq!(parser.feed(b"\x1bK"), vec![ParsedInput::AltK]);
+}
+
+#[test]
 fn vt_parser_emits_alt_a_for_explicit_aquarium_chord() {
     let mut parser = VtInputParser::default();
     assert_eq!(parser.feed(b"\x1ba"), vec![ParsedInput::AltA]);
@@ -862,4 +869,100 @@ fn chat_click_kind_double_click_followup_only_for_body_and_profile() {
     assert!(!ChatClickKind::StoreBadge.has_double_click_followup());
     assert!(!ChatClickKind::StoreFlag.has_double_click_followup());
     assert!(!ChatClickKind::Image { message_id: mid }.has_double_click_followup());
+}
+
+// A lone Esc in an active Lateania world belongs to the door, not to this
+// dispatcher. `dispatch_escape` runs before screen dispatch, so leaving here
+// unconditionally skipped both of the door's Esc rules: cancelling a chat line
+// you are composing, and requiring a confirming second press. Losing your place
+// in a persistent world to one stray keypress is the worst kind of accident.
+#[tokio::test]
+async fn one_escape_never_drops_you_out_of_an_active_lateania_world() {
+    let db = crate::test_helpers::new_test_db().await;
+    let mut app = crate::test_helpers::make_app(db.db.clone(), uuid::Uuid::now_v7(), "esc-confirm");
+    app.set_screen(Screen::Lateania);
+    app.enter_lateania();
+    assert!(app.lateania_state.is_some(), "the world is live");
+
+    dispatch_escape(&mut app);
+    assert!(
+        app.lateania_state.is_some(),
+        "one Esc must only arm the confirmation, never leave"
+    );
+    assert_eq!(
+        app.screen,
+        Screen::Lateania,
+        "and it must not navigate away either"
+    );
+
+    dispatch_escape(&mut app);
+    assert!(
+        app.lateania_state.is_none(),
+        "a confirming second Esc does leave"
+    );
+    assert_eq!(
+        app.screen,
+        Screen::Games,
+        "and lands back on the hub that launched it"
+    );
+}
+
+// A backtick detach keeps Lateania on the workspace cycle for a few minutes,
+// but an explicit Esc-Esc leave means "I'm done": it must drop the door off
+// the cycle immediately, not leave a stale hop-back stop behind.
+#[tokio::test]
+async fn explicit_esc_esc_leave_drops_lateania_off_the_backtick_cycle() {
+    let db = crate::test_helpers::new_test_db().await;
+    let mut app = crate::test_helpers::make_app(db.db.clone(), uuid::Uuid::now_v7(), "esc-window");
+    app.set_screen(Screen::Lateania);
+    app.enter_lateania();
+    app.lateania_detached_at = Some(std::time::Instant::now());
+
+    dispatch_escape(&mut app);
+    dispatch_escape(&mut app);
+    assert!(app.lateania_state.is_none(), "esc esc leaves the world");
+    assert!(
+        !app.lateania_recently_active(),
+        "an explicit leave must clear the backtick recency window"
+    );
+}
+
+// The reserved chords run ahead of the modal stack, so every opener they
+// reach must close the gild picker the way it already closes the poll modal.
+// Otherwise Ctrl+G paints the Lobby over a picker that still owns the
+// keyboard, and the next Enter buys a gild nobody can see.
+#[tokio::test]
+async fn reserved_chords_close_the_gild_picker_instead_of_burying_it() {
+    use crate::app::chat::gild::state::GildTarget;
+
+    let db = crate::test_helpers::new_test_db().await;
+    let mut app = crate::test_helpers::make_app(db.db.clone(), uuid::Uuid::now_v7(), "gild-chord");
+    let target = || GildTarget {
+        message_id: uuid::Uuid::now_v7(),
+        author_username: "mira".to_string(),
+        preview: "worth paying for".to_string(),
+    };
+
+    app.gild_modal_state.open(target());
+    app.show_gild_modal = true;
+    app.handle_input(&[CTRL_G]);
+    assert!(app.show_lobby_modal, "Ctrl+G opens the Lobby");
+    assert!(!app.show_gild_modal, "and the picker is gone, not buried");
+    assert!(app.gild_modal_state.target().is_none());
+    app.banner = None;
+    app.handle_input(b"\r");
+    assert!(
+        app.banner
+            .as_ref()
+            .is_none_or(|banner| banner.message != "Gilding..."),
+        "Enter in the Lobby must not buy a gild"
+    );
+
+    app.show_lobby_modal = false;
+    app.gild_modal_state.open(target());
+    app.show_gild_modal = true;
+    app.handle_input(&[CTRL_O]);
+    assert!(app.show_settings, "Ctrl+O opens settings");
+    assert!(!app.show_gild_modal, "and the picker is gone, not buried");
+    assert!(app.gild_modal_state.target().is_none());
 }

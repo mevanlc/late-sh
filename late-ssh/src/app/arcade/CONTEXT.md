@@ -2,7 +2,7 @@
 
 ## Metadata
 - Scope: `late-ssh/src/app/arcade`
-- Last updated: 2026-07-30 (daily/weekly quest strip renders at the top of the lobby via `hub::dailies::ui::draw_arcade_strip`; per-game leaderboards are roster-generated from `DailyPuzzle`/`ScoreGame` in `late-core/src/models/leaderboard.rs`)
+- Last updated: 2026-08-31 (Sudoku added a 50-move undo queue via `u`/`U` to revert previous moves and candidate mark edits. Previous: Sliding Puzzle has persisted, unrewarded personal boards; it is the seventh `ArcadeStop` and rolls with the rest in `refresh_daily_games`. Lateris gained a hold slot: `c` parks the current piece, one hold per piece, persisted in `tetris_games.hold_kind`/`hold_used` by migration 146. Nonograms joined the press-again reset confirmation every other Arcade game already had, covering both `r` and `n`. Every daily puzzle now rolls over at UTC midnight inside a live session via `workspace::refresh_daily_games`, instead of only on reconnect.)
 - Purpose: local working context for The Arcade screen and single-player terminal games.
 - Parent context: `../../../../CONTEXT.md`
 
@@ -25,11 +25,14 @@ Keep `mod.rs` declaration-only. Do not add `pub use` re-export layers.
 - `mod.rs` declares Arcade modules.
 - `input.rs` routes The Arcade lobby and selected active game input.
 - `ui.rs` renders the lobby and exposes Arcade-only bottom-bar/status helpers. The lobby carves `hub::dailies::ui::arcade_strip_height(quest_state)` rows off the top for the quest strip (streak-meter heading plus grouped Daily/Weekly sections, from `QuestState`) whenever the area leaves at least 13 rows for the game list below it; active games never show it.
-- `twenty_forty_eight/`, `tetris/`, and `snake/` are high-score games.
+- `twenty_forty_eight/`, `tetris/`, and `snake/` are high-score games. Snake's board glyph colors live in `ui.rs` (`glyph_color`), resolved per frame from `theme::` tokens and passed through `theme::legible_on_selection`: every cell is painted over `theme::BG_SELECTION()`, and twelve AMOLED palettes reuse an accent as that very fill (`success` on Greenery is byte-identical), so a raw token can render fg == bg. `snake/ui_test.rs` sweeps every palette asserting each glyph clears `theme::MIN_GLYPH_CONTRAST` against the fill. State carries only `ThingKind`; per-frame resolution also means a mid-level theme switch repaints glyphs together with the board.
 - `traffic/` is a multi-track high-score game. Each track finish is graded to a normalized `0..=1000` score (`Track::grade_time`, from the track's theoretical fastest/slowest completion time, so every track yields a comparable range regardless of its distance/speed definition); crashing before the finish scores nothing. The user's Traffic high score is the **sum** of their per-track bests. Persistence keeps one best per `(user, track_key)` in `traffic_track_scores` plus a mirrored aggregate row in `traffic_high_scores` (`= SUM(track scores)`) so leaderboard queries stay uniform with the other high-score games. `track_key` is the `Track::name`.
-- `rubiks_cube/` is a daily deterministic puzzle game with a real cube state, face turns, a three-face angled render, and a compact net. It records one daily win per user/date, publishes Activity for the once-per-day base chip payout and Hub quest progress, and counts toward Arcade Wins. The in-progress cube persists per user in `rubiks_cube_games` (54-char sticker string + move count, saved fire-and-forget on every move/reset; rows from an older date are ignored on load since the daily scramble is deterministic).
-- `sudoku/`, `nonogram/`, `minesweeper/`, `solitaire/`, `le_word/`, and `rubiks_cube/` are daily puzzle games. Le Word has a single global daily word rather than personal runs. Rubik's Cube has one shared daily scramble and no personal mode.
-- `workspace.rs` owns the Arcade leg of the backtick workspace cycle: the `ArcadeStop` closed enum (the six daily puzzle games in lobby order), `unfinished_daily_stops` (today's daily boards with at least one player move and no win — each game state exposes `first_unfinished_daily()` / `has_unfinished_daily()`), and `open_stop` (points the Arcade at the right daily board and sets `is_playing_game`). Real-time games and personal boards never join; `lobby/workspace.rs` consumes this module.
+- `rubiks_cube/` is a daily deterministic puzzle game with a real cube state, face turns, a three-face angled render, and a compact net. It records one daily win per user/date, publishes Activity for the once-per-day base chip payout and Hub quest progress, and counts toward Arcade Wins. The in-progress cube persists per user in `rubiks_cube_games` (54-char sticker string + move count, saved fire-and-forget on every move/reset; rows from an older date are ignored on load since the daily scramble is deterministic). Reset (`s`/`0`) is a two-press confirm, and is refused outright once the cube is solved: the day's win is already banked, so re-scrambling would just put a finished puzzle back on the board.
+- `sudoku/`, `nonogram/`, `minesweeper/`, `solitaire/`, `le_word/`, `rubiks_cube/`, and `sliding_puzzle/` are daily puzzle games. Le Word has a single global daily word rather than personal runs. Rubik's Cube has one shared daily scramble and no personal mode. Sliding Puzzle pairs each deterministic UTC-daily difficulty with one saved random personal board.
+- **Daily rollover inside a live session.** Each daily game builds its boards once in `State::new`, which only reruns on connect, so a client left running past UTC midnight used to keep yesterday's puzzles while the quest strip above them had already rolled. Every daily state now exposes `ensure_current_daily() -> bool`, comparing a stored `daily_date`/`puzzle_date` against `svc.today()` and rebuilding its dailies when they differ; `workspace::refresh_daily_games` calls all seven and `tick.rs` runs it on the shared 1Hz edge. It is skipped only while the player is looking at a board (`Screen::Arcade` + `is_playing_game`) so a puzzle is never swapped out mid-move; looking away rolls it on the next tick. The `is_playing_game` flag alone is not enough: it stays set when a board is left open behind a page switch. Sudoku regenerates through its existing off-thread `daily_generation_rx` channel (the screen shows its loading state until the boards land) and Le Word refetches its global word through a `oneshot` drained by `poll_word_reload`; the other five generate from a date-derived seed synchronously. Le Word's `puzzle_date` only advances once the word actually lands, so a failed fetch retries after a 30s backoff instead of leaving the board dead until reconnect.
+- **Daily saves and wins are stamped with the board's own date, never the wall clock.** Minesweeper, Sudoku, Nonogram, and Solitaire pass `daily_date` into `save_game_task`/`record_win_task` (Rubik's Cube and Sliding Puzzle already passed their `puzzle_date`; Sliding Puzzle also skips the keypress-time `ensure_current_daily` Rubik's still does in `arcade/input.rs`, so its open board is never swapped mid-solve), so a player who crosses UTC midnight mid-board banks the finish under the day the board belongs to; it never counts as today's daily, and its save lands under its own (then ignored) date. `svc.today()` at completion time was wrong exactly in the window the rollover skip guard protects.
+- `daily.rs` also owns `SessionDailyWins`: the dailies this session banked today, marked in `tick.rs` from the session's own `GameWon` Activity events and OR'd into the lobby card's ✓/✗ tier marks, so a win turns green at once instead of on the next five-minute leaderboard pass. Wins stamped on any other UTC date are ignored, and the overlay empties itself at rollover.
+- The Arcade leg of the backtick workspace cycle (the `ArcadeStop` closed enum, `unfinished_daily_stops`, `open_stop`) lives in the workspace domain, `app/workspace/arcade.rs`: it is cycle vocabulary, not an Arcade concept. It reads each game state's `first_unfinished_daily()` / `has_unfinished_daily()` / `is_daily_active()`; real-time games and personal boards never join. See `app/workspace/CONTEXT.md`.
 
 Per-game directories generally follow:
 - `state.rs`: local per-session game state and pure rules.
@@ -39,7 +42,7 @@ Per-game directories generally follow:
 
 ## Lifecycle
 
-- `late-ssh/src/main.rs` creates the Arcade services: 2048, Lateris, Snake, Sudoku, Nonogram, Solitaire, Minesweeper, Le Word, and Rubik's Cube. It also creates the shared `games::chips::svc::ChipService`. Hub creates the shared leaderboard refresh service.
+- `late-ssh/src/main.rs` creates the Arcade services: 2048, Lateris, Snake, Sudoku, Nonogram, Solitaire, Minesweeper, Le Word, Rubik's Cube, and Sliding Puzzle. It also creates the shared `games::chips::svc::ChipService`. Hub creates the shared leaderboard refresh service.
 - `late-ssh/src/session_bootstrap.rs` and `late-ssh/src/ssh.rs` load saved per-user game rows/high scores before `App::new`.
 - `App::new` in `late-ssh/src/app/state.rs` builds one per-session state object per Arcade game.
 - `App::tick` advances active real-time games only while `screen == Screen::Arcade && is_playing_game`.
@@ -55,7 +58,7 @@ Per-game directories generally follow:
 - `Enter` launches the selected available game and sets `is_playing_game = true`.
 - Nonograms are only launchable when `nonogram_state.has_puzzles()` is true; otherwise the lobby card is present but treated as unavailable/coming soon.
 - `Esc`, `q`, or `Q` leaves an active Arcade game and returns to the lobby. Snake persists progress before leaving.
-- Backtick inside an active daily puzzle game hops the workspace cycle (`lobby/workspace.rs` via `arcade/workspace.rs`); real-time games keep the byte. Hopping out clears `is_playing_game` — daily boards save move-by-move, so nothing else is flushed.
+- Backtick inside an active daily puzzle game hops the workspace cycle (`app/workspace/cycle.rs` via `app/workspace/arcade.rs`); real-time games keep the byte. Hopping out clears `is_playing_game`; daily boards save move-by-move, so nothing else is flushed.
 
 ## Game Categories
 
@@ -63,7 +66,7 @@ Per-game directories generally follow:
 | --- | --- | --- | --- |
 | High-score | 2048, Lateris, Snake | One current run plus best score plus final score events | Monthly and all-time high scores in Hub |
 | High-score (multi-track) | Traffic | One best per track (`traffic_track_scores`) plus aggregate sum (`traffic_high_scores`) plus final score events | Monthly and all-time Traffic high scores in Hub |
-| Daily puzzles | Sudoku, Nonograms, Minesweeper, Solitaire, Le Word, Rubik's Cube | One daily and one personal slot per user/difficulty or pack, except Le Word's global daily answer and Rubik's shared daily scramble | Daily completion status / Arcade Wins in Hub, plus Hub Quests via Activity |
+| Daily puzzles | Sudoku, Nonograms, Minesweeper, Solitaire, Le Word, Rubik's Cube, Sliding Puzzle | One daily and one personal slot per user/difficulty or pack, except Le Word's global daily answer and Rubik's shared daily scramble | Daily completion status / Arcade Wins in Hub, plus Hub Quests via Activity |
 | Economy support | Chips | `user_chips` plus `chip_ledger` | Monthly chip earners in Hub |
 
 Asterion, Blackjack, Chess, Poker, ssHattrick, Tic-Tac-Toe, and Tron are Rooms games, not Arcade games. Cards are shared by Solitaire/Blackjack/Poker; chips are shared by Arcade rewards and room-game payouts/settlements. Keep room runtimes, traits, registry wiring, and UI under `rooms/`.
@@ -99,6 +102,7 @@ Arcade wiring checklist:
 
 Leaderboard/Hub checklist:
 - High-score games must write final score events through a `late-core` model method so monthly boards do not depend only on legacy high-score table `updated` timestamps. Lateris and Snake also publish hidden quest Activity score events on final score submission; Snake includes the reached level for weekly/daily quest matching.
+- A restored run that was already over must not emit its final score event again (it fired when the run ended). A second emission is a fresh `GameScored` activity today, which completes score-based daily quests for a game nobody played; `snake/state.rs` carries `score_event_recorded` across `restore` for this.
 - Add the game to the matching roster in `late-core/src/models/leaderboard.rs`: a `DailyPuzzle` variant enrolls it in the per-game win boards, Arcade Wins points, today's champions, and daily statuses at once; a `ScoreGame` variant enrolls its monthly/all-time score boards. The compiler walks you through the per-variant facts, and the Leaderboards page (`app/leaderboard/`) picks the board up from the roster with no page change.
 
 Testing guidance:
@@ -114,11 +118,12 @@ Testing guidance:
 - Daily win tables record one completion fact per user/date/difficulty, separate from board state.
 - Le Word stores progress by `(user_id, puzzle_date)` and records daily wins by `(user_id, puzzle_date)` with `difficulty = "daily"` in Activity/reward params. Hub derives monthly and all-time solve counts plus each user's longest consecutive-date solve streak from those win rows.
 - Rubik's Cube stores daily wins by `(user_id, puzzle_date)` with `difficulty = "daily"` in Activity/reward params. The in-progress cube persists in `rubiks_cube_games` (one row per user, upserted on every move/reset); a row whose `puzzle_date` isn't today is ignored on load and the deterministic daily scramble is applied instead.
+- Sliding Puzzle stores daily and personal progress rows per `(user_id, difficulty_key, mode)` in `sliding_puzzle_games`, saving every legal blank move and reset through one process-wide FIFO worker; `load_games` waits at most `LOAD_FLUSH_TIMEOUT` (2s) for that queue before reading the database, so one login never sits behind other players' moves. Easy/medium/hard map to 3x3/4x4/5x5 boards (including the blank), generated by legal blank moves; daily seeds derive from UTC date plus difficulty and personal seeds are random. A restored row must be a permutation the slides can actually reach, so stale or unreachable daily rows regenerate and unreachable personal rows are rescrambled on activation. The service trusts the state's finishing move; the table's own gates (`moves > 0`, one win per user/date/difficulty) are the checks that remain. Daily wins are unique per `(user_id, puzzle_date, difficulty_key)` and publish the move count as the Activity score; personal solves only persist the solved board and never emit Activity, rewards, quest progress, or Arcade Wins.
 - `ChipService::ensure_chips(user_id)` creates new chip rows with 1000 chips.
 - Generic chip balance mutations in `late-core/src/models/chips.rs` notify `chip_user_changed` with the affected `user_id`; Hub Shop listens to that channel to refresh active balance snapshots.
 - Daily puzzle services record the persisted win and publish `ActivityEvent::GameWon`; `ChipService`'s activity reward task awards the corresponding daily puzzle base chips from `reward_templates` and records the once-per-UTC-day claim in `game_payout_claims`.
 - Daily services call `record_win_task()` on completion. That records the daily win, grants chips, and publishes a structured Activity event with the difficulty key in `detail` so Hub Dailies quests can match goals such as "win medium Sudoku".
-- `hub::svc::LeaderboardService` refreshes from DB every 5 minutes while subscribed. Immediate win callouts come from Activity; the Leaderboards page lags until the next refresh.
+- `leaderboard::svc::LeaderboardService` refreshes from DB every 5 minutes while subscribed. Immediate win callouts come from Activity; the Leaderboards page lags until the next refresh.
 
 ## Nonogram Runtime
 
@@ -145,16 +150,17 @@ Root context keeps only global Arcade shortcuts. Keep detailed per-game control 
 
 Current per-game basics:
 - 2048: `h/j/k/l` or arrows move, `r` restarts after game over.
-- Lateris: left/right move, down soft-drops, up rotates, `Space` hard-drops, `p` pauses, `r` restarts.
+- Lateris: left/right move, down soft-drops, up rotates, `Space` hard-drops, `c` holds the current piece, `p` pauses, `r` restarts.
 - Snake: arrows or `h/j/k/l` steer, `p` pauses, `r` restarts.
-- Sudoku: arrows or `h/j/k/l` move, `1-9` fill, `0`/Backspace clear, `d/p/n` daily/personal/new, `[`/`]` difficulty.
-- Nonograms: arrows or `h/j/k/l` move, `Space`/`x` toggle, `0`/Backspace/`c` clear, `d/p/n` daily/personal/new, `[`/`]` difficulty.
+- Sudoku: arrows or `h/j/k/l` move, `1-9` fill, `m` pencil mode, `u` undo, `0`/Backspace clear, `d/p/n` daily/personal/new, `[`/`]` difficulty.
+- Nonograms: arrows or `h/j/k/l` move, `Space`/`x` toggle, `0`/Backspace/`c` clear, `d/p` daily/personal, `n` new board, `r` reset, `[`/`]` difficulty.
 - Minesweeper: arrows or `h/j/k/l` move, reveal/flag/chord controls live in the game info panel.
 - Solitaire: card/tableau/foundation controls live in the game info panel; mouse support maps left-click to select/place/draw stock, right-click to auto-move the clicked card, and wheel events over the board to tableau scroll.
 - Le Word: type `a-z`, `Enter` submits, Backspace deletes, and `!` opens rules.
 - Rubik's Cube: everyone gets the same UTC daily scramble; `u/d/l/r/f/b` turns faces clockwise, uppercase turns inverse, `s`/`0` resets today's scramble, `v` rotates the view right, and arrows rotate the view in their own directions.
+- Sliding Puzzle: arrows or `h/j/k/l` slide an adjacent tile in the indicated direction into the gap; left-clicking an adjacent tile moves it directly. `d`/`p` switch daily/personal mode, `n` twice starts a new personal board, `[`/`]` changes difficulty, and `r`/`0` twice restores the active scramble. Personal boards persist but have no reward. Reset is refused on a solved daily (the win is banked), like Rubik's Cube. Sliding Puzzle has no keypress-time rollover: a board left open across UTC midnight finishes under its own date and `refresh_daily_games` rolls it once the player looks away.
 
-Destructive daily/personal puzzle reset keys use a local confirmation flag. Sudoku (`n`/`r`), Minesweeper (`n`), Solitaire (`n`/`r`), and Rubik's Cube (`s`/`0`) set `reset_pending` on the first press and reset only on a repeated reset key. Any ordinary movement, mode/difficulty switch, board edit, card action, face turn, or view change clears the pending flag. Renderers surface a short "press again" tip while pending.
+Destructive daily/personal puzzle reset keys use a local confirmation flag. Sudoku (`n`/`r`), Nonograms (`n`/`r`), Minesweeper (`n`), Solitaire (`n`/`r`), Rubik's Cube (`s`/`0`), and Sliding Puzzle (`n`/`r`/`0`) set `reset_pending` on the first press and reset only on a repeated matching action key. Any ordinary movement, mode/difficulty switch, board edit, card action, face turn, or view change clears the pending flag. Renderers surface a short "press again" tip while pending.
 
 ## Tests
 

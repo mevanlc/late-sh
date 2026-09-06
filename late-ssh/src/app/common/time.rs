@@ -9,7 +9,6 @@ pub fn timezone_current_time(now: DateTime<Utc>, timezone: Option<&str>) -> Opti
     let tz: Tz = timezone.parse().ok()?;
     Some(now.with_timezone(&tz).format("%a %H:%M").to_string())
 }
-
 /// The same instant in the user's saved timezone, falling back to UTC when it
 /// is unset or unparseable — the fallback `timezone_current_time` signals by
 /// returning `None` and its callers spell as a `UTC` prefix.
@@ -24,4 +23,14 @@ pub fn timezone_now(now: DateTime<Utc>, timezone: Option<&str>) -> DateTime<Fixe
         .and_then(|tz| tz.parse::<Tz>().ok())
         .map(|tz| now.with_timezone(&tz).fixed_offset())
         .unwrap_or_else(|| now.fixed_offset())
+}
+
+/// One absolute instant written for a viewer: their account zone when they
+/// have set one, UTC otherwise. `%Z` names the zone either way, so the string
+/// can never be read against the wrong clock.
+pub fn instant_for_viewer(at: DateTime<Utc>, timezone: Option<Tz>) -> String {
+    match timezone {
+        Some(tz) => at.with_timezone(&tz).format("%b %d %H:%M %Z").to_string(),
+        None => at.format("%b %d %H:%M UTC").to_string(),
+    }
 }

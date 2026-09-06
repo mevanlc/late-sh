@@ -1,4 +1,5 @@
 use chrono::Utc;
+use late_core::models::chat_message_gild::{GildCounts, GildTier};
 use ratatui::{
     Frame,
     layout::{Constraint, Flex, Layout, Margin, Rect},
@@ -92,7 +93,7 @@ fn profile_frame(frame: &mut Frame, area: Rect, state: &ProfileModalState) -> Op
 }
 
 /// The big layout: no sub-boxes, just labelled sections. The about (bio),
-/// earned-award preview, showcases, and badge-code legend live in the left
+/// showcases, earned awards, and badge-code legend live in the left
 /// column; bonsai sits on the right, and the aquarium gets the whole bottom
 /// band.
 fn draw_dashboard(frame: &mut Frame, area: Rect, state: &ProfileModalState) {
@@ -284,10 +285,6 @@ fn draw_header(frame: &mut Frame, area: Rect, state: &ProfileModalState) {
         spans.push(sep());
         spans.push(Span::styled(format!("{balance} chips"), value));
     }
-    if let Some(birthday) = profile.birthday.as_deref() {
-        spans.push(sep());
-        spans.push(Span::styled(format_birthday(birthday), value));
-    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
@@ -346,12 +343,34 @@ fn build_overview_lines(state: &ProfileModalState, width: usize) -> Vec<Line<'st
         ));
     }
 
-    let badge_lines = badges::preview_lines(state.profile_awards());
-    if !badge_lines.is_empty() {
+    let gild_lines = gild_lines(state.gild_counts());
+    if !gild_lines.is_empty() {
         lines.push(Line::from(""));
-        lines.push(section_heading("Badges"));
-        lines.extend(badge_lines);
+        lines.push(section_heading("Gilds received"));
+        lines.extend(gild_lines);
     }
+
+    let gallery = state.gallery_counts();
+    if gallery.pieces > 0 {
+        lines.push(Line::from(""));
+        lines.push(section_heading("Artboard gallery"));
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(
+                    "{} {}",
+                    gallery.pieces,
+                    if gallery.pieces == 1 {
+                        "piece"
+                    } else {
+                        "pieces"
+                    }
+                ),
+                text,
+            ),
+            Span::styled(format!(" · {} applause", gallery.applause), dim),
+        ]));
+    }
+
     let showcases = state.showcases_for_viewed();
     if !showcases.is_empty() {
         lines.push(Line::from(""));
@@ -367,11 +386,45 @@ fn build_overview_lines(state: &ProfileModalState, width: usize) -> Vec<Line<'st
         }
     }
 
-    lines.push(Line::from(""));
-    lines.push(section_heading("Badge Codes"));
-    lines.extend(badges::legend_lines());
+    let badge_lines = badges::badge_lines(state.profile_awards());
+    if !badge_lines.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(section_heading("Badges"));
+        lines.extend(badge_lines);
+    }
 
     lines
+}
+
+/// Gilds received, one row per tier that has any, in the tier's own color.
+/// A profile with no gilds shows no section at all: an empty "Gilds received"
+/// heading reads as a scoreboard nobody asked to be on.
+fn gild_lines(counts: GildCounts) -> Vec<Line<'static>> {
+    GildTier::ALL
+        .iter()
+        .filter(|tier| counts.get(**tier) > 0)
+        .map(|tier| {
+            let color = match tier {
+                GildTier::Bronze => theme::BADGE_BRONZE(),
+                GildTier::Silver => theme::BADGE_SILVER(),
+                GildTier::Gold => theme::BADGE_GOLD(),
+            };
+            Line::from(vec![
+                Span::styled(
+                    format!("{:<4}", tier.marker()),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:<8}", tier.label()),
+                    Style::default().fg(theme::TEXT()),
+                ),
+                Span::styled(
+                    format!("x{}", counts.get(*tier)),
+                    Style::default().fg(theme::TEXT_DIM()),
+                ),
+            ])
+        })
+        .collect()
 }
 
 fn late_fetch_lines(
@@ -593,22 +646,6 @@ fn format_two_cells(
 
 fn format_created_at(created_at: &chrono::DateTime<Utc>) -> String {
     created_at.format("%Y-%m-%d").to_string()
-}
-
-/// Render a `MM-DD` birthday as "7 March", appending a "today!" / "in N days"
-/// hint when it is within a month.
-fn format_birthday(birthday: &str) -> String {
-    use late_core::models::birthday::{days_until, month_day_label, normalize_birthday};
-    let Some(canonical) = normalize_birthday(birthday) else {
-        return birthday.to_string();
-    };
-    let base = month_day_label(&canonical).unwrap_or_else(|| canonical.clone());
-    match days_until(&canonical, Utc::now().date_naive()) {
-        Some(0) => format!("{base} · today!"),
-        Some(1) => format!("{base} · tomorrow"),
-        Some(d) if d <= 30 => format!("{base} · in {d} days"),
-        _ => base,
-    }
 }
 
 fn showcase_markdown(item: &ShowcaseFeedItem) -> String {

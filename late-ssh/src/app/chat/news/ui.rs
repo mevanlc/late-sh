@@ -6,13 +6,13 @@ use chrono::{DateTime, Utc};
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Flex, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use late_core::models::article::ArticleFeedItem;
+use late_core::models::article::{ArticleFeedItem, NEWS_SHARE_REWARD_CHIPS};
 
 pub struct ArticleListView<'a> {
     pub articles: &'a [ArticleFeedItem],
@@ -42,7 +42,9 @@ pub fn draw_article_list(frame: &mut Frame, area: Rect, view: &ArticleListView<'
     }
 
     if view.articles.is_empty() {
-        let text = Text::from("No news yet. Press 'i' to share a link.");
+        let text = Text::from(format!(
+            "No news yet. Press 'i' to share a link and earn {NEWS_SHARE_REWARD_CHIPS} chips."
+        ));
         let empty_p = Paragraph::new(text).style(Style::default().fg(theme::TEXT_DIM()));
         frame.render_widget(empty_p, list_area);
     } else {
@@ -71,16 +73,10 @@ pub fn draw_article_list(frame: &mut Frame, area: Rect, view: &ArticleListView<'
                 .map(|last_read_at| article.created > last_read_at)
                 .unwrap_or(true);
 
-            let bg_color = if article_idx == selected_index {
-                theme::BG_SELECTION()
-            } else {
-                Color::Reset
-            };
-
             let item_block = Block::default()
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(theme::BORDER()))
-                .style(Style::default().bg(bg_color));
+                .style(theme::row_style(article_idx == selected_index));
 
             let content_area = item_block.inner(item_area);
             frame.render_widget(item_block, item_area);

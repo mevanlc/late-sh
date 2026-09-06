@@ -3,11 +3,24 @@ use late_core::telemetry::TracedExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
-/// The model backing @bot's grounded chat/news replies. Gemini 3.6 Flash beats
-/// 3.1 Pro on coding/agentic benchmarks while costing less and running faster;
-/// Pro only keeps an edge on the hardest reasoning benchmarks, which this bot
-/// doesn't need.
-pub const AI_MODEL: &str = "gemini-3.6-flash";
+/// The model behind every AI surface in the app: @bot's grounded chat and
+/// news replies, @bartender's orders, custom-title screening, and translation.
+/// One constant, so no surface can drift onto a different model.
+///
+/// Gemini 3.7 Flash since 2026-08-30, up from 3.6 Flash. Not a benchmark
+/// decision: both sit at the same $0.75/$3.75 per million through 2026 and
+/// both double on 2027-01-01, and 3.7's gains are in coding and agentic work,
+/// which is not what a bartender or a 20-character title screen does. It is
+/// the newer model at the same price, which is reason enough; there was none
+/// to stay.
+///
+/// Two things to know before moving it again. `temperature` (0.8 below) is
+/// accepted on 3.x but discouraged, so a future cleanup should drop it rather
+/// than tune it. And these models think by default, billing thought as output
+/// and spending it out of `maxOutputTokens`: the 2026-08-06 outage in the root
+/// `CONTEXT.md` was a body carrying nothing but `usageMetadata`. Any model
+/// change is a change to how much of the budget the answer still gets.
+pub const AI_MODEL: &str = "gemini-3.7-flash";
 
 #[derive(Debug, Clone)]
 pub struct AiService {
@@ -130,8 +143,17 @@ fn extract_json_object(text: &str) -> &str {
 
 impl AiService {
     pub fn new(enabled: bool, api_key: Option<String>) -> Self {
+        // Every caller funnels through this one client, and several hold a
+        // scarce resource across the call (the translation API gate, spawned
+        // summary tasks). reqwest has no default timeout, so a hung Gemini
+        // call would pin those forever; 120s is far past any legitimate
+        // generation.
+        let client = Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .expect("reqwest client construction cannot fail with these options");
         Self {
-            client: Client::new(),
+            client,
             api_key,
             enabled,
         }
@@ -170,6 +192,19 @@ impl AiService {
         history: &str,
     ) -> Result<Option<String>> {
         self.generate(system_prompt, history, false, 2048).await
+    }
+
+    /// An ungrounded reply with a full-size output budget: no Google Search
+    /// (the answer is entirely in the prompt), but room for a multi-paragraph
+    /// result plus a thinking model's reasoning tokens, which count against
+    /// `maxOutputTokens` too. Used by the chat catch-up summarizer, whose
+    /// input is large (a room's unread backlog) and whose output is prose.
+    pub async fn generate_ungrounded(
+        &self,
+        system_prompt: &str,
+        prompt: &str,
+    ) -> Result<Option<String>> {
+        self.generate(system_prompt, prompt, false, 8192).await
     }
 
     async fn generate(
@@ -227,7 +262,8 @@ impl AiService {
     }
 
     /// A grounded (Google Search) call whose reply is expected to be JSON.
-    /// Grounding and JSON response mode don't mix on gemini-3.6-flash:
+    /// Grounding and JSON response mode don't mix, proven on gemini-3.6-flash
+    /// and never re-tested since (root `CONTEXT.md` §10, 2026-08-06):
     /// attaching the `googleSearch` tool together with
     /// `responseMimeType: application/json` gets a 200 whose body has no
     /// `candidates` at all (the model thinks, then emits nothing). So this

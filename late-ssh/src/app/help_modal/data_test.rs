@@ -40,7 +40,9 @@ fn all_purpose_guide_folds_music_into_pair_topic() {
 fn bot_context_includes_hub_guide_facts() {
     let context = bot_app_context();
     assert!(context.contains("## Economy\n"));
-    assert!(context.contains("Monthly Top Chips counts net chip delta."));
+    assert!(
+        context.contains("Monthly Top Chips counts only chips the house paid you for playing.")
+    );
     assert!(context.contains("Lateris, 2048, Snake, and Traffic record run scores."));
     assert!(context.contains("Four-seat fixed-stack Texas Hold'em"));
 }
@@ -79,6 +81,7 @@ fn chips_guide_lists_every_earning_surface() {
         "Solitaire draw-3",
         "Le Word daily",
         "Rubik's Cube daily",
+        "Sliding Puzzle",
         "Quests",
         "daily streak",
         "Bonsai",
@@ -94,10 +97,33 @@ fn chips_guide_lists_every_earning_surface() {
         "King Who Was Promised Nothing",
         "Amulet of Yendor",
         "Green Dragon",
+        "Sharing news",
+        "Bringing music",
         "/gift @user",
     ] {
         assert!(chips.contains(expected), "chips guide missing {expected}");
     }
+    // News moved from the pay-nothing list to a paying surface; the amount
+    // has to read the constant the service actually credits.
+    assert!(chips.contains(&format!("News pays {NEWS_SHARE_REWARD_CHIPS} chips")));
+    assert!(chips.contains(&format!(
+        "At most {NEWS_SHARE_MAX_PAID_PER_DAY} shares a day"
+    )));
+    // Same rule for the jukebox: the chips tab and the booth's own guide both
+    // have to read the constants the queue actually credits.
+    assert!(chips.contains(&format!("pays {SONG_QUEUE_REWARD_CHIPS} chips")));
+    assert!(chips.contains(&format!(
+        "At most {SONG_QUEUE_MAX_PAID_PER_DAY} tracks a day"
+    )));
+    assert!(MUSIC_PAIR_TEXT.contains(&format!(
+        "Bringing a track pays you {SONG_QUEUE_REWARD_CHIPS} chips"
+    )));
+    assert!(MUSIC_PAIR_TEXT.contains(&format!("at most {SONG_QUEUE_MAX_PAID_PER_DAY} a day")));
+    let news = lines_for(HelpTopic::News, false, "").join("\n");
+    assert!(news.contains(&format!("pays you {NEWS_SHARE_REWARD_CHIPS} chips")));
+    assert!(news.contains(&format!(
+        "At most {NEWS_SHARE_MAX_PAID_PER_DAY} shares a day"
+    )));
     // Losing at a non-betting surface must never read as a chip risk, and the
     // pay-nothing surfaces have to be called out or the bot invents payouts.
     assert!(chips.contains("the losers lose nothing"));
@@ -106,7 +132,9 @@ fn chips_guide_lists_every_earning_surface() {
     // Economy keeps ranking rules; the amounts live here, in one place.
     let economy = lines_for(HelpTopic::Economy, false, "").join("\n");
     assert!(economy.contains("The Chips tab lists every way to earn chips"));
-    assert!(economy.contains("Monthly Top Chips counts net chip delta."));
+    assert!(
+        economy.contains("Monthly Top Chips counts only chips the house paid you for playing.")
+    );
 }
 
 #[test]
@@ -198,6 +226,42 @@ fn chat_guide_collapses_compose_section_when_keep_composer_focused() {
     assert!(!on.contains("Alt+S"));
     assert!(!on.contains("send and exit"));
     assert!(!on.contains("<<COMPOSE_SEND_LINES>>"));
+}
+
+/// OBS setup questions land on @bot, so the Streaming tab has to carry the
+/// full WHIP recipe: service fields, the Opus requirement, and the encoder
+/// reset trap that OBS springs when the service switches to WHIP.
+#[test]
+fn streaming_guide_covers_golive_and_obs_setup() {
+    assert!(
+        HelpTopic::ALL
+            .iter()
+            .any(|topic| topic.title() == "Streaming")
+    );
+    assert!(bot_app_context().contains("## Streaming\n"));
+    let streaming = lines_for(HelpTopic::Streaming, false, "").join("\n");
+    for expected in [
+        "/golive [title]",
+        "/golive obs",
+        "/golive stop",
+        "/watch @user",
+        "Service           WHIP",
+        "Bearer Token",
+        "Opus, required: WHIP cannot carry AAC",
+        "Same as stream",
+        "Restart OBS",
+        "minted per stream and die with it",
+        "born silent",
+        "ON AIR",
+    ] {
+        assert!(
+            streaming.contains(expected),
+            "streaming guide missing {expected}"
+        );
+    }
+    // The chat commands list stays an index and defers the details here.
+    let chat = chat_help_lines(false).join("\n");
+    assert!(chat.contains("the Streaming tab"));
 }
 
 #[test]

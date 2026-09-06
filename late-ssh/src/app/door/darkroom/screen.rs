@@ -53,15 +53,6 @@ impl DoorGame for DarkroomDoorGame {
     fn handle_arrow(&self, app: &mut App, key: u8) -> bool {
         handle_arrow(app, key)
     }
-
-    fn leave_active(&self, app: &mut App) -> bool {
-        if app.darkroom_state.is_some() {
-            leave(app);
-            true
-        } else {
-            false
-        }
-    }
 }
 
 pub struct DarkroomScreenView<'a> {
@@ -88,6 +79,27 @@ fn handle_key(app: &mut App, byte: u8) -> bool {
 
     // Compute the outcome in a tight borrow, then act on `app` once it's
     // released (leaving the game re-borrows `app` mutably).
+    if ending_took_key(app) {
+        return true;
+    }
+
+    app.darkroom_state.as_mut().unwrap().touch();
+
+    // Backtick hops onward on the workspace cycle. Unlike Esc this keeps the
+    // door loaded: the village goes on growing while the player is elsewhere,
+    // and the idle deadline in `App::tick` is what eventually ends the visit.
+    // The one exception is the ascent, where every key is steering and there
+    // is no unattended ship to hop away from.
+    if byte == b'`'
+        && app
+            .darkroom_state
+            .as_ref()
+            .is_some_and(|state| state.flight.is_none())
+    {
+        app.detach_door_game();
+        return true;
+    }
+
     let acted = {
         let state = app.darkroom_state.as_mut().unwrap();
         // Esc means different things per view: it aborts a flight, parks a
@@ -182,10 +194,37 @@ fn handle_key(app: &mut App, byte: u8) -> bool {
     true
 }
 
+/// The ending owns every key while it is up: the first press skips the
+/// reveal, the next one steps out of the door. There is nothing behind it to
+/// go back to (the save was deleted the moment the ship got through), so this
+/// is the only exit the screen offers. Returns whether it took the key.
+fn ending_took_key(app: &mut App) -> bool {
+    let done = match app
+        .darkroom_state
+        .as_mut()
+        .and_then(|state| state.ending.as_mut())
+    {
+        None => return false,
+        Some(ending) if ending.done() => true,
+        Some(ending) => {
+            ending.reveal_all();
+            false
+        }
+    };
+    if done {
+        leave(app);
+    }
+    true
+}
+
 fn handle_arrow(app: &mut App, key: u8) -> bool {
+    if ending_took_key(app) {
+        return true;
+    }
     let Some(state) = app.darkroom_state.as_mut() else {
         return false;
     };
+    state.touch();
     if state.flight.is_some() {
         match key {
             b'A' => state.steer(0.0, -1.0),

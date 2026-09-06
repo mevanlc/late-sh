@@ -188,6 +188,25 @@ impl ChatRoom {
         Ok(Self::from(row))
     }
 
+    /// The game's haunted channel (GAME.md, First contact stage 4): its own
+    /// kind, so every room listing (browse lists only `topic`, IRC lists
+    /// lounge/language/topic) excludes it by construction and the join path
+    /// can gate on the first-contact invitation. Never auto-joined; seeded
+    /// on the first invited `/join #deadchannel`.
+    pub async fn get_or_create_deadchannel_room(client: &Client) -> Result<Self> {
+        let row = client
+            .query_one(
+                "INSERT INTO chat_rooms (kind, visibility, auto_join, slug)
+                 VALUES ('deadchannel', 'public', false, $1)
+                 ON CONFLICT (slug) WHERE kind = 'deadchannel'
+                 DO UPDATE SET updated = current_timestamp
+                 RETURNING *",
+                &[&DEADCHANNEL_SLUG],
+            )
+            .await?;
+        Ok(Self::from(row))
+    }
+
     pub async fn get_or_create_game_room(
         client: &Client,
         game_kind: GameKind,
@@ -203,6 +222,80 @@ impl ChatRoom {
                  DO UPDATE SET updated = current_timestamp
                  RETURNING *",
                 &[&slug, &game_kind],
+            )
+            .await?;
+        Ok(Self::from(row))
+    }
+
+    /// Permanent per-streamer chat room for "watch me" streams: `kind='game'`
+    /// (hidden from the Home rail and IRC, joinable by anyone through the
+    /// public game-room join path), `game_kind='stream'`, slug
+    /// `{username}-live`. Same seeded shape as the house-table rooms; chat
+    /// history persists between streams. `owner` is recorded as `created_by`
+    /// on first creation and is the only user allowed to publish into the
+    /// room's stream.
+    pub async fn get_or_create_stream_room(
+        client: &Client,
+        username: &str,
+        owner: Uuid,
+    ) -> Result<Self> {
+        // The room follows the account, not the name: the owner lookup comes
+        // first, so a freed-and-reclaimed username never lands a new streamer
+        // in the original owner's room (and its chat history). A renamed
+        // streamer keeps their room under the old slug.
+        let existing = client
+            .query_opt(
+                "SELECT * FROM chat_rooms
+                 WHERE kind = 'game' AND game_kind = 'stream' AND created_by = $1
+                 ORDER BY id LIMIT 1",
+                &[&owner],
+            )
+            .await?;
+        if let Some(row) = existing {
+            return Ok(Self::from(row));
+        }
+        let slug = normalize_game_slug(&format!("{username}-live"))?;
+        let row = client
+            .query_opt(
+                "INSERT INTO chat_rooms (kind, visibility, auto_join, slug, game_kind, created_by)
+                 VALUES ('game', 'public', false, $1, 'stream', $2)
+                 ON CONFLICT (game_kind, slug) WHERE kind = 'game'
+                 DO NOTHING
+                 RETURNING *",
+                &[&slug, &owner],
+            )
+            .await?;
+        if let Some(row) = row {
+            return Ok(Self::from(row));
+        }
+        // The insert lost: either a concurrent go_live for this same owner
+        // just created the room (re-check by owner), or the plain slug
+        // belongs to another account (its owner was renamed and this
+        // username reclaimed).
+        let raced = client
+            .query_opt(
+                "SELECT * FROM chat_rooms
+                 WHERE kind = 'game' AND game_kind = 'stream' AND created_by = $1
+                 ORDER BY id LIMIT 1",
+                &[&owner],
+            )
+            .await?;
+        if let Some(row) = raced {
+            return Ok(Self::from(row));
+        }
+        // Squatted slug: suffix with random id bits so each account still
+        // gets exactly one room of its own.
+        let owner_simple = owner.simple().to_string();
+        let suffix = &owner_simple[owner_simple.len() - 8..];
+        let slug = normalize_game_slug(&format!("{username}-live-{suffix}"))?;
+        let row = client
+            .query_one(
+                "INSERT INTO chat_rooms (kind, visibility, auto_join, slug, game_kind, created_by)
+                 VALUES ('game', 'public', false, $1, 'stream', $2)
+                 ON CONFLICT (game_kind, slug) WHERE kind = 'game'
+                 DO UPDATE SET updated = current_timestamp
+                 RETURNING *",
+                &[&slug, &owner],
             )
             .await?;
         Ok(Self::from(row))
@@ -313,6 +406,23 @@ impl ChatRoom {
             .into_iter()
             .map(|row| (row.get("room_id"), row.get("user_id")))
             .collect())
+    }
+
+    /// The streamer whose room this is, or `None` when the room is not a
+    /// stream room. Deliberately not the derived `owner_id`: that one succeeds
+    /// to the earliest remaining member, which on a *public* room would hand a
+    /// passing viewer the streamer's moderation powers. A stream room's owner
+    /// is the recorded `created_by` and nobody else, for as long as the room
+    /// exists.
+    pub async fn stream_room_owner(client: &Client, room_id: Uuid) -> Result<Option<Uuid>> {
+        let row = client
+            .query_opt(
+                "SELECT created_by FROM chat_rooms
+                 WHERE id = $1 AND kind = 'game' AND game_kind = 'stream'",
+                &[&room_id],
+            )
+            .await?;
+        Ok(row.and_then(|row| row.get("created_by")))
     }
 
     /// The owner of one room. Same derivation as `owner_ids_for_rooms`.
@@ -916,6 +1026,14 @@ pub struct PublicTopicRoomSummary {
     pub member_count: i64,
 }
 
+/// The haunted channel's slug: reserved from user creation in
+/// `normalize_topic_slug`, owned by `get_or_create_deadchannel_room`.
+pub const DEADCHANNEL_SLUG: &str = "deadchannel";
+/// The haunted channel's `chat_rooms.kind` (migration 170): its own kind
+/// so every kind whitelist (browse, IRC, the rail's sections) excludes or
+/// places it by construction rather than by slug.
+pub const DEADCHANNEL_KIND: &str = "deadchannel";
+
 pub fn canonical_dm_pair(user_a: Uuid, user_b: Uuid) -> (Uuid, Uuid) {
     if user_a.as_u128() < user_b.as_u128() {
         (user_a, user_b)
@@ -928,6 +1046,15 @@ fn normalize_topic_slug(slug: &str) -> Result<String> {
     let slug = normalize_room_slug(slug)?;
     if slug == "lounge" {
         bail!("cannot create room with reserved name 'lounge'");
+    }
+    if slug == DEADCHANNEL_SLUG {
+        // The game's home channel (GAME.md, First contact): the invitation
+        // DM ends in `/join #deadchannel`, so the name has to be waiting
+        // for the game, not for whoever typed it first. The message is the
+        // fiction rather than "reserved", which would confirm there is
+        // something to reserve it for; the room itself lives under its own
+        // kind (`get_or_create_deadchannel_room`), not through here.
+        bail!("only static on that channel");
     }
     Ok(slug)
 }

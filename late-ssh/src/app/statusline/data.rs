@@ -7,6 +7,8 @@
 
 use late_core::models::statusline::{StatusComponent, StatusVariant};
 
+use crate::app::common::primitives::thousands;
+
 /// Everything the bar can show this frame, gathered once in `App::render`.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct StatusData<'a> {
@@ -19,6 +21,10 @@ pub(crate) struct StatusData<'a> {
     pub chip_balance: i64,
     pub mentions_unread: i64,
     pub dms_unread: i64,
+    /// Open raffle pot size. `None` before refresh or while the pot is closed.
+    pub pot_size: Option<i64>,
+    /// Compact time until the next draw, paired with `pot_size` when available.
+    pub pot_draws_in: Option<&'a str>,
     /// Humans currently connected, bots excluded.
     pub online_count: usize,
     /// Daily correspondence matches waiting on this user's move.
@@ -78,6 +84,12 @@ impl<'a> StatusData<'a> {
                 };
                 (count > 0).then(|| count.to_string())
             }
+            StatusComponent::Pot => self.pot_size.map(|size| {
+                let size = thousands(size);
+                self.pot_draws_in
+                    .filter(|draws_in| !draws_in.is_empty())
+                    .map_or_else(|| size.clone(), |draws_in| format!("{size} · {draws_in}"))
+            }),
             StatusComponent::Users => Some(self.online_count.to_string()),
             StatusComponent::Turns => {
                 (self.turns_waiting > 0).then(|| self.turns_waiting.to_string())
@@ -125,6 +137,9 @@ impl<'a> StatusData<'a> {
                 .voice
                 .map(|badge| badge.split_once(" [").map_or(badge, |(name, _)| name))
                 .map(str::to_string),
+            // Give up the countdown before the pot itself. Its low-priority
+            // default makes the whole segment the next concession.
+            StatusComponent::Pot => self.pot_size.map(thousands),
             // A track line is unbounded; the station name it falls back to is
             // short and fixed.
             StatusComponent::Station => match variant {

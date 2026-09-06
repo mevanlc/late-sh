@@ -14,7 +14,7 @@
 
 use serde_json::Value;
 
-pub const STATUS_COMPONENT_COUNT: usize = 10;
+pub const STATUS_COMPONENT_COUNT: usize = 11;
 
 /// A segment the user can place on the status bar. Order in the stored list is
 /// the paint order, left to right.
@@ -23,6 +23,7 @@ pub enum StatusComponent {
     Time,
     Chips,
     Mentions,
+    Pot,
     Users,
     Turns,
     Pomodoro,
@@ -36,13 +37,14 @@ impl StatusComponent {
     /// Default paint order, left to right. `ALL` is also the backfill order for
     /// components missing from a stored list.
     ///
-    /// The four enabled-by-default arms are ordered to reproduce the hardcoded
-    /// bar this roster replaced (mentions, pomodoro, voice, chips), so nobody's
-    /// frame changes the day this ships.
+    /// The enabled-by-default arms reproduce the current upstream HUD order.
+    /// The pot is low priority, so it compacts and drops before the established
+    /// readouts when the border gets tight.
     pub const ALL: [StatusComponent; STATUS_COMPONENT_COUNT] = [
-        Self::Mentions,
         Self::Pomodoro,
         Self::Voice,
+        Self::Mentions,
+        Self::Pot,
         Self::Chips,
         Self::Turns,
         Self::Invites,
@@ -57,6 +59,7 @@ impl StatusComponent {
             Self::Time => "time",
             Self::Chips => "chips",
             Self::Mentions => "mentions",
+            Self::Pot => "pot",
             Self::Users => "users",
             Self::Turns => "turns",
             Self::Pomodoro => "pomodoro",
@@ -72,6 +75,7 @@ impl StatusComponent {
             "time" => Some(Self::Time),
             "chips" => Some(Self::Chips),
             "mentions" => Some(Self::Mentions),
+            "pot" => Some(Self::Pot),
             "users" => Some(Self::Users),
             "turns" => Some(Self::Turns),
             "pomodoro" => Some(Self::Pomodoro),
@@ -89,6 +93,7 @@ impl StatusComponent {
             Self::Time => "Time",
             Self::Chips => "Chips",
             Self::Mentions => "Mentions",
+            Self::Pot => "Pot",
             Self::Users => "Users online",
             Self::Turns => "Your move",
             Self::Pomodoro => "Pomodoro",
@@ -106,6 +111,7 @@ impl StatusComponent {
             Self::Time => "",
             Self::Chips => "chips",
             Self::Mentions => "unread",
+            Self::Pot => "pot",
             Self::Users => "online",
             Self::Turns => "your move",
             Self::Pomodoro => "focus",
@@ -131,6 +137,7 @@ impl StatusComponent {
             Self::Time => "",
             Self::Chips => "🪙",
             Self::Mentions => "📩",
+            Self::Pot => "🍯",
             Self::Users => "🌐",
             Self::Turns => "🎲",
             Self::Pomodoro => "🍅",
@@ -157,7 +164,7 @@ impl StatusComponent {
     pub fn default_enabled(self) -> bool {
         matches!(
             self,
-            Self::Mentions | Self::Pomodoro | Self::Voice | Self::Chips
+            Self::Mentions | Self::Pomodoro | Self::Voice | Self::Pot | Self::Chips
         )
     }
 
@@ -173,24 +180,24 @@ impl StatusComponent {
         self.can_auto_hide()
     }
 
-    /// Whether the component starts in the low-priority drop tier. The four
-    /// that predate the customizer keep their footing; everything opt-in
-    /// yields first, so switching one on cannot cost a user their page tabs.
+    /// Whether the component starts in the low-priority drop tier. The pot is
+    /// ambient and yields first despite being enabled; everything opt-in joins
+    /// that tier, so switching one on cannot cost a user their page tabs.
     pub fn default_low_priority(self) -> bool {
-        !self.default_enabled()
+        self == Self::Pot || !self.default_enabled()
     }
 
     /// What happens when this component is added to the roster *after* a user
     /// has already saved a bar. `false` (the default for anything cosmetic or
     /// niche) backfills it disabled, leaving a customized bar untouched;
-    /// `true` forces it on, and is reserved for a component the app needs the
-    /// user to see. Diverges on purpose from
+    /// `true` forces it on, and is reserved for upstream additions that must
+    /// remain visible; currently that is the pot. Diverges on purpose from
     /// `normalize_right_sidebar_components`, which backfills everything
     /// enabled — a sidebar panel that appears costs a user rows in a rail
     /// built to hold panels, while a bar segment that appears costs them the
     /// page tabs.
     pub fn backfill_existing(self) -> bool {
-        false
+        self == Self::Pot
     }
 
     /// The component's one extra dial, or `&[]` when it has none. The first

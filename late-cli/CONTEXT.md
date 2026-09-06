@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: `late-cli` - companion CLI for late.sh (plus the sibling `late-webview` helper crate)
 - Primary audience: LLM agents working on the CLI, human contributors
-- Last updated: 2026-07-31 (Linux MPRIS publication: the CLI publishes the selected source as a desktop media player; widget transport/volume commands go up the pair WS as `set_muted`/`set_volume` and the server fans them to every paired client, YouTube's webview helper included; missing session D-Bus fails open)
+- Last updated: 2026-08-26 (Pair-WS reconnect no longer unmutes a paired session or gives up on pairing: releasing the startup mute is gated on the server never having seen the session, a connection that held 60s clears the failure count, and the loop backs off to a 60s retry instead of parking forever. See §6 "Pairing behavior" and §7. Previous entry: macOS native voice is back: `build.rs` passes `-ObjC` when linking the `late` binary on darwin, which is what the vendored `webrtc-sys` patch was working around, plus the microphone `Info.plist` section; `default.nix` now predeclares the mac WebRTC archives too; see §9 "macOS voice link requirements")
 - Status: Active
 - Stability note: Sections marked `[STABLE]` should change rarely. Sections marked `[VOLATILE]` are expected to change often.
 
@@ -312,12 +312,12 @@ Client to server for voice state:
 Client state labels:
 - `ssh_mode`: `native`, `openssh`, `old`
 - `platform`: `linux`, `macos`, `windows`, `android`, or `unknown`
-- `capabilities`: optional list; Linux and Windows desktop CLI builds advertise `clipboard_image`, `youtube`, and `voice`; macOS desktop CLI builds advertise `clipboard_image` and `youtube`; Android/Termux builds leave it empty.
+- `capabilities`: optional list; Linux, macOS, and Windows desktop CLI builds advertise `clipboard_image`, `youtube`, and `voice`; Android/Termux builds leave it empty.
 
 Pairing behavior:
 - The server stores one paired-client sender/state entry per token.
 - If the CLI and its webview helper both pair on the same token, latest registration owns control/state until it disconnects.
-- CLI WebSocket reconnects up to 10 consecutive failures with a 2s delay.
+- CLI WebSocket reconnects with a 2s delay for 10 consecutive failures, then keeps reconnecting every 60s. Pairing is never abandoned, so a server redeploy or a network change cannot leave a live SSH session permanently unpaired. A connection that held for 60s (`STABLE_CONNECTION`) clears the failure count, so one long session's worth of rare drops never accumulates into a give-up. Policy lives in `ws.rs`'s `PairRetryPolicy` (pure, tested in `ws_test.rs`); `main.rs`'s pair loop owns the sleeping, logging, and mute write.
 - The pair WebSocket loop is selected alongside SSH session completion in the root async task, not spawned with `tokio::spawn`. This is intentional because native LiveKit voice room state is not guaranteed to be `Send` across desktop platforms.
 - The first `client_state` is sent immediately after connect. It is resent after local mute/volume controls and when `icecast_output_available` changes; source changes and voice controls use their own handling/`voice_state`.
 - `/paste-image` in SSH chat depends on the paired CLI control channel. The server only sends `request_clipboard_image` after seeing `clipboard_image` in the latest paired client's `client_state.capabilities`, so older CLIs and the webview helper do not receive unsupported control events.
@@ -368,7 +368,8 @@ Platform notes:
 - MP3 is the only enabled stream format.
 - Stream URL normalization trims trailing slashes, preserves `/stream`, `/stream/...`, and direct `.mp3`/`.m4a`/`.aac` URLs, and appends `/stream` only for base URLs.
 - Stream probing scans up to 64 KiB for MP3 sync/ID3 before probing.
-- Initial volume is 30%. Enabled desktop audio boots muted until the pair WebSocket delivers the user's initial mute/source state; if pairing repeatedly fails, the CLI releases startup mute after the 10 failed pair attempts. Volume uses squared scaling.
+- Initial volume is 30%. Enabled desktop audio boots muted until the pair WebSocket delivers the user's initial mute/source state; if the server never sees this session at all, the CLI releases that startup mute once, after 10 failed attempts, rather than leave the user silently muted with no explanation. Volume uses squared scaling.
+- Releasing the startup mute is gated on the session never having paired, and that gate is load-bearing: a session the server has already seen is running the user's stored device mute, so a mid-session pair-WS outage must leave the mute alone. Silence is the safe failure mode; unmuting on reconnect failure is how a muted session used to start playing music behind the user's back. The fact is structural, not guessed: `run_pair_session` reports whether any frame arrived from the server (`PairSessionEnd::server_frame_received`), and only such a session counts as `PairAttempt::Ended`. A successful `client_state` write is not enough, because the server accepts the WebSocket upgrade before it checks the per-IP pair limit and the per-token capacity, so a rejected socket still takes the write and then dies unread; the server's first frame (`set_playback_source`, sent right after registering) is what proves the session was registered and the buffered `client_state` read. Because the slow retry never gives up, a session that did release the mute still gets the stored value applied when the server comes back, since the server's alignment is claimed once per session token and was never claimed.
 - On Linux, the pair client consumes `queue_update`, `now_playing_update`, and `radio_meta_update` snapshots and publishes the currently selected source through `org.mpris.MediaPlayer2`. YouTube includes title/channel/duration, watch URL, thumbnail, and wall-clock-derived initial position; Icecast and radio select the metadata entry matching `set_playback_source.station`. Missing metadata falls back to the source/station label.
 - MPRIS is controllable, but only over mute and volume. `Play`/`Pause`/`PlayPause`/`Stop` resolve through `TransportCommand` to an absolute mute target, and `SetVolume` maps the slider to a percent (raising it off zero also unmutes). `CanPlay`/`CanPause`/`CanControl` are therefore true, `CanSeek`/`CanGoNext`/`CanGoPrevious` false. Muted publishes as `Paused` rather than a zeroed volume, which is what a desktop widget draws a play button for. Reporting the read-only truth (`CanControl=false`) is spec-correct but makes the player invisible to **playerctl**, which skips any player whose `can-play` is false, and with it waybar/polybar, since those link `libplayerctl`.
 - Desktop writes are not applied locally. The MPRIS interface queues a `DesktopCommand`, the pair WS loop sends it as a `set_muted`/`set_volume` event, and the server fans the result back to every paired client (`PairControlMessage::SetMuted`/`SetVolume`), exactly like a TUI `m` keypress. That round trip is what lets a widget pause reach YouTube, which plays in the separate `late-webview` helper on its own pair WS, and it keeps CLI, helper, and sidebar convergent. It also means controls need a live pair socket, and the widget updates when the fan-out lands rather than instantly.
@@ -377,7 +378,7 @@ Platform notes:
 - Analyzer cadence is about 15 Hz with a 1024-sample FFT and 8 log-spaced bands.
 
 Audio and stream resiliency:
-- WebSocket pairing has a 10-attempt retry loop with 2s delay.
+- WebSocket pairing retries every 2s for 10 consecutive failures, then every 60s for as long as the session lives; see §6 for the stable-connection reset and the mute rule.
 - Startup stream probing and the decoder thread's first stream open each retry 3 times with a short 750ms delay before aborting startup. This covers rare Icecast/network timing blips where the first CLI launch says "failed to create audio decoder" but immediately joining again works.
 - Decoder recovery re-probes `SymphoniaStreamDecoder` in place after stream failures, sleeps 2s between reconnects, and gives up after 10 consecutive failures.
 - CPAL output stream errors mark `icecast_output_available=false`; the pair WebSocket sends an updated `client_state` so the server knows this CLI is not producing audio.
@@ -433,13 +434,17 @@ Release workflow:
 - `deploy_cli.yml` triggers on published `*-cli` GitHub Releases and also supports manual `workflow_dispatch` with `release_tag` and `environment` inputs. Manual dispatch checks out the requested tag through the shared `source_ref` path and is the recovery path when GitHub misses a release event.
 - Linux CI/release jobs install `libwebkit2gtk-4.1-dev` to build the `late-webview` helper crate. `late-cli` itself no longer needs WebKitGTK dev packages on Linux (`cargo build -p late-cli` works without them).
 - Linux glibc release artifacts are two binaries per target: `late` plus the `late-webview` helper, uploaded and checksummed together; `install.sh` installs both into the same directory (helper download is warning-only so older releases still install). Android/Termux, macOS, and Windows remain single-binary.
-- Desktop release artifacts include native LiveKit voice media on Linux and Windows only. macOS builds do not compile or advertise native voice. Keep Windows MSVC release builds on the static CRT (`crt-static`/`/MT`) because LiveKit's bundled WebRTC objects are built that way.
+- Desktop release artifacts include native LiveKit voice media on Linux, macOS, and Windows. Keep Windows MSVC release builds on the static CRT (`crt-static`/`/MT`) because LiveKit's bundled WebRTC objects are built that way. macOS release builds depend on the two `build.rs` darwin link args (see "macOS voice link requirements" below).
 - Publishes versioned releases plus `latest`
 - Publishes `install.sh` and `install.ps1` at the distribution root
 
 Version stamping:
 - The release tag is the single source of truth for the CLI version. `deploy_cli.yml`'s `build_cli` job exports `LATE_CLI_VERSION=<tag>`, and `late-cli/build.rs` embeds it via `cargo:rustc-env` so the binary version matches the published `VERSION` file (`publish/VERSION`, `publish/latest/VERSION`) byte-for-byte. Local/dev and CI test builds fall back to the `Cargo.toml` version, so nothing needs to be set for `cargo build`.
 - `late --version` / `late -V` prints `late <version>` (`config::VERSION`). The published `VERSION` file carries a trailing newline; the update check `trim()`s the fetched body. No manual `Cargo.toml` version bumps are required per release.
+
+macOS voice link requirements (`build.rs`, `apple-darwin` targets only):
+- `-ObjC` on the `late` binary and on test binaries. LiveKit's static `libwebrtc.a` carries ObjC categories (`+[NSString stringForAbslStringView:]` and friends) that the linker drops without it, so the CLI links clean and then aborts on an uncaught `NSException` the first time LiveKit builds its video encoder factory, which happens during peer-connection setup even for our audio-only rooms. `webrtc-sys` and `livekit` both emit this flag from their own build scripts, but `cargo:rustc-link-arg` does not propagate to a downstream crate's link (rust-lang/cargo#9554), so `late-cli` has to emit it itself. Upstream tracking: livekit/rust-sdks#795.
+- `-sectcreate __TEXT __info_plist macos/Info.plist`, which carries `NSMicrophoneUsageDescription`. Without that Mach-O section macOS aborts the process on first microphone access, and abort bypasses `RawModeGuard::drop`, leaving the terminal in raw mode with the privacy exception printed as one long line.
 
 ### Update check (`src/update.rs`)
 
@@ -454,7 +459,7 @@ Nix flake outputs:
 - `apps.${system}.late` runs that CLI package for `nix run ...#late`
 - `packages.${system}.late-sh` remains the default multi-binary package with `mainProgram = "late-ssh"`
 - On Linux, the Nix package builds with WebKitGTK 4.1, GTK3, ALSA, glib-networking, and GStreamer base/good/bad/ugly/libav plugins. The GStreamer path uses `gstreamer.out`, and `gst-plugins-bad` is overridden with `-Dlv2=disabled` to avoid `libgstlv2.so` crashes during plugin scanning. The flake's `late` package builds both the `late` and `late-webview` binaries; the installed binaries are wrapped with a fixed `GST_PLUGIN_SYSTEM_PATH_1_0`, `GST_PLUGIN_SCANNER`, `GIO_EXTRA_MODULES`, and `LATE_WEBKIT_GSTREAMER_SANDBOX_PATHS`; on Linux the webview helper adds those GStreamer store paths to WebKitGTK's web-process sandbox before creating the webview.
-- On Linux, `default.nix` predeclares LiveKit's `webrtc-51ef663` WebRTC zip for x86_64/aarch64 and exports `LK_CUSTOM_WEBRTC` during the Cargo build. This keeps `webrtc-sys` from trying to download WebRTC from GitHub inside the Nix sandbox.
+- `default.nix` predeclares LiveKit's `webrtc-51ef663` WebRTC zip for all four voice-capable systems (`x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, `aarch64-darwin`) and exports `LK_CUSTOM_WEBRTC` during the Cargo build. This keeps `webrtc-sys` from trying to download WebRTC from GitHub inside the Nix sandbox. All four archives unpack to the same `{triple}/` layout, so `preBuild` asserts the same three files everywhere. Darwin builds also get `xcbuild` in `nativeBuildInputs` because `webrtc-sys` shells out to `xcrun` for the macOS SDK path. Bumping `webrtc-sys` means re-fetching every archive's hash, not just the Linux pair.
 
 ---
 
@@ -518,6 +523,7 @@ Relevant TUI controls:
 
 - Full desktop CLI audio still depends on a working configured or default local audio output device; without one, the CLI proceeds into SSH/pairing with local audio disabled.
 - Embedded YouTube on Linux depends on the `late-webview` helper binary being installed next to `late` (plus the host WebKitGTK/GStreamer packages). A missing helper or missing libraries only disables embedded YouTube via the crash backoff; radio and icecast are unaffected, and the queue stays listenable at late.sh/listen.
+- Darwin Nix builds (`nix build .#late` on macOS) are wired but unverified: the WebRTC archives and `xcrun` provider are declared, and nobody has run the build on a mac yet.
 - OpenSSH mode is Unix-only; Windows users should use native mode.
 - Old mode remains as a compatibility path and still depends on system OpenSSH plus PTY behavior.
 - Native mode does not handle OpenSSH/FIDO/YubiKey auth flows; users must switch to OpenSSH mode for those.

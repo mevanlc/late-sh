@@ -1,4 +1,15 @@
+use late_core::models::article::NewsShareReward;
+use late_core::models::chat_message_gild::GildTier;
+use late_core::models::leaderboard::DoorGame;
+use late_core::models::media_queue_item::SongQueueReward;
+
 use crate::app::activity::event::ActivityGame;
+use crate::app::chat::svc::GildRefusal;
+use crate::app::crown::svc::CrownRefusal;
+use crate::app::deadchannel::haunt::state::GateVerdict;
+use crate::app::games::chips::svc::RoundRefusal;
+use crate::app::lobby::daily::svc::DailyWinPayout;
+use crate::app::pot::svc::PotRefusal;
 
 /// Why the render loop drew a frame. The loop can only distinguish its two
 /// wake sources; event-driven renders currently ride the world tick, so they
@@ -11,6 +22,151 @@ pub enum RenderReason {
     WorldTick,
 }
 
+/// How a chat-translation request resolved. `Translated` and `SameLanguage`
+/// are the variants that spent an API call; the others are the cache and the
+/// guardrails doing their job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TranslationResult {
+    CacheHit,
+    Translated,
+    /// The model judged the message already in the target language; cached,
+    /// renders as nothing.
+    SameLanguage,
+    Failed,
+    CapExhausted,
+    Stale,
+}
+
+/// How a `/summary` catch-up request resolved. `Summarized` is the variant
+/// that spent an API call; the rest are the guardrails and the empty case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SummaryResult {
+    Summarized,
+    /// Nothing in the window to summarize; no call spent.
+    Empty,
+    /// Collapsed into a request already running for the same user and room.
+    InFlight,
+    Cooldown,
+    CapExhausted,
+    /// AI is disabled or unconfigured for this deployment.
+    Unavailable,
+    Failed,
+}
+
+/// How one page of The Late Edition (`app/paper`) came off the press.
+/// `Printed` is the variant that spent a model call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaperPrintResult {
+    Printed,
+    /// Under the message threshold, or nothing to write about; no call.
+    Quiet,
+    /// Another replica held the claim; no call.
+    Lost,
+    Failed,
+}
+
+/// How a request to open the paper resolved. `Login` and `Command` are the
+/// two ways a reader got it; the rest are why they did not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaperOpenResult {
+    Login,
+    Command,
+    /// Nothing printed for today's edition.
+    Empty,
+    /// This account's login pop for the edition was already claimed.
+    AlreadyShown,
+    /// The paper's kill switch is off, or AI is unconfigured here.
+    Unavailable,
+    Failed,
+}
+
+/// How a hang attempt on the Artboard gallery ended. `Hung` is the row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GalleryHangResult {
+    Hung,
+    /// The account's pieces for the UTC day were already up.
+    DailyCap,
+    /// The same cells already hang this month.
+    Duplicate,
+    Failed,
+}
+
+/// How an applause toggle on a gallery piece ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GalleryApplauseResult {
+    Applauded,
+    Withdrawn,
+    OwnPiece,
+    NotFound,
+    Closed,
+    Failed,
+}
+
+/// How a hanger's own take-down resolved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GalleryTakeDownResult {
+    TakenDown,
+    NotFound,
+    NotYours,
+    Closed,
+    Failed,
+}
+
+/// How a five-minute online-time flush resolved. `Failed` means the batch is
+/// retained in memory for retry; a sustained run of failures is accruing time
+/// that dies with the process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnlineTimeFlushResult {
+    Flushed,
+    Failed,
+}
+
+/// One rung of the first-contact ladder actually reaching a person (GAME.md,
+/// First contact). The two hit beats count won DB claims, never local dice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstContactBeat {
+    GlitchBurst,
+    NameFlicker,
+    WhisperDelivered,
+    InvitationRequested,
+    /// The invitation accepted: `/join #deadchannel` created the runner.
+    RunnerCreated,
+}
+
+/// How one bio screen (the first-contact eligibility gate's AI leg)
+/// resolved. `Passed` and `Failed` are the verdicts that spent an API call
+/// and landed; the rest are the reasons a claim produced no verdict.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BioScreenOutcome {
+    Passed,
+    Failed,
+    /// The model answered with nothing usable; the pending claim stays and
+    /// is retried after the stale window.
+    Unavailable,
+    /// The call itself broke (network, API error).
+    CallFailed,
+    /// Another session on any replica already holds the claim.
+    LostClaim,
+    /// The bio changed while the call was in flight; the verdict was
+    /// dropped and the new text gets its own screen.
+    TextChanged,
+}
+
+/// Why an inbound SSH TCP connection was closed before the SSH handshake.
+/// Every variant is a socket the accept loop dropped on the floor; none of
+/// them ever reached russh, so they cost no permit, task, or buffers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SshRejectReason {
+    /// The trusted proxy never delivered a PROXY protocol header in time.
+    ProxyHeader,
+    /// The per-IP attempt rate limiter refused the connection.
+    RateLimited,
+    /// The IP already holds `max_conns_per_ip` open connections.
+    PerIpLimit,
+    /// The global `max_conns_global` semaphore is exhausted.
+    GlobalLimit,
+}
+
 #[cfg(feature = "otel")]
 mod inner {
     use std::sync::OnceLock;
@@ -20,7 +176,13 @@ mod inner {
         metrics::{Counter, UpDownCounter},
     };
 
-    use super::{ActivityGame, RenderReason};
+    use super::{
+        ActivityGame, BioScreenOutcome, CrownRefusal, DailyWinPayout, DoorGame, FirstContactBeat,
+        GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult, GateVerdict, GildRefusal,
+        GildTier, NewsShareReward, OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult,
+        PotRefusal, RenderReason, RoundRefusal, SongQueueReward, SshRejectReason, SummaryResult,
+        TranslationResult,
+    };
 
     fn meter() -> opentelemetry::metrics::Meter {
         global::meter("late-ssh")
@@ -37,7 +199,10 @@ mod inner {
         match game {
             ActivityGame::Asterion => "asterion",
             ActivityGame::Blackjack => "blackjack",
+            ActivityGame::Brogue => "brogue",
             ActivityGame::Chess => "chess",
+            ActivityGame::Darkroom => "darkroom",
+            ActivityGame::Dcss => "dcss",
             ActivityGame::GreenDragon => "greendragon",
             ActivityGame::LeWord => "le_word",
             ActivityGame::Minesweeper => "minesweeper",
@@ -46,6 +211,7 @@ mod inner {
             ActivityGame::Nonogram => "nonogram",
             ActivityGame::Poker => "poker",
             ActivityGame::RubiksCube => "rubiks_cube",
+            ActivityGame::SlidingPuzzle => "sliding_puzzle",
             ActivityGame::Sshattrick => "sshattrick",
             ActivityGame::Ssnake => "ssnake",
             ActivityGame::Solitaire => "solitaire",
@@ -199,6 +365,266 @@ mod inner {
         })
     }
 
+    fn gild_tier_label(tier: GildTier) -> &'static str {
+        match tier {
+            GildTier::Bronze => "bronze",
+            GildTier::Silver => "silver",
+            GildTier::Gold => "gold",
+        }
+    }
+
+    fn gild_refusal_label(refusal: GildRefusal) -> &'static str {
+        match refusal {
+            GildRefusal::MessageNotFound => "message_not_found",
+            GildRefusal::NotAMember => "not_a_member",
+            GildRefusal::NotPublic => "not_public",
+            GildRefusal::GameRoom => "game_room",
+            GildRefusal::SelfGild => "self_gild",
+            GildRefusal::BotAuthor => "bot_author",
+            GildRefusal::OnCooldown => "on_cooldown",
+            GildRefusal::AlreadyGilded => "already_gilded",
+            GildRefusal::HeldHigher => "held_higher",
+            GildRefusal::InsufficientChips => "insufficient_chips",
+        }
+    }
+
+    fn crown_refusal_label(refusal: CrownRefusal) -> &'static str {
+        match refusal {
+            CrownRefusal::AlreadyYours => "already_yours",
+            CrownRefusal::InsufficientChips { .. } => "insufficient_chips",
+        }
+    }
+
+    fn crown_takes_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_crown_takes_total")
+                .with_description("Crown takeovers that settled")
+                .build()
+        })
+    }
+
+    fn crown_chips_burned_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_crown_chips_burned_total")
+                .with_description("Chips destroyed by crown takeovers (the whole price)")
+                .build()
+        })
+    }
+
+    fn crown_takes_refused_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_crown_takes_refused_total")
+                .with_description("Crown takeovers refused, by reason (none were charged)")
+                .build()
+        })
+    }
+
+    fn round_refusal_label(refusal: RoundRefusal) -> &'static str {
+        match refusal {
+            RoundRefusal::EmptyHouse => "empty_house",
+            RoundRefusal::AllHolding => "all_holding",
+            RoundRefusal::InsufficientChips { .. } => "insufficient_chips",
+        }
+    }
+
+    fn rounds_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_rounds_total")
+                .with_description("Rounds bought for the house that settled")
+                .build()
+        })
+    }
+
+    fn round_drinks_granted_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_round_drinks_granted_total")
+                .with_description("Drink credits handed out by rounds")
+                .build()
+        })
+    }
+
+    fn round_drinks_cashed_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_round_drinks_cashed_total")
+                .with_description(
+                    "Round credits actually drunk (the gap against granted is what expired)",
+                )
+                .build()
+        })
+    }
+
+    fn round_chips_burned_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_round_chips_burned_total")
+                .with_description("Chips destroyed by rounds (the whole price)")
+                .build()
+        })
+    }
+
+    fn rounds_refused_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_rounds_refused_total")
+                .with_description("Rounds refused, by reason (none were charged)")
+                .build()
+        })
+    }
+
+    fn pot_refusal_label(refusal: PotRefusal) -> &'static str {
+        match refusal {
+            PotRefusal::Closed => "closed",
+            PotRefusal::CapReached { .. } => "cap_reached",
+            PotRefusal::InsufficientChips { .. } => "insufficient_chips",
+        }
+    }
+
+    fn pot_tickets_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_tickets_total")
+                .with_description("Pot tickets bought")
+                .build()
+        })
+    }
+
+    fn pot_chips_in_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_chips_in_total")
+                .with_description("Chips paid into pots for tickets")
+                .build()
+        })
+    }
+
+    fn pot_buys_refused_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_buys_refused_total")
+                .with_description("Pot ticket buys refused, by reason (none were charged)")
+                .build()
+        })
+    }
+
+    fn pot_draws_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_draws_total")
+                .with_description("Pots drawn with a winner")
+                .build()
+        })
+    }
+
+    fn pot_tickets_drawn_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_tickets_drawn_total")
+                .with_description("Tickets in the field at each pot draw")
+                .build()
+        })
+    }
+
+    fn pot_chips_out_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_chips_out_total")
+                .with_description("Chips paid out by pot draws; the gap to chips_in is the burn")
+                .build()
+        })
+    }
+
+    fn chat_gilds_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_chat_gilds_total")
+                .with_description("Chat message gilds bought, by tier")
+                .build()
+        })
+    }
+
+    fn chat_gilds_refused_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_chat_gilds_refused_total")
+                .with_description("Chat message gilds refused, by reason (none were charged)")
+                .build()
+        })
+    }
+
+    fn daily_win_payouts_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_daily_win_payouts_total")
+                .with_description(
+                    "Daily correspondence match wins by what the chips did (paid, or refused by a lobby gate)",
+                )
+                .build()
+        })
+    }
+
+    fn news_shares_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_news_shares_total")
+                .with_description("News articles published, from the composer or an RSS share")
+                .build()
+        })
+    }
+
+    fn news_share_chips_paid_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_news_share_chips_paid_total")
+                .with_description("Chips minted as News share rewards")
+                .build()
+        })
+    }
+
+    fn songs_queued_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_songs_queued_total")
+                .with_description("YouTube tracks queued, from the booth, a URL, or history")
+                .build()
+        })
+    }
+
+    fn song_queue_chips_paid_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_song_queue_chips_paid_total")
+                .with_description("Chips minted as jukebox submission rewards")
+                .build()
+        })
+    }
+
     fn game_wins_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -207,6 +633,125 @@ mod inner {
                 .with_description("Games won by game name")
                 .build()
         })
+    }
+
+    fn first_contact_beats_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_first_contact_beats_total")
+                .with_description("First-contact ladder beats delivered, by beat")
+                .build()
+        })
+    }
+
+    fn first_contact_bio_screens_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_first_contact_bio_screens_total")
+                .with_description("First-contact bio screens, by outcome")
+                .build()
+        })
+    }
+
+    fn first_contact_gate_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_first_contact_gate_total")
+                .with_description(
+                    "First-contact eligibility gate evaluations at connect (one per session, not per person), by verdict and audience",
+                )
+                .build()
+        })
+    }
+
+    fn first_contact_gate_verdict_label(verdict: GateVerdict) -> &'static str {
+        match verdict {
+            GateVerdict::Passed => "passed",
+            GateVerdict::TooFewHours => "too_few_hours",
+            GateVerdict::TooFewSettings => "too_few_settings",
+            GateVerdict::BioTooShort => "bio_too_short",
+            GateVerdict::BioAiOff => "bio_ai_off",
+            GateVerdict::BioUnscreened => "bio_unscreened",
+            GateVerdict::BioPending => "bio_pending",
+            GateVerdict::BioFailed => "bio_failed",
+        }
+    }
+
+    fn first_contact_beat_label(beat: FirstContactBeat) -> &'static str {
+        match beat {
+            FirstContactBeat::GlitchBurst => "glitch_burst",
+            FirstContactBeat::NameFlicker => "name_flicker",
+            FirstContactBeat::WhisperDelivered => "whisper_delivered",
+            FirstContactBeat::InvitationRequested => "invitation_requested",
+            FirstContactBeat::RunnerCreated => "runner_created",
+        }
+    }
+
+    fn bio_screen_outcome_label(outcome: BioScreenOutcome) -> &'static str {
+        match outcome {
+            BioScreenOutcome::Passed => "passed",
+            BioScreenOutcome::Failed => "failed",
+            BioScreenOutcome::Unavailable => "unavailable",
+            BioScreenOutcome::CallFailed => "call_failed",
+            BioScreenOutcome::LostClaim => "lost_claim",
+            BioScreenOutcome::TextChanged => "text_changed",
+        }
+    }
+
+    pub fn record_first_contact_beat(beat: FirstContactBeat) {
+        first_contact_beats_total()
+            .add(1, &[KeyValue::new("beat", first_contact_beat_label(beat))]);
+    }
+
+    pub fn record_first_contact_bio_screen(outcome: BioScreenOutcome) {
+        first_contact_bio_screens_total().add(
+            1,
+            &[KeyValue::new("outcome", bio_screen_outcome_label(outcome))],
+        );
+    }
+
+    /// One gate evaluation at connect. `staff` splits admins and
+    /// moderators (haunted while the fuse is unlit) from everyone else.
+    pub fn record_first_contact_gate(verdict: GateVerdict, staff: bool) {
+        let audience = if staff { "staff" } else { "public" };
+        first_contact_gate_total().add(
+            1,
+            &[
+                KeyValue::new("verdict", first_contact_gate_verdict_label(verdict)),
+                KeyValue::new("audience", audience),
+            ],
+        );
+    }
+
+    fn ssh_connections_rejected_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_connections_rejected_total")
+                .with_description(
+                    "Inbound SSH TCP connections closed before the handshake, by reason",
+                )
+                .build()
+        })
+    }
+
+    fn ssh_reject_reason_label(reason: SshRejectReason) -> &'static str {
+        match reason {
+            SshRejectReason::ProxyHeader => "proxy_header",
+            SshRejectReason::RateLimited => "rate_limited",
+            SshRejectReason::PerIpLimit => "per_ip_limit",
+            SshRejectReason::GlobalLimit => "global_limit",
+        }
+    }
+
+    pub fn record_ssh_connection_rejected(reason: SshRejectReason) {
+        ssh_connections_rejected_total().add(
+            1,
+            &[KeyValue::new("reason", ssh_reject_reason_label(reason))],
+        );
     }
 
     pub fn record_ssh_connection() {
@@ -276,13 +821,391 @@ mod inner {
     pub fn record_game_win(game: ActivityGame) {
         game_wins_total().add(1, &[KeyValue::new("game", game_label(game))]);
     }
+
+    fn daily_win_payout_label(payout: DailyWinPayout) -> &'static str {
+        match payout {
+            DailyWinPayout::Paid => "paid",
+            DailyWinPayout::Unplayed => "unplayed",
+            DailyWinPayout::PairDayCapped => "pair_day_capped",
+            DailyWinPayout::Failed => "failed",
+        }
+    }
+
+    pub fn record_daily_win_payout(payout: DailyWinPayout) {
+        daily_win_payouts_total().add(
+            1,
+            &[KeyValue::new("outcome", daily_win_payout_label(payout))],
+        );
+    }
+
+    /// A share pays a flat reward, so one counter tracks the shares and
+    /// another the chips they minted; the two together are the sink-free
+    /// half of the News economy.
+    fn news_share_reward_label(reward: NewsShareReward) -> &'static str {
+        match reward {
+            NewsShareReward::Paid => "paid",
+            NewsShareReward::RepeatUrl => "repeat_url",
+            NewsShareReward::DailyCapReached => "daily_cap",
+        }
+    }
+
+    pub fn record_news_shared(reward: NewsShareReward) {
+        news_shares_total().add(
+            1,
+            &[KeyValue::new("reward", news_share_reward_label(reward))],
+        );
+        news_share_chips_paid_total().add(reward.chips() as u64, &[]);
+    }
+
+    /// Same shape as the News share: one counter for the submissions and one
+    /// for the chips they minted, so the tracks that came in past the day's
+    /// cap are visible beside the paid ones.
+    fn song_queue_reward_label(reward: SongQueueReward) -> &'static str {
+        match reward {
+            SongQueueReward::Paid => "paid",
+            SongQueueReward::DailyCapReached => "daily_cap",
+        }
+    }
+
+    pub fn record_song_queued(reward: SongQueueReward) {
+        songs_queued_total().add(
+            1,
+            &[KeyValue::new("reward", song_queue_reward_label(reward))],
+        );
+        song_queue_chips_paid_total().add(reward.chips() as u64, &[]);
+    }
+
+    pub fn record_gild_bought(tier: GildTier) {
+        chat_gilds_total().add(1, &[KeyValue::new("tier", gild_tier_label(tier))]);
+    }
+
+    pub fn record_gild_refused(refusal: GildRefusal) {
+        chat_gilds_refused_total().add(1, &[KeyValue::new("reason", gild_refusal_label(refusal))]);
+    }
+
+    /// The price is burned whole, so one counter tracks the takeovers and
+    /// another the chips they removed from the supply.
+    pub fn record_crown_taken(price: i64) {
+        crown_takes_total().add(1, &[]);
+        crown_chips_burned_total().add(price.max(0) as u64, &[]);
+    }
+
+    pub fn record_crown_take_refused(refusal: CrownRefusal) {
+        crown_takes_refused_total()
+            .add(1, &[KeyValue::new("reason", crown_refusal_label(refusal))]);
+    }
+
+    /// A settled round. The price is burned whole like the crown's, and the
+    /// drinks are counted separately from the rounds because the interesting
+    /// number is how many of them ever get drunk.
+    pub fn record_round_bought(patrons: i64, chips: i64) {
+        rounds_total().add(1, &[]);
+        round_drinks_granted_total().add(patrons.max(0) as u64, &[]);
+        round_chips_burned_total().add(chips.max(0) as u64, &[]);
+    }
+
+    pub fn record_round_refused(refusal: RoundRefusal) {
+        rounds_refused_total().add(1, &[KeyValue::new("reason", round_refusal_label(refusal))]);
+    }
+
+    /// A patron walked up and drank a credit somebody else paid for.
+    pub fn record_round_drink_cashed() {
+        round_drinks_cashed_total().add(1, &[]);
+    }
+
+    /// A settled buy. Two counters, because the burn is only visible as the
+    /// gap between what went in and what came out.
+    pub fn record_pot_tickets_bought(tickets: i64, chips: i64) {
+        pot_tickets_total().add(tickets.max(0) as u64, &[]);
+        pot_chips_in_total().add(chips.max(0) as u64, &[]);
+    }
+
+    pub fn record_pot_buy_refused(refusal: PotRefusal) {
+        pot_buys_refused_total().add(1, &[KeyValue::new("reason", pot_refusal_label(refusal))]);
+    }
+
+    /// A settled draw with a winner. A pot that rolled empty records nothing:
+    /// no chips moved. The ticket count rides its own counter rather than a
+    /// label, since a per-draw number would be unbounded cardinality.
+    pub fn record_pot_drawn(payout: i64, tickets: i64) {
+        pot_draws_total().add(1, &[]);
+        pot_tickets_drawn_total().add(tickets.max(0) as u64, &[]);
+        pot_chips_out_total().add(payout.max(0) as u64, &[]);
+    }
+
+    fn translation_result_label(result: TranslationResult) -> &'static str {
+        match result {
+            TranslationResult::CacheHit => "cache_hit",
+            TranslationResult::Translated => "translated",
+            TranslationResult::SameLanguage => "same_language",
+            TranslationResult::Failed => "failed",
+            TranslationResult::CapExhausted => "cap_exhausted",
+            TranslationResult::Stale => "stale",
+        }
+    }
+
+    fn chat_translations_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_chat_translations_total")
+                .with_description("Chat message translation requests by resolution")
+                .build()
+        })
+    }
+
+    pub fn record_chat_translation(result: TranslationResult) {
+        chat_translations_total().add(
+            1,
+            &[KeyValue::new("result", translation_result_label(result))],
+        );
+    }
+
+    fn summary_result_label(result: SummaryResult) -> &'static str {
+        match result {
+            SummaryResult::Summarized => "summarized",
+            SummaryResult::Empty => "empty",
+            SummaryResult::InFlight => "in_flight",
+            SummaryResult::Cooldown => "cooldown",
+            SummaryResult::CapExhausted => "cap_exhausted",
+            SummaryResult::Unavailable => "unavailable",
+            SummaryResult::Failed => "failed",
+        }
+    }
+
+    fn chat_summaries_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_chat_summaries_total")
+                .with_description("Chat /summary catch-up requests by resolution")
+                .build()
+        })
+    }
+
+    pub fn record_chat_summary(result: SummaryResult) {
+        chat_summaries_total().add(1, &[KeyValue::new("result", summary_result_label(result))]);
+    }
+
+    fn paper_print_result_label(result: PaperPrintResult) -> &'static str {
+        match result {
+            PaperPrintResult::Printed => "printed",
+            PaperPrintResult::Quiet => "quiet",
+            PaperPrintResult::Lost => "lost",
+            PaperPrintResult::Failed => "failed",
+        }
+    }
+
+    fn paper_prints_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_paper_prints_total")
+                .with_description("Daily paper pages (rooms and sections) by print result")
+                .build()
+        })
+    }
+
+    pub fn record_paper_print(result: PaperPrintResult) {
+        paper_prints_total().add(
+            1,
+            &[KeyValue::new("result", paper_print_result_label(result))],
+        );
+    }
+
+    fn paper_open_result_label(result: PaperOpenResult) -> &'static str {
+        match result {
+            PaperOpenResult::Login => "login",
+            PaperOpenResult::Command => "command",
+            PaperOpenResult::Empty => "empty",
+            PaperOpenResult::AlreadyShown => "already_shown",
+            PaperOpenResult::Unavailable => "unavailable",
+            PaperOpenResult::Failed => "failed",
+        }
+    }
+
+    fn paper_opens_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_paper_opens_total")
+                .with_description("Daily paper open requests (login pop and /paper) by resolution")
+                .build()
+        })
+    }
+
+    pub fn record_paper_open(result: PaperOpenResult) {
+        paper_opens_total().add(
+            1,
+            &[KeyValue::new("result", paper_open_result_label(result))],
+        );
+    }
+
+    fn gallery_hang_result_label(result: GalleryHangResult) -> &'static str {
+        match result {
+            GalleryHangResult::Hung => "hung",
+            GalleryHangResult::DailyCap => "daily_cap",
+            GalleryHangResult::Duplicate => "duplicate",
+            GalleryHangResult::Failed => "failed",
+        }
+    }
+
+    fn gallery_hangs_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_artboard_gallery_hangs_total")
+                .with_description("Artboard gallery hang attempts by result")
+                .build()
+        })
+    }
+
+    pub fn record_gallery_hang(result: GalleryHangResult) {
+        gallery_hangs_total().add(
+            1,
+            &[KeyValue::new("result", gallery_hang_result_label(result))],
+        );
+    }
+
+    fn gallery_applause_result_label(result: GalleryApplauseResult) -> &'static str {
+        match result {
+            GalleryApplauseResult::Applauded => "applauded",
+            GalleryApplauseResult::Withdrawn => "withdrawn",
+            GalleryApplauseResult::OwnPiece => "own_piece",
+            GalleryApplauseResult::NotFound => "not_found",
+            GalleryApplauseResult::Closed => "closed",
+            GalleryApplauseResult::Failed => "failed",
+        }
+    }
+
+    fn gallery_take_down_result_label(result: GalleryTakeDownResult) -> &'static str {
+        match result {
+            GalleryTakeDownResult::TakenDown => "taken_down",
+            GalleryTakeDownResult::NotFound => "not_found",
+            GalleryTakeDownResult::NotYours => "not_yours",
+            GalleryTakeDownResult::Closed => "closed",
+            GalleryTakeDownResult::Failed => "failed",
+        }
+    }
+
+    fn gallery_take_downs_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_artboard_gallery_take_downs_total")
+                .with_description("Artboard gallery take-downs by the hanger, by result")
+                .build()
+        })
+    }
+
+    pub fn record_gallery_take_down(result: GalleryTakeDownResult) {
+        gallery_take_downs_total().add(
+            1,
+            &[KeyValue::new(
+                "result",
+                gallery_take_down_result_label(result),
+            )],
+        );
+    }
+
+    fn gallery_applause_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_artboard_gallery_applause_total")
+                .with_description("Artboard gallery applause toggles by result")
+                .build()
+        })
+    }
+
+    pub fn record_gallery_applause(result: GalleryApplauseResult) {
+        gallery_applause_total().add(
+            1,
+            &[KeyValue::new(
+                "result",
+                gallery_applause_result_label(result),
+            )],
+        );
+    }
+
+    fn door_ingest_lines_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_ingest_lines_total")
+                .with_description(
+                    "Door host log lines handled by the ingest pipe (cursor advanced) by game",
+                )
+                .build()
+        })
+    }
+
+    fn door_ingest_session_failures_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_ingest_session_failures_total")
+                .with_description(
+                    "Door stats-session failures (connect or mid-stream) before a retry, by game",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_door_ingest_line(game: DoorGame) {
+        // `DoorGame::key` is the closed roster's own exhaustive label map.
+        door_ingest_lines_total().add(1, &[KeyValue::new("game", game.key())]);
+    }
+
+    pub fn record_door_ingest_session_failure(game: DoorGame) {
+        door_ingest_session_failures_total().add(1, &[KeyValue::new("game", game.key())]);
+    }
+
+    fn online_time_flush_result_label(result: OnlineTimeFlushResult) -> &'static str {
+        match result {
+            OnlineTimeFlushResult::Flushed => "flushed",
+            OnlineTimeFlushResult::Failed => "failed",
+        }
+    }
+
+    fn online_time_flushes_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_online_time_flushes_total")
+                .with_description(
+                    "Online-time flush passes by result; a failed pass retains its batch in memory for retry",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_online_time_flush(result: OnlineTimeFlushResult) {
+        online_time_flushes_total().add(
+            1,
+            &[KeyValue::new(
+                "result",
+                online_time_flush_result_label(result),
+            )],
+        );
+    }
 }
 
 #[cfg(not(feature = "otel"))]
 mod inner {
-    use super::{ActivityGame, RenderReason};
+    use super::{
+        ActivityGame, BioScreenOutcome, CrownRefusal, DailyWinPayout, DoorGame, FirstContactBeat,
+        GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult, GateVerdict, GildRefusal,
+        GildTier, NewsShareReward, OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult,
+        PotRefusal, RenderReason, RoundRefusal, SongQueueReward, SshRejectReason, SummaryResult,
+        TranslationResult,
+    };
 
     pub fn record_ssh_connection() {}
+    pub fn record_ssh_connection_rejected(_reason: SshRejectReason) {}
+    pub fn record_first_contact_beat(_beat: FirstContactBeat) {}
+    pub fn record_first_contact_bio_screen(_outcome: BioScreenOutcome) {}
+    pub fn record_first_contact_gate(_verdict: GateVerdict, _staff: bool) {}
     pub fn record_render(_reason: RenderReason) {}
     pub fn record_render_skipped_clean() {}
     pub fn add_ssh_session(_delta: i64) {}
@@ -296,6 +1219,29 @@ mod inner {
     pub fn record_chat_message_sent() {}
     pub fn record_chat_message_edited() {}
     pub fn record_game_win(_game: ActivityGame) {}
+    pub fn record_daily_win_payout(_payout: DailyWinPayout) {}
+    pub fn record_news_shared(_reward: NewsShareReward) {}
+    pub fn record_song_queued(_reward: SongQueueReward) {}
+    pub fn record_gild_bought(_tier: GildTier) {}
+    pub fn record_gild_refused(_refusal: GildRefusal) {}
+    pub fn record_crown_taken(_price: i64) {}
+    pub fn record_crown_take_refused(_refusal: CrownRefusal) {}
+    pub fn record_round_bought(_patrons: i64, _chips: i64) {}
+    pub fn record_round_refused(_refusal: RoundRefusal) {}
+    pub fn record_round_drink_cashed() {}
+    pub fn record_pot_tickets_bought(_tickets: i64, _chips: i64) {}
+    pub fn record_pot_buy_refused(_refusal: PotRefusal) {}
+    pub fn record_pot_drawn(_payout: i64, _tickets: i64) {}
+    pub fn record_chat_translation(_result: TranslationResult) {}
+    pub fn record_chat_summary(_result: SummaryResult) {}
+    pub fn record_paper_print(_result: PaperPrintResult) {}
+    pub fn record_paper_open(_result: PaperOpenResult) {}
+    pub fn record_gallery_hang(_result: GalleryHangResult) {}
+    pub fn record_gallery_applause(_result: GalleryApplauseResult) {}
+    pub fn record_gallery_take_down(_result: GalleryTakeDownResult) {}
+    pub fn record_door_ingest_line(_game: DoorGame) {}
+    pub fn record_door_ingest_session_failure(_game: DoorGame) {}
+    pub fn record_online_time_flush(_result: OnlineTimeFlushResult) {}
 }
 
 pub use inner::*;

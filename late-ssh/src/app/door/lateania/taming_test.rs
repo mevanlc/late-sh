@@ -46,8 +46,15 @@ fn no_beast_is_out_classed_by_an_easier_one() {
     // The ten Wildbound mounts used to open at attack 22 / hp 420 against the
     // tame-50 Green Wyrm's 38 / 560, leaving taming 51..=79 as pure dead grind -
     // twenty-five levels that downgraded your pet.
-    for b in TAMEABLE {
-        if let Some(better) = TAMEABLE.iter().find(|c| {
+    //
+    // Both pools are one ladder as far as a player is concerned: they grind a
+    // single Animal Taming level and pick the best beast it opens, wherever it
+    // roams. So the rule spans `TAMEABLE` and `AELUNOR_TAMEABLE` together, in
+    // both directions - Aelunor's five used to escape it entirely by sitting
+    // in their own const, and three of them lost outright to easier classics.
+    let pool: Vec<&PetSpecies> = TAMEABLE.iter().chain(AELUNOR_TAMEABLE).collect();
+    for b in &pool {
+        if let Some(better) = pool.iter().find(|c| {
             c.tame_level < b.tame_level
                 && c.base_attack >= b.base_attack
                 && c.base_hp >= b.base_hp
@@ -83,33 +90,48 @@ fn tameable_keys_are_unique_and_resolve() {
 #[test]
 fn every_beast_has_a_roaming_spot_in_broceliande() {
     let beasts = wild_beasts();
-    assert_eq!(beasts.len(), TAMEABLE_COUNT, "one roaming spot per beast");
-    // Every spot points at a real species index, and all fifty species appear.
+    assert_eq!(
+        beasts.len(),
+        TAMEABLE_COUNT + AELUNOR_TAMEABLE.len(),
+        "one roaming spot per beast, Broceliande's fifty-five plus Aelunor's five"
+    );
+    // Every spot points at a real species index (resolved via `beast_species`,
+    // which covers both pools), and every species in both pools appears.
     let mut seen = std::collections::HashSet::new();
     for b in beasts {
-        assert!(b.species < TAMEABLE_COUNT);
+        assert!(b.species < TAMEABLE_COUNT + AELUNOR_TAMEABLE.len());
         seen.insert(b.species);
     }
-    assert_eq!(seen.len(), TAMEABLE_COUNT, "all fifty beasts are placed");
+    assert_eq!(
+        seen.len(),
+        TAMEABLE_COUNT + AELUNOR_TAMEABLE.len(),
+        "every beast in both pools is placed"
+    );
 }
 
 #[test]
 fn tame_chance_rises_with_surplus_and_refuses_under_level() {
     let beast = &TAMEABLE[TAMEABLE_COUNT - 1]; // needs level 50
     // A novice cannot tame the greatest beast.
-    assert_eq!(tame_chance(0, beast), 0);
+    assert_eq!(tame_chance(0, beast, 0), 0);
     // The first beast (level 1) is a coin-toss for a rank beginner and a near
     // sure thing for a trained tamer.
     let easy = &TAMEABLE[0];
-    assert_eq!(tame_chance(0, easy), 40, "at exactly the required level");
+    assert_eq!(tame_chance(0, easy, 0), 40, "at exactly the required level");
+    assert_eq!(
+        tame_chance(0, easy, 6),
+        46,
+        "charisma adds its percent points"
+    );
+    assert_eq!(tame_chance(0, easy, -6), 34, "and takes them away");
     let trained = super::super::skills::xp_for_skill_level(10);
     assert!(
-        tame_chance(trained, easy) > tame_chance(0, easy),
+        tame_chance(trained, easy, 0) > tame_chance(0, easy, 0),
         "surplus level raises the odds"
     );
     // The chance is capped below certainty.
     let master = super::super::skills::xp_for_skill_level(50);
-    assert!(tame_chance(master, easy) <= 95, "never a sure thing");
+    assert!(tame_chance(master, easy, 12) <= 95, "never a sure thing");
 }
 
 #[test]

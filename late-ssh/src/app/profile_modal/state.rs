@@ -1,6 +1,8 @@
 use std::cell::{Cell, RefCell};
 
+use late_core::models::artboard_piece::GalleryCounts;
 use late_core::models::bonsai::Tree;
+use late_core::models::chat_message_gild::GildCounts;
 use late_core::models::profile::Profile;
 use late_core::models::profile_award::ProfileAward;
 use ratatui::layout::Rect;
@@ -70,6 +72,8 @@ pub(crate) struct ProfileModalState {
     /// immutable `draw` path.
     popup_area: Cell<Rect>,
     profile_awards: Vec<ProfileAward>,
+    gild_counts: GildCounts,
+    gallery_counts: GalleryCounts,
     tab: ProfileTab,
     snapshot_rx: Option<watch::Receiver<ProfileSnapshot>>,
     scroll_offset: u16,
@@ -107,6 +111,8 @@ impl ProfileModalState {
             aquarium_area: Cell::new(Rect::default()),
             popup_area: Cell::new(Rect::default()),
             profile_awards: Vec::new(),
+            gild_counts: GildCounts::default(),
+            gallery_counts: GalleryCounts::default(),
             tab: ProfileTab::Overview,
             snapshot_rx: None,
             scroll_offset: 0,
@@ -120,6 +126,8 @@ impl ProfileModalState {
         self.scroll_offset = 0;
         self.tab = ProfileTab::Overview;
         self.profile_awards.clear();
+        self.gild_counts = GildCounts::default();
+        self.gallery_counts = GalleryCounts::default();
         self.aquarium_fish.clear();
         *self.aquarium.get_mut() = None;
         let mut snapshot_rx = self.profile_service.subscribe_snapshot(user_id);
@@ -143,6 +151,8 @@ impl ProfileModalState {
         self.aquarium_fish.clear();
         *self.aquarium.get_mut() = None;
         self.profile_awards.clear();
+        self.gild_counts = GildCounts::default();
+        self.gallery_counts = GalleryCounts::default();
         self.tab = ProfileTab::Overview;
         self.scroll_offset = 0;
         self.snapshot_rx = None;
@@ -189,6 +199,8 @@ impl ProfileModalState {
             self.bonsai_v2 = None;
             self.dynamic_bonsai_selected = false;
             self.profile_awards.clear();
+            self.gild_counts = GildCounts::default();
+            self.gallery_counts = GalleryCounts::default();
             if !self.aquarium_fish.is_empty() {
                 self.aquarium_fish.clear();
                 *self.aquarium.get_mut() = None;
@@ -201,6 +213,8 @@ impl ProfileModalState {
         self.bonsai = snapshot.bonsai;
         self.dynamic_bonsai_selected = snapshot.dynamic_bonsai_selected;
         self.profile_awards = snapshot.profile_awards;
+        self.gild_counts = snapshot.gild_counts;
+        self.gallery_counts = snapshot.gallery_counts;
 
         if snapshot.aquarium_fish != self.aquarium_fish {
             self.aquarium_fish = snapshot.aquarium_fish;
@@ -299,6 +313,14 @@ impl ProfileModalState {
 
     pub(crate) fn profile_awards(&self) -> &[ProfileAward] {
         &self.profile_awards
+    }
+
+    pub(crate) fn gild_counts(&self) -> GildCounts {
+        self.gild_counts
+    }
+
+    pub(crate) fn gallery_counts(&self) -> GalleryCounts {
+        self.gallery_counts
     }
 
     pub(crate) fn profile(&self) -> Option<&Profile> {

@@ -19,7 +19,6 @@ use std::os::unix::fs::PermissionsExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as TokioMutex, OwnedSemaphorePermit};
 use tokio::task::JoinSet;
@@ -31,7 +30,8 @@ use crate::app::{
     state::{App, SessionConfig},
 };
 use crate::authz::Permissions as AuthzPermissions;
-use crate::metrics;
+use crate::metrics::{self, SshRejectReason};
+use crate::proxy_protocol;
 use crate::render_signal::RenderSignal;
 use crate::session_bootstrap::{ArcadeSessionPreloads, load_arcade_session_preloads};
 use crate::state::{ActiveSession, State};
@@ -39,8 +39,7 @@ use crate::terminal_size::clamp_terminal_size;
 use crate::usernames;
 
 static FRAME_DROP_COUNT: AtomicU64 = AtomicU64::new(0);
-const PROXY_V1_MAX_LEN: usize = 108;
-const PROXY_HEADER_TIMEOUT: Duration = Duration::from_millis(250);
+use crate::config::PROXY_HEADER_TIMEOUT;
 const CLI_MODE_ENV: &str = "LATE_CLI_MODE";
 const CLI_TOKEN_PREFIX: &str = "LATE_SESSION_TOKEN=";
 const CLI_TOKEN_REQUEST: &str = "late-cli-token-v1";
@@ -126,10 +125,9 @@ struct ClientHandler {
     transport_peer_addr: Option<std::net::SocketAddr>,
     peer_addr: Option<std::net::SocketAddr>,
     peer_ip: Option<IpAddr>,
-    _conn_permit: Option<OwnedSemaphorePermit>,
+    _conn_permit: OwnedSemaphorePermit,
     per_ip_incremented: bool,
     active_user_incremented: bool,
-    over_limit: bool,
 
     /// Activity feed
     activity_feed_rx: Option<tokio::sync::broadcast::Receiver<ActivityEvent>>,
@@ -198,6 +196,16 @@ pub async fn run_with_listener(
         // the real publickey auth is even attempted.
         auth_rejection_time_initial: Some(std::time::Duration::ZERO),
         keys,
+        // Offer `none` only. russh advertises zlib by default, and clients
+        // that ask for it (`ssh -C`, `Compression yes`) have been dropping
+        // mid-session with "closed by remote host" on the first keystroke
+        // that moves a character. A TUI frame stream is small and already
+        // poorly compressible, so there is nothing to win here and a live
+        // disconnect to lose.
+        preferred: russh::Preferred {
+            compression: std::borrow::Cow::Borrowed(&[russh::compression::NONE]),
+            ..russh::Preferred::DEFAULT
+        },
         window_size: 8 * 1024 * 1024, // 8MB window size
         event_buffer_size: 128,
         nodelay: true,
@@ -212,14 +220,6 @@ pub async fn run_with_listener(
 
     let server = Server { state };
     let mut session_tasks = JoinSet::new();
-    if server.state.config.ssh_proxy_protocol
-        && server.state.config.ssh_proxy_trusted_cidrs.is_empty()
-    {
-        tracing::warn!(
-            "ssh proxy protocol is enabled but LATE_SSH_PROXY_TRUSTED_CIDRS is empty; \
-             proxy headers will be rejected"
-        );
-    }
 
     loop {
         tokio::select! {
@@ -245,11 +245,52 @@ pub async fn run_with_listener(
                                     error = ?err,
                                     "failed to resolve proxy protocol header; dropping connection"
                                 );
+                                metrics::record_ssh_connection_rejected(SshRejectReason::ProxyHeader);
                                 return;
                             }
                         };
 
-                    let handler = server.new_client_with_addrs(Some(transport_peer_addr), proxied_addr);
+                    // Admission runs before the SSH handshake so a refused
+                    // socket costs nothing past this line: `tcp` drops on
+                    // return, no permit, no russh task, no buffers. A flood
+                    // that held its connections open through the handshake
+                    // is what exhausted the global permits on 2026-09-03.
+                    let effective_peer_addr = proxied_addr.or(Some(transport_peer_addr));
+                    let admission = match server.admit(effective_peer_addr) {
+                        Ok(admission) => admission,
+                        Err(reason) => {
+                            // `ip` stays a dedicated field: the incident
+                            // queries in CONTEXT.md group rejections by it.
+                            let ip = effective_peer_addr.map(|addr| addr.ip());
+                            match reason {
+                                SshRejectReason::RateLimited => tracing::warn!(
+                                    ?ip,
+                                    ?transport_peer_addr,
+                                    max_attempts = server.state.ssh_attempt_limiter.max_attempts(),
+                                    window_secs = server.state.ssh_attempt_limiter.window_secs(),
+                                    "ssh rate limit exceeded for peer ip"
+                                ),
+                                SshRejectReason::PerIpLimit => tracing::warn!(
+                                    ?ip,
+                                    ?transport_peer_addr,
+                                    limit = server.state.config.max_conns_per_ip,
+                                    "per-ip limit reached, rejecting new client"
+                                ),
+                                SshRejectReason::GlobalLimit => tracing::info!(
+                                    ?transport_peer_addr,
+                                    ?effective_peer_addr,
+                                    "connection limit reached, rejecting new client"
+                                ),
+                                SshRejectReason::ProxyHeader => {
+                                    unreachable!("admit never reports a proxy header failure")
+                                }
+                            }
+                            metrics::record_ssh_connection_rejected(reason);
+                            return;
+                        }
+                    };
+
+                    let handler = server.new_client(Some(transport_peer_addr), proxied_addr, admission);
                     match russh::server::run_stream(config, tcp, handler).await {
                         Ok(session) => {
                             if let Err(err) = session.await {
@@ -283,52 +324,57 @@ pub async fn run_with_listener(
     Ok(())
 }
 
+/// What an admitted connection holds for its lifetime. Released by
+/// `ClientHandler::drop`.
+struct Admission {
+    permit: OwnedSemaphorePermit,
+    per_ip_incremented: bool,
+}
+
 impl Server {
-    fn new_client_with_addrs(
-        &self,
-        transport_peer_addr: Option<SocketAddr>,
-        proxied_addr: Option<SocketAddr>,
-    ) -> ClientHandler {
+    /// Decide whether a fresh TCP connection may start the SSH handshake.
+    /// Cheap per-IP checks run first so a rate-limited peer never touches the
+    /// global semaphore; the permit is taken last and only kept on success.
+    fn admit(&self, effective_peer_addr: Option<SocketAddr>) -> Result<Admission, SshRejectReason> {
         metrics::record_ssh_connection();
-        let permit = self.state.conn_limit.clone().try_acquire_owned().ok();
-        let mut over_limit = permit.is_none();
-        let effective_peer_addr = proxied_addr.or(transport_peer_addr);
         let peer_ip = effective_peer_addr.map(|addr| addr.ip());
         let mut per_ip_incremented = false;
 
-        if over_limit {
-            tracing::info!(
-                ?transport_peer_addr,
-                ?effective_peer_addr,
-                "connection limit reached, rejecting new client"
-            );
-        } else if let Some(ip) = peer_ip {
+        if let Some(ip) = peer_ip {
             if !self.state.ssh_attempt_limiter.allow(ip) {
-                over_limit = true;
-                tracing::warn!(
-                    ?ip,
-                    max_attempts = self.state.ssh_attempt_limiter.max_attempts(),
-                    window_secs = self.state.ssh_attempt_limiter.window_secs(),
-                    "ssh rate limit exceeded for peer ip"
-                );
+                return Err(SshRejectReason::RateLimited);
             }
-
             let mut counts = self.state.conn_counts.lock_recover();
-            if !over_limit {
-                let count = counts.entry(ip).or_insert(0);
-                if *count >= self.state.config.max_conns_per_ip {
-                    over_limit = true;
-                    tracing::warn!(
-                        ?ip,
-                        limit = self.state.config.max_conns_per_ip,
-                        "per-ip limit reached, rejecting new client"
-                    );
-                } else {
-                    *count += 1;
-                    per_ip_incremented = true;
+            let count = counts.entry(ip).or_insert(0);
+            if *count >= self.state.config.max_conns_per_ip {
+                return Err(SshRejectReason::PerIpLimit);
+            }
+            *count += 1;
+            per_ip_incremented = true;
+        }
+
+        match self.state.conn_limit.clone().try_acquire_owned() {
+            Ok(permit) => Ok(Admission {
+                permit,
+                per_ip_incremented,
+            }),
+            Err(_) => {
+                if let Some(ip) = peer_ip {
+                    release_per_ip_slot(&self.state, ip);
                 }
+                Err(SshRejectReason::GlobalLimit)
             }
         }
+    }
+
+    fn new_client(
+        &self,
+        transport_peer_addr: Option<SocketAddr>,
+        proxied_addr: Option<SocketAddr>,
+        admission: Admission,
+    ) -> ClientHandler {
+        let effective_peer_addr = proxied_addr.or(transport_peer_addr);
+        let peer_ip = effective_peer_addr.map(|addr| addr.ip());
 
         tracing::debug!(
             ?transport_peer_addr,
@@ -344,10 +390,9 @@ impl Server {
             transport_peer_addr,
             peer_addr: effective_peer_addr,
             peer_ip,
-            _conn_permit: permit,
-            per_ip_incremented,
+            _conn_permit: admission.permit,
+            per_ip_incremented: admission.per_ip_incremented,
             active_user_incremented: false,
-            over_limit,
             channel: None,
             app_channel_id: None,
             app: None,
@@ -363,11 +408,14 @@ impl Server {
     }
 }
 
-impl russh::server::Server for Server {
-    type Handler = ClientHandler;
-
-    fn new_client(&mut self, peer_addr: Option<std::net::SocketAddr>) -> ClientHandler {
-        self.new_client_with_addrs(peer_addr, peer_addr)
+fn release_per_ip_slot(state: &State, ip: IpAddr) {
+    let mut counts = state.conn_counts.lock_recover();
+    if let Some(count) = counts.get_mut(&ip) {
+        if *count <= 1 {
+            counts.remove(&ip);
+        } else {
+            *count -= 1;
+        }
     }
 }
 
@@ -384,70 +432,11 @@ async fn resolve_proxied_client_addr(
         return Ok(None);
     }
 
-    read_proxy_v1_client_addr(stream, PROXY_HEADER_TIMEOUT).await
+    proxy_protocol::read_v1_client_addr(stream, PROXY_HEADER_TIMEOUT).await
 }
 
 fn is_trusted_proxy_peer(state: &State, ip: IpAddr) -> bool {
-    state
-        .config
-        .ssh_proxy_trusted_cidrs
-        .iter()
-        .any(|cidr| cidr.contains(&ip))
-}
-
-async fn read_proxy_v1_client_addr(
-    stream: &mut TcpStream,
-    timeout_duration: Duration,
-) -> Result<Option<SocketAddr>> {
-    let mut line = Vec::with_capacity(PROXY_V1_MAX_LEN);
-    let mut byte = [0u8; 1];
-
-    let read_future = async {
-        while line.len() < PROXY_V1_MAX_LEN {
-            stream.read_exact(&mut byte).await?;
-            line.push(byte[0]);
-            if line.len() >= 2 && line[line.len() - 2..] == *b"\r\n" {
-                return parse_proxy_v1_addr(&line);
-            }
-        }
-        anyhow::bail!(
-            "proxy protocol v1 header exceeded {} bytes",
-            PROXY_V1_MAX_LEN
-        );
-    };
-
-    match timeout(timeout_duration, read_future).await {
-        Ok(Ok(addr)) => Ok(addr),
-        Ok(Err(e)) => Err(e.context("failed to read proxy protocol header")),
-        Err(_) => anyhow::bail!("timed out waiting for proxy protocol header"),
-    }
-}
-
-fn parse_proxy_v1_addr(line: &[u8]) -> Result<Option<SocketAddr>> {
-    let text = std::str::from_utf8(line).context("proxy v1 header is not valid UTF-8")?;
-    let text = text
-        .strip_suffix("\r\n")
-        .ok_or_else(|| anyhow::anyhow!("proxy v1 header missing CRLF terminator"))?;
-    let parts: Vec<&str> = text.split_whitespace().collect();
-    if parts.len() < 2 || parts[0] != "PROXY" {
-        anyhow::bail!("proxy v1 header malformed");
-    }
-    match parts[1] {
-        "UNKNOWN" => Ok(None),
-        "TCP4" | "TCP6" => {
-            if parts.len() != 6 {
-                anyhow::bail!("proxy v1 TCP header has unexpected field count");
-            }
-            let src_ip: IpAddr = parts[2]
-                .parse()
-                .with_context(|| format!("invalid proxy v1 source IP '{}'", parts[2]))?;
-            let src_port: u16 = parts[4]
-                .parse()
-                .with_context(|| format!("invalid proxy v1 source port '{}'", parts[4]))?;
-            Ok(Some(SocketAddr::new(src_ip, src_port)))
-        }
-        fam => anyhow::bail!("unsupported proxy v1 protocol family '{fam}'"),
-    }
+    proxy_protocol::is_trusted_peer(ip, &state.config.ssh_proxy_trusted_cidrs)
 }
 
 impl Drop for ClientHandler {
@@ -455,6 +444,9 @@ impl Drop for ClientHandler {
         if self.app.is_none()
             && let Some(token) = self.session_token.clone()
         {
+            // No App was ever built, so `Drop for App` will not run: retire
+            // the paired registry's token-scoped state from here instead.
+            self.state.paired_client_registry.forget_session(&token);
             let registry = self.state.session_registry.clone();
             tokio::spawn(async move {
                 registry.unregister(&token).await;
@@ -467,6 +459,7 @@ impl Drop for ClientHandler {
             metrics::add_ssh_session(-1);
             let user_id = user.id;
             let mut user_still_afk = false;
+            let mut became_offline = false;
             let mut active_users = self.state.active_users.lock_recover();
 
             if let Some(active) = active_users.get_mut(&user_id) {
@@ -475,6 +468,7 @@ impl Drop for ClientHandler {
                 }
                 if active.connection_count <= 1 {
                     active_users.remove(&user_id);
+                    became_offline = true;
                     // Last connection gone: retire any running countdown so a
                     // peer doesn't keep painting a badge for someone who left.
                     // The timer is session-local, so there is nothing to
@@ -489,24 +483,22 @@ impl Drop for ClientHandler {
                     user_still_afk = active.sessions.iter().any(|session| session.afk.is_some());
                 }
             }
+            if became_offline {
+                self.state
+                    .leaderboard_service
+                    .online_user_disconnected(user_id);
+            }
             drop(active_users);
             crate::state::set_afk_user(&self.state.afk_users, user_id, user_still_afk);
         }
 
-        if self.over_limit || !self.per_ip_incremented {
+        if !self.per_ip_incremented {
             return;
         }
         let Some(ip) = self.peer_ip else {
             return;
         };
-        let mut counts = self.state.conn_counts.lock_recover();
-        if let Some(count) = counts.get_mut(&ip) {
-            if *count <= 1 {
-                counts.remove(&ip);
-            } else {
-                *count -= 1;
-            }
-        }
+        release_per_ip_slot(&self.state, ip);
     }
 }
 
@@ -525,7 +517,12 @@ impl ClientHandler {
         let (session_tx, session_rx) = tokio::sync::mpsc::channel(64);
         self.state
             .session_registry
-            .register(session_token.clone(), session_tx, user_id)
+            .register(
+                session_token.clone(),
+                session_tx,
+                user_id,
+                self.auth_fingerprint.clone(),
+            )
             .await;
         self.session_token = Some(session_token.clone());
         self.session_rx = Some(session_rx);
@@ -570,10 +567,6 @@ impl russh::server::Handler for ClientHandler {
         key: &russh::keys::PublicKey,
     ) -> Result<Auth, Self::Error> {
         tracing::debug!("public key auth accepted");
-        if self.over_limit {
-            tracing::debug!("connection over limit, rejecting auth");
-            return Ok(reject_publickey_only());
-        }
         if !self.state.config.open_access {
             tracing::debug!("open access disabled, rejecting public key auth");
             return Ok(reject_publickey_only());
@@ -638,27 +631,33 @@ impl russh::server::Handler for ClientHandler {
         if !self.active_user_incremented {
             let mut active_users = self.state.active_users.lock_recover();
 
-            if let Some(active) = active_users.get_mut(&user.id) {
+            let became_online = if let Some(active) = active_users.get_mut(&user.id) {
                 active.connection_count += 1;
                 active.username = user.username.clone();
                 active.fingerprint = Some(fingerprint.clone());
-                active.peer_ip = self.peer_ip;
                 active.audio_source = late_core::models::user::extract_audio_source(&user.settings);
                 active.last_login_at = std::time::Instant::now();
+                false
             } else {
                 active_users.insert(
                     user.id,
                     crate::state::ActiveUser {
                         username: user.username.clone(),
                         fingerprint: Some(fingerprint.clone()),
-                        peer_ip: self.peer_ip,
                         audio_source: late_core::models::user::extract_audio_source(&user.settings),
                         sessions: Vec::new(),
                         connection_count: 1,
                         last_login_at: std::time::Instant::now(),
                     },
                 );
+                true
+            };
+            if became_online {
+                self.state
+                    .leaderboard_service
+                    .online_user_connected(user.id);
             }
+            drop(active_users);
             self.active_user_incremented = true;
             metrics::add_ssh_session(1);
         }
@@ -711,10 +710,6 @@ impl russh::server::Handler for ClientHandler {
         _session: &mut Session,
     ) -> Result<bool, Self::Error> {
         tracing::debug!("session channel opened");
-        if self.over_limit {
-            tracing::debug!("connection over limit, rejecting channel open");
-            return Ok(false);
-        }
         self.channel = Some(channel);
         Ok(true)
     }
@@ -786,6 +781,7 @@ impl russh::server::Handler for ClientHandler {
             initial_le_word_daily_word,
             initial_le_word_game,
             initial_rubiks_cube_game,
+            initial_sliding_puzzle_games,
             initial_sudoku_games,
             initial_nonogram_games,
             initial_solitaire_games,
@@ -871,8 +867,12 @@ impl russh::server::Handler for ClientHandler {
                 None
             }
         };
+        // The door: the next of last month's podium pieces this account has
+        // not seen, or the cup. One claim per login, the gallery logs its
+        // own failures.
+        let splash_piece = self.state.gallery_service.claim_splash_piece(user_id).await;
         let key_fingerprint = self.auth_fingerprint.clone();
-        let key_layout = crate::session_bootstrap::load_device_rails(
+        let device = crate::session_bootstrap::load_device_state(
             &self.state,
             user_id,
             key_fingerprint.as_deref(),
@@ -901,6 +901,12 @@ impl russh::server::Handler for ClientHandler {
             }
         };
         let (input_tx, input_rx) = tokio::sync::mpsc::channel(INPUT_QUEUE_CAP);
+        let first_contact_gate = crate::app::deadchannel::haunt::svc::bootstrap_gate(
+            &self.state,
+            permissions.can_moderate(),
+            user,
+        )
+        .await;
         let mut app = crate::app::state::App::new(SessionConfig {
             // Terminal / layout
             cols: terminal_size.cols,
@@ -910,7 +916,11 @@ impl russh::server::Handler for ClientHandler {
             // Services / data sources
             audio_service: self.state.audio_service.clone(),
             voice_service: self.state.voice_service.clone(),
+            stream_service: self.state.stream_service.clone(),
             chat_service,
+            translation_service: self.state.translation_service.clone(),
+            summary_service: self.state.summary_service.clone(),
+            paper_service: self.state.paper_service.clone(),
             notification_service: self.state.notification_service.clone(),
             article_service,
             feed_service: self.state.feed_service.clone(),
@@ -926,6 +936,8 @@ impl russh::server::Handler for ClientHandler {
             traffic_service: self.state.traffic_service.clone(),
             rubiks_cube_service: self.state.rubiks_cube_service.clone(),
             initial_rubiks_cube_game,
+            sliding_puzzle_service: self.state.sliding_puzzle_service.clone(),
+            initial_sliding_puzzle_games,
             initial_tetris_game,
             initial_snake_game,
             initial_tetris_high_score,
@@ -956,6 +968,8 @@ impl russh::server::Handler for ClientHandler {
             artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService::new(
                 self.state.db.clone(),
             ),
+            gallery_service: self.state.gallery_service.clone(),
+            splash_piece,
             username: user.username.clone(),
             bonsai_service: self.state.bonsai_service.clone(),
             initial_bonsai_tree,
@@ -985,15 +999,13 @@ impl russh::server::Handler for ClientHandler {
             nethack_host: self.state.config.nethack_host.clone(),
             nethack_port: self.state.config.nethack_port,
             nethack_secret: self.state.config.nethack_secret.clone(),
-            nethack_awards: Some(crate::app::door::nethack::award::NethackAwards::new(
-                self.state.chip_service.clone(),
-                self.state.db.clone(),
+            nethack_activity: Some(
                 crate::app::activity::publisher::ActivityPublisher::new(
                     self.state.db.clone(),
                     self.state.activity_feed.clone(),
                 )
                 .with_username_directory(self.state.username_directory.clone()),
-            )),
+            ),
             dcss_enabled: self.state.config.dcss_enabled,
             dcss_host: self.state.config.dcss_host.clone(),
             dcss_port: self.state.config.dcss_port,
@@ -1010,6 +1022,13 @@ impl russh::server::Handler for ClientHandler {
             dopewars_host: self.state.config.dopewars_host.clone(),
             dopewars_port: self.state.config.dopewars_port,
             dopewars_secret: self.state.config.dopewars_secret.clone(),
+            bashquest_enabled: self.state.config.bashquest_enabled,
+            bashquest_host: self.state.config.bashquest_host.clone(),
+            bashquest_port: self.state.config.bashquest_port,
+            bashquest_secret: self.state.config.bashquest_secret.clone(),
+            bashquest_awards: Some(crate::app::door::bashquest::graduate::BashquestAwards::new(
+                self.state.db.clone(),
+            )),
             codekeep_enabled: self.state.config.codekeep_enabled,
             codekeep_host: self.state.config.codekeep_host.clone(),
             codekeep_port: self.state.config.codekeep_port,
@@ -1023,17 +1042,28 @@ impl russh::server::Handler for ClientHandler {
             active_users: Some(self.state.active_users.clone()),
             clubhouse_lobby: Some(self.state.clubhouse_lobby.clone()),
             mention_ladders: self.state.mention_ladders.clone(),
+            files: self.state.config.files.clone(),
             scratchpad_registry: Some(self.state.scratchpad_registry.clone()),
             clubhouse_tutorial_done: late_core::models::user::extract_clubhouse_tutorial_done(
                 &user.settings,
             ),
+            first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks::from_settings(
+                &user.settings,
+            ),
+            first_contact_gate,
+            app_flags_rx: self.state.app_flags.subscribe(),
+            app_flags: Some(self.state.app_flags.clone()),
+            runner_looks_rx: self.state.runner_looks.subscribe(),
             show_aquarium_tray: late_core::models::user::extract_show_aquarium_tray(&user.settings),
             key_fingerprint,
-            key_layout,
+            key_layout: device.layout,
+            key_left_at: device.left_at,
             afk_users: self.state.afk_users.clone(),
             username_directory: Some(self.state.username_directory.clone()),
             flair_directory: Some(self.state.flair_directory.clone()),
             pomodoro_directory: Some(self.state.pomodoro_directory.clone()),
+            crown_service: Some(self.state.crown_service.clone()),
+            pot_service: Some(self.state.pot_service.clone()),
             activity_feed_rx: self.activity_feed_rx.take(),
             initial_announcements,
             user_id,
@@ -1043,6 +1073,7 @@ impl russh::server::Handler for ClientHandler {
 
             is_new_user: self.is_new_user,
             land_on_home: late_core::models::user::extract_land_on_home(&user.settings),
+            paper_at_login: late_core::models::user::extract_paper_at_login(&user.settings),
 
             // Display config
             initial_theme_id: late_ssh_theme_id(&user.settings),

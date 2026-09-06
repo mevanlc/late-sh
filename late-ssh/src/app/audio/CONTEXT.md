@@ -3,7 +3,7 @@
 ## Metadata
 - Domain: late.sh audio — Icecast house radio, global YouTube queue, browser/CLI source arbitration, procedural browser-pair visualizer fallback, and now-playing poller
 - Primary audience: LLM agents working in `late-ssh/src/app/audio` and the music/audio touchpoints it owns in `late-cli` and `late-web/src/pages/listen`
-- Last updated: 2026-07-27 (browser pairing removed: no more real-browser surface, so `web_icecast_enabled`/`embedded_webview_enabled` are gone from `SetPlaybackSource` and source alone decides the audible surface; the public `GET /api/listen` now feeds late-web's token-less `/listen` page)
+- Last updated: 2026-08-30 (Bringing a track pays: `MediaQueueItem::insert_youtube` is now the paying path, `SONG_QUEUE_REWARD_CHIPS` (200) for the first `SONG_QUEUE_MAX_PAID_PER_DAY` (5) tracks a person queues each UTC day, credited in the same transaction as the insert. Every track pays, repeats and History re-queues included; the day's count is the only gate. Every submit path funnels through it, so booth, `/audio`, and a history re-queue all pay the same, and `SubmitQueueResponse.reward_chips` carries what was actually minted into the banner. See "Submission reward" under §4. Previous entry: The CLI no longer unmutes itself when the pair socket dies: only a session the server never saw may release its boot mute, and the retry loop slows to 60s instead of abandoning pairing. See the end of "Mute and volume: one source of truth, stored per device". Previous entry: device-audio write path hardened: only CLI reports persist (never the webview helper's), alignment echoes are not treated as intent, a failed connect-time read disables alignment and persistence for that connection instead of imposing fresh-boot defaults, and writes land in report order. See "Mute and volume: one source of truth, stored per device")
 - Status: Active
 - Parent context: `../../../../CONTEXT.md`
 
@@ -121,6 +121,38 @@ Keep `mod.rs` declaration-only — no `pub use` re-exports.
 - `requeue_history_item` — inserts a fresh `media_queue_items` row from stored validated history metadata. Live queue votes always start at 0.
 - `delete_history_item` — requires centralized `Caps::DELETE_AUDIO_TRACK` via `Permissions::can_delete_audio_track(false)`.
 - `toggle_unskippable` / `toggle_unskippable_task` — staff-only path that flips `media_queue_items.unskippable` only while the item is still `queued`; `u` in Booth Queue mode triggers it.
+
+### Submission reward
+Queueing a track pays the person who brought it `SONG_QUEUE_REWARD_CHIPS`
+(100), minted through `ChipMove::SongQueued`. The gate lives in
+`MediaQueueItem::insert_youtube` (`late-core/src/models/media_queue_item.rs`),
+which is the only path a submission may take, so booth, `/audio`, trusted
+submits, and a history re-queue cannot pay different amounts or forget to pay.
+
+- **The track is never a gate.** The same song twice, a re-queue from History,
+  one somebody else put on an hour ago: all paid. Nothing looks at what was
+  queued or whether the room has heard it. The one question asked is how many
+  this person has already been paid for today, which is what keeps "why did
+  that one not pay?" a single number the guide can state.
+- `SONG_QUEUE_MAX_PAID_PER_DAY` (5) per UTC day is therefore the whole of the
+  gating, and what stands between the jukebox and a chip printer:
+  `MAX_SUBMISSIONS_PER_WINDOW` (10 per 5 minutes) is a rate limit for the
+  room's sake, not an economic one.
+- Insert, count, and credit are one transaction under a per-user advisory
+  lock, the same shape as `Article::create_shared`: a credit that fails leaves
+  no orphan row in the queue, and two submissions landing together cannot both
+  read the same count and pay a sixth. Migration 169 indexes
+  `(user_id, created_at) WHERE reason = 'song_queued'` so the count is not a
+  scan over a ledger that only grows.
+- `source_ref` is the video id as provenance, so a ledger row says which track
+  it paid for. Nothing reads it back; it is not a key.
+- `SongQueueReward` (`Paid` / `DailyCapReached`) is what the banner and
+  `metrics::record_song_queued` read, never the constant, so a track that came
+  in past the cap can never be reported as paid.
+  `SubmitQueueResponse.reward_chips` carries it to
+  `AudioEvent::BoothSubmitQueued` and `BoothHistoryRequeued`, and
+  `state.rs::submitted_line` drops the chips clause entirely when nothing was
+  minted.
 
 ### Startup lifecycle
 1. `sweep_orphan_playing` (`svc.rs:425-438`) marks any `status='playing'` row older than `now - 1h` as `failed` with `error = "orphan playing row swept at startup"`.
@@ -340,7 +372,7 @@ TUI sees, and it holds no per-user server state at all.
 
 - **One poll, no socket.** The page fetches same-origin `/listen/state` every
   10s, which late-web fills server-side from late-ssh `GET /api/listen` over
-  `LATE_SSH_INTERNAL_URL`. No browser ever calls late-ssh directly, which is
+  its profile's `ssh_internal_url`. No browser ever calls late-ssh directly, which is
   why late-ssh carries no CORS layer.
 - **`/api/listen` is memory-only.** It reads `AudioService::current_snapshot()`
   (the `snapshot_tx` watch, not the DB-backed `snapshot()`), the now-playing
@@ -565,7 +597,7 @@ Model helpers (`late-core/src/models/media_queue_item.rs`, `media_source.rs`):
 - **Guide vs `/audio`.** The Pair guide tab (`?`) explains music setup and controls. `/audio` and `/audio fallback` are staff submit commands. Don't conflate.
 - **No public submit route.** Reading the queue is public via `/api/listen`; submitting still requires the SSH booth modal or the staff `/audio` command.
 - **Region locks / embedding disabled** may still be partly regional. `/audio` and booth both use the YouTube Data API now, so public/non-embeddable/upcoming/duration failures are caught at submit time. A client may still report `error`, but the server treats that as diagnostics only.
-- **`LATE_YOUTUBE_API_KEY` is optional at config load** (`config.rs:200`, `optional()`), but YouTube submissions and fallback updates require it at runtime. Without it, booth submit is disabled and staff `/audio` fails validation.
+- **`LATE_YOUTUBE_API_KEY` is optional in the dev profile and required in prod** (`config.rs` profiles), but YouTube submissions and fallback updates require it at runtime. Without it, booth submit is disabled and staff `/audio` fails validation.
 - **Queue state-drift / singleton-violation stuck state.** Took down prod once already (2026-05-19). The class of bug is non-atomic two-write transitions (DB row status + in-memory `state.current_item_id`); any divergence is unrecoverable without a pod restart. The reconciliation contract in §19 is the active fix — any new code that flips `media_queue_items.status` or mutates `current_item_id` must route through it.
 
 ---
@@ -633,7 +665,21 @@ The helper serves `late-webview/src/page.html` from a loopback-only ephemeral HT
 
 The helper owns its own mute/volume state, starting at the same 30% default as native CLI Icecast. It registers as a browser with `ssh_mode = "webview"`, so pair-WS `toggle_mute`, `volume_up`, and `volume_down` controls must be applied inside `late-webview/src/pair.rs` and forwarded into `page.html`; changing only the native CLI Icecast atom is not enough because YouTube audio is emitted by WebKit/GStreamer.
 
-Helper mute is session-sticky across respawns and reconnects. At spawn the parent CLI passes its current mute/volume (its atomics track the same broadcast controls) via `LATE_WEBVIEW_INITIAL_MUTED` / `LATE_WEBVIEW_INITIAL_VOLUME`; the helper seeds its audio settings from them and pushes them into the page on the page's `ready` IPC event, before the first `load_video` plays. Server-side, `api.rs` aligns a connecting `ssh_mode = "webview"` client's mute to the live CLI entry's muted state (`PairedClientRegistry::cli_muted`), falling back to `start_with_music_muted` only when no CLI entry exists; aligning the webview to the boot preference would unmute a runtime-muted session on every helper respawn or reconnect.
+Helper mute is session-sticky across respawns and reconnects. At spawn the parent CLI passes its current mute/volume (its atomics track the same broadcast controls) via `LATE_WEBVIEW_INITIAL_MUTED` / `LATE_WEBVIEW_INITIAL_VOLUME`; the helper seeds its audio settings from them and pushes them into the page on the page's `ready` IPC event, before the first `load_video` plays. Server-side alignment is `api::align_paired_audio`; see below.
+
+### Mute and volume: one source of truth, stored per device
+
+`user_ssh_keys.settings` holds this device's `audio_muted` + `audio_volume_percent` (`late-core/src/models/user_ssh_key.rs`, `KeyAudio`), and that row **is** the mute and volume. Both live on the key rather than the account because they belong to the machine with the speakers: muting a laptop must not silence the desktop. Same store and same "account default, per-device override" shape as the home rails. There is deliberately no second control anywhere: the old `Start app with music muted` tweak row is gone, and `users.settings.start_with_music_muted` survives only as a **read-time seed** for a device that has never reported audio, so nobody lost the mute they had configured before this existed. Once a device reports once, that account value is never read again.
+
+The write path is one place: `api.rs`'s `client_state` handler persists what a paired client reports, with `api::PairAudioFlow` (pure, tested in `api_internal_test.rs`) deciding what each report means. The CLI re-sends `client_state` after applying any control (`late-cli/src/ws.rs`, `should_send_state`), so `m`, `+`/`-`, a media key, and `/brb`'s auto-mute and `/back`'s unmute all land in the same write with no per-keybind plumbing and no special cases. Three classes of report are never persisted: anything from the webview helper (its volume-up clears mute while the CLI's does not, and the CLI is the surface of record, so a helper report must not overwrite it; `ClientKind::Unknown` is an older CLI and persists like one), reports *before* the alignment (the client is still on its own boot defaults, which is not intent), and the reports *echoing* the alignment itself (the client re-reports once per control applied; persisting those would write a transiently wrong value for a restore that changed nothing). `PairedClientRegistry::claim_audio_write` gates the rest, so the CLI's periodic heartbeats do not rewrite an unchanged row and a failed write retries on the next report; the DB write is awaited on the socket task so a token's writes land in report order.
+
+The connect-time read (`api::read_device_audio`) distinguishes a failed read from an empty one: on a DB error the whole connection runs with alignment and persistence off, so a transient failure can neither impose fresh-boot defaults on the session nor overwrite the stored row with them; the next connection retries. The read path aligns a connecting client to the stored value, and that alignment is claimed **once per SSH session token**, not once per WebSocket (`audio_alignment_pending` / `note_alignment_applied`, retired by `forget_session` from `Drop for App` and from `ClientHandler::drop` when no App was ever built). One token is one CLI process, which is the scope the stored value describes. A mid-session pair-WS reconnect (a network change, an ingress restart, a webview helper respawn) instead reports the state the session is already running with and is left alone; re-imposing the stored value there is how a muted session used to get unmuted behind the user's back.
+
+`api::align_paired_audio` is the pure decision and returns both halves of the push. **Order matters and is load-bearing: volume goes first, because a non-zero `SetVolume` also clears mute on the CLI and on the helper**, so the mute half is decided against the state *after* the volume write. Without that, restoring a stored (muted, 60%) would come back audible. A webview helper additionally prefers the live CLI entry's mute (`cli_muted`), since the CLI takes the same controls and is the session's surface of record while YouTube plays.
+
+Two consequences worth knowing. A session whose SSH key is unknown (`fingerprint_for` returns `None`) has no device identity, so its audio is memory-only for that session and nothing is stored. And two `late` processes on one machine share a fingerprint, so the last one to change mute or volume wins the row.
+
+The CLI holds up its end of this when the socket dies. Its pair-WS retry loop (`late-cli`'s `PairRetryPolicy`, §6 of `late-cli/CONTEXT.md`) may release its boot mute only when the server never registered the session at all; once the server has sent the session a frame (which it does right after `register`, before reading the buffered `client_state`), the running mute is the user's and a reconnect outage leaves it alone. A socket this handler accepts and then drops unread (the per-IP pair limit and the per-token capacity are both checked after the upgrade) never sends a frame, so the CLI still counts it as not established. Silence is the safe failure mode: unmuting because the socket dropped is how a muted session used to start playing music mid-SSH. The loop also never abandons pairing, it slows to a 60s retry, so a redeploy cannot strand a live session unpaired and uncontrollable, and a session that did release its boot mute still receives the stored value on the reconnect, since the once-per-token alignment was never claimed.
 
 ### Runtime support / troubleshooting
 

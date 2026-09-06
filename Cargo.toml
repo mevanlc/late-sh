@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "late-bashquest",
     "late-brogue",
     "late-cli",
     "late-codekeep",
@@ -100,6 +101,7 @@ rustls-pemfile = "2.2"
 sha2 = "0.10"
 shlex = "1.3.0"
 symphonia = "0.5.5"
+tempfile = "3"
 tokio-rustls = "0.26"
 tokio-tungstenite = "0.28"
 tower = "0.5"

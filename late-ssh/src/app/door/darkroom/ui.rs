@@ -9,18 +9,49 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph};
 
+use late_core::models::profile_award::{award_badge, award_category_label};
+
 use crate::app::common::theme;
 use crate::app::door::landing;
 
 use super::data::{self, Building, Resource, ResourceKind};
 use super::model::{Game, View};
 use super::pace;
-use super::state::{Row, State};
+use super::state::{Ending, EndingBeat, Row, State};
 
 /// Label column width for the stores/pack sidebar rows: the longest label
 /// ("trading post", "sulphur mine") plus a two-space gutter, so a count never
 /// butts up against the name it belongs to.
 pub const SIDEBAR_LABEL_PAD: usize = 14;
+
+/// The stores whose own name is too long for that column, and what the sidebar
+/// calls them instead. Ours, not upstream's: upstream has no fixed-width
+/// column to fit and abbreviates only where it feels like it (its own armours
+/// are already "l armour"/"i armour"/"s armour", which is the style followed
+/// here).
+///
+/// This is an exception list, not a second naming scheme: everything absent
+/// renders under its real name, and `ui_test` is what keeps the list complete
+/// as new stores arrive.
+pub static SIDEBAR_LABELS: [(Resource, &str); 8] = [
+    (Resource::KineticArmour, "k armour"),
+    (Resource::FluidRecycler, "recycler"),
+    (Resource::HypoBlueprint, "bp: hypo"),
+    (Resource::KineticArmourBlueprint, "bp: armour"),
+    (Resource::DisruptorBlueprint, "bp: disruptor"),
+    (Resource::PlasmaRifleBlueprint, "bp: plasma"),
+    (Resource::StimBlueprint, "bp: stim"),
+    (Resource::GlowstoneBlueprint, "bp: glowstone"),
+];
+
+/// What the sidebar calls a store.
+pub fn sidebar_label(resource: Resource) -> &'static str {
+    SIDEBAR_LABELS
+        .iter()
+        .find(|(listed, _)| *listed == resource)
+        .map(|(_, label)| *label)
+        .unwrap_or_else(|| resource.label())
+}
 
 /// Total width of the stores/pack sidebar column: the two-space indent, the
 /// label column, and room for the widest value a long run reaches
@@ -38,6 +69,13 @@ pub fn draw_page(frame: &mut Frame, area: Rect, state: &State) {
         frame.render_widget(loading, area);
         return;
     };
+
+    // The ending takes the whole panel, and there is nothing underneath it any
+    // more: the save is gone by the time it is up.
+    if let Some(ending) = state.ending.as_ref() {
+        draw_ending(frame, area, ending);
+        return;
+    }
 
     // The ascent takes the whole panel: no stores, no log, just the sky.
     if let Some(flight) = state.flight.as_ref() {
@@ -100,6 +138,7 @@ fn title_for(state: &State, game: &Game) -> String {
         View::Outside => game.outside_title().to_string(),
         View::Path => "A Dusty Path".to_string(),
         View::World => "A Barren World".to_string(),
+        View::Fabricator => data::FABRICATOR_TITLE.to_string(),
         View::Ship => "An Old Starship".to_string(),
     }
 }
@@ -121,7 +160,7 @@ fn pack_lines(state: &State, game: &Game) -> Vec<Line<'static>> {
             continue;
         }
         lines.push(landing::stat(
-            item.label(),
+            sidebar_label(*item),
             &count.to_string(),
             SIDEBAR_LABEL_PAD,
         ));
@@ -157,6 +196,19 @@ fn status_line(state: &State, game: &Game) -> Line<'static> {
             game.capacity() as i64
         ),
         View::World => String::new(),
+        // The blueprints found so far, which is the whole of what the
+        // fabricator has to say about itself.
+        View::Fabricator => {
+            let known: Vec<&str> = data::Blueprint::ALL
+                .into_iter()
+                .filter(|blueprint| game.blueprints.contains(blueprint))
+                .map(data::Blueprint::label)
+                .collect();
+            match known.is_empty() {
+                true => format!("{}: none yet", data::SECTION_BLUEPRINTS),
+                false => format!("{}: {}", data::SECTION_BLUEPRINTS, known.join(", ")),
+            }
+        }
         View::Ship => match game.ship.as_ref() {
             Some(ship) => format!("hull: {}. engine: {}.", ship.hull, ship.thrusters),
             None => String::new(),
@@ -310,7 +362,11 @@ fn stores_lines(state: &State, game: &Game) -> Vec<Line<'static>> {
                 Some(rate) => format!("{} {}/{}s", game.store(resource), fmt_income(*rate), tick),
                 None => game.store(resource).to_string(),
             };
-            lines.push(landing::stat(resource.label(), &value, SIDEBAR_LABEL_PAD));
+            lines.push(landing::stat(
+                sidebar_label(resource),
+                &value,
+                SIDEBAR_LABEL_PAD,
+            ));
         }
     }
     let standing: Vec<&Building> = Building::ALL
@@ -444,6 +500,88 @@ fn footer(state: &State, game: &Game) -> Line<'static> {
     Line::from(spans)
 }
 
+/// The two lines that say the run is over for good.
+const ENDING_WIPED: &str = "the save is gone. the room is dark and cold again.";
+const ENDING_PROMPT: &str = "press any key to step outside";
+
+/// The ending: upstream's closing prose, the run's last figures, the badge it
+/// earned, and the one key left to press. Border-less and centered, like the
+/// ascent it follows.
+fn draw_ending(frame: &mut Frame, area: Rect, ending: &Ending) {
+    let lines = ending_lines(ending);
+    // Anchor on every beat, revealed or not, so the text does not crawl up the
+    // screen as the epitaph arrives.
+    let top = (area.height as usize).saturating_sub(lines.len()) / 2;
+    let mut padded: Vec<Line<'static>> = vec![Line::from(""); top];
+    padded.extend(lines);
+    frame.render_widget(Paragraph::new(padded).centered(), area);
+}
+
+/// One line per beat, in order, with the unrevealed ones left blank.
+fn ending_lines(ending: &Ending) -> Vec<Line<'static>> {
+    let revealed = ending.revealed_count();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut previous: Option<&EndingBeat> = None;
+    for (index, beat) in ending.beats().iter().enumerate() {
+        // A blank line wherever the epitaph changes register: prose, then the
+        // figures, then the badge, then the way out.
+        if previous.is_some_and(|last| std::mem::discriminant(last) != std::mem::discriminant(beat))
+        {
+            lines.push(Line::from(""));
+        }
+        previous = Some(beat);
+        let shown = index < revealed;
+        for line in beat_lines(beat) {
+            lines.push(if shown { line } else { Line::from("") });
+        }
+    }
+    lines
+}
+
+/// How one beat reads. The unrevealed ones still take their rows, so this is
+/// also what reserves the space for them.
+fn beat_lines(beat: &EndingBeat) -> Vec<Line<'static>> {
+    match beat {
+        EndingBeat::Prose(text) => vec![Line::from(Span::styled(
+            (*text).to_string(),
+            Style::default().fg(theme::TEXT()),
+        ))],
+        // Padded to a fixed width so the centered column lines up.
+        EndingBeat::Stat { label, value } => vec![Line::from(Span::styled(
+            format!("{label:>16}   {value:<22}"),
+            Style::default().fg(theme::TEXT_DIM()),
+        ))],
+        EndingBeat::Award(escape) => vec![
+            Line::from(vec![
+                Span::styled(
+                    format!("[{}]  ", award_badge(escape.award_category(), 1)),
+                    Style::default()
+                        .fg(theme::AMBER())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    award_category_label(escape.award_category()).to_string(),
+                    Style::default().fg(theme::TEXT_BRIGHT()),
+                ),
+            ]),
+            Line::from(Span::styled(
+                escape.reward_line().to_string(),
+                Style::default().fg(theme::TEXT_DIM()),
+            )),
+        ],
+        EndingBeat::Prompt => vec![
+            Line::from(Span::styled(
+                ENDING_WIPED.to_string(),
+                Style::default().fg(theme::TEXT()),
+            )),
+            Line::from(Span::styled(
+                ENDING_PROMPT.to_string(),
+                Style::default().fg(theme::TEXT_FAINT()),
+            )),
+        ],
+    }
+}
+
 /// The two-column landing card for the Games hub.
 pub fn draw_landing(frame: &mut Frame, area: Rect, delete_confirm: bool) {
     let inner = Layout::default()
@@ -501,15 +639,70 @@ pub fn draw_landing(frame: &mut Frame, area: Rect, delete_confirm: bool) {
             10,
         ),
         Line::from(""),
+        landing::heading("Rewards"),
+        landing::stat(
+            "Fly out",
+            "15,000 chips, and the ADE badge the first time",
+            15,
+        ),
+        landing::stat(
+            "Fleet beacon",
+            "20,000 chips, and the ADB badge the first time",
+            15,
+        ),
+        Line::from(Span::styled(
+            "  Every run that gets out pays: the ending wipes the save,",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        Line::from(Span::styled(
+            "  so a repeat is the whole arc again, not a shortcut.",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )),
+        Line::from(""),
+        landing::heading("The second pass"),
+        Line::from(Span::styled(
+            "Flying out once makes you a veteran. Your next map carries",
+            Style::default().fg(theme::TEXT_DIM()),
+        )),
+        Line::from(Span::styled(
+            "the ravaged battleship, a wreck no first run ever sees: clear",
+            Style::default().fg(theme::TEXT_DIM()),
+        )),
+        Line::from(Span::styled(
+            "it, kill the immortal wanderer, take the fleet beacon, and",
+            Style::default().fg(theme::TEXT_DIM()),
+        )),
+        Line::from(Span::styled(
+            "fly out holding it for the second ending.",
+            Style::default().fg(theme::TEXT_DIM()),
+        )),
+        Line::from(""),
     ]);
 
     if delete_confirm {
+        // The hub's confirm prompt takes Enter/Y to go through and n/Esc to
+        // back out; a second `d` cancels like `n` does. Name those keys, so
+        // the card cannot promise a double-tap the handler never honours.
         lines.push(landing::action(
             "!",
-            "d",
-            "press again to burn it all down and start over",
+            "Enter/Y",
+            "burn it all down and start over",
             theme::ERROR(),
         ));
+        lines.push(landing::action(
+            " ",
+            "n/Esc",
+            "keep the save, the fire stays lit",
+            theme::AMBER(),
+        ));
+        lines.push(Line::from(Span::styled(
+            "  Only this run burns. Flying out once is remembered forever,",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )));
+        lines.push(Line::from(Span::styled(
+            "  so the ravaged battleship is still on the next map.",
+            Style::default().fg(theme::TEXT_FAINT()),
+        )));
     } else {
         lines.push(landing::action(
             ">",
@@ -519,6 +712,20 @@ pub fn draw_landing(frame: &mut Frame, area: Rect, delete_confirm: bool) {
         ));
         lines.push(landing::action("x", "d", "start over", theme::ERROR()));
     }
+
+    lines.extend([
+        Line::from(""),
+        landing::heading("Once Inside"),
+        landing::hint(
+            "j/k, w/s, arrows",
+            "move the cursor; Enter or space picks",
+            18,
+        ),
+        landing::hint("Tab", "switch between the room and outside", 18),
+        landing::hint("+/- and </>", "move one or ten villagers between jobs", 18),
+        landing::hint("wasd / arrows", "walk the wasteland, steer the ship", 18),
+        landing::hint("Esc", "park the trip and step out; time keeps banking", 18),
+    ]);
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(

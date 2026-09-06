@@ -123,3 +123,238 @@ fn login_tokens_parse_with_and_without_refresh_token() {
     assert_eq!(tokens.id_token, "id-2");
     assert!(tokens.refresh_token.is_none());
 }
+
+#[test]
+fn circ_message_parses_both_style_shapes() {
+    let one: CircMessage =
+        serde_json::from_str(r#"{"id":"m1","content":"hi","style":"rainbow"}"#).expect("one style");
+    assert_eq!(one.styles, vec!["rainbow".to_string()]);
+
+    let many: CircMessage =
+        serde_json::from_str(r#"{"id":"m2","content":"hi","style":["rainbow","blink"]}"#)
+            .expect("chained styles");
+    assert_eq!(
+        many.styles,
+        vec!["rainbow".to_string(), "blink".to_string()]
+    );
+
+    let none: CircMessage =
+        serde_json::from_str(r#"{"id":"m3","content":"hi"}"#).expect("no style");
+    assert!(none.styles.is_empty());
+}
+
+#[test]
+fn display_text_decodes_art_and_drops_duplicated_attachment_captions() {
+    // `style: "art"` is the one style that changes how content reads.
+    let art: CircMessage =
+        serde_json::from_str(r#"{"id":"m1","content":"XF8o44OEKV8v","style":"art"}"#)
+            .expect("art message");
+    assert_eq!(art.display_text(), r"\_(ツ)_/");
+
+    // A caption that is just the attachment's own URL would print twice.
+    let captionless: CircMessage = serde_json::from_str(
+        r#"{"id":"m2","content":"https://cdn.example/a.png","imageUrl":"https://cdn.example/a.png"}"#,
+    )
+    .expect("attachment message");
+    assert_eq!(captionless.display_text(), "");
+    assert_eq!(captionless.attachment_label(), Some("[image]"));
+
+    // A real caption survives alongside its attachment.
+    let captioned: CircMessage = serde_json::from_str(
+        r#"{"id":"m3","content":"look at this","imageUrl":"https://cdn.example/a.png"}"#,
+    )
+    .expect("captioned message");
+    assert_eq!(captioned.display_text(), "look at this");
+
+    // A deleted message is a tombstone whatever it used to carry.
+    let deleted: CircMessage = serde_json::from_str(
+        r#"{"id":"m4","content":"[DELETED]","deleted":true,"imageUrl":"https://cdn.example/a.png"}"#,
+    )
+    .expect("deleted message");
+    assert_eq!(deleted.display_text(), "[deleted]");
+    assert_eq!(deleted.attachment_label(), None);
+}
+
+#[test]
+fn stream_frames_carry_window_arrival_and_deletion() {
+    // The opening frame is the whole window, keyed by message id.
+    let window = parse_circ_stream_frame(
+        "event: put\ndata: {\"path\":\"/\",\"data\":{\"m2\":{\"content\":\"second\",\"timestamp\":2},\"m1\":{\"content\":\"first\",\"timestamp\":1}}}",
+    )
+    .expect("window frame");
+    match window {
+        CircStreamEvent::Window(messages) => {
+            // Sorted oldest-first, and the map key becomes the id.
+            let ids: Vec<&str> = messages.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(ids, vec!["m1", "m2"]);
+        }
+        other => panic!("expected a window, got {other:?}"),
+    }
+
+    let arrival = parse_circ_stream_frame(
+        "event: put\ndata: {\"path\":\"/m3\",\"data\":{\"content\":\"hello\",\"timestamp\":3}}",
+    )
+    .expect("arrival frame");
+    match arrival {
+        CircStreamEvent::Upsert(message) => {
+            assert_eq!(message.id, "m3");
+            assert_eq!(message.content, "hello");
+        }
+        other => panic!("expected an upsert, got {other:?}"),
+    }
+
+    // A delete rewrites a message already on screen rather than adding one:
+    // listening only for arrivals leaves the deletion invisible.
+    let deletion = parse_circ_stream_frame(
+        "event: patch\ndata: {\"path\":\"/m3\",\"data\":{\"content\":\"[DELETED]\",\"deleted\":true}}",
+    )
+    .expect("patch frame");
+    match deletion {
+        CircStreamEvent::Patch { id, deleted, .. } => {
+            assert_eq!(id, "m3");
+            assert!(deleted);
+        }
+        other => panic!("expected a patch, got {other:?}"),
+    }
+
+    let removal = parse_circ_stream_frame("event: put\ndata: {\"path\":\"/m3\",\"data\":null}")
+        .expect("null");
+    assert!(matches!(removal, CircStreamEvent::Removed(id) if id == "m3"));
+
+    // Keep-alives and unmodelled paths say nothing about the room.
+    assert!(parse_circ_stream_frame("event: keep-alive\ndata: null").is_none());
+    assert!(
+        parse_circ_stream_frame(
+            "event: patch\ndata: {\"path\":\"/m3/content\",\"data\":\"edited\"}"
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn presence_heartbeat_is_floored_against_a_hot_loop() {
+    // A misbehaving response naming a zero cadence must not turn the
+    // presence loop into a hot cycle of authenticated POSTs.
+    let hot: CircPresence = parse_envelope(
+        200,
+        r#"{ "data": { "heartbeatMs": 0, "idleAfterMs": 60000 } }"#,
+    )
+    .expect("parse hot presence");
+    assert_eq!(hot.heartbeat_ms, CIRC_PRESENCE_MIN_HEARTBEAT_MS);
+
+    // The cadence they actually publish stays theirs, untouched.
+    let sane: CircPresence = parse_envelope(200, r#"{ "data": { "heartbeatMs": 30000 } }"#)
+        .expect("parse sane presence");
+    assert_eq!(sane.heartbeat_ms, 30_000);
+}
+
+#[test]
+fn stream_buffer_keeps_multibyte_chars_whole_across_chunk_splits() {
+    let frame = "event: put\ndata: {\"path\":\"/m1\",\"data\":{\"content\":\"caffè 🦀\",\"timestamp\":1}}\n\n";
+    // Cut inside the 4-byte crab: each half alone is invalid UTF-8, which is
+    // exactly where a TCP chunk boundary is allowed to land.
+    let split = frame.find('🦀').expect("crab in frame") + 2;
+    let bytes = frame.as_bytes();
+
+    let mut buffer = CircStreamBuffer::default();
+    assert!(
+        buffer.push(&bytes[..split]).is_empty(),
+        "half a frame must wait, not decode"
+    );
+    assert_eq!(buffer.push(&bytes[split..]), vec![frame.to_string()]);
+    assert_eq!(buffer.pending_len(), 0);
+}
+
+#[test]
+fn stream_buffer_drains_every_completed_frame_and_keeps_the_tail() {
+    let mut buffer = CircStreamBuffer::default();
+    let frames = buffer.push(b"event: put\ndata: 1\n\nevent: put\ndata: 2\n\nevent: pu");
+    assert_eq!(
+        frames,
+        vec![
+            "event: put\ndata: 1\n\n".to_string(),
+            "event: put\ndata: 2\n\n".to_string(),
+        ]
+    );
+    assert_eq!(buffer.pending_len(), "event: pu".len());
+}
+
+#[test]
+fn a_notification_shape_names_its_ids_and_never_their_text() {
+    // A chat mention, invented to the shape their docs allow: `targetType`
+    // is documented as `post | reply`, `metadata` is open-ended, and unknown
+    // top-level keys are possible, so the log has to survive all three.
+    let body = r#"{
+        "data": [
+            {
+                "id": "n1",
+                "type": "chat_mention",
+                "actorUsername": "laschii",
+                "targetId": "general",
+                "targetType": "chat",
+                "roomId": "general",
+                "metadata": {
+                    "messageId": "-Oabc123",
+                    "roomName": "general",
+                    "messageContent": "hey @mat did you see this",
+                    "context": { "timestamp": 1719700000000 }
+                }
+            }
+        ]
+    }"#;
+    let notifications: Vec<CsNotification> = parse_envelope(200, body).expect("notifications");
+    let shape = notifications[0].shape();
+
+    // The ids are the whole point of the log: they are what a jump needs.
+    assert!(shape.contains("type=chat_mention"), "{shape}");
+    assert!(shape.contains("targetId=general"), "{shape}");
+    assert!(shape.contains("metadata.messageId=-Oabc123"), "{shape}");
+    // Keys the struct does not name survive, wherever they sit.
+    assert!(shape.contains("roomId=general"), "{shape}");
+    assert!(
+        shape.contains("context={timestamp=1719700000000}"),
+        "{shape}"
+    );
+    // Their text never lands in a log an AI can read, by key and by shape.
+    assert!(shape.contains("messageContent=<content>"), "{shape}");
+    assert!(!shape.contains("hey"), "{shape}");
+}
+
+#[test]
+fn a_notification_shape_drops_prose_under_undocumented_keys() {
+    // A `dm_message`, the kind the debug log exists to observe and the one
+    // most likely to carry a preview. The metadata is open-ended, so a
+    // content key the list does not name exactly (`messagePreview`,
+    // `lastMessage`) must still never print, even as a single word that
+    // slips past the whitespace check.
+    let body = r#"{
+        "data": [
+            {
+                "id": "n2",
+                "type": "dm_message",
+                "actorUsername": "laschii",
+                "targetId": "-Oconv42",
+                "targetType": "conversation",
+                "metadata": {
+                    "conversationId": "-Oconv42",
+                    "messageId": "-Omsg7",
+                    "messagePreview": "tonight",
+                    "lastMessage": "yes"
+                }
+            }
+        ]
+    }"#;
+    let notifications: Vec<CsNotification> = parse_envelope(200, body).expect("notifications");
+    let shape = notifications[0].shape();
+
+    // Ids keep printing: they are what the log is for, and `messageId` is a
+    // pointer even though it carries a content word.
+    assert!(
+        shape.contains("metadata.conversationId=-Oconv42"),
+        "{shape}"
+    );
+    assert!(shape.contains("metadata.messageId=-Omsg7"), "{shape}");
+    // A single word is still their prose.
+    assert!(!shape.contains("tonight"), "{shape}");
+    assert!(!shape.contains("yes"), "{shape}");
+}
