@@ -3065,11 +3065,11 @@ fn dashboard_room_rail_area(app: &App) -> Option<Rect> {
     })
 }
 
-/// Route a click on the top-border status bar to the segment under it.
+/// Route a click on either frame status bar to the segment under it.
 ///
 /// The rects come from the bar's own layout pass, rebuilt every frame, so this
-/// stays correct however the user reorders or resizes their components — and a
-/// segment the fit pass dropped simply has no rect to hit.
+/// stays correct however the bottom bar is reordered or resized — and a segment
+/// either fit pass dropped simply has no rect to hit.
 fn handle_status_bar_click(app: &mut App, mouse: MouseEvent) -> bool {
     if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
         return false;

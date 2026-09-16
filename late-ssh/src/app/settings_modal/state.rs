@@ -119,7 +119,7 @@ pub(crate) enum TweakRow {
     PaperAtLogin,
     // Input group.
     InteractionMode,
-    /// Launcher for the status bar customizer. Deliberately last and
+    /// Launcher for the bottom status bar customizer. Deliberately last and
     /// ungrouped: it opens a dialog rather than carrying a value, and the tab
     /// has no spare row for a heading over a single entry.
     Statusline,
@@ -141,7 +141,7 @@ impl TweakRow {
     ];
 }
 
-/// Which pane of the status bar customizer the keys act on.
+/// Which pane of the bottom status bar customizer the keys act on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StatuslinePane {
     /// The ordered segment list: reorder, enable, disable.
@@ -926,7 +926,7 @@ impl SettingsModalState {
 
     /// Move the selected segment left or right along the bar, keeping the
     /// cursor on it. The list reads top-to-bottom as the bar reads
-    /// left-to-right, so "up" is "further left".
+    /// left-to-right along the bottom border, so "up" is "further left".
     pub(crate) fn move_statusline_component(&mut self, delta: isize) {
         let len = self.draft.statusline_components.len();
         if len == 0 {
@@ -955,9 +955,8 @@ impl SettingsModalState {
     }
 
     pub(crate) fn focus_statusline_pane(&mut self, pane: StatuslinePane) {
-        // Nothing to focus on a segment with no dials at all; today every
-        // component has at least Label and Low priority, but the guard keeps
-        // the detail pane from being focusable if that ever stops being true.
+        // Nothing to focus on a segment with no dials at all. Keyboard
+        // shortcuts deliberately have only the list's on/off switch.
         if pane == StatuslinePane::Detail && self.statusline_dials().is_empty() {
             return;
         }
@@ -2438,10 +2437,14 @@ fn cycle_notify_format(current: Option<&str>, forward: bool) -> &'static str {
     OPTIONS[next]
 }
 
-/// The dials a status bar segment offers, in display order. A component with no
-/// inactive reading gets no auto-hide switch, and one with no variants gets no
-/// mode row, so the pane never shows a control that does nothing.
+/// The dials a bottom status bar segment offers, in display order. Keyboard
+/// shortcuts are fixed copy and therefore only use the list's enable switch. A
+/// status component with no inactive reading gets no auto-hide switch, and one
+/// with no variants gets no mode row, so the pane never shows a dead control.
 fn statusline_dials_for(component: StatusComponent) -> Vec<StatuslineDial> {
+    if component == StatusComponent::Shortcuts {
+        return Vec::new();
+    }
     let mut dials = vec![StatuslineDial::Label];
     if component.can_auto_hide() {
         dials.push(StatuslineDial::AutoHide);

@@ -1,4 +1,4 @@
-//! The customizable status bar painted on the app frame's border rows.
+//! The customizable status bar painted on the app frame's bottom border.
 //!
 //! This module owns only the *persisted* model: the component roster, the
 //! per-component dials, and the parse/normalize rules. Building spans,
@@ -14,12 +14,13 @@
 
 use serde_json::Value;
 
-pub const STATUS_COMPONENT_COUNT: usize = 11;
+pub const STATUS_COMPONENT_COUNT: usize = 12;
 
 /// A segment the user can place on the status bar. Order in the stored list is
 /// the paint order, left to right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusComponent {
+    Shortcuts,
     Time,
     Chips,
     Mentions,
@@ -37,10 +38,12 @@ impl StatusComponent {
     /// Default paint order, left to right. `ALL` is also the backfill order for
     /// components missing from a stored list.
     ///
-    /// The enabled-by-default arms reproduce the current upstream HUD order.
-    /// The pot is low priority, so it compacts and drops before the established
-    /// readouts when the border gets tight.
+    /// Keyboard shortcuts retain the bottom-left frame hint by default. Status
+    /// readouts are opt-in here because the fixed top bar already carries the
+    /// upstream HUD; users can add whichever duplicate or supplemental readings
+    /// they want along the bottom border.
     pub const ALL: [StatusComponent; STATUS_COMPONENT_COUNT] = [
+        Self::Shortcuts,
         Self::Pomodoro,
         Self::Voice,
         Self::Mentions,
@@ -56,6 +59,7 @@ impl StatusComponent {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Shortcuts => "shortcuts",
             Self::Time => "time",
             Self::Chips => "chips",
             Self::Mentions => "mentions",
@@ -72,6 +76,7 @@ impl StatusComponent {
 
     pub fn from_key(key: &str) -> Option<Self> {
         match key.trim() {
+            "shortcuts" => Some(Self::Shortcuts),
             "time" => Some(Self::Time),
             "chips" => Some(Self::Chips),
             "mentions" => Some(Self::Mentions),
@@ -90,6 +95,7 @@ impl StatusComponent {
     /// Name shown in the customizer's component list.
     pub fn label(self) -> &'static str {
         match self {
+            Self::Shortcuts => "Keyboard shortcuts",
             Self::Time => "Time",
             Self::Chips => "Chips",
             Self::Mentions => "Mentions",
@@ -108,6 +114,7 @@ impl StatusComponent {
     /// `label()`, which only has to be legible in the editor's list.
     pub fn text_label(self) -> &'static str {
         match self {
+            Self::Shortcuts => "",
             Self::Time => "",
             Self::Chips => "chips",
             Self::Mentions => "unread",
@@ -130,10 +137,12 @@ impl StatusComponent {
     /// a glyph the terminal paints at a width `unicode-width` disagrees about
     /// both slides every hit rect and lets the bar overrun the page tabs.
     /// Text-default glyphs that only become emoji via VS16 (♟️, ✉️, ☎️) must
-    /// not be used here. `Time` returns the empty string: its icon is
-    /// hour-dependent and comes from `clock_icon`.
+    /// not be used here. `Time` returns the empty string because its icon is
+    /// hour-dependent and comes from `clock_icon`; `Shortcuts` is a pre-styled
+    /// frame hint rather than an icon/value pair and also returns empty.
     pub fn icon(self) -> &'static str {
         match self {
+            Self::Shortcuts => "",
             Self::Time => "",
             Self::Chips => "🪙",
             Self::Mentions => "📩",
@@ -149,29 +158,25 @@ impl StatusComponent {
     }
 
     /// Whether this component has an "inactive" reading at all, and so whether
-    /// the customizer offers it an auto-hide switch. Time and Users always
-    /// have something to say; the rest can read zero/idle.
+    /// the customizer offers it an auto-hide switch. Shortcuts, Time, and Users
+    /// always have something to say; the rest can read zero/idle.
     pub fn can_auto_hide(self) -> bool {
-        !matches!(self, Self::Time | Self::Users)
+        !matches!(self, Self::Shortcuts | Self::Time | Self::Users)
     }
 
     /// Whether the component starts enabled for a user with no stored list.
     ///
-    /// Today that is every user, so this set is exactly the bar as it looked
-    /// before it became customizable. Anything else ships discoverable in the
-    /// customizer rather than appearing unbidden on a row that is one line tall
-    /// and already shared with the page tabs.
+    /// The bottom-left keyboard hint is the only shipped segment. Status
+    /// readouts remain discoverable in the customizer rather than duplicating
+    /// the fixed top bar until a user asks for them.
     pub fn default_enabled(self) -> bool {
-        matches!(
-            self,
-            Self::Mentions | Self::Pomodoro | Self::Voice | Self::Pot | Self::Chips
-        )
+        self == Self::Shortcuts
     }
 
     pub fn default_label_mode(self) -> LabelMode {
         match self {
             // The clock reads as a clock; a label would only cost columns.
-            Self::Time => LabelMode::None,
+            Self::Shortcuts | Self::Time => LabelMode::None,
             _ => LabelMode::Text,
         }
     }
@@ -180,24 +185,25 @@ impl StatusComponent {
         self.can_auto_hide()
     }
 
-    /// Whether the component starts in the low-priority drop tier. The pot is
-    /// ambient and yields first despite being enabled; everything opt-in joins
-    /// that tier, so switching one on cannot cost a user their page tabs.
+    /// Whether the component starts in the low-priority drop tier. The existing
+    /// keyboard hint keeps normal priority; every opt-in status reading starts
+    /// low priority until the user promotes it.
     pub fn default_low_priority(self) -> bool {
-        self == Self::Pot || !self.default_enabled()
+        !self.default_enabled()
     }
 
     /// What happens when this component is added to the roster *after* a user
     /// has already saved a bar. `false` (the default for anything cosmetic or
     /// niche) backfills it disabled, leaving a customized bar untouched;
-    /// `true` forces it on, and is reserved for upstream additions that must
-    /// remain visible; currently that is the pot. Diverges on purpose from
+    /// `true` forces it on, and is reserved for the keyboard hint so an existing
+    /// saved component list does not make the longstanding bottom-left help
+    /// disappear. Diverges on purpose from
     /// `normalize_right_sidebar_components`, which backfills everything
     /// enabled — a sidebar panel that appears costs a user rows in a rail
-    /// built to hold panels, while a bar segment that appears costs them the
-    /// page tabs.
+    /// built to hold panels, while a bar segment that appears costs horizontal
+    /// frame space.
     pub fn backfill_existing(self) -> bool {
-        self == Self::Pot
+        self == Self::Shortcuts
     }
 
     /// The component's one extra dial, or `&[]` when it has none. The first
@@ -349,9 +355,10 @@ pub struct StatusComponentSetting {
     /// Drop the segment entirely while the component reads inactive/zero.
     /// Meaningless, and not offered, when `!component.can_auto_hide()`.
     pub auto_hide: bool,
-    /// Drop tier. The bar shares its row with the page tabs, so when the two
-    /// collide every low-priority segment is given up (leftmost first) before
-    /// any normal-priority one yields.
+    /// Drop tier. The bottom bar shares its row with the sponsor title, so when
+    /// space runs out every low-priority segment is given up before any
+    /// normal-priority one yields; within a tier the rightmost segment goes
+    /// first.
     pub low_priority: bool,
     /// Resolved against `component.variants()`; `None` for components with no
     /// dial. A stored value that is absent or foreign resolves to the first
@@ -391,8 +398,10 @@ pub fn default_statusline_components() -> Vec<StatusComponentSetting> {
 }
 
 /// Drop duplicates, repair dials that no longer make sense, and backfill any
-/// missing component at the end so the list always covers every component
-/// exactly once, preserving stored order.
+/// missing component so the list always covers every component exactly once,
+/// preserving stored order. The keyboard hint is the one positional exception:
+/// when newly backfilled it takes its longstanding bottom-left slot at the
+/// front; other additions append.
 ///
 /// Backfilled components take `StatusComponent::backfill_existing()` rather
 /// than a blanket `true`: see that method for why this diverges from the
@@ -425,7 +434,12 @@ pub fn normalize_statusline_components(
     }
     for component in StatusComponent::ALL {
         if !result.iter().any(|s| s.component == component) {
-            result.push(StatusComponentSetting::backfilled(component));
+            let setting = StatusComponentSetting::backfilled(component);
+            if component == StatusComponent::Shortcuts {
+                result.insert(0, setting);
+            } else {
+                result.push(setting);
+            }
         }
     }
     result

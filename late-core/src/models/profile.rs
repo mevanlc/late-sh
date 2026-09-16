@@ -47,9 +47,10 @@ pub struct Profile {
     /// Ordered list of sidebar panels with their on/off state. List order is
     /// the render order (top to bottom); the clock is pinned above it.
     pub right_sidebar_components: Vec<RightSidebarComponentSetting>,
-    /// Ordered list of status bar segments with their per-component dials.
-    /// List order is the paint order, left to right along the app frame's top
-    /// border row.
+    /// Ordered list of user-configurable bottom status bar segments with their
+    /// per-component dials. List order is the paint order, left to right along
+    /// the app frame's bottom border row. The top bar is fixed UI policy and is
+    /// not stored here.
     pub statusline_components: Vec<StatusComponentSetting>,
     /// Legacy mirror of `room_list_mode`, kept in sync on write so an older
     /// binary rolled back onto new data still shows the right rail.

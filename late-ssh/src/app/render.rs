@@ -314,15 +314,15 @@ struct DrawContext<'a> {
     icon_picker_open: bool,
     icon_picker_state: &'a icon_picker::IconPickerState,
     icon_catalog: Option<&'a icon_picker::catalog::IconCatalogData>,
-    /// The user's ordered status bar (draft while the settings modal is open,
-    /// else the saved profile). Order is paint order, left to right.
+    /// The user's ordered bottom status bar (draft while the settings modal is
+    /// open, else the saved profile). Order is paint order, left to right.
     statusline_components: Vec<StatusComponentSetting>,
-    /// Everything the status bar can show this frame. Pre-formatted — notably
+    /// Everything either status bar can show this frame. Pre-formatted — notably
     /// the clock and the `/pomodoro` countdown — so the bar builder stays a
     /// pure function of its inputs with no clock read inside the draw path.
     status_data: crate::app::statusline::data::StatusData<'a>,
-    /// Slot for where each clickable status segment landed this frame, read by
-    /// the hit test in `input.rs`.
+    /// Slot for where each clickable top- or bottom-bar segment landed this
+    /// frame, read by the hit test in `input.rs`.
     status_hits: &'a std::cell::RefCell<Vec<(StatusComponent, Rect)>>,
     home_selected: bool,
 }
@@ -432,7 +432,8 @@ impl App {
                 .right_sidebar_components
                 .clone()
         };
-        // Same draft-aware live preview as the sidebar panels above.
+        // Same draft-aware live preview as the sidebar panels above. These are
+        // the user-arranged bottom-left components; the top bar is fixed.
         let statusline_components = if self.show_settings {
             self.settings_modal_state
                 .draft()
@@ -1313,7 +1314,7 @@ impl App {
         terminal_images: &mut TerminalImageFrame,
     ) {
         if ctx.show_splash {
-            // No status bar on the splash: keep the click slots in step with
+            // No status bars on the splash: keep the click slots in step with
             // what is actually on screen.
             ctx.status_hits.borrow_mut().clear();
             let msg = "take a break, grab a coffee";
@@ -1437,24 +1438,41 @@ impl App {
             .title(title)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
-        match crate::app::statusline::bar::build_status_bar(
-            &ctx.statusline_components,
+        let mut status_hits = Vec::new();
+        let fixed_topbar_components = crate::app::statusline::bar::fixed_topbar_components();
+        if let Some(bar) = crate::app::statusline::bar::build_status_bar(
+            &fixed_topbar_components,
             &ctx.status_data,
             crate::app::statusline::bar::Placement::TopRight,
             area,
             title_width,
         ) {
-            Some(bar) => {
-                *ctx.status_hits.borrow_mut() = bar.hits;
-                block = block.title_top(bar.line);
-            }
-            None => ctx.status_hits.borrow_mut().clear(),
+            status_hits.extend(bar.hits);
+            block = block.title_top(bar.line);
         }
-        let (help_hint_title, sponsor_title) = app_frame_bottom_titles(area.width);
-        block = block.title_bottom(help_hint_title);
-        if let Some(sponsor_title) = sponsor_title {
+
+        // The configurable bar owns the bottom-left title. It receives the
+        // whole border budget first, preserving the old keyboard hint's
+        // priority; the optional sponsor chooses the richest form that fits in
+        // whatever remains on the right.
+        let mut bottom_bar_width = 0;
+        if let Some(bar) = crate::app::statusline::bar::build_status_bar(
+            &ctx.statusline_components,
+            &ctx.status_data,
+            crate::app::statusline::bar::Placement::BottomLeft,
+            area,
+            0,
+        ) {
+            bottom_bar_width = line_width(&bar.line);
+            status_hits.extend(bar.hits);
+            block = block.title_bottom(bar.line);
+        }
+        let sponsor_width =
+            usize::from(area.width.saturating_sub(2)).saturating_sub(bottom_bar_width);
+        if let Some(sponsor_title) = app_frame_sponsor_title(sponsor_width) {
             block = block.title_bottom(sponsor_title);
         }
+        *ctx.status_hits.borrow_mut() = status_hits;
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -2436,24 +2454,6 @@ fn line_width(line: &Line<'_>) -> usize {
         .sum()
 }
 
-fn app_frame_bottom_titles(area_width: u16) -> (Line<'static>, Option<Line<'static>>) {
-    let title_width = usize::from(area_width.saturating_sub(2));
-    for hint_style in [
-        HelpHintStyle::DottedCtrl,
-        HelpHintStyle::SpacedCtrl,
-        HelpHintStyle::SpacedCaret,
-    ] {
-        let help_hint_title = app_frame_help_hint_title(hint_style);
-        let help_hint_width = line_width(&help_hint_title);
-        if help_hint_width <= title_width {
-            let sponsor_title = app_frame_sponsor_title(title_width - help_hint_width);
-            return (help_hint_title, sponsor_title);
-        }
-    }
-
-    (app_frame_help_hint_title(HelpHintStyle::SpacedCaret), None)
-}
-
 fn app_frame_sponsor_title(sponsor_width: usize) -> Option<Line<'static>> {
     [
         sponsor_line(true, true),
@@ -2462,56 +2462,6 @@ fn app_frame_sponsor_title(sponsor_width: usize) -> Option<Line<'static>> {
     ]
     .into_iter()
     .find(|line| line_width(line) <= sponsor_width)
-}
-
-#[derive(Clone, Copy)]
-enum HelpHintStyle {
-    DottedCtrl,
-    SpacedCtrl,
-    SpacedCaret,
-}
-
-fn app_frame_help_hint_title(hint_style: HelpHintStyle) -> Line<'static> {
-    let dim = Style::default().fg(theme::TEXT_DIM());
-    let key = Style::default()
-        .fg(theme::AMBER_DIM())
-        .add_modifier(Modifier::BOLD);
-    let sep_style = Style::default().fg(theme::TEXT_FAINT());
-    let separator = match hint_style {
-        HelpHintStyle::DottedCtrl => " · ",
-        HelpHintStyle::SpacedCtrl | HelpHintStyle::SpacedCaret => "  ",
-    };
-    let use_caret = matches!(hint_style, HelpHintStyle::SpacedCaret);
-    let hints = [
-        ("Settings", ctrl_hint("O", use_caret)),
-        ("Lobby", ctrl_hint("G", use_caret)),
-        ("Shop", "/shop"),
-        ("Guide", "?"),
-        ("Exit", "qq"),
-    ];
-
-    let mut spans = Vec::new();
-    for (idx, (label, key_text)) in hints.into_iter().enumerate() {
-        if idx == 0 {
-            spans.push(Span::styled(" ", dim));
-        } else {
-            spans.push(Span::styled(separator, sep_style));
-        }
-        spans.push(Span::styled(format!("{label} "), dim));
-        spans.push(Span::styled(key_text, key));
-    }
-    spans.push(Span::styled(" ", dim));
-    Line::from(spans)
-}
-
-fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
-    match (use_caret, key) {
-        (true, "O") => "^O",
-        (true, "G") => "^G",
-        (false, "O") => "Ctrl+O",
-        (false, "G") => "Ctrl+G",
-        _ => key,
-    }
 }
 
 fn sponsor_line(include_thanks: bool, include_protocol: bool) -> Line<'static> {

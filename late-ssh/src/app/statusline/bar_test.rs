@@ -4,7 +4,7 @@ use late_core::models::statusline::{
 use ratatui::layout::Rect;
 use ratatui::text::Span;
 
-use super::bar::{Placement, StatusClick, build_status_bar, click_action};
+use super::bar::{Placement, StatusClick, build_status_bar, click_action, fixed_topbar_components};
 use super::data::{StatusData, clock_icon};
 
 fn data() -> StatusData<'static> {
@@ -68,7 +68,10 @@ fn render(components: &[StatusComponentSetting], width: u16) -> String {
 #[test]
 fn every_icon_measures_two_cells() {
     for component in StatusComponent::ALL {
-        let icon = if component == StatusComponent::Time {
+        let icon = if matches!(
+            component,
+            StatusComponent::Shortcuts | StatusComponent::Time
+        ) {
             continue;
         } else {
             component.icon()
@@ -80,6 +83,50 @@ fn every_icon_measures_two_cells() {
             component.as_str()
         );
     }
+}
+
+#[test]
+fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
+    let topbar = fixed_topbar_components();
+    assert_eq!(
+        topbar.map(|setting| setting.component),
+        [
+            StatusComponent::Pomodoro,
+            StatusComponent::Voice,
+            StatusComponent::Mentions,
+            StatusComponent::Pot,
+            StatusComponent::Chips,
+        ]
+    );
+    assert!(topbar.iter().all(|setting| setting.enabled));
+    assert!(
+        topbar
+            .iter()
+            .all(|setting| { setting.low_priority == (setting.component == StatusComponent::Pot) })
+    );
+    assert!(!StatusComponentSetting::new(StatusComponent::Pomodoro).enabled);
+}
+
+#[test]
+fn keyboard_shortcuts_keep_their_styled_bottom_left_copy_and_both_compactions() {
+    let components = [StatusComponentSetting::new(StatusComponent::Shortcuts)];
+    let area_for = |text: &str| Rect::new(0, 0, text.chars().count() as u16 + 2, 24);
+    let render_in = |area| {
+        build_status_bar(&components, &data(), Placement::BottomLeft, area, 0)
+            .expect("shortcut bar")
+            .line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    };
+    let full = "─ Settings Ctrl+O · Lobby Ctrl+G · Shop /shop · Guide ? · Exit qq ";
+    let spaced = "─ Settings Ctrl+O  Lobby Ctrl+G  Shop /shop  Guide ?  Exit qq ";
+    let caret = "─ Settings ^O  Lobby ^G  Shop /shop  Guide ?  Exit qq ";
+
+    assert_eq!(render_in(area_for(full)), full);
+    assert_eq!(render_in(area_for(spaced)), spaced);
+    assert_eq!(render_in(area_for(caret)), caret);
 }
 
 #[test]
@@ -191,6 +238,23 @@ fn a_bottom_left_bar_leads_with_its_edge_glyph() {
         .map(|s| s.content.as_ref())
         .collect::<String>();
     assert_eq!(text, "─ 1204 ");
+}
+
+#[test]
+fn bottom_left_hit_rects_follow_the_leading_edge_glyph() {
+    let area = Rect::new(0, 0, 40, 24);
+    let bar = build_status_bar(
+        &[on(StatusComponent::Chips, LabelMode::None)],
+        &data(),
+        Placement::BottomLeft,
+        area,
+        0,
+    )
+    .expect("bar");
+
+    assert_eq!(bar.hits.len(), 1);
+    assert_eq!(bar.hits[0].0, StatusComponent::Chips);
+    assert_eq!(bar.hits[0].1, Rect::new(2, area.bottom() - 1, 6, 1));
 }
 
 #[test]
@@ -521,6 +585,7 @@ fn click_actions_cover_exactly_the_actionable_components() {
         Some(StatusClick::Shop)
     );
     assert_eq!(click_action(StatusComponent::Time), None);
+    assert_eq!(click_action(StatusComponent::Shortcuts), None);
     assert_eq!(click_action(StatusComponent::Pomodoro), None);
     assert_eq!(click_action(StatusComponent::Voice), None);
     assert_eq!(click_action(StatusComponent::Pot), None);

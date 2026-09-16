@@ -67,6 +67,9 @@ impl<'a> StatusData<'a> {
         variant: Option<StatusVariant>,
     ) -> Option<String> {
         match component {
+            // Built directly by `bar::shortcut_spans`: it is styled help copy,
+            // not a value/label status reading.
+            StatusComponent::Shortcuts => None,
             StatusComponent::Time => Some(
                 match variant {
                     Some(StatusVariant::ClockAmPm) => self.clock_ampm,
@@ -126,6 +129,7 @@ impl<'a> StatusData<'a> {
         variant: Option<StatusVariant>,
     ) -> Option<String> {
         match component {
+            StatusComponent::Shortcuts => None,
             // `MM:SS label` -> `MM:SS`. Losing the label is survivable because
             // expiry still banners and notifies.
             StatusComponent::Pomodoro => self

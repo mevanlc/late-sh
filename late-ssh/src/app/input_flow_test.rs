@@ -15,6 +15,7 @@ use late_core::models::{
     chat_message_reaction::ChatMessageReaction,
     chat_room::ChatRoom,
     chat_room_member::ChatRoomMember,
+    statusline::StatusComponent,
     user::User,
 };
 use late_core::test_utils::create_test_user;
@@ -1965,7 +1966,30 @@ async fn the_lounge_renders_its_own_topic_header() {
     wait_for_render_contains(&mut app, "tonight: the rooms upgrade").await;
 }
 
-/// Each status bar segment routes to its own destination, so a click has to
+#[tokio::test]
+async fn keyboard_shortcuts_are_the_default_bottom_left_component() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "bottom-status-default").await;
+    let mut app = make_app(test_db.db.clone(), viewer.id, "bottom-status-default-it");
+
+    let enabled = app
+        .profile_state
+        .profile()
+        .statusline_components
+        .iter()
+        .filter(|setting| setting.enabled)
+        .map(|setting| setting.component)
+        .collect::<Vec<_>>();
+    assert_eq!(enabled, vec![StatusComponent::Shortcuts]);
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Settings Ctrl+O") && frame.contains("Exit qq"),
+        "keyboard shortcuts should render from the default component: {frame:?}"
+    );
+}
+
+/// Each fixed top-bar segment routes to its own destination, so a click has to
 /// land in that segment's rect and no other. The rects come from measured span
 /// widths, which is what this exercises end to end.
 #[tokio::test]
@@ -1996,7 +2020,7 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     );
     wait_for_render_contains(&mut app, "1 unread").await;
 
-    // The bar sits on the top border row as `1 unread ─ N chips`. Border
+    // The fixed bar sits on the top border row as `1 unread ─ N chips`. Border
     // glyphs are multi-byte, so translate byte offsets into display columns by
     // char count (every glyph on this row is single-width).
     let frame = render_plain(&mut app);

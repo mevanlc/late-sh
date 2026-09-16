@@ -2,9 +2,10 @@
 //!
 //! Three passes, and no component ever knows its own x:
 //!
-//! 1. [`build_segments`] turns the user's component list plus this frame's
-//!    [`StatusData`] into [`Segment`]s. Disabled components, and auto-hiding
-//!    components with nothing to say, produce nothing.
+//! 1. [`build_segments`] turns a component list plus this frame's [`StatusData`]
+//!    into [`Segment`]s. Disabled components, and auto-hiding components with
+//!    nothing to say, produce nothing. The top bar supplies a fixed list; the
+//!    bottom bar supplies the user's persisted list.
 //! 2. [`fit`] degrades and then drops segments until the bar clears the other
 //!    title sharing its border row.
 //! 3. [`lay_out`] joins the survivors with dividers, measures, and converts
@@ -30,14 +31,8 @@ pub(crate) enum Placement {
     /// Right-aligned on the top border, sharing the row with the page tabs on
     /// the left. Yields from its left end, the end that meets the tabs.
     TopRight,
-    /// Left-aligned on the bottom border, sharing the row with the sponsor
-    /// line on the right. Yields from its right end.
-    ///
-    /// Built and tested but not yet wired to a frame: the bottom border still
-    /// paints the fixed help hint. Kept here so the engine's asymmetry (which
-    /// end collides, and therefore which end yields) is settled and covered
-    /// while the top bar is the only caller.
-    #[allow(dead_code, reason = "bottom bar seam; exercised by bar_test")]
+    /// Left-aligned on the bottom border, sharing the row with the optional
+    /// sponsor line on the right. Yields from its right end.
     BottomLeft,
 }
 
@@ -57,9 +52,10 @@ impl Placement {
 pub(crate) struct Segment {
     component: StatusComponent,
     spans: Vec<Span<'static>>,
-    /// The tightest reasonable rendering, offered up under width pressure
-    /// before the segment is dropped. `None` once it is already compact.
-    compact: Option<Vec<Span<'static>>>,
+    /// Successively tighter renderings, offered under width pressure before
+    /// the segment is dropped. Most status readings have one; the keyboard
+    /// shortcuts retain both of their established compaction steps.
+    compacts: Vec<Vec<Span<'static>>>,
     /// Low-priority segments compact and drop ahead of every normal one.
     low_priority: bool,
 }
@@ -72,13 +68,14 @@ impl Segment {
     /// How many cells compacting this segment would save; 0 when it has
     /// nothing left to give.
     fn compact_saving(&self) -> u16 {
-        self.compact.as_ref().map_or(0, |compact| {
+        self.compacts.first().map_or(0, |compact| {
             self.width().saturating_sub(span_width(compact))
         })
     }
 
     fn compact_in_place(&mut self) {
-        if let Some(compact) = self.compact.take() {
+        if !self.compacts.is_empty() {
+            let compact = self.compacts.remove(0);
             self.spans = compact;
         }
     }
@@ -94,6 +91,79 @@ pub(crate) struct StatusBar {
     /// Screen rects for the segments a click can act on, in paint order.
     /// Components with no click action are absent.
     pub hits: Vec<(StatusComponent, Rect)>,
+}
+
+/// The upstream HUD remains on the top border, but is not part of the user's
+/// saved arrangement. Keeping it expressed as component settings lets both
+/// bars share formatting, fitting, and hit-testing without making top-bar
+/// policy configurable.
+pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 5] {
+    [
+        StatusComponent::Pomodoro,
+        StatusComponent::Voice,
+        StatusComponent::Mentions,
+        StatusComponent::Pot,
+        StatusComponent::Chips,
+    ]
+    .map(|component| StatusComponentSetting {
+        enabled: true,
+        low_priority: component == StatusComponent::Pot,
+        ..StatusComponentSetting::new(component)
+    })
+}
+
+#[derive(Clone, Copy)]
+enum ShortcutStyle {
+    DottedCtrl,
+    SpacedCtrl,
+    SpacedCaret,
+}
+
+/// The keyboard hint was the original bottom-left frame title. It stays a
+/// multi-style component rather than flattening into the generic value/label
+/// treatment so its key names retain their emphasis and its narrow-terminal
+/// fallbacks remain unchanged.
+fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let key = Style::default()
+        .fg(theme::AMBER_DIM())
+        .add_modifier(Modifier::BOLD);
+    let sep_style = Style::default().fg(theme::TEXT_FAINT());
+    let separator = match style {
+        ShortcutStyle::DottedCtrl => " · ",
+        ShortcutStyle::SpacedCtrl | ShortcutStyle::SpacedCaret => "  ",
+    };
+    let use_caret = matches!(style, ShortcutStyle::SpacedCaret);
+    let hints = [
+        ("Settings", ctrl_hint("O", use_caret)),
+        ("Lobby", ctrl_hint("G", use_caret)),
+        ("Shop", "/shop"),
+        ("Guide", "?"),
+        ("Exit", "qq"),
+    ];
+
+    let mut spans = Vec::new();
+    for (idx, (label, key_text)) in hints.into_iter().enumerate() {
+        if idx == 0 {
+            spans.push(Span::styled(" ", dim));
+        } else {
+            spans.push(Span::styled(separator, sep_style));
+        }
+        spans.push(Span::styled(format!("{label} "), dim));
+        spans.push(Span::styled(key_text, key));
+    }
+    spans.push(Span::styled(" ", dim));
+    spans
+}
+
+fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
+    match (use_caret, key) {
+        (true, "O") => "^O",
+        (true, "G") => "^G",
+        (false, "O") => "Ctrl+O",
+        (false, "G") => "Ctrl+G",
+        _ => key,
+    }
 }
 
 /// Build the bar for one frame.
@@ -115,7 +185,7 @@ pub(crate) fn build_status_bar(
     lay_out(segments, placement, area)
 }
 
-/// Turn the user's list into this frame's segments, in paint order.
+/// Turn a component list into this frame's segments, in paint order.
 pub(crate) fn build_segments(
     components: &[StatusComponentSetting],
     data: &StatusData<'_>,
@@ -129,6 +199,17 @@ pub(crate) fn build_segments(
 
 fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Option<Segment> {
     let component = setting.component;
+    if component == StatusComponent::Shortcuts {
+        return Some(Segment {
+            component,
+            spans: shortcut_spans(ShortcutStyle::DottedCtrl),
+            compacts: vec![
+                shortcut_spans(ShortcutStyle::SpacedCtrl),
+                shortcut_spans(ShortcutStyle::SpacedCaret),
+            ],
+            low_priority: setting.low_priority,
+        });
+    }
     let value = match data.value(component, setting.variant) {
         Some(value) => value,
         // Inactive: hide the segment, or show the resting reading.
@@ -137,7 +218,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
     };
 
     let spans = segment_spans(setting, data, &value);
-    let compact = data
+    let compacts = data
         .compact_value(component, setting.variant)
         .filter(|compact| *compact != value)
         .map(|compact| segment_spans(setting, data, &compact))
@@ -154,12 +235,14 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
                     &value,
                 )
             })
-        });
+        })
+        .into_iter()
+        .collect();
 
     Some(Segment {
         component,
         spans,
-        compact,
+        compacts,
         low_priority: setting.low_priority,
     })
 }
@@ -169,6 +252,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
 /// count at all.
 fn resting_value(component: StatusComponent) -> String {
     match component {
+        StatusComponent::Shortcuts => String::new(),
         StatusComponent::Pomodoro | StatusComponent::Voice | StatusComponent::Station => {
             "-".to_string()
         }
@@ -222,6 +306,7 @@ fn segment_spans(
 
 fn accent(component: StatusComponent) -> ratatui::style::Color {
     match component {
+        StatusComponent::Shortcuts => theme::TEXT_DIM(),
         StatusComponent::Mentions | StatusComponent::Invites => theme::MENTION(),
         StatusComponent::Chips | StatusComponent::Pot => theme::AMBER(),
         StatusComponent::Voice => theme::SUCCESS(),
@@ -257,13 +342,24 @@ pub(crate) fn fit(
     };
 
     for low_priority_tier in [true, false] {
-        for idx in yield_order(segments.len()) {
-            if total_width(&segments) <= spare_cols {
-                return segments;
+        // One pass per compaction level: every segment in the tier gives up its
+        // next-cheapest form before any one segment is pushed through a second
+        // step. Only the shortcuts currently have two steps.
+        loop {
+            let mut changed = false;
+            for idx in yield_order(segments.len()) {
+                if total_width(&segments) <= spare_cols {
+                    return segments;
+                }
+                if segments[idx].low_priority == low_priority_tier
+                    && segments[idx].compact_saving() > 0
+                {
+                    segments[idx].compact_in_place();
+                    changed = true;
+                }
             }
-            if segments[idx].low_priority == low_priority_tier && segments[idx].compact_saving() > 0
-            {
-                segments[idx].compact_in_place();
+            if !changed {
+                break;
             }
         }
         loop {
@@ -384,6 +480,7 @@ pub(crate) enum StatusClick {
 
 pub(crate) fn click_action(component: StatusComponent) -> Option<StatusClick> {
     match component {
+        StatusComponent::Shortcuts => None,
         StatusComponent::Mentions => Some(StatusClick::Mentions),
         StatusComponent::Chips => Some(StatusClick::Shop),
         StatusComponent::Turns | StatusComponent::Invites => Some(StatusClick::Lobby),

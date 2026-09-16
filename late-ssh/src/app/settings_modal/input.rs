@@ -426,9 +426,10 @@ fn handle_right_sidebar_components_input(app: &mut App, event: ParsedInput) {
     }
 }
 
-/// Status bar customizer. Two panes: the ordered segment list on the left and
-/// the selected segment's dials on the right. `→`/`Tab` step into the dials and
-/// `Esc` steps back out, so the same arrows drive both without a modifier.
+/// Bottom status bar customizer. Two panes: the ordered segment list on the
+/// left and the selected segment's dials on the right. `→`/`Tab` step into the
+/// dials and `Esc` steps back out, so the same arrows drive both without a
+/// modifier.
 ///
 /// Reordering is `⇧↑`/`⇧↓`, with `[`/`]` as the fallback for terminals that
 /// swallow Shift+Arrow (and as the idiom the sibling sidebar-panel dialog

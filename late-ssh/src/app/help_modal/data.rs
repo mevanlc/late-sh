@@ -1336,7 +1336,7 @@ fn settings_help_lines() -> Vec<String> {
         "  Bio               multiline markdown bio".to_string(),
         "  Themes            expanded theme browser; / searches it, f stars a theme into Favorites"
             .to_string(),
-        "  Tweaks            power-user toggles for appearance, compose, display, startup, input, and the status bar"
+        "  Tweaks            power-user toggles for appearance, compose, display, startup, input, and the bottom status bar"
             .to_string(),
         "  Account           link SSH keys across accounts, reset/revoke your IRC access token, or delete your account"
             .to_string(),
@@ -1350,7 +1350,7 @@ fn settings_help_lines() -> Vec<String> {
         "  country via picker, with Unicode flag rendering".to_string(),
         "  timezone via picker".to_string(),
         "  IDE, terminal, OS, and languages for profile/late.fetch surfaces".to_string(),
-        "  Tweaks: terminal background sync, text brightness, right sidebar mode, room list, pet strip, composer send behavior, chat flag fallback, land on Home, input mode, statusline segments"
+        "  Tweaks: terminal background sync, text brightness, right sidebar mode, room list, pet strip, composer send behavior, chat flag fallback, land on Home, input mode, bottom statusline segments"
             .to_string(),
         "  private RSS/Atom subscriptions".to_string(),
         "  IRC access token for external IRC clients".to_string(),
@@ -1368,7 +1368,8 @@ fn settings_help_lines() -> Vec<String> {
         "  Space quick-cycles simple toggles".to_string(),
         "  Pickers: type to filter, Enter pick, Esc cancel".to_string(),
         "  Custom sidebar: Enter on Custom opens the three-page checklist".to_string(),
-        "  Tweaks > Status bar: Enter opens the top-border segment customizer".to_string(),
+        "  Tweaks > Bottom status bar: Enter opens the bottom-left segment customizer"
+            .to_string(),
         "  Account: Enter opens Link Accounts or Delete Account".to_string(),
         "  ? opens this guide; Esc / q closes".to_string(),
         "".to_string(),
@@ -1413,16 +1414,18 @@ fn settings_help_lines() -> Vec<String> {
         "  Startup".to_string(),
         "    Land on Home page             land on Home (page 1) instead of the Clubhouse (page 0) when a session starts"
             .to_string(),
-        "  Status bar                      Enter opens the customizer for the app frame's top border"
+        "  Bottom status bar               Enter opens the customizer for the app frame's bottom-left border"
             .to_string(),
         "".to_string(),
-        "Status bar customizer".to_string(),
-        "  The top border of the app frame is a status bar you arrange yourself.".to_string(),
+        "Bottom status bar customizer".to_string(),
+        "  The bottom-left border of the app frame is a status bar you arrange yourself."
+            .to_string(),
         "  Segments paint left to right in the order the list shows them top to bottom."
             .to_string(),
-        "  Available segments: pomodoro, voice, mentions, pot, chips, your move, invites, quests, station, users online, time"
+        "  Available segments: keyboard shortcuts, pomodoro, voice, mentions, pot, chips, your move, invites, quests, station, users online, time"
             .to_string(),
-        "  Most segments are clickable and jump to what they are counting.".to_string(),
+        "  Status segments with a destination are clickable and jump to what they count."
+            .to_string(),
         "  Controls".to_string(),
         "    j / k or arrows         move through segments".to_string(),
         "    Shift+Up / Shift+Down   move the selected segment along the bar ([ and ] do the same)"
@@ -1432,6 +1435,7 @@ fn settings_help_lines() -> Vec<String> {
         "    Left / Right or Space   change the focused option".to_string(),
         "    Esc                     back out of the options, then close".to_string(),
         "  Per-segment options".to_string(),
+        "    Keyboard shortcuts have no options beyond the list's on/off switch.".to_string(),
         "    Label          Text, Icon, or None beside the value".to_string(),
         "    Auto-hide      drop the segment while it reads zero or idle".to_string(),
         "    Low priority   yields first when the bar runs out of room; every low-priority"
@@ -1441,8 +1445,11 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "    with or without DMs, daily vs daily+weekly quests, station name vs track"
             .to_string(),
-        "  The bar shares its row with the page tabs, so when the two collide segments".to_string(),
-        "  shed their text labels first and only then drop, leftmost first."
+        "  The bar gets first claim on its border row and the optional sponsor uses what remains."
+            .to_string(),
+        "  When the bar itself runs short, segments compact and then drop, rightmost first."
+            .to_string(),
+        "  The top-right status bar remains fixed rather than following this arrangement."
             .to_string(),
         "  Your arrangement is account-wide: every device you SSH in from gets the same bar."
             .to_string(),

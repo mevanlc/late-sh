@@ -1783,9 +1783,9 @@ pub fn extract_right_sidebar_components(settings: &Value) -> Vec<RightSidebarCom
     normalize_right_sidebar_components(&parsed)
 }
 
-/// The user's status bar. An absent key means "never customized" and yields
-/// the shipped default bar, so this is also what every existing account reads
-/// until the customizer writes for the first time.
+/// The user's bottom status bar. An absent key means "never customized" and
+/// yields the shipped keyboard-shortcuts component, so this is also what every
+/// existing account reads until the customizer writes for the first time.
 pub fn extract_statusline_components(settings: &Value) -> Vec<StatusComponentSetting> {
     let Some(values) = settings
         .get(STATUSLINE_COMPONENTS_KEY)

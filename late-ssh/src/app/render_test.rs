@@ -1,8 +1,7 @@
 use super::{
-    AUTO_RIGHT_SIDEBAR_MIN_COLS, AUTO_ROOM_LIST_MIN_COLS, HelpHintStyle, app_frame_bottom_titles,
-    app_frame_help_hint_title, app_frame_sponsor_title, dashboard_home_selected, line_width,
-    resolve_right_sidebar_enabled, resolve_room_list_enabled, room_list_sidebar_enabled,
-    sidebar_enabled, sponsor_line,
+    AUTO_RIGHT_SIDEBAR_MIN_COLS, AUTO_ROOM_LIST_MIN_COLS, app_frame_sponsor_title,
+    dashboard_home_selected, line_width, resolve_right_sidebar_enabled, resolve_room_list_enabled,
+    room_list_sidebar_enabled, sidebar_enabled, sponsor_line,
 };
 use crate::app::common::primitives::Screen;
 use late_core::models::user::{RightSidebarMode, RoomListMode};
@@ -158,7 +157,7 @@ fn dashboard_home_selected_rejects_synthetic_and_non_lounge_rooms() {
 }
 
 #[test]
-fn sponsor_title_drops_optional_segments_before_overlapping_help_hints() {
+fn sponsor_title_drops_optional_segments_to_fit_its_available_width() {
     let full_width = line_width(&sponsor_line(true, true));
     let url_width = line_width(&sponsor_line(false, true));
     let short_url_width = line_width(&sponsor_line(false, false));
@@ -181,40 +180,4 @@ fn sponsor_title_drops_optional_segments_before_overlapping_help_hints() {
 
     let hidden = app_frame_sponsor_title(short_url_width - 1);
     assert!(hidden.is_none());
-}
-
-#[test]
-fn help_hint_title_lists_exit_last() {
-    let help = app_frame_help_hint_title(HelpHintStyle::DottedCtrl);
-    assert_eq!(
-        line_text(&help),
-        " Settings Ctrl+O · Lobby Ctrl+G · Shop /shop · Guide ? · Exit qq "
-    );
-}
-
-#[test]
-fn help_hint_title_compacts_separators_then_ctrl_notation() {
-    let dotted = app_frame_help_hint_title(HelpHintStyle::DottedCtrl);
-    let spaced = app_frame_help_hint_title(HelpHintStyle::SpacedCtrl);
-    let caret = app_frame_help_hint_title(HelpHintStyle::SpacedCaret);
-    assert_eq!(
-        line_text(&spaced),
-        " Settings Ctrl+O  Lobby Ctrl+G  Shop /shop  Guide ?  Exit qq "
-    );
-    assert_eq!(
-        line_text(&caret),
-        " Settings ^O  Lobby ^G  Shop /shop  Guide ?  Exit qq "
-    );
-
-    let (help, sponsor) = app_frame_bottom_titles((line_width(&dotted) + 2) as u16);
-    assert_eq!(line_text(&help), line_text(&dotted));
-    assert!(sponsor.is_none());
-
-    let (help, sponsor) = app_frame_bottom_titles((line_width(&spaced) + 2) as u16);
-    assert_eq!(line_text(&help), line_text(&spaced));
-    assert!(sponsor.is_none());
-
-    let (help, sponsor) = app_frame_bottom_titles((line_width(&caret) + 2) as u16);
-    assert_eq!(line_text(&help), line_text(&caret));
-    assert!(sponsor.is_none());
 }

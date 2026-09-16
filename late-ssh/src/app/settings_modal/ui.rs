@@ -800,7 +800,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // Input subsection heading
         Constraint::Length(1),                // interaction mode row
         Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // status bar customizer row
+        Constraint::Length(1),                // bottom status bar customizer row
         Constraint::Min(0),                   // flex spacer
         Constraint::Length(gem_strip_height), // gem
     ])
@@ -922,7 +922,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             state,
             TweakRow::Statusline,
             width,
-            "Status bar",
+            "Bottom status bar",
             value_span("⏎ segments", theme::AMBER()),
         )),
         sections[20],
@@ -1774,24 +1774,24 @@ fn draw_right_sidebar_components_dialog(frame: &mut Frame, area: Rect, state: &S
     frame.render_widget(Paragraph::new(footer_bottom), layout[layout.len() - 1]);
 }
 
-/// Status bar customizer: the ordered segment list on the left, the selected
-/// segment's dials on the right.
+/// Bottom status bar customizer: the ordered segment list on the left, the
+/// selected segment's dials on the right.
 ///
 /// The list is ordered top-to-bottom the way the bar reads left-to-right, so
 /// "move up" and "move left" are the same gesture and the user never has to
 /// hold the mapping in their head.
 fn draw_statusline_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     /// Columns given to the segment list; the dials take what's left.
-    const LIST_WIDTH: u16 = 24;
+    const LIST_WIDTH: u16 = 28;
 
     let components = state.statusline_components();
     let count = components.len() as u16;
     // rows + heading + blank + 2 footer lines + borders, plus one spare row.
-    let popup = centered_rect(62, count + 7, area);
+    let popup = centered_rect(66, count + 7, area);
     frame.render_widget(Clear, popup);
 
     let block = Block::default()
-        .title(" Status bar ")
+        .title(" Bottom status bar ")
         .title_style(
             Style::default()
                 .fg(theme::AMBER_GLOW())
@@ -1815,7 +1815,7 @@ fn draw_statusline_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalSt
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                "Segments paint left to right along the top border.",
+                "Segments paint left to right along the bottom border.",
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
@@ -1896,7 +1896,19 @@ fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalSta
         Rect::new(area.x, area.y, area.width, 1),
     );
 
-    for (idx, dial) in state.statusline_dials().into_iter().enumerate() {
+    let dials = state.statusline_dials();
+    if dials.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Toggle this component from the list.",
+                Style::default().fg(theme::TEXT_DIM()),
+            ))),
+            Rect::new(area.x, area.y + 2, area.width, 1),
+        );
+        return;
+    }
+
+    for (idx, dial) in dials.into_iter().enumerate() {
         // +2 leaves the component name a blank line of its own.
         let y = idx as u16 + 2;
         if y >= area.height {

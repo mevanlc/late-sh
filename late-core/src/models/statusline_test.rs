@@ -30,51 +30,46 @@ fn default_list_covers_every_component_exactly_once() {
     }
 }
 
-/// A user without a stored list sees the current upstream HUD content in its
-/// current order, plus nothing opt-in.
+/// A user without a stored list keeps the longstanding bottom-left keyboard
+/// hint. Status readings are opt-in because the fixed top bar already carries
+/// the upstream HUD.
 #[test]
-fn default_enabled_set_reproduces_the_upstream_bar() {
+fn default_bottom_bar_is_the_keyboard_shortcuts() {
     let enabled: Vec<StatusComponent> = default_statusline_components()
         .into_iter()
         .filter(|s| s.enabled)
         .map(|s| s.component)
         .collect();
-    assert_eq!(
-        enabled,
-        vec![
-            StatusComponent::Pomodoro,
-            StatusComponent::Voice,
-            StatusComponent::Mentions,
-            StatusComponent::Pot,
-            StatusComponent::Chips,
-        ]
-    );
+    assert_eq!(enabled, vec![StatusComponent::Shortcuts]);
 }
 
-/// The pot is visible by default but remains the first ambient segment to yield;
-/// everything opt-in also starts in that low-priority tier.
+/// The keyboard hint keeps its established place while every opt-in status
+/// component starts in the low-priority tier.
 #[test]
-fn ambient_and_opt_in_components_start_low_priority() {
+fn opt_in_status_components_start_low_priority() {
     for setting in default_statusline_components() {
         assert_eq!(
             setting.low_priority,
-            setting.component == StatusComponent::Pot || !setting.enabled,
+            setting.component != StatusComponent::Shortcuts,
             "{} priority tier",
             setting.component.as_str()
         );
     }
 }
 
-/// Only `Time` supplies its icon at render time (it is hour-dependent), so
-/// every other component must carry one. The two-cells-wide invariant those
-/// icons have to satisfy is locked in `late-ssh`, against the same measuring
-/// function ratatui lays cells out with.
+/// `Time` supplies its icon at render time and the keyboard shortcuts are a
+/// pre-styled hint rather than an icon/value pair, so every status component
+/// other than those two must carry an icon. The two-cells-wide invariant is
+/// locked in `late-ssh` against ratatui's own measuring function.
 #[test]
-fn every_component_but_time_carries_an_icon() {
+fn every_value_component_but_time_carries_an_icon() {
     for component in StatusComponent::ALL {
         assert_eq!(
             component.icon().is_empty(),
-            component == StatusComponent::Time,
+            matches!(
+                component,
+                StatusComponent::Shortcuts | StatusComponent::Time
+            ),
             "{} icon",
             component.as_str()
         );
@@ -101,33 +96,36 @@ fn normalize_drops_duplicates_and_keeps_stored_order() {
 
     let normalized = normalize_statusline_components(&stored);
     assert_eq!(normalized.len(), STATUS_COMPONENT_COUNT);
-    assert_eq!(normalized[0].component, StatusComponent::Chips);
+    assert_eq!(normalized[0].component, StatusComponent::Shortcuts);
     assert!(normalized[0].enabled);
-    assert_eq!(normalized[1].component, StatusComponent::Mentions);
-    assert!(!normalized[1].enabled);
+    assert_eq!(normalized[1].component, StatusComponent::Chips);
+    assert!(normalized[1].enabled);
+    assert_eq!(normalized[2].component, StatusComponent::Mentions);
+    assert!(!normalized[2].enabled);
 }
 
-/// Backfill diverges from the sidebar's blanket enable. The upstream pot is the
-/// one required addition; optional components stay off in an existing custom
-/// roster.
+/// Backfill diverges from the sidebar's blanket enable. Only the longstanding
+/// keyboard hint is required; optional status components stay off in an
+/// existing custom roster.
 #[test]
 fn normalize_backfills_each_component_at_its_own_policy() {
     let stored = vec![StatusComponentSetting::new(StatusComponent::Chips)];
     let normalized = normalize_statusline_components(&stored);
 
     assert_eq!(normalized.len(), STATUS_COMPONENT_COUNT);
-    assert_eq!(normalized[0].component, StatusComponent::Chips);
-    for setting in normalized.iter().skip(1) {
+    assert_eq!(normalized[0].component, StatusComponent::Shortcuts);
+    assert!(normalized[0].enabled);
+    assert_eq!(normalized[1].component, StatusComponent::Chips);
+    for setting in normalized.iter().skip(2) {
         assert_eq!(
             setting.enabled,
             setting.component.backfill_existing(),
             "{} backfilled at its own policy",
             setting.component.as_str()
         );
-        assert_eq!(
-            setting.enabled,
-            setting.component == StatusComponent::Pot,
-            "only the upstream pot forces itself on"
+        assert!(
+            !setting.enabled,
+            "only the keyboard shortcuts force themselves on"
         );
     }
 }
@@ -172,7 +170,8 @@ fn parse_skips_unknown_keys_and_falls_back_per_field() {
 
     let parsed = parse_statusline_components(&values);
     assert_eq!(parsed.len(), STATUS_COMPONENT_COUNT);
-    assert_eq!(parsed[0].component, StatusComponent::Time);
+    assert_eq!(parsed[0].component, StatusComponent::Shortcuts);
+    assert_eq!(parsed[1].component, StatusComponent::Time);
 
     let time = find(&parsed, StatusComponent::Time);
     assert_eq!(time.enabled, StatusComponent::Time.default_enabled());
@@ -209,11 +208,11 @@ fn parse_of_an_empty_array_yields_the_full_default_list() {
     // normalize backfills rather than leaving the user with no roster at all.
     let parsed = parse_statusline_components(&[] as &[Value]);
     assert_eq!(parsed.len(), STATUS_COMPONENT_COUNT);
-    assert!(find(&parsed, StatusComponent::Pot).enabled);
+    assert!(find(&parsed, StatusComponent::Shortcuts).enabled);
     assert!(
         parsed
             .iter()
-            .filter(|setting| setting.component != StatusComponent::Pot)
+            .filter(|setting| setting.component != StatusComponent::Shortcuts)
             .all(|setting| !setting.enabled),
         "optional backfilled entries stay off"
     );
