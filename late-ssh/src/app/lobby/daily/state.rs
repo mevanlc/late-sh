@@ -26,8 +26,9 @@ use super::{
     games::DailyGame,
     reversi::DailyReversiState,
     svc::{
-        DAILY_MAX_ACTIVE_ENTRIES, DailyChallengeItem, DailyChessState, DailyEvent,
-        DailyFinishedItem, DailyMatchItem, DailyService, DailySnapshot,
+        DAILY_MAX_ACTIVE_ENTRIES, DAILY_WIN_MIN_MOVES, DailyChallengeItem, DailyChessState,
+        DailyEvent, DailyFinishOutcome, DailyFinishedItem, DailyMatchItem, DailyService,
+        DailySnapshot, DailyWinPayout,
     },
 };
 
@@ -58,6 +59,14 @@ impl ChallengeDraft {
 pub struct DailyTick {
     pub banner: Option<Banner>,
     pub changed: bool,
+    /// A match of this user's finished with this user winning. The activity
+    /// feed's `DailyResult` names a player for draws too, so the pet's pride
+    /// reads this instead of the feed.
+    pub own_win: bool,
+    /// A match of this user's finished with the other player winning. The
+    /// activity feed names only the winner, so this is the loser's one
+    /// witness (the pet sulks on it).
+    pub own_loss: bool,
 }
 
 pub struct DailyState {
@@ -78,6 +87,10 @@ pub struct DailyState {
     /// first snapshot update, so a cold-start empty snapshot can't make the
     /// first real snapshot notify for every my-turn match at once.
     turn_notify_seeded: bool,
+    /// Set by a `MatchFinished` this user won or lost, taken by the next
+    /// tick. A draw sets neither.
+    own_win: bool,
+    own_loss: bool,
 
     pub board: Option<DailyBoardState>,
 }
@@ -123,6 +136,9 @@ pub struct DailyMatchDetail {
 
 pub enum DailyGameDetail {
     Chess(ChessDetail),
+    /// Same detail as `Chess`: chess960 differs only in the opening position,
+    /// which lives in the FEN, so rules, board, and renderer are shared.
+    Chess960(ChessDetail),
     Battleship(BattleshipDetail),
     Connect4(Connect4Detail),
     Reversi(ReversiDetail),
@@ -136,6 +152,7 @@ impl DailyGameDetail {
     pub fn kind(&self) -> DailyGame {
         match self {
             Self::Chess(_) => DailyGame::Chess,
+            Self::Chess960(_) => DailyGame::Chess960,
             Self::Battleship(_) => DailyGame::Battleship,
             Self::Connect4(_) => DailyGame::ConnectFour,
             Self::Reversi(_) => DailyGame::Reversi,
@@ -236,6 +253,7 @@ impl DailyMatchDetail {
     fn from_row(row: DailyMatch) -> Result<Self, String> {
         let game = match DailyGame::from_kind(&row.game_kind) {
             Some(DailyGame::Chess) => DailyGameDetail::Chess(ChessDetail::from_row(&row)?),
+            Some(DailyGame::Chess960) => DailyGameDetail::Chess960(ChessDetail::from_row(&row)?),
             Some(DailyGame::Battleship) => DailyGameDetail::Battleship(BattleshipDetail {
                 state: DailyBattleshipState::parse(&row.state).map_err(|e| e.to_string())?,
                 shot_in_flight: false,
@@ -270,14 +288,14 @@ impl DailyMatchDetail {
 
     pub fn chess(&self) -> Option<&ChessDetail> {
         match &self.game {
-            DailyGameDetail::Chess(chess) => Some(chess),
+            DailyGameDetail::Chess(chess) | DailyGameDetail::Chess960(chess) => Some(chess),
             _ => None,
         }
     }
 
     fn chess_mut(&mut self) -> Option<&mut ChessDetail> {
         match &mut self.game {
-            DailyGameDetail::Chess(chess) => Some(chess),
+            DailyGameDetail::Chess(chess) | DailyGameDetail::Chess960(chess) => Some(chess),
             _ => None,
         }
     }
@@ -348,6 +366,8 @@ impl DailyState {
             notifier,
             turn_notified_match_ids: HashSet::new(),
             turn_notify_seeded: false,
+            own_win: false,
+            own_loss: false,
             board: None,
         }
     }
@@ -386,7 +406,12 @@ impl DailyState {
         if self.poll_board_load() {
             changed = true;
         }
-        DailyTick { banner, changed }
+        DailyTick {
+            banner,
+            changed,
+            own_win: std::mem::take(&mut self.own_win),
+            own_loss: std::mem::take(&mut self.own_loss),
+        }
     }
 
     fn apply_event(&mut self, event: DailyEvent) -> Option<Banner> {
@@ -420,34 +445,54 @@ impl DailyState {
                 game,
                 challenger_id,
                 opponent_id,
-                winner_user_id,
+                outcome,
                 result,
             } => {
                 if self.board.as_ref().is_some_and(|b| b.match_id == match_id) {
                     self.request_board_reload();
                 }
                 let playing = challenger_id == self.user_id || opponent_id == Some(self.user_id);
-                if winner_user_id == Some(self.user_id) {
-                    Some(Banner::success(&format!(
-                        "Daily {}: you won the match (+{} chips)",
-                        game.label(),
-                        game.win_payout()
-                    )))
-                } else if playing && winner_user_id.is_some() {
-                    // Losers get told too; the lingering result row in the
-                    // lobby is the durable copy of this news.
-                    Some(Banner::info(&format!(
-                        "Daily {}: you lost the match ({})",
-                        game.label(),
-                        result_phrase(&result)
-                    )))
-                } else if playing {
-                    Some(Banner::info(&format!(
+                match outcome {
+                    DailyFinishOutcome::Won { user_id, payout } if user_id == self.user_id => {
+                        self.own_win = true;
+                        // The payout was settled before this event was sent,
+                        // so the banner reports what the chips did.
+                        Some(match payout {
+                            DailyWinPayout::Paid => Banner::success(&format!(
+                                "Daily {}: you won the match (+{} chips)",
+                                game.label(),
+                                game.win_payout()
+                            )),
+                            DailyWinPayout::Unplayed => Banner::success(&format!(
+                                "Daily {}: you won the match (no chips: under {} moves)",
+                                game.label(),
+                                DAILY_WIN_MIN_MOVES
+                            )),
+                            DailyWinPayout::PairDayCapped => Banner::success(&format!(
+                                "Daily {}: you won the match (no chips: one paid win per opponent per game per posting day)",
+                                game.label()
+                            )),
+                            DailyWinPayout::Failed => Banner::success(&format!(
+                                "Daily {}: you won the match (the chip payout failed)",
+                                game.label()
+                            )),
+                        })
+                    }
+                    DailyFinishOutcome::Won { .. } if playing => {
+                        // Losers get told too; the lingering result row in the
+                        // lobby is the durable copy of this news.
+                        self.own_loss = true;
+                        Some(Banner::info(&format!(
+                            "Daily {}: you lost the match ({})",
+                            game.label(),
+                            result_phrase(&result)
+                        )))
+                    }
+                    DailyFinishOutcome::Draw if playing => Some(Banner::info(&format!(
                         "Daily {}: match ended in a draw",
                         game.label()
-                    )))
-                } else {
-                    None
+                    ))),
+                    DailyFinishOutcome::Won { .. } | DailyFinishOutcome::Draw => None,
                 }
             }
             DailyEvent::MovePlayed { match_id, .. }
@@ -709,7 +754,7 @@ impl DailyState {
             return_screen,
             // Start the cursor mid-board for each game's grid.
             cursor: match game {
-                DailyGame::Chess => 12,
+                DailyGame::Chess | DailyGame::Chess960 => 12,
                 DailyGame::Battleship => 44,
                 // The connect4 cursor is a column, not a cell.
                 DailyGame::ConnectFour => 3,
@@ -962,7 +1007,9 @@ impl DailyState {
         // Copy the game kind out first: the per-game handlers need `board`
         // whole, and matching the roster enum keeps this exhaustive.
         match detail.game.kind() {
-            DailyGame::Chess => Self::chess_select_or_move(board, user_id, &svc),
+            DailyGame::Chess | DailyGame::Chess960 => {
+                Self::chess_select_or_move(board, user_id, &svc)
+            }
             DailyGame::Battleship => Self::battleship_fire(board, user_id, &svc),
             DailyGame::ConnectFour => Self::connect4_drop(board, user_id, &svc),
             DailyGame::Reversi => Self::reversi_place(board, user_id, &svc),
@@ -1315,7 +1362,7 @@ impl DailyState {
         let label = rules::san_label(&board, mv);
         let mut board = board;
         board.play(mv);
-        chess.state.fen = format!("{board}");
+        chess.state.fen = rules::fen(&board);
         // The resolved move's own squares, not the clicked pair: a castle
         // played as a two-square king push records as the king-captures-rook
         // encoding every other castle in the history uses.

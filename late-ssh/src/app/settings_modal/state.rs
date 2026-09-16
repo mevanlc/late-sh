@@ -42,7 +42,6 @@ pub(crate) enum PickerKind {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Row {
     Username,
-    Birthday,
     Ide,
     Terminal,
     Os,
@@ -56,6 +55,7 @@ pub(crate) enum Row {
     DirectMessages,
     Mentions,
     GameEvents,
+    Streams,
     Bell,
     Cooldown,
     NotifyFormat,
@@ -66,7 +66,6 @@ impl Row {
         Row::Username,
         Row::Country,
         Row::Timezone,
-        Row::Birthday,
         Row::Theme,
         Row::Ide,
         Row::Terminal,
@@ -78,6 +77,7 @@ impl Row {
         Row::DirectMessages,
         Row::Mentions,
         Row::GameEvents,
+        Row::Streams,
         Row::Bell,
         Row::Cooldown,
         Row::NotifyFormat,
@@ -106,27 +106,27 @@ pub(crate) enum TweakRow {
     TextBrightness,
     RightSidebar,
     RoomListSidebar,
-    PetStrip,
-    // Compose / Music / Display / Startup groups.
+    // Compose / Display / Startup groups. There is deliberately no music-mute
+    // row: mute and volume are owned by `m` and `+`/`-`, persisted per device,
+    // and a second control here would be a second source of truth for them.
     ComposerKeepFocused,
-    StartWithMusicMuted,
     FlagFallback,
-    LandOnHome,
+    LandingPage,
+    PaperAtLogin,
     // Input group.
     InteractionMode,
 }
 
 impl TweakRow {
-    pub(crate) const ALL: [TweakRow; 10] = [
+    pub(crate) const ALL: [TweakRow; 9] = [
         TweakRow::BackgroundColor,
         TweakRow::TextBrightness,
         TweakRow::RightSidebar,
         TweakRow::RoomListSidebar,
-        TweakRow::PetStrip,
         TweakRow::ComposerKeepFocused,
-        TweakRow::StartWithMusicMuted,
         TweakRow::FlagFallback,
-        TweakRow::LandOnHome,
+        TweakRow::LandingPage,
+        TweakRow::PaperAtLogin,
         TweakRow::InteractionMode,
     ];
 }
@@ -146,7 +146,6 @@ pub(crate) enum LinkAccountEnterCodeFocus {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SystemField {
-    Birthday,
     Ide,
     Terminal,
     Os,
@@ -156,7 +155,6 @@ pub(crate) enum SystemField {
 impl SystemField {
     pub(crate) fn from_row(row: Row) -> Option<Self> {
         match row {
-            Row::Birthday => Some(Self::Birthday),
             Row::Ide => Some(Self::Ide),
             Row::Terminal => Some(Self::Terminal),
             Row::Os => Some(Self::Os),
@@ -167,7 +165,6 @@ impl SystemField {
 
     fn value(self, profile: &Profile) -> Option<String> {
         match self {
-            Self::Birthday => profile.birthday.clone(),
             Self::Ide => profile.ide.clone(),
             Self::Terminal => profile.terminal.clone(),
             Self::Os => profile.os.clone(),
@@ -177,9 +174,6 @@ impl SystemField {
 
     fn set_value(self, profile: &mut Profile, text: String) {
         match self {
-            Self::Birthday => {
-                profile.birthday = late_core::models::birthday::normalize_birthday(&text);
-            }
             Self::Ide => profile.ide = normalize_optional_text(&text),
             Self::Terminal => profile.terminal = normalize_optional_text(&text),
             Self::Os => profile.os = normalize_optional_text(&text),
@@ -233,6 +227,10 @@ pub(crate) enum ThemeTreeRow {
         group: theme::ThemeGroup,
         collapsed: bool,
     },
+    /// The starred-themes block that sits above the real groups. It is not a
+    /// `ThemeGroup` because no theme belongs to it: it is a view of themes that
+    /// live in the groups below.
+    FavoritesHeader { collapsed: bool },
     Theme {
         option_index: usize,
         last_in_group: bool,
@@ -463,6 +461,20 @@ pub(crate) struct SettingsModalState {
     theme_selected_row: usize,
     theme_scroll_offset: usize,
     theme_visible_height: Cell<usize>,
+    /// Live substring filter over the theme list. Empty means "show the tree".
+    /// With 100+ themes across 17 groups, scrolling to a theme you can already
+    /// name is the slow path (user feedback).
+    theme_query: String,
+    /// Whether keystrokes are editing [`Self::theme_query`].
+    theme_searching: bool,
+    /// Whether a search-time preview changed the theme without persisting it.
+    /// While the search is open every keystroke can move the preview, and each
+    /// `save()` is a detached task with no ordering, so racing one per key
+    /// could persist a theme other than the last one previewed. Settled by one
+    /// save when the search closes.
+    theme_preview_unsaved: bool,
+    /// Whether the starred-themes block at the top of the tree is folded away.
+    theme_favorites_collapsed: bool,
     theme_collapsed_groups: u32,
     editing_username: bool,
     username_input: TextArea<'static>,
@@ -526,6 +538,10 @@ impl SettingsModalState {
             theme_selected_row: 0,
             theme_scroll_offset: 0,
             theme_visible_height: Cell::new(1),
+            theme_query: String::new(),
+            theme_searching: false,
+            theme_preview_unsaved: false,
+            theme_favorites_collapsed: false,
             theme_collapsed_groups: 0,
             editing_username: false,
             username_input: new_short_textarea(false),
@@ -599,6 +615,12 @@ impl SettingsModalState {
         self.account_row_index = 0;
         self.tweak_row_index = 0;
         self.sync_theme_index_to_draft();
+        // A reserved chord (Ctrl+G) can close the modal over an open theme
+        // search, so reopening must not land back inside it with a stale
+        // query. The collapse states survive on purpose, like the groups'.
+        self.theme_query.clear();
+        self.theme_searching = false;
+        self.theme_preview_unsaved = false;
         self.editing_username = false;
         self.username_input = new_short_textarea(false);
         self.editing_system_field = None;
@@ -677,6 +699,12 @@ impl SettingsModalState {
         }
         if self.selected_tab == Tab::Feeds && self.editing_feed_url {
             self.cancel_feed_url_edit();
+        }
+        if self.selected_tab == Tab::Themes && self.theme_searching {
+            // Leaving mid-search closes it (persisting any pending preview),
+            // so returning to Themes never lands inside a stale query where
+            // j/k type instead of navigate.
+            self.cancel_theme_search();
         }
         if next == Tab::Themes {
             self.sync_theme_index_to_draft();
@@ -815,20 +843,17 @@ impl SettingsModalState {
             TweakRow::RoomListSidebar => {
                 self.device_rails.0 = self.device_rails.0.cycle(true);
             }
-            TweakRow::PetStrip => {
-                self.draft.show_pet_strip ^= true;
-            }
             TweakRow::ComposerKeepFocused => {
                 self.draft.keep_composer_focused ^= true;
-            }
-            TweakRow::StartWithMusicMuted => {
-                self.draft.start_with_music_muted ^= true;
             }
             TweakRow::FlagFallback => {
                 self.draft.show_flag_fallback ^= true;
             }
-            TweakRow::LandOnHome => {
-                self.draft.land_on_home ^= true;
+            TweakRow::LandingPage => {
+                self.draft.landing_page = self.draft.landing_page.cycle(true);
+            }
+            TweakRow::PaperAtLogin => {
+                self.draft.paper_at_login ^= true;
             }
             TweakRow::InteractionMode => {
                 // Applied on the app (it flips the mouse live and persists on its
@@ -842,6 +867,10 @@ impl SettingsModalState {
     pub(crate) fn cycle_selected_tweak(&mut self, forward: bool) {
         match self.selected_tweak_row() {
             TweakRow::TextBrightness => self.cycle_text_brightness_adjustment(forward),
+            TweakRow::LandingPage => {
+                self.draft.landing_page = self.draft.landing_page.cycle(forward);
+                self.save();
+            }
             _ => self.toggle_selected_tweak(),
         }
     }
@@ -1301,6 +1330,20 @@ impl SettingsModalState {
                 group,
                 collapsed: false,
             }) => self.collapse_theme_group(group),
+            Some(ThemeTreeRow::FavoritesHeader { collapsed: false }) => {
+                self.theme_favorites_collapsed = true;
+                self.keep_theme_cursor_visible();
+            }
+            // Inside the starred block, ← folds that block: collapsing the
+            // theme's real group instead would fold something the cursor is
+            // nowhere near.
+            Some(ThemeTreeRow::Theme { .. })
+                if self.theme_row_is_favorite_entry(self.theme_selected_row) =>
+            {
+                self.theme_favorites_collapsed = true;
+                self.theme_selected_row = 0;
+                self.keep_theme_cursor_visible();
+            }
             Some(ThemeTreeRow::Theme { option_index, .. }) => {
                 self.collapse_theme_group(theme::OPTIONS[option_index].group);
             }
@@ -1311,6 +1354,10 @@ impl SettingsModalState {
     pub(crate) fn theme_cursor_right(&mut self) {
         let rows = self.theme_tree_rows();
         match rows.get(self.theme_selected_row).copied() {
+            Some(ThemeTreeRow::FavoritesHeader { collapsed: true }) => {
+                self.theme_favorites_collapsed = false;
+                self.keep_theme_cursor_visible();
+            }
             Some(ThemeTreeRow::Group {
                 group,
                 collapsed: true,
@@ -1344,6 +1391,10 @@ impl SettingsModalState {
                         self.collapse_theme_group(group);
                     }
                 }
+                ThemeTreeRow::FavoritesHeader { collapsed } => {
+                    self.theme_favorites_collapsed = !collapsed;
+                    self.keep_theme_cursor_visible();
+                }
                 ThemeTreeRow::Theme { option_index, .. } => self.select_theme_index(option_index),
             }
         }
@@ -1373,13 +1424,173 @@ impl SettingsModalState {
             self.draft.theme_id = Some(option.id.to_string());
             self.keep_theme_cursor_visible();
             if changed {
-                self.save();
+                // The render loop previews straight from the draft, so the
+                // save is persistence only; during a search it is deferred to
+                // `cancel_theme_search` (see `theme_preview_unsaved`).
+                match self.theme_searching {
+                    true => self.theme_preview_unsaved = true,
+                    false => self.save(),
+                }
             }
         }
     }
 
+    pub(crate) fn theme_query(&self) -> &str {
+        &self.theme_query
+    }
+
+    pub(crate) fn theme_searching(&self) -> bool {
+        self.theme_searching
+    }
+
+    /// Open the search line. The groups stay as they were: cancelling drops
+    /// you back into the same tree you left.
+    pub(crate) fn start_theme_search(&mut self) {
+        self.theme_searching = true;
+    }
+
+    /// Close the search line and go back to the full tree, with the cursor on
+    /// whichever theme is actually applied so the list is never left pointing
+    /// somewhere arbitrary.
+    pub(crate) fn cancel_theme_search(&mut self) {
+        self.theme_searching = false;
+        self.theme_query.clear();
+        if self.theme_preview_unsaved {
+            self.theme_preview_unsaved = false;
+            self.save();
+        }
+        self.theme_selected_row = self.theme_row_for_option(self.theme_index).unwrap_or(0);
+        self.keep_theme_cursor_visible();
+    }
+
+    pub(crate) fn push_theme_query_char(&mut self, ch: char) {
+        if ch.is_control() {
+            return;
+        }
+        self.theme_query.push(ch);
+        self.settle_theme_cursor_after_query_change();
+    }
+
+    pub(crate) fn backspace_theme_query(&mut self) {
+        self.theme_query.pop();
+        self.settle_theme_cursor_after_query_change();
+    }
+
+    pub(crate) fn clear_theme_query(&mut self) {
+        self.theme_query.clear();
+        self.settle_theme_cursor_after_query_change();
+    }
+
+    /// After the query changes the rows underneath are different ones, so the
+    /// cursor goes to the top and previews whatever landed there. An empty
+    /// result set previews nothing and leaves the applied theme alone.
+    fn settle_theme_cursor_after_query_change(&mut self) {
+        self.theme_selected_row = 0;
+        self.theme_scroll_offset = 0;
+        if let Some(ThemeTreeRow::Theme { option_index, .. }) = self.theme_tree_rows().first() {
+            self.apply_theme_index(*option_index);
+        }
+        self.keep_theme_cursor_visible();
+    }
+
+    pub(crate) fn theme_is_favorite(&self, option_index: usize) -> bool {
+        let Some(option) = theme::OPTIONS.get(option_index) else {
+            return false;
+        };
+        self.draft
+            .favorite_theme_ids
+            .iter()
+            .any(|id| id == option.id)
+    }
+
+    /// Star or unstar the theme under the cursor. Favorites are ordered by when
+    /// they were starred, so a newly starred theme joins the bottom of the
+    /// Favorites group rather than reshuffling the ones above it.
+    pub(crate) fn toggle_theme_favorite(&mut self) {
+        let rows = self.theme_tree_rows();
+        let Some(ThemeTreeRow::Theme { option_index, .. }) = rows.get(self.theme_selected_row)
+        else {
+            return;
+        };
+        let Some(option) = theme::OPTIONS.get(*option_index) else {
+            return;
+        };
+
+        match self
+            .draft
+            .favorite_theme_ids
+            .iter()
+            .position(|id| id == option.id)
+        {
+            Some(index) => {
+                self.draft.favorite_theme_ids.remove(index);
+            }
+            None => self.draft.favorite_theme_ids.push(option.id.to_string()),
+        }
+
+        // The Favorites group grows or shrinks above the cursor, so the row the
+        // cursor was on has moved. Follow the theme itself rather than the index.
+        let option_index = *option_index;
+        self.save();
+        self.theme_selected_row = self
+            .theme_row_for_option_in_groups(option_index)
+            .unwrap_or(self.theme_selected_row);
+        self.keep_theme_cursor_visible();
+    }
+
+    /// The starred themes, in starred order, as indices into `theme::OPTIONS`.
+    /// Ids that no longer name a theme are skipped rather than erroring: a
+    /// retired theme should not break the list it used to be in.
+    fn favorite_option_indices(&self) -> Vec<usize> {
+        self.draft
+            .favorite_theme_ids
+            .iter()
+            .filter_map(|id| theme::OPTIONS.iter().position(|option| option.id == *id))
+            .collect()
+    }
+
+    /// Rows for the theme list: the grouped tree, or a flat list of matches
+    /// while a search is running. Group headers are dropped from results
+    /// because a filtered list has nothing to collapse.
+    ///
+    /// Starred themes are repeated in a Favorites block at the top; they keep
+    /// their place in their own group too, so the tree still reads as the full
+    /// catalogue rather than one with holes cut in it.
     pub(crate) fn theme_tree_rows(&self) -> Vec<ThemeTreeRow> {
+        let query = self.theme_query.trim().to_lowercase();
+        if !query.is_empty() {
+            let matches: Vec<usize> = theme::OPTIONS
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, option)| theme_matches(option, &query).then_some(idx))
+                .collect();
+            let last = matches.len().saturating_sub(1);
+            return matches
+                .into_iter()
+                .enumerate()
+                .map(|(idx, option_index)| ThemeTreeRow::Theme {
+                    option_index,
+                    last_in_group: idx == last,
+                })
+                .collect();
+        }
+
         let mut rows = Vec::new();
+        let favorites = self.favorite_option_indices();
+        if !favorites.is_empty() {
+            let collapsed = self.theme_favorites_collapsed;
+            rows.push(ThemeTreeRow::FavoritesHeader { collapsed });
+            if !collapsed {
+                let last = favorites.len().saturating_sub(1);
+                for (idx, option_index) in favorites.into_iter().enumerate() {
+                    rows.push(ThemeTreeRow::Theme {
+                        option_index,
+                        last_in_group: idx == last,
+                    });
+                }
+            }
+        }
+
         for group in theme::ThemeGroup::ALL {
             let collapsed = self.theme_group_collapsed(group);
             rows.push(ThemeTreeRow::Group { group, collapsed });
@@ -1458,6 +1669,29 @@ impl SettingsModalState {
         self.theme_tree_rows().iter().position(
             |row| matches!(row, ThemeTreeRow::Theme { option_index: row_index, .. } if *row_index == option_index),
         )
+    }
+
+    /// The theme's row inside its own group, skipping the Favorites copy. A
+    /// starred theme appears twice; when the caller is following a theme the
+    /// cursor was already sitting on, the copy down in the tree is the one it
+    /// means, not the one that just appeared at the top.
+    fn theme_row_for_option_in_groups(&self, option_index: usize) -> Option<usize> {
+        self.theme_tree_rows().iter().rposition(
+            |row| matches!(row, ThemeTreeRow::Theme { option_index: row_index, .. } if *row_index == option_index),
+        )
+    }
+
+    /// Whether a row sits inside the starred block, which is always the run
+    /// directly under the header at the top of the tree.
+    fn theme_row_is_favorite_entry(&self, row: usize) -> bool {
+        let rows = self.theme_tree_rows();
+        if !matches!(
+            rows.first(),
+            Some(ThemeTreeRow::FavoritesHeader { collapsed: false })
+        ) {
+            return false;
+        }
+        row > 0 && row <= self.favorite_option_indices().len()
     }
 
     fn first_theme_row_for_group(&self, group: theme::ThemeGroup) -> Option<usize> {
@@ -1906,6 +2140,10 @@ impl SettingsModalState {
                 toggle_kind(&mut self.draft.notify_kinds, "game_events");
                 true
             }
+            Row::Streams => {
+                toggle_kind(&mut self.draft.notify_kinds, "streams");
+                true
+            }
             Row::Bell => {
                 self.draft.notify_bell ^= true;
                 true
@@ -1933,7 +2171,7 @@ impl SettingsModalState {
                 self.draft.translate_mine_to_en ^= true;
                 true
             }
-            Row::Birthday | Row::Ide | Row::Terminal | Row::Os | Row::Langs => false,
+            Row::Ide | Row::Terminal | Row::Os | Row::Langs => false,
             _ => false,
         };
         if mutated {
@@ -1972,14 +2210,14 @@ impl SettingsModalState {
                 room_list_mode: self.draft.room_list_mode,
                 keep_composer_focused: self.draft.keep_composer_focused,
                 start_with_music_muted: self.draft.start_with_music_muted,
-                land_on_home: self.draft.land_on_home,
+                landing_page: self.draft.landing_page,
+                paper_at_login: self.draft.paper_at_login,
                 show_flag_fallback: self.draft.show_flag_fallback,
-                show_pet_strip: self.draft.show_pet_strip,
                 translate_to: self.draft.translate_to,
                 auto_translate: self.draft.auto_translate,
                 translate_mine_to_en: self.draft.translate_mine_to_en,
                 favorite_room_ids: self.draft.favorite_room_ids.clone(),
-                birthday: self.draft.birthday.clone(),
+                favorite_theme_ids: self.draft.favorite_theme_ids.clone(),
             },
         );
     }
@@ -2079,6 +2317,14 @@ fn set_short_textarea_cursor_visible(ta: &mut TextArea<'static>, editing: bool) 
         Style::default()
     };
     ta.set_cursor_style(style);
+}
+
+/// Whether a theme answers the search. The group name counts: "catppuccin"
+/// should find the whole family even though no single theme is called that.
+fn theme_matches(option: &theme::ThemeOption, query_lower: &str) -> bool {
+    option.label.to_lowercase().contains(query_lower)
+        || option.id.to_lowercase().contains(query_lower)
+        || option.group.label().to_lowercase().contains(query_lower)
 }
 
 fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {

@@ -206,11 +206,44 @@ fn draw_footer(frame: &mut Frame, area: Rect, tab: Tab, editing_bio: bool) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// The row above the tree: the live search when it is open, otherwise the hint
+/// that says the search exists at all. It occupies the same row either way, so
+/// opening the search never reflows the list underneath it.
+fn theme_search_line(state: &SettingsModalState) -> Line<'static> {
+    if !state.theme_searching() {
+        return Line::from(Span::styled(
+            "  / search themes · f star the selected one",
+            Style::default().fg(theme::TEXT_FAINT()),
+        ));
+    }
+
+    // With a query the rows are all matches; without one they are still the
+    // full tree (headers, favorites copies), so a count there would lie.
+    let tail = match state.theme_query().trim().is_empty() {
+        true => "   type to search · Esc back".to_string(),
+        false => match state.theme_tree_rows().len() {
+            0 => "   no matches · Esc back".to_string(),
+            1 => "   1 match · ↑↓ preview · Esc back".to_string(),
+            n => format!("   {n} matches · ↑↓ preview · Esc back"),
+        },
+    };
+    Line::from(vec![
+        Span::styled("  search ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("› ", Style::default().fg(theme::AMBER_GLOW())),
+        Span::styled(
+            state.theme_query().to_string(),
+            Style::default().fg(theme::TEXT_BRIGHT()),
+        ),
+        Span::styled("_", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled(tail, Style::default().fg(theme::TEXT_DIM())),
+    ])
+}
+
 fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let sections = Layout::vertical([
         Constraint::Length(1), // heading
         Constraint::Length(1), // summary
-        Constraint::Length(1), // breathing
+        Constraint::Length(1), // search / hint
         Constraint::Min(4),    // tree
     ])
     .split(area);
@@ -249,6 +282,7 @@ fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         ),
     ]);
     frame.render_widget(Paragraph::new(summary), sections[1]);
+    frame.render_widget(Paragraph::new(theme_search_line(state)), sections[2]);
 
     let tree_area = sections[3];
     let width = tree_area.width as usize;
@@ -271,6 +305,14 @@ fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             ThemeTreeRow::Group { group, collapsed } => {
                 lines.push(theme_group_line(group, collapsed, selected, width));
             }
+            ThemeTreeRow::FavoritesHeader { collapsed } => {
+                lines.push(theme_pseudo_group_line(
+                    "★ Favorites",
+                    collapsed,
+                    selected,
+                    width,
+                ));
+            }
             ThemeTreeRow::Theme {
                 option_index,
                 last_in_group,
@@ -279,6 +321,7 @@ fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                     theme::OPTIONS[option_index],
                     selected,
                     last_in_group,
+                    state.theme_is_favorite(option_index),
                     width,
                 ));
             }
@@ -294,9 +337,20 @@ fn theme_group_line(
     selected: bool,
     width: usize,
 ) -> Line<'static> {
+    theme_pseudo_group_line(group.label(), collapsed, selected, width)
+}
+
+/// A collapsible header row. Real groups and the Favorites block share it so
+/// the two read identically in the tree.
+fn theme_pseudo_group_line(
+    label: &str,
+    collapsed: bool,
+    selected: bool,
+    width: usize,
+) -> Line<'static> {
     let marker = if selected { "›" } else { " " };
     let symbol = if collapsed { "▸" } else { "▾" };
-    let text = format!(" {marker} {symbol} {}", group.label());
+    let text = format!(" {marker} {symbol} {label}");
     let padding = width.saturating_sub(text.chars().count());
     let style = if selected {
         Style::default()
@@ -323,6 +377,7 @@ fn theme_option_line(
     option: theme::ThemeOption,
     selected: bool,
     last_in_group: bool,
+    favorite: bool,
     width: usize,
 ) -> Line<'static> {
     let preview = theme::preview_for_option(option);
@@ -367,8 +422,12 @@ fn theme_option_line(
         preview.chat_author,
         preview.mention,
     ];
+    // The star reads the same inside the Favorites block and out in the theme's
+    // own group, so it is always obvious which themes are starred.
+    let star = if favorite { "★ " } else { "" };
     let id_text = format!("  {}", option.id);
     let used = prefix.chars().count()
+        + star.chars().count()
         + option.label.chars().count()
         + id_text.chars().count()
         + 2
@@ -376,6 +435,15 @@ fn theme_option_line(
     let padding = width.saturating_sub(used);
     let mut spans = vec![
         Span::styled(prefix, prefix_style),
+        Span::styled(
+            star.to_string(),
+            match selected {
+                true => Style::default()
+                    .fg(theme::AMBER_GLOW())
+                    .patch(theme::selection_style()),
+                false => Style::default().fg(theme::AMBER()),
+            },
+        ),
         Span::styled(option.label.to_string(), label_style),
         Span::styled(id_text, id_style),
         Span::styled(" ".repeat(padding + 2), trailing_style),
@@ -396,7 +464,6 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
         Constraint::Length(1), // Username row
         Constraint::Length(1), // Country row
         Constraint::Length(1), // Timezone row
-        Constraint::Length(1), // Birthday row
         Constraint::Length(1), // Theme row
         Constraint::Length(1), // breathing room
         Constraint::Length(1), // late.fetch heading
@@ -406,7 +473,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
         Constraint::Length(1), // Languages row
         Constraint::Length(1), // breathing room
         Constraint::Length(1), // Translation heading
-        Constraint::Length(1), // Translate to row
+        Constraint::Length(1), // Target language row
         Constraint::Length(1), // Auto-translate row
         Constraint::Length(1), // Translate mine row
         Constraint::Length(1), // breathing room
@@ -414,6 +481,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
         Constraint::Length(1), // DMs
         Constraint::Length(1), // Mentions
         Constraint::Length(1), // Game events
+        Constraint::Length(1), // Streams
         Constraint::Length(1), // Bell
         Constraint::Length(1), // Cooldown
         Constraint::Length(1), // Format
@@ -478,16 +546,6 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
     frame.render_widget(
         Paragraph::new(row_line(
             state,
-            Row::Birthday,
-            width,
-            "Birthday",
-            system_field_value(state, Row::Birthday, state.draft().birthday.clone()),
-        )),
-        sections[4],
-    );
-    frame.render_widget(
-        Paragraph::new(row_line(
-            state,
             Row::Theme,
             width,
             "Theme",
@@ -503,10 +561,10 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
                 theme::TEXT_BRIGHT(),
             ),
         )),
-        sections[5],
+        sections[4],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("late.fetch")), sections[7]);
+    frame.render_widget(Paragraph::new(section_heading("late.fetch")), sections[6]);
     frame.render_widget(
         Paragraph::new(row_line(
             state,
@@ -515,7 +573,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "IDE",
             system_field_value(state, Row::Ide, state.draft().ide.clone()),
         )),
-        sections[8],
+        sections[7],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -525,7 +583,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "Terminal",
             system_field_value(state, Row::Terminal, state.draft().terminal.clone()),
         )),
-        sections[9],
+        sections[8],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -535,7 +593,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "OS",
             system_field_value(state, Row::Os, state.draft().os.clone()),
         )),
-        sections[10],
+        sections[9],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -549,19 +607,19 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
                 (!state.draft().langs.is_empty()).then(|| format_lang_tags(&state.draft().langs)),
             ),
         )),
-        sections[11],
+        sections[10],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Translation")), sections[13]);
+    frame.render_widget(Paragraph::new(section_heading("Translation")), sections[12]);
     frame.render_widget(
         Paragraph::new(row_line(
             state,
             Row::TranslateTo,
             width,
-            "Translate to",
+            "Target language",
             translate_to_span(state.draft().translate_to),
         )),
-        sections[14],
+        sections[13],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -571,7 +629,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "Auto-translate new messages",
             toggle_span(state.draft().auto_translate),
         )),
-        sections[15],
+        sections[14],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -581,12 +639,12 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "Translate my messages to English",
             toggle_span(state.draft().translate_mine_to_en),
         )),
-        sections[16],
+        sections[15],
     );
 
     frame.render_widget(
         Paragraph::new(section_heading("Notifications")),
-        sections[18],
+        sections[17],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -596,7 +654,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "DMs",
             toggle_span(has_kind(state, "dms")),
         )),
-        sections[19],
+        sections[18],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -606,7 +664,7 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             "@mentions",
             toggle_span(has_kind(state, "mentions")),
         )),
-        sections[20],
+        sections[19],
     );
     frame.render_widget(
         Paragraph::new(row_line(
@@ -615,6 +673,16 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             width,
             "Game events",
             toggle_span(has_kind(state, "game_events")),
+        )),
+        sections[20],
+    );
+    frame.render_widget(
+        Paragraph::new(row_line(
+            state,
+            Row::Streams,
+            width,
+            "Streams (friends live, your viewers)",
+            toggle_span(has_kind(state, "streams")),
         )),
         sections[21],
     );
@@ -710,19 +778,16 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // text brightness row
         Constraint::Length(1),                // right sidebar row
         Constraint::Length(1),                // room list row
-        Constraint::Length(1),                // pet strip row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Compose subsection heading
         Constraint::Length(1),                // composer keep-focused row
-        Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // Music subsection heading
-        Constraint::Length(1),                // start-with-music-muted row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Display subsection heading
         Constraint::Length(1),                // flag fallback row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Startup subsection heading
         Constraint::Length(1),                // land on home row
+        Constraint::Length(1),                // daily paper row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Input subsection heading
         Constraint::Length(1),                // interaction mode row
@@ -774,18 +839,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         )),
         sections[4],
     );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::PetStrip,
-            width,
-            "Pet companion strip",
-            toggle_span(state.draft().show_pet_strip),
-        )),
-        sections[5],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[7]);
+    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[6]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -794,22 +848,10 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Send and keep open on Enter",
             toggle_span(state.draft().keep_composer_focused),
         )),
-        sections[8],
+        sections[7],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Music")), sections[10]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::StartWithMusicMuted,
-            width,
-            "Start app with music muted",
-            toggle_span(state.draft().start_with_music_muted),
-        )),
-        sections[11],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Display")), sections[13]);
+    frame.render_widget(Paragraph::new(section_heading("Display")), sections[9]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -818,22 +860,32 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Chat flag text fallback",
             toggle_span(state.draft().show_flag_fallback),
         )),
-        sections[14],
+        sections[10],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[16]);
+    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[12]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
-            TweakRow::LandOnHome,
+            TweakRow::LandingPage,
             width,
-            "Land on Home page",
-            toggle_span(state.draft().land_on_home),
+            "Land on",
+            landing_page_span(state.draft().landing_page),
         )),
-        sections[17],
+        sections[13],
+    );
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::PaperAtLogin,
+            width,
+            "Daily paper at login",
+            toggle_span(state.draft().paper_at_login),
+        )),
+        sections[14],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Input")), sections[19]);
+    frame.render_widget(Paragraph::new(section_heading("Input")), sections[16]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -842,7 +894,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Interaction mode",
             interaction_mode_span(state.interaction_mode()),
         )),
-        sections[20],
+        sections[17],
     );
 
     if gem_strip_height > 0 {
@@ -850,7 +902,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         // border so it doesn't crowd the dialog frame.
         const PAD_X: u16 = 2;
         const PAD_BOTTOM: u16 = 1;
-        let strip = sections[22];
+        let strip = sections[18];
         let pad_x = PAD_X.min(strip.width / 2);
         let pad_bottom = PAD_BOTTOM.min(strip.height);
         let gem_area = Rect::new(
@@ -980,7 +1032,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
-        sections[6],
+        sections[5],
     );
     frame.render_widget(
         Paragraph::new(account_row_line(
@@ -990,7 +1042,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Delete Account",
             true,
         )),
-        sections[8],
+        sections[7],
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1000,7 +1052,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
-        sections[9],
+        sections[8],
     );
 }
 
@@ -2507,7 +2559,6 @@ fn system_field_value(state: &SettingsModalState, row: Row, value: Option<String
             .filter(|value| !value.is_empty())
         {
             Some(value) => value_span(value.to_string(), theme::TEXT_BRIGHT()),
-            None if row == Row::Birthday => value_span("MM-DD", theme::TEXT_FAINT()),
             None if row == Row::Langs => value_span("comma sep…", theme::TEXT_FAINT()),
             None => value_span("not set", theme::TEXT_FAINT()),
         }
@@ -2585,6 +2636,22 @@ fn translate_to_span(lang: late_core::models::message_translation::TranslateLang
         text: lang.label().to_string(),
         style: Style::default()
             .fg(theme::SUCCESS())
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// The "Land on" row: the page a session opens on, cycled with the arrows.
+fn landing_page_span(page: late_core::models::user::LandingPage) -> ValueSpan {
+    use late_core::models::user::LandingPage;
+    let text = match page {
+        LandingPage::Clubhouse => "◂ Clubhouse ▸",
+        LandingPage::Home => "◂ Home ▸",
+        LandingPage::Zen => "◂ Zen ▸",
+    };
+    ValueSpan {
+        text: text.to_string(),
+        style: Style::default()
+            .fg(theme::AMBER())
             .add_modifier(Modifier::BOLD),
     }
 }

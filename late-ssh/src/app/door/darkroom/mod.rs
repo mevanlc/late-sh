@@ -27,7 +27,8 @@
 //! - `model`      — the persistent `Game` and the rules acting on it
 //! - `sim`        — the settle-forward village clock (no timers, no game loop)
 //! - `event`      — the scene machine and the fight
-//! - `scenes_*`   — the event pools: village, encounters, setpieces
+//! - `scenes_*`   — the event pools: village, encounters, setpieces, and the
+//!   ravaged battleship
 //! - `world_data` — the wasteland's tables: tiles, landmarks, weapons, weights
 //! - `world`      — map generation, walking, supplies, going home or not
 //! - `space`      — the ascent, and the way off this rock
@@ -44,6 +45,7 @@ pub mod model;
 pub mod pace;
 pub mod persist;
 pub mod scenes_encounters;
+pub mod scenes_executioner;
 pub mod scenes_setpieces;
 pub mod scenes_village;
 pub mod screen;
@@ -80,6 +82,9 @@ mod sim_test;
 
 #[cfg(test)]
 mod state_test;
+
+#[cfg(test)]
+mod ui_event_test;
 
 #[cfg(test)]
 mod ui_test;

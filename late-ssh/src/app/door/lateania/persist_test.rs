@@ -22,6 +22,7 @@ fn round_trips_through_json() {
         inventory: vec![1300, 1301],
         equipped: vec![("weapon".to_string(), 1004)],
         scores,
+        score_points_spent: 3,
         titles: vec!["Wyrmbane".to_string()],
         title_levels: vec![12],
         active_title: Some(0),
@@ -41,6 +42,9 @@ fn round_trips_through_json() {
         craft_skills: vec![("smithing".to_string(), 300)],
         taming_xp: 1500,
         rpg_mode: false,
+        pvp_kills: 6,
+        starter_stage: 2,
+        starter_kills: 1,
     });
     let json = c.to_json();
     let back = SavedCharacter::from_json(&json).expect("parses");
@@ -55,6 +59,7 @@ fn round_trips_through_json() {
     assert_eq!(back.inventory, vec![1300, 1301]);
     assert_eq!(back.equipped, vec![("weapon".to_string(), 1004)]);
     assert_eq!(back.scores.dexterity, 16);
+    assert_eq!(back.score_points_spent, 3);
     assert_eq!(back.titles, vec!["Wyrmbane".to_string()]);
     assert_eq!(back.board_progress, vec![(4, 2)]);
     assert_eq!(back.board_done, vec![1]);
@@ -76,6 +81,9 @@ fn round_trips_through_json() {
     );
     assert_eq!(back.craft_skills, vec![("smithing".to_string(), 300)]);
     assert_eq!(back.taming_xp, 1500);
+    assert_eq!(back.pvp_kills, 6);
+    assert_eq!(back.starter_stage, 2);
+    assert_eq!(back.starter_kills, 1);
 }
 
 #[test]
@@ -96,6 +104,8 @@ fn missing_fields_fall_back_to_defaults() {
     assert_eq!(c.room, 1);
     assert!(c.visited.is_empty());
     assert!(c.inventory.is_empty());
+    assert_eq!(c.starter_stage, 0);
+    assert_eq!(c.starter_kills, 0);
 }
 
 #[test]
@@ -117,6 +127,7 @@ fn world_state_round_trips_through_json() {
             owner,
             damage: 5,
             remaining_ticks: 3,
+            from_coat: false,
         }],
     );
     let json = world.to_json();

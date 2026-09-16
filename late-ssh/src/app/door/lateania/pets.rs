@@ -7,11 +7,19 @@
 // the growth maths live here; the world wiring (buying, feeding, combat) is in
 // `svc.rs`.
 
-/// A companion species: the fixed template a live `Pet` grows from. A species is
-/// either **bought** at a Stable (`tame_level == 0`, a positive `price`) or
-/// **tamed** in the wild (`tame_level > 0`, the required Animal Taming level; the
-/// `price` is unused). Both kinds share the same runtime `Pet`, so a tamed beast
-/// fights, is fed, and persists exactly like a bought one.
+/// Where a species comes from. Both kinds share the same runtime `Pet`, so a
+/// tamed beast fights, is fed, and persists exactly like a bought one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PetSource {
+    /// Sold at every capital Stable. `rung` is the Animal Taming level whose
+    /// wild beasts it is worth, placing it on the one companion ladder the
+    /// tameables climb (see `PetSpecies::rung`).
+    Stable { price: i64, rung: i32 },
+    /// Tamed in the wild, needing this Animal Taming level.
+    Wild { tame_level: i32 },
+}
+
+/// A companion species: the fixed template a live `Pet` grows from.
 #[derive(Clone, Copy, Debug)]
 pub struct PetSpecies {
     /// Stable persistence key (never reorder/rename).
@@ -19,76 +27,163 @@ pub struct PetSpecies {
     pub name: &'static str,
     /// A short glyph shown beside the pet in panels.
     pub glyph: &'static str,
-    /// Purchase price in gold (for buyable Stable species; 0 for tameables).
-    pub price: i64,
     /// Level-1 health and per-round attack, before loyalty growth.
     pub base_hp: i32,
     pub base_attack: i32,
     pub desc: &'static str,
-    /// Animal Taming level required to tame this beast in the wild. `0` marks a
-    /// buyable Stable companion (not tameable). Rises across the fifty wild
-    /// beasts so taming gets harder and harder.
-    pub tame_level: i32,
+    pub source: PetSource,
+    /// This species' own auto-skill unlock ladder. Every pre-Aelunor species
+    /// points at the shared `taming::PET_SKILLS` ladder (unchanged behaviour);
+    /// the five Aelunor companions each carry their own distinct ladder, so
+    /// "different pets, different spells" is real per-species data, not just
+    /// re-skinned flavour text on the same five abilities.
+    pub skills: &'static [super::taming::PetSkill],
 }
 
-/// The companions sold across the capital Stables. Ordered cheapest first.
+/// The companions sold across the capital Stables, cheapest and weakest first.
+/// Each one's `rung` is the Animal Taming level whose wild beasts it matches,
+/// so gold buys a real mid-game pet while the top of the ladder stays wild.
 pub const PET_SPECIES: &[PetSpecies] = &[
     PetSpecies {
         key: "war_hound",
         name: "War Hound",
         glyph: "\u{1F415}",
-        price: 120,
         base_hp: 40,
         base_attack: 6,
         desc: "A loyal hound bred for the shield-wall - eager, brave, and quick to the throat of your foe.",
-        tame_level: 0,
+        source: PetSource::Stable {
+            price: 120,
+            rung: 4,
+        },
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "dire_wolf",
         name: "Dire Wolf",
         glyph: "\u{1F43A}",
-        price: 320,
         base_hp: 64,
         base_attack: 10,
         desc: "A grey hunter of the deep wood, all sinew and patience, that brings down quarry far above its weight.",
-        tame_level: 0,
+        source: PetSource::Stable {
+            price: 320,
+            rung: 9,
+        },
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "moor_hawk",
         name: "Moor Hawk",
         glyph: "\u{1F985}",
-        price: 280,
-        base_hp: 30,
+        base_hp: 52,
         base_attack: 14,
-        desc: "A swift raptor that stoops from above in a blur of talons - fragile, but its strikes bite deep.",
-        tame_level: 0,
+        desc: "A swift raptor that stoops from above in a blur of talons - light in the bone, but its strikes bite deep.",
+        source: PetSource::Stable {
+            price: 650,
+            rung: 12,
+        },
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "cave_bear",
         name: "Cave Bear",
         glyph: "\u{1F43B}",
-        price: 640,
         base_hp: 120,
-        base_attack: 12,
+        base_attack: 13,
         desc: "A mountain of fur and muscle from the frostline caverns; slow to rouse, ruinous once it does.",
-        tame_level: 0,
+        source: PetSource::Stable {
+            price: 1100,
+            rung: 16,
+        },
+        skills: super::taming::PET_SKILLS,
+    },
+    PetSpecies {
+        key: "sabre_cat",
+        name: "Sabre Cat",
+        glyph: "\u{1F405}",
+        base_hp: 104,
+        base_attack: 18,
+        desc: "A striped sabre-toothed cat from the southern scrub, trained to the leash and never quite to the hand.",
+        source: PetSource::Stable {
+            price: 2000,
+            rung: 20,
+        },
+        skills: super::taming::PET_SKILLS,
     },
     PetSpecies {
         key: "emberdrake",
         name: "Emberdrake",
         glyph: "\u{1F432}",
-        price: 1200,
-        base_hp: 90,
+        base_hp: 116,
         base_attack: 20,
         desc: "A hatchling wyrm with coals for eyes - rare, prized, and worth every coin to those who can afford it.",
-        tame_level: 0,
+        source: PetSource::Stable {
+            price: 3200,
+            rung: 26,
+        },
+        skills: super::taming::PET_SKILLS,
+    },
+    PetSpecies {
+        key: "iron_rhino",
+        name: "Ironhide Rhino",
+        glyph: "\u{1F98F}",
+        base_hp: 170,
+        base_attack: 17,
+        desc: "An armoured desert rhino shod in iron plates; it takes the blows meant for you and answers with the horn.",
+        source: PetSource::Stable {
+            price: 5000,
+            rung: 30,
+        },
+        skills: super::taming::PET_SKILLS,
+    },
+    PetSpecies {
+        key: "basilisk",
+        name: "Stormhide Basilisk",
+        glyph: "\u{1F98E}",
+        base_hp: 160,
+        base_attack: 23,
+        desc: "A storm-scaled basilisk hatched in the Matlatesh beast-pits; the finest beast any Stable sells, and priced like it.",
+        source: PetSource::Stable {
+            price: 8000,
+            rung: 35,
+        },
+        skills: super::taming::PET_SKILLS,
     },
 ];
 
 impl PetSpecies {
     /// True for a wild beast tamed via the Animal Taming trade (not a Stable buy).
     pub fn is_tameable(&self) -> bool {
-        self.tame_level > 0
+        match self.source {
+            PetSource::Stable { .. } => false,
+            PetSource::Wild { .. } => true,
+        }
+    }
+
+    /// Where this species sits on the one companion ladder: the Animal Taming
+    /// level a wild beast needs, or the level a Stable pet is priced to match.
+    pub fn rung(&self) -> i32 {
+        match self.source {
+            PetSource::Stable { rung, .. } => rung,
+            PetSource::Wild { tame_level } => tame_level,
+        }
+    }
+
+    /// Gold to buy this species at a Stable. None for a wild beast, which is
+    /// tamed and never sold.
+    pub fn price(&self) -> Option<i64> {
+        match self.source {
+            PetSource::Stable { price, .. } => Some(price),
+            PetSource::Wild { .. } => None,
+        }
+    }
+
+    /// The Animal Taming level a wild beast needs. Only ever asked of a beast
+    /// roaming the wild (`taming::beast_species`), never of a Stable pet.
+    pub fn tame_level(&self) -> i32 {
+        match self.source {
+            PetSource::Wild { tame_level } => tame_level,
+            PetSource::Stable { .. } => panic!("{} is sold at a Stable, never tamed", self.key),
+        }
     }
 }
 
@@ -99,6 +194,7 @@ pub fn pet_species_by_key(key: &str) -> Option<&'static PetSpecies> {
     PET_SPECIES
         .iter()
         .chain(super::taming::TAMEABLE.iter())
+        .chain(super::taming::AELUNOR_TAMEABLE.iter())
         .find(|s| s.key == key)
 }
 
@@ -144,10 +240,16 @@ impl Pet {
         (base + base * (self.level() - 1) / 4).max(1)
     }
 
-    /// Per-round attack: the base bite plus a quarter of it per level gained.
+    /// The companion's own bite: the species base plus an eighth of it (at
+    /// least 1) per loyalty level gained. What actually lands is this plus a share of the
+    /// owner's attack rating (`svc::PET_COEF_PCT`), so a pet scales with the
+    /// build it fights beside instead of being a fixed lump that dwarfs a
+    /// level-30 character and fades by 100. Loyalty used to add a quarter per
+    /// level (3.25x at cap); that flat growth was the lump.
     pub fn attack(&self) -> i32 {
         let base = self.species.base_attack;
-        (base + base * (self.level() - 1) / 4).max(1)
+        let step = (base / 8).max(1);
+        (base + step * (self.level() - 1)).max(1)
     }
 
     /// Loyalty progress toward the next level, as a 0-100 percentage (100 at cap).

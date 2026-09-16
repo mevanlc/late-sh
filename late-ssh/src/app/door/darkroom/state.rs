@@ -9,12 +9,18 @@
 //! `tick` is called by the app and is correct at any cadence.
 
 use std::collections::VecDeque;
+use std::mem::{Discriminant, discriminant};
+use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use super::data::{self, Building, Craftable, Fire, Job, Resource, TradeGood};
+use late_core::models::profile_award::{
+    DARKROOM_BEACON_AWARD_CATEGORY, DARKROOM_ESCAPE_AWARD_CATEGORY,
+};
+
+use super::data::{self, Building, Craftable, Fabricable, Fire, Job, Resource, TradeGood};
 use super::event::{self, Active, Ctx, Outcome};
 use super::model::{
     BuildOutcome, BuyOutcome, CombatSnapshot, CraftOutcome, Game, GatherOutcome, LightFire,
@@ -26,6 +32,12 @@ use super::space::{self, Flight, Space};
 use super::svc::{DarkroomService, GameLoad};
 use super::world::{self, Direction, Step};
 use super::world_data::{self, Weapon};
+
+/// Which screen of the modal is up: the event, the scene inside it, and the
+/// phase of that scene. All three are needed, not just the scene: nearly every
+/// event names its opening scene `start`, so a scene key alone reads as
+/// unchanged when a button has walked into a whole different event.
+type EventScreen = (&'static str, &'static str, Discriminant<event::Phase>);
 
 /// How many notification lines the log keeps. Upstream fades them out of a
 /// scrolling column; a fixed window is the terminal equivalent.
@@ -42,6 +54,8 @@ pub enum Row {
     Craft(&'static Craftable),
     /// A trading post good, same idea.
     Buy(&'static TradeGood),
+    /// A fabricator recipe, same idea again.
+    Fabricate(&'static Fabricable),
     GatherWood,
     CheckTraps,
     Worker(Job),
@@ -63,6 +77,7 @@ pub enum Section {
     Build,
     Craft,
     Buy,
+    Fabricate,
 }
 
 impl Section {
@@ -71,6 +86,7 @@ impl Section {
             Section::Build => data::SECTION_BUILD,
             Section::Craft => data::SECTION_CRAFT,
             Section::Buy => data::SECTION_BUY,
+            Section::Fabricate => data::SECTION_FABRICATE,
         }
     }
 }
@@ -82,6 +98,149 @@ pub enum Acted {
     Stay,
     /// The player wants out of the door.
     Leave,
+}
+
+/// Seconds between the ending's beats. Any key skips the wait.
+const ENDING_BEAT_SECS: f64 = 0.9;
+
+/// How the run ended, which is what decides the closing lines, the badge and
+/// the payout. Two endings, and an account can earn both.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Escape {
+    /// Off this rock, and that is all anyone knows.
+    Plain,
+    /// Carrying the fleet beacon taken off the immortal wanderer.
+    WithBeacon,
+}
+
+impl Escape {
+    /// The profile award category this ending grants.
+    pub fn award_category(self) -> &'static str {
+        match self {
+            Escape::Plain => DARKROOM_ESCAPE_AWARD_CATEGORY,
+            Escape::WithBeacon => DARKROOM_BEACON_AWARD_CATEGORY,
+        }
+    }
+
+    /// What this ending pays, in the shape the landing and the ending text
+    /// both print. The amounts are the reward templates' (migration 158);
+    /// they are written out here because the door has no reason to read the
+    /// table just to print one line.
+    pub fn reward_line(self) -> &'static str {
+        match self {
+            Escape::Plain => "15,000 chips, every run that gets out",
+            Escape::WithBeacon => "20,000 chips, every run that gets out",
+        }
+    }
+
+    /// What the `#lounge` feed line adds after "flew out of A Dark Room".
+    /// The plain ending needs nothing: flying out is the whole of it.
+    pub fn feed_detail(self) -> Option<&'static str> {
+        match self {
+            Escape::Plain => None,
+            Escape::WithBeacon => Some("followed the fleet beacon home"),
+        }
+    }
+}
+
+/// One chunk of the ending, in the order it arrives. The renderer decides how
+/// each one looks; the run decides what they say.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EndingBeat {
+    /// One of the ending's closing lines.
+    Prose(&'static str),
+    /// A figure the run finished on: what it counts, and how much.
+    Stat { label: &'static str, value: String },
+    /// The badge and chips the account keeps. The chips land for every run
+    /// that gets out; the badge is once per account. Which of each depends on
+    /// how the ship left.
+    Award(Escape),
+    /// The save is gone, and the only key left is the one out.
+    Prompt,
+}
+
+/// The run is over: the ship is through the debris cloud and the save has been
+/// deleted. This is the last thing the door has to say, revealed a beat at a
+/// time. Never persisted, and there is no way back into the game from here:
+/// the room the player would return to no longer exists.
+#[derive(Clone, Debug)]
+pub struct Ending {
+    beats: Vec<EndingBeat>,
+    /// Seconds since the ending took the screen.
+    elapsed: f64,
+}
+
+impl Ending {
+    /// The epitaph for a finished run, read off the game one last time. Which
+    /// closing lines it opens with depends on whether the ship left carrying
+    /// the fleet beacon: the beacon has coordinates, and the ship follows them
+    /// somewhere.
+    pub fn for_run(game: &Game, escape: Escape) -> Self {
+        let prose: &[&'static str] = match escape {
+            Escape::Plain => &space::ENDING,
+            Escape::WithBeacon => &space::BEACON_ENDING,
+        };
+        let mut beats: Vec<EndingBeat> = prose.iter().map(|line| EndingBeat::Prose(line)).collect();
+        beats.push(EndingBeat::Stat {
+            label: "villagers",
+            value: game.population.to_string(),
+        });
+        beats.push(EndingBeat::Stat {
+            label: "huts",
+            value: game.building_count(Building::Hut).to_string(),
+        });
+        beats.push(EndingBeat::Stat {
+            label: "things learned",
+            value: game.perks.len().to_string(),
+        });
+        beats.push(EndingBeat::Stat {
+            label: "the ship",
+            value: match game.ship.as_ref() {
+                Some(ship) => format!("hull {}, engine {}", ship.hull, ship.thrusters),
+                None => "gone".to_string(),
+            },
+        });
+        beats.push(EndingBeat::Award(escape));
+        beats.push(EndingBeat::Prompt);
+        Self {
+            beats,
+            elapsed: 0.0,
+        }
+    }
+
+    /// Every beat of the epitaph, revealed or not. The renderer lays all of
+    /// them out and leaves the unrevealed ones blank, so the text does not
+    /// walk up the screen as it arrives.
+    pub fn beats(&self) -> &[EndingBeat] {
+        &self.beats
+    }
+
+    /// How many of them are on screen right now.
+    pub fn revealed_count(&self) -> usize {
+        let shown = 1 + (self.elapsed / ENDING_BEAT_SECS) as usize;
+        shown.min(self.beats.len())
+    }
+
+    /// Whether the whole epitaph is up, which is when a key means "leave".
+    pub fn done(&self) -> bool {
+        self.revealed_count() == self.beats.len()
+    }
+
+    /// Skip the wait and show everything at once.
+    pub fn reveal_all(&mut self) {
+        self.elapsed = self.beats.len() as f64 * ENDING_BEAT_SECS;
+    }
+
+    /// Advance the reveal. Returns whether a new beat landed, for the render
+    /// loop's dirty contract.
+    fn advance(&mut self, delta: f64) -> bool {
+        if self.done() {
+            return false;
+        }
+        let before = self.revealed_count();
+        self.elapsed += delta;
+        self.revealed_count() != before
+    }
 }
 
 pub struct State {
@@ -106,8 +265,19 @@ pub struct State {
     event_timer: f64,
     /// The ascent, if the ship has left the ground.
     pub flight: Option<Space>,
+    /// The epitaph, once the ascent is won. While this is up the run is over
+    /// and the save is already deleted, so nothing may write it back.
+    pub ending: Option<Ending>,
     /// When `tick` last ran, for live play.
     last_tick: DateTime<Utc>,
+    /// The player's last touch of this door: a key it handled, or a tick with
+    /// it as the open screen. The door outlives a hop to another screen (the
+    /// village keeps growing), so this is what ends an abandoned visit; see
+    /// [`State::idle_expired`].
+    last_input_at: Instant,
+    /// See [`State::force_idle_for_test`].
+    #[cfg(test)]
+    idle_forced: bool,
 }
 
 impl State {
@@ -127,13 +297,58 @@ impl State {
             event: None,
             event_timer: event::next_event_delay(&mut rng),
             flight: None,
+            ending: None,
             last_tick: Utc::now(),
+            last_input_at: Instant::now(),
+            #[cfg(test)]
+            idle_forced: false,
         }
+    }
+
+    /// Mark the player as still here. Every key the door handles calls this,
+    /// and `App::tick` calls it while the door is the open screen (sitting on
+    /// it reading is not being away); the idle deadline it feeds is what
+    /// closes a forgotten visit.
+    pub fn touch(&mut self) {
+        self.last_input_at = Instant::now();
+        #[cfg(test)]
+        {
+            self.idle_forced = false;
+        }
+    }
+
+    /// No touch for [`IDLE_WINDOW`], so half an hour away from the door: this
+    /// visit is over. The caller saves and drops the door, which takes it off
+    /// the backtick workspace cycle.
+    pub fn idle_expired(&self) -> bool {
+        #[cfg(test)]
+        if self.idle_forced {
+            return true;
+        }
+        self.last_input_at.elapsed() >= crate::app::door::game::IDLE_WINDOW
+    }
+
+    /// Test-only: force the idle deadline, so the reap in `App::tick` can be
+    /// exercised without waiting half an hour. A flag rather than an aged
+    /// `last_input_at`, because winding an `Instant` back half an hour panics
+    /// on a machine booted more recently than that. Cleared by [`State::touch`],
+    /// exactly as a real stamp clears real idleness.
+    #[cfg(test)]
+    pub fn force_idle_for_test(&mut self) {
+        self.idle_forced = true;
     }
 
     /// The loaded game, or `None` while the DB round-trip is in flight.
     pub fn game(&self) -> Option<&Game> {
         self.game.as_ref()
+    }
+
+    /// The loaded game, mutably. Tests only: in production every change to the
+    /// game goes through an action on `State`, and nothing outside should be
+    /// reaching in.
+    #[cfg(test)]
+    pub(crate) fn game_mut(&mut self) -> Option<&mut Game> {
+        self.game.as_mut()
     }
 
     /// Notification lines, newest last.
@@ -160,6 +375,13 @@ impl State {
         let now = Utc::now();
         let delta = (now - self.last_tick).num_milliseconds().max(0) as f64 / 1000.0;
         self.last_tick = now;
+
+        // The run is over and the save is gone: the only thing still moving is
+        // the epitaph's reveal. Settling a game nobody will ever save again
+        // would only credit a village that no longer exists.
+        if let Some(ending) = self.ending.as_mut() {
+            return ending.advance(delta);
+        }
 
         let mut changed = false;
         // Read the value, never `has_changed()`: the loader drops its sender as
@@ -279,16 +501,29 @@ impl State {
                 self.save();
                 true
             }
+            // The one ending. The account keeps the badge and the chips; the
+            // save does not survive, so the room is dark again next time and
+            // the whole arc is there to walk a second time, and paid for
+            // again, keyed on this run's id.
             Some(Flight::Won) => {
                 self.flight = None;
-                for line in space::ENDING {
-                    self.push_log(line.to_string());
-                }
-                if let Some(game) = self.game.as_mut() {
-                    game.completed = true;
-                }
                 self.view = View::Ship;
-                self.save();
+                let game = self
+                    .game
+                    .as_ref()
+                    .expect("a flight cannot exist without a loaded game");
+                // The beacon is held, never spent, so the store room is what
+                // says which ending this is.
+                let escape = match game.store(Resource::FleetBeacon) > 0 {
+                    true => Escape::WithBeacon,
+                    false => Escape::Plain,
+                };
+                let run_id = game.run_id;
+                self.ending = Some(Ending::for_run(game, escape));
+                // Both fire the moment the ship is through, not on dismissal,
+                // so a dropped connection loses the words and never the run.
+                self.svc.reward_escape(self.user_id, escape, run_id);
+                self.svc.delete_game(self.user_id);
                 true
             }
         }
@@ -315,7 +550,7 @@ impl State {
         game.path_unlocked = true;
         if game.world.is_none() {
             let mut rng = rand::thread_rng();
-            game.world = Some(world::generate(&mut rng));
+            game.world = Some(world::generate(game.veteran, &mut rng));
         }
         let direction = game
             .world
@@ -451,7 +686,8 @@ impl State {
             return;
         };
         let found = super::scenes_encounters::by_key(&snapshot.event)
-            .or_else(|| super::scenes_setpieces::by_key(&snapshot.event));
+            .or_else(|| super::scenes_setpieces::by_key(&snapshot.event))
+            .or_else(|| super::scenes_executioner::by_key(&snapshot.event));
         match found.and_then(|chosen| {
             chosen
                 .scene(&snapshot.scene)
@@ -520,6 +756,13 @@ impl State {
                 rows.push(Row::Embark);
             }
             View::World => return Vec::new(),
+            View::Fabricator => {
+                for fabricable in &data::FABRICABLES {
+                    if game.fabricable_available(fabricable) {
+                        rows.push(Row::Fabricate(fabricable));
+                    }
+                }
+            }
             View::Ship => {
                 rows.push(Row::ReinforceHull);
                 rows.push(Row::UpgradeEngine);
@@ -568,6 +811,10 @@ impl State {
         if game.path_unlocked {
             open.push(View::Path);
         }
+        // Upstream slots the fabricator's tab in just before the ship's.
+        if game.fabricator {
+            open.push(View::Fabricator);
+        }
         if game.ship.is_some() {
             open.push(View::Ship);
         }
@@ -582,6 +829,17 @@ impl State {
                 .is_some_and(|game| !std::mem::replace(&mut game.seen_forest, true));
         if first_visit {
             self.push_log(data::MSG_SEEN_FOREST.to_string());
+            self.save();
+        }
+        // The fabricator says its one line the first time it is looked at,
+        // latched on the save the same way the ship's is.
+        let first_hum = self.view == View::Fabricator
+            && self
+                .game
+                .as_mut()
+                .is_some_and(|game| !std::mem::replace(&mut game.seen_fabricator, true));
+        if first_hum {
+            self.push_log(data::MSG_FABRICATOR_SEEN.to_string());
             self.save();
         }
         // The ship says its one line the first time it is ever looked at
@@ -615,6 +873,7 @@ impl State {
             Row::Build(building) => self.build(building),
             Row::Craft(craftable) => self.craft(craftable),
             Row::Buy(good) => self.buy(good),
+            Row::Fabricate(fabricable) => self.fabricate(fabricable),
             Row::GatherWood => self.gather_wood(),
             Row::CheckTraps => self.check_traps(),
             Row::Worker(job) => self.assign(job, 1),
@@ -652,6 +911,7 @@ impl State {
     }
 
     fn event_press(&mut self, row: event::Row) {
+        let before = self.event_screen();
         let mut out = Vec::new();
         let outcome = {
             let (Some(game), Some(active)) = (self.game.as_mut(), self.event.as_mut()) else {
@@ -674,9 +934,44 @@ impl State {
         for message in out {
             self.push_log(message);
         }
-        self.cursor = 0;
+        self.keep_cursor_on(row, before);
         self.finish_event(outcome);
         self.save();
+    }
+
+    /// Two presses that leave this unchanged are looking at the same list of
+    /// rows; anything else has replaced them.
+    fn event_screen(&self) -> Option<EventScreen> {
+        self.event.as_ref().map(|active| {
+            (
+                active.event.key,
+                active.scene.key,
+                discriminant(&active.phase),
+            )
+        })
+    }
+
+    /// Put the cursor back where the player left it.
+    ///
+    /// Upstream is a page of buttons that never move: using one greys it out
+    /// for its cooldown and leaves it exactly where it was. A terminal cursor
+    /// has to be put back on purpose, and it follows the *row* rather than its
+    /// index, so a weapon that ran out of ammo and dropped off the list cannot
+    /// silently slide the selection onto a different one.
+    ///
+    /// A press that changed the scene or the phase gets the cursor back at the
+    /// top, because those rows really are a different screen.
+    fn keep_cursor_on(&mut self, row: event::Row, before: Option<EventScreen>) {
+        if self.event_screen() != before {
+            self.cursor = 0;
+            return;
+        }
+        let target = Row::Event(row);
+        if let Some(index) = self.rows().iter().position(|listed| *listed == target) {
+            self.cursor = index;
+        }
+        // The row is gone. Leaving the cursor put keeps the player near where
+        // they were; `selected` clamps it to the list.
     }
 
     fn light_fire(&mut self) {
@@ -750,6 +1045,25 @@ impl State {
         };
         let message = match game.craft(craftable) {
             CraftOutcome::Crafted(_) => craftable.build_msg.to_string(),
+            CraftOutcome::AtMaximum(item) => {
+                format!("there's no need for another {}", item.label())
+            }
+            CraftOutcome::Missing(resource) => format!("not enough {}", resource.label()),
+            CraftOutcome::TooCold => data::MSG_BUILDER_SHIVERS.to_string(),
+        };
+        self.push_log(message);
+        self.save();
+    }
+
+    fn fabricate(&mut self, fabricable: &'static Fabricable) {
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+        // The same outcomes as the workshop's, minus the cold: the fabricator
+        // hums in its own corner and does not care what the room is doing, so
+        // `Game::fabricate` never returns `TooCold`.
+        let message = match game.fabricate(fabricable) {
+            CraftOutcome::Crafted(_) => fabricable.build_msg.to_string(),
             CraftOutcome::AtMaximum(item) => {
                 format!("there's no need for another {}", item.label())
             }
@@ -885,7 +1199,19 @@ impl State {
             Step::Walked | Step::Blocked => {}
             Step::Home => self.go_home(),
             Step::Setpiece(scene) => {
-                if let Some(chosen) = super::scenes_setpieces::by_key(scene) {
+                let chosen = match scene {
+                    // The battleship is the one landmark with more than one
+                    // way in: which event opens depends on how far in the
+                    // wanderer already is.
+                    "executioner" => self
+                        .game
+                        .as_ref()
+                        .and_then(|game| game.expedition.as_ref())
+                        .map(world::battleship_scene)
+                        .and_then(super::scenes_executioner::by_key),
+                    _ => super::scenes_setpieces::by_key(scene),
+                };
+                if let Some(chosen) = chosen {
                     self.start_event(chosen);
                 }
             }
@@ -1010,7 +1336,14 @@ impl State {
     // ---- persistence ----
 
     /// Persist the current game. Called after anything worth not losing.
+    ///
+    /// The one exception, guarded here so there is a single place to look: a
+    /// finished run has already been deleted, and writing the in-memory game
+    /// back would undo the wipe the ending performed.
     pub fn save(&self) {
+        if self.ending.is_some() {
+            return;
+        }
         if let Some(game) = self.game.as_ref() {
             self.svc.save_game(self.user_id, game);
         }
@@ -1019,6 +1352,9 @@ impl State {
     /// Settle one last time and persist, so the credited clock stops here
     /// rather than at whenever the last action happened.
     pub fn save_on_leave(&mut self) {
+        if self.ending.is_some() {
+            return;
+        }
         self.park();
         self.settle();
         self.save();
@@ -1033,6 +1369,11 @@ impl State {
             Row::Build(building) => building.label().to_string(),
             Row::Craft(craftable) => craftable.item.label().to_string(),
             Row::Buy(good) => good.good.label().to_string(),
+            // A batch row says so, the way upstream suffixes "(x5)".
+            Row::Fabricate(fabricable) => match fabricable.quantity {
+                1 => fabricable.item.label().to_string(),
+                quantity => format!("{} (x{quantity})", fabricable.item.label()),
+            },
             Row::GatherWood => "gather wood".to_string(),
             Row::CheckTraps => "check traps".to_string(),
             Row::Worker(job) => {
@@ -1070,16 +1411,20 @@ impl State {
             },
             event::Row::Eat => "eat meat".to_string(),
             event::Row::Meds => "use meds".to_string(),
+            event::Row::Hypo => "use hypo".to_string(),
+            event::Row::Stim => "boost".to_string(),
+            event::Row::Shield => "shield".to_string(),
             event::Row::Take(index) => active
                 .loot
                 .get(index)
                 .map(|loot| format!("{} [{}]", loot.item.label(), loot.left))
                 .unwrap_or_default(),
             event::Row::TakeAll => "take everything".to_string(),
+            event::Row::Drop { item, count } => format!("drop {count} {}", item.label()),
+            event::Row::DropCancel => "cancel".to_string(),
             event::Row::Leave => "leave".to_string(),
         }
     }
-
     /// Seconds until a row's cooldown expires, if it is on one.
     pub fn row_cooldown(&self, row: Row) -> u32 {
         let Some(game) = self.game.as_ref() else {
@@ -1110,9 +1455,28 @@ impl State {
                 .and_then(|active| active.fight())
                 .map(|fight| fight.meds_cooldown.ceil() as u32)
                 .unwrap_or(0),
+            Row::Event(event::Row::Hypo) => self
+                .event
+                .as_ref()
+                .and_then(|active| active.fight())
+                .map(|fight| fight.hypo_cooldown.ceil() as u32)
+                .unwrap_or(0),
+            Row::Event(event::Row::Stim) => self
+                .event
+                .as_ref()
+                .and_then(|active| active.fight())
+                .map(|fight| fight.stim_cooldown.ceil() as u32)
+                .unwrap_or(0),
+            Row::Event(event::Row::Shield) => self
+                .event
+                .as_ref()
+                .and_then(|active| active.fight())
+                .map(|fight| fight.shield_cooldown.ceil() as u32)
+                .unwrap_or(0),
             Row::Build(_)
             | Row::Craft(_)
             | Row::Buy(_)
+            | Row::Fabricate(_)
             | Row::Worker(_)
             | Row::Outfit(_)
             | Row::ReinforceHull
@@ -1131,6 +1495,7 @@ impl State {
             Row::Build(building) => building.cost(game.building_count(building)),
             Row::Craft(craftable) => craftable.cost.to_vec(),
             Row::Buy(good) => good.cost.to_vec(),
+            Row::Fabricate(fabricable) => fabricable.cost.to_vec(),
             Row::ReinforceHull => vec![(Resource::AlienAlloy, space::ALLOY_PER_HULL)],
             Row::UpgradeEngine => vec![(Resource::AlienAlloy, space::ALLOY_PER_THRUSTER)],
             Row::Event(event::Row::Button(index)) => self
@@ -1178,6 +1543,9 @@ impl State {
             Row::Buy(good) => good
                 .maximum
                 .is_some_and(|max| game.store(good.good) >= i64::from(max)),
+            Row::Fabricate(fabricable) => fabricable
+                .maximum
+                .is_some_and(|max| game.store(fabricable.item) >= i64::from(max)),
             Row::Embark => !game.can_embark(),
             Row::LiftOff => game.ship.as_ref().map(|s| s.hull <= 0).unwrap_or(true),
             Row::Event(row) => !self.event_row_ready(row),
@@ -1206,6 +1574,7 @@ impl State {
             Row::Build(_) => Some(Section::Build),
             Row::Craft(_) => Some(Section::Craft),
             Row::Buy(_) => Some(Section::Buy),
+            Row::Fabricate(_) => Some(Section::Fabricate),
             Row::LightFire
             | Row::StokeFire
             | Row::GatherWood

@@ -9,8 +9,9 @@ use ratatui::{
     text::{Line, Span},
 };
 
+use super::terminal_image::MAX_DECODED_IMAGE_PIXELS;
+
 const ALPHA_THRESHOLD: u8 = 128;
-const MAX_DECODED_IMAGE_PIXELS: u64 = 25_000_000;
 
 pub type InlineImagePreview = Vec<Line<'static>>;
 
@@ -80,20 +81,25 @@ pub(crate) async fn fetch_and_render_image(
     let bytes = crate::app::files::image_upload::download_url_bytes(
         &url,
         std::time::Duration::from_secs(15),
-        crate::app::files::image_upload::max_upload_bytes(),
+        crate::config::MAX_IMAGE_BYTES,
     )
     .await?;
     tracing::trace!("image downloaded: {} bytes", bytes.len());
 
+    render_image_bytes(bytes, max_width, max_height, settings).await
+}
+
+pub(crate) async fn render_image_bytes(
+    bytes: Vec<u8>,
+    max_width: u32,
+    max_height: u32,
+    settings: InlineImageRenderSettings,
+) -> Result<InlineImagePreview> {
     tokio::task::spawn_blocking(move || {
         tracing::trace!("decoding image...");
-        let img = match image::load_from_memory(&bytes) {
-            Ok(img) => img,
-            Err(e) => {
-                tracing::trace!("image decoding failed: {}", e);
-                return Err(e.into());
-            }
-        };
+        let img = image::load_from_memory(&bytes)
+            .inspect_err(|error| tracing::trace!("image decoding failed: {error}"))
+            .context("failed to decode image")?;
         tracing::trace!("image decoded: {}x{}", img.width(), img.height());
 
         let (width, height) = img.dimensions();

@@ -1,5 +1,6 @@
 use std::cell::Cell;
 
+use late_core::models::pet::{PetMood, PetSpecies};
 use ratatui::{
     Frame,
     layout::Rect,
@@ -8,315 +9,359 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use late_core::models::pet::PET_SPECIES_DOG;
-
-use super::state::{PetMood, PetNeedStatus, PetState};
+use super::state::{Look, PET_HEIGHT, PET_WIDTH, Perch, PetFrameInputs, PetState, PetTravel};
 use crate::app::common::theme;
 
-/// Constant height of the pet strip that sits above the chat composer.
-/// Stable chrome: the strip never grows or shrinks between states.
-pub const PET_STRIP_HEIGHT: u16 = 3;
+/// The pet's box at its smallest: the three art rows.
+pub const PET_BOX_MIN_ROWS: u16 = PET_HEIGHT as u16;
 
-/// Pet strip inputs threaded through the chat render views. The rect slots
-/// receive this frame's clickable targets (pet and food bowl both feed, water
-/// bowl waters) so mouse hit-testing in `app::input` can route clicks.
-pub struct PetStripView<'a> {
-    pub state: &'a PetState,
-    /// Pet food left in the Shop inventory. A meal costs one, so at zero the
-    /// food bowl asks the user to restock instead of showing an empty dish.
-    pub pet_food_quantity: i32,
-    pub pet_rect_slot: Option<&'a Cell<Option<Rect>>>,
-    pub food_bowl_rect_slot: Option<&'a Cell<Option<Rect>>>,
-    pub water_bowl_rect_slot: Option<&'a Cell<Option<Rect>>>,
-    /// Receives the wander travel width actually drawn this frame, so the
-    /// tick-side animation predicate (`strip_frame_changed`) can evaluate the
-    /// same frame math the next draw will use.
-    pub travel_slot: Option<&'a Cell<Option<usize>>>,
+/// Where the tank is, seen from the pet's box, when the two share an edge
+/// on the Zen page. The pet goes and sits against that edge to watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchSide {
+    Left,
+    Right,
+    Above,
+    Below,
 }
 
-const BOWL_WIDTH: u16 = 10;
-/// food bowl + gap + water bowl + right pad
-const BOWLS_ZONE_WIDTH: u16 = BOWL_WIDTH + 1 + BOWL_WIDTH + 1;
+/// What the pet goes to look at. The tank moves on its own and the pet
+/// reacts to it; the bonsai does not, so it gets a quieter beat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchTarget {
+    Tank,
+    Bonsai,
+}
 
-/// Three-row strip above the composer: the pet wanders the left zone while
-/// the food and water bowls sit pinned on the right. The bowls double as
-/// status (a full bowl is done, an empty amber/red one is due) and as the
-/// click targets for feeding/watering; clicking the pet feeds it too.
-pub fn draw_pet_strip(frame: &mut Frame, area: Rect, view: &PetStripView<'_>) {
-    if area.height < PET_STRIP_HEIGHT || area.width < BOWLS_ZONE_WIDTH + 12 {
+/// What the pet's box touches on the Zen page, with the side each one is
+/// on. The pet spends one watch window of the round on each, so with both
+/// beside it the fish and the tree alternate; with one, that one takes
+/// both windows, and its time at the glass never depends on what else the
+/// page happens to hold.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Neighbours {
+    pub tank: Option<WatchSide>,
+    pub bonsai: Option<WatchSide>,
+}
+
+impl Neighbours {
+    /// What this watch window is spent on: `second` is the second of the
+    /// two windows in a round.
+    fn target(self, second: bool) -> Option<(WatchTarget, WatchSide)> {
+        match (self.tank, self.bonsai, second) {
+            (None, None, _) => None,
+            (Some(side), None, _) => Some((WatchTarget::Tank, side)),
+            (None, Some(side), _) => Some((WatchTarget::Bonsai, side)),
+            (Some(side), Some(_), false) => Some((WatchTarget::Tank, side)),
+            (Some(_), Some(side), true) => Some((WatchTarget::Bonsai, side)),
+        }
+    }
+}
+
+/// What the pet is doing this frame. The stroll and the watch are wall
+/// clock formulas; the perch is state (`PetState::perch`): the pet walking
+/// after the cursor, or sitting under it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PetPose {
+    Stroll,
+    Watch(WatchTarget, WatchSide),
+    /// Sulking: parked mid floor, turned away.
+    Sulk,
+    /// Asleep: curled mid floor.
+    Sleep,
+    At(Perch),
+}
+
+/// Wall ticks in a minute: the shared animation clock runs at 66ms.
+const TICKS_PER_MINUTE: usize = 60_000 / 66;
+/// A calm pet beside a tank or a bonsai gets bored of it: it strolls for
+/// twenty minutes, then watches for five, and round again on the wall
+/// clock.
+pub const STROLL_TICKS: usize = 20 * TICKS_PER_MINUTE;
+pub const WATCH_TICKS: usize = 5 * TICKS_PER_MINUTE;
+/// One leg of the round: a stroll and the watch that ends it. A round is
+/// two legs, so a pet with both neighbours visits each once an hour or so.
+pub const LEG_TICKS: usize = STROLL_TICKS + WATCH_TICKS;
+
+impl PetPose {
+    pub fn for_frame(
+        mood: PetMood,
+        neighbours: Neighbours,
+        perch: Option<Perch>,
+        tick: usize,
+    ) -> Self {
+        if let Some(perch) = perch {
+            return PetPose::At(perch);
+        }
+        match mood {
+            PetMood::Sulking => PetPose::Sulk,
+            PetMood::Asleep => PetPose::Sleep,
+            // Wound up: it paces rather than watches.
+            PetMood::Purring | PetMood::Proud => PetPose::Stroll,
+            PetMood::Chatty | PetMood::Vibing | PetMood::Idle => {
+                let phase = tick % (2 * LEG_TICKS);
+                let window = phase % LEG_TICKS >= STROLL_TICKS;
+                match (window, neighbours.target(phase >= LEG_TICKS)) {
+                    (true, Some((target, side))) => PetPose::Watch(target, side),
+                    (true, None) | (false, _) => PetPose::Stroll,
+                }
+            }
+        }
+    }
+}
+
+/// Pet box inputs threaded through the Zen render view. The rect slot
+/// receives this frame's click target (a click is a pet), the frame slot
+/// what the tick needs to walk it and gate its frames.
+pub struct PetView<'a> {
+    pub state: &'a PetState,
+    pub pet_rect_slot: Option<&'a Cell<Option<Rect>>>,
+    pub frame_slot: Option<&'a Cell<Option<PetFrameInputs>>>,
+}
+
+/// The pet's box: the whole of `area` is its floor and its sky.
+/// `neighbours` is the side of each tile it can go and watch, when one
+/// touches this box.
+pub fn draw_pet_box(frame: &mut Frame, area: Rect, view: &PetView<'_>, neighbours: Neighbours) {
+    if area.height < PET_BOX_MIN_ROWS || area.width < PET_WIDTH as u16 + 2 {
         return;
     }
     let state = view.state;
-    let needs = state.needs();
-
-    let wander_zone = Rect {
-        width: area.width - BOWLS_ZONE_WIDTH,
-        ..area
+    let travel = PetTravel {
+        x: (area.width as usize).saturating_sub(PET_WIDTH),
+        y: (area.height as usize).saturating_sub(PET_HEIGHT),
     };
-    let food_area = Rect {
-        x: wander_zone.right(),
-        width: BOWL_WIDTH,
-        ..area
-    };
-    let water_area = Rect {
-        x: food_area.right() + 1,
-        width: BOWL_WIDTH,
-        ..area
-    };
-
-    let pet_rect = draw_wandering_pet(frame, wander_zone, state);
-    if let Some(slot) = view.pet_rect_slot {
-        slot.set(pet_rect);
-    }
-    if let Some(slot) = view.travel_slot {
-        slot.set(Some((wander_zone.width as usize).saturating_sub(PET_WIDTH)));
-    }
-
-    // Only nag about an empty pantry on a day the pet can still eat. Once fed,
-    // the meal is spent until tomorrow and the amber label would be a false
-    // alarm. Feeding also forces the bowl to `Done`, so a `?` never coexists
-    // with a full dish.
-    let needs_restock = view.pet_food_quantity <= 0 && !state.fed_today();
-    draw_bowl(
-        frame,
-        food_area,
-        '*',
-        "/pet feed",
-        needs.food,
-        needs_restock,
+    let pose = PetPose::for_frame(
+        state.mood(),
+        neighbours,
+        state.perch(),
+        state.animation_ticks(),
     );
-    draw_bowl(frame, water_area, '~', "/pet water", needs.water, false);
-    if let Some(slot) = view.food_bowl_rect_slot {
-        slot.set(Some(food_area));
+    let art = PetArt::at(state.mood(), pose, state.animation_ticks(), travel);
+    let pet_rect = draw_pet(frame, area, state, art);
+    if let Some(slot) = view.pet_rect_slot {
+        slot.set(Some(pet_rect));
     }
-    if let Some(slot) = view.water_bowl_rect_slot {
-        slot.set(Some(water_area));
-    }
-
-    // Action feedback ("watered!", "fed! strolling", "buy pet food first")
-    // sits right-aligned on the strip's bottom row, next to the bowls.
-    if let Some(feedback) = state.action_feedback {
-        let row = Rect {
-            y: area.y + 2,
-            height: 1,
-            ..wander_zone
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!("{feedback}  "),
-                Style::default()
-                    .fg(theme::AMBER())
-                    .add_modifier(Modifier::BOLD),
-            )))
-            .right_aligned(),
-            row,
-        );
+    if let Some(slot) = view.frame_slot {
+        slot.set(Some(PetFrameInputs {
+            travel,
+            zone: area,
+            neighbours,
+            position: art.position,
+        }));
     }
 }
 
-/// The pet's three art rows inside `zone`, wandering horizontally. Returns
-/// the pet's on-screen rect (a second feed click target), or `None` while it
-/// is off strolling through the whole app via the roaming overlay.
-fn draw_wandering_pet(frame: &mut Frame, zone: Rect, state: &PetState) -> Option<Rect> {
-    if state.roaming_active() {
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                "strolling",
-                Style::default()
-                    .fg(theme::TEXT_FAINT())
-                    .add_modifier(Modifier::ITALIC),
-            )))
-            .centered(),
-            Rect {
-                y: zone.y + 1,
-                height: 1,
-                ..zone
-            },
-        );
-        return None;
+/// The pet's three art rows inside `zone`, standing where the art says.
+/// Returns the pet's on-screen rect (the click target).
+fn draw_pet(frame: &mut Frame, zone: Rect, state: &PetState, art: PetArt) -> Rect {
+    let (x, y) = art.position;
+    let lines = art_lines(state.species, state.mood(), art, x);
+    let rows = Rect::new(zone.x, zone.y + y as u16, zone.width, PET_HEIGHT as u16);
+    frame.render_widget(Paragraph::new(lines), rows);
+
+    Rect {
+        x: zone.x + x as u16,
+        width: (PET_WIDTH as u16).min(zone.width),
+        ..rows
     }
+}
 
-    let mood = state.mood();
-    let color = mood_color(mood);
-    let tick = state.animation_ticks();
-    let activity = pet_activity(mood);
-
-    // The pet wanders the whole zone width, picking a fresh spot each leg.
-    let travel = (zone.width as usize).saturating_sub(PET_WIDTH);
-    let x = wander_x(tick, activity, travel);
-    let pad = " ".repeat(x);
-
-    let blink = activity > 0 && tick % 64 < 3;
-    let eyes = if blink { "-.-" } else { mood.eyes() };
-    let tail = tail(activity, tick);
-    let is_dog = state.species == PET_SPECIES_DOG;
-    // Cat: pointy ears `/\_/\` going up. Dog: floppy ears `\,_,/` drooping
-    // outward at the sides. Same 5-char crown so the face row aligns.
-    let ears = if is_dog { " \\,_,/ " } else { " /\\_/\\ " };
-    let mouth_row = if is_dog {
-        format!(" \\_{}_/ ", mouth(mood, true))
-    } else {
-        format!(" > {} < ", mouth(mood, false))
+/// The pet as three rows for a profile: its species in its stored mood,
+/// standing still, blinking on the wall clock. No box, no walk.
+pub fn portrait_lines(species: PetSpecies, mood: PetMood, tick: usize) -> Vec<Line<'static>> {
+    let pose = match mood {
+        PetMood::Sulking => PetPose::Sulk,
+        PetMood::Asleep => PetPose::Sleep,
+        PetMood::Purring | PetMood::Proud | PetMood::Chatty | PetMood::Vibing | PetMood::Idle => {
+            PetPose::At(Perch {
+                x: 0,
+                y: 0,
+                look: Look::Ahead,
+            })
+        }
     };
+    let art = PetArt::at(mood, pose, tick, PetTravel { x: 0, y: 0 });
+    art_lines(species, mood, art, 0)
+}
 
-    let lines = vec![
+/// The three rows, `pad` cells in from the left, in the mood's colour.
+fn art_lines(species: PetSpecies, mood: PetMood, art: PetArt, pad: usize) -> Vec<Line<'static>> {
+    let color = mood_color(mood);
+    let pad = " ".repeat(pad);
+    let tail = art.tail;
+    let (crown, face, floor) = species_rows(species, art.eyes, mouth(art.mouth, species));
+    vec![
         Line::from(Span::styled(
-            format!("{pad}{ears}{}", tail[0]),
+            format!("{pad}{crown}{}", tail[0]),
             Style::default().fg(color),
         )),
         Line::from(Span::styled(
-            format!("{pad}( {eyes} ){}", tail[1]),
+            format!("{pad}{face}{}", tail[1]),
             Style::default().fg(color).add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
-            format!("{pad}{mouth_row}"),
+            format!("{pad}{floor}"),
             Style::default().fg(color),
         )),
-    ];
-    frame.render_widget(Paragraph::new(lines), zone);
-
-    Some(Rect {
-        x: zone.x + x as u16,
-        y: zone.y,
-        width: (PET_WIDTH as u16).min(zone.width),
-        height: PET_STRIP_HEIGHT,
-    })
+    ]
 }
 
-/// Three-row bowl: fill + base + slash-command label. The bowl carries the
-/// status on its own: a full green bowl is done, an empty amber/red one still
-/// needs care. `needs_restock` is the food bowl's out-of-pantry state, where
-/// the dish shows `?` rather than an empty bowl because there is nothing to
-/// pour until the Shop restocks. Water is never gated, so it passes `false`.
-fn draw_bowl(
-    frame: &mut Frame,
-    area: Rect,
-    fill: char,
-    label: &'static str,
-    status: PetNeedStatus,
-    needs_restock: bool,
-) {
-    let color = status_color(status);
-    let inside = match (status, needs_restock) {
-        (PetNeedStatus::Done, _) => fill.to_string().repeat(7),
-        (_, false) => " ".repeat(7),
-        (_, true) => "   ?   ".to_string(),
-    };
-    let label_style = if needs_restock {
-        Style::default()
-            .fg(theme::AMBER())
-            .add_modifier(Modifier::ITALIC)
-    } else if status.is_missing() {
-        Style::default().fg(color).add_modifier(Modifier::ITALIC)
-    } else {
-        Style::default()
-            .fg(theme::TEXT_FAINT())
-            .add_modifier(Modifier::ITALIC)
-    };
-    let lines = vec![
-        Line::from(Span::styled(
-            format!("({inside})"),
-            Style::default().fg(color),
-        ))
-        .centered(),
-        Line::from(Span::styled(" \\_____/ ", Style::default().fg(color))).centered(),
-        Line::from(Span::styled(label, label_style)).centered(),
-    ];
-    frame.render_widget(Paragraph::new(lines), area);
-}
-
-fn status_color(status: PetNeedStatus) -> Color {
-    match status {
-        PetNeedStatus::Done => theme::SUCCESS(),
-        PetNeedStatus::Due => theme::AMBER(),
-        PetNeedStatus::Overdue => theme::ERROR(),
+/// The three rows before the tail column, seven cells each so the face
+/// aligns across species. Cat: pointy ears going up. Dog: floppy ears
+/// drooping outward. Bird: a crest, a beak instead of a mouth, and feet.
+fn species_rows(species: PetSpecies, eyes: &str, mouth: char) -> (String, String, String) {
+    match species {
+        PetSpecies::Cat => (
+            " /\\_/\\ ".to_string(),
+            format!("( {eyes} )"),
+            format!(" > {mouth} < "),
+        ),
+        PetSpecies::Dog => (
+            " \\,_,/ ".to_string(),
+            format!("( {eyes} )"),
+            format!(" \\_{mouth}_/ "),
+        ),
+        PetSpecies::Bird => (
+            "  ,^,  ".to_string(),
+            format!(" ({eyes}{mouth} "),
+            "  ^ ^  ".to_string(),
+        ),
     }
 }
 
-pub fn draw_roaming_pet(frame: &mut Frame, area: Rect, state: &PetState) {
-    if !state.roaming_active() || area.width < 12 || area.height < 5 {
-        return;
-    }
+/// What the mouth says this frame. The mood mouths are the pet's own; the
+/// watch mouths belong to whatever it is looking at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mouth {
+    Mood(PetMood),
+    /// Watching, quietly.
+    Hush,
+    /// A fish just swam past.
+    Gasp,
+    /// Leaning in to smell the leaves.
+    Sniff,
+}
 
-    let tick = state.animation_ticks();
-    let (lines, width) = if state.species == PET_SPECIES_DOG {
-        if (tick / 8).is_multiple_of(2) {
-            ([r" \,_,/ ", r"( o.o )", r" /___\ "], 7)
-        } else {
-            ([r" \,_,/ ", r"( o.o )", r" _/ \_ "], 7)
+/// Every tick-dependent piece of the pet's art, computed once so the draw
+/// and the tick-side gate (`frame_changed`) can never disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PetArt {
+    pub position: (usize, usize),
+    eyes: &'static str,
+    tail: [&'static str; 2],
+    mouth: Mouth,
+}
+
+impl PetArt {
+    fn at(mood: PetMood, pose: PetPose, tick: usize, travel: PetTravel) -> Self {
+        let activity = pet_activity(mood, pose);
+        let blink = activity > 0 && tick % 64 < 3;
+        let tail = tail(activity, tick);
+        let position = pet_position(pose, tick, travel);
+        match pose {
+            PetPose::Sulk | PetPose::Sleep | PetPose::Stroll => PetArt {
+                position,
+                eyes: if blink { "-.-" } else { mood_eyes(mood) },
+                tail,
+                mouth: Mouth::Mood(mood),
+            },
+            PetPose::At(perch) => PetArt {
+                position,
+                eyes: match perch.look {
+                    Look::Left => "<.<",
+                    Look::Right => ">.>",
+                    Look::Ahead => {
+                        if blink {
+                            "-.-"
+                        } else {
+                            mood_eyes(mood)
+                        }
+                    }
+                },
+                tail,
+                mouth: Mouth::Mood(mood),
+            },
+            // Wide eyes on the glass; every so often a fish swims past
+            // and the pet gasps at it for a few ticks.
+            PetPose::Watch(WatchTarget::Tank, _) => {
+                let gasp = tick % 96 < 6;
+                PetArt {
+                    position,
+                    eyes: if gasp {
+                        "O.O"
+                    } else if blink {
+                        "-.-"
+                    } else {
+                        "o.o"
+                    },
+                    tail,
+                    mouth: if gasp { Mouth::Gasp } else { Mouth::Hush },
+                }
+            }
+            // Nothing darts about in a tree: the same rapt eyes on a
+            // slower beat, and the pet leans in for a smell of the leaves
+            // instead of gasping at them.
+            PetPose::Watch(WatchTarget::Bonsai, _) => {
+                let sniff = tick % 240 < 12;
+                PetArt {
+                    position,
+                    eyes: if sniff {
+                        "^.^"
+                    } else if blink {
+                        "-.-"
+                    } else {
+                        "o.o"
+                    },
+                    tail,
+                    mouth: if sniff { Mouth::Sniff } else { Mouth::Hush },
+                }
+            }
         }
-    } else if (tick / 8).is_multiple_of(2) {
-        ([r" /\_/\ ", r"( o.o )", r" > ^ < "], 7)
-    } else {
-        ([r" /\_/\ ", r"( o.o )", r" > - < "], 7)
-    };
-
-    let max_x = (area.width as usize).saturating_sub(width);
-    let max_y = (area.height as usize).saturating_sub(lines.len());
-    let x = stroll_axis(tick, max_x, 150, 0);
-    let y = stroll_axis(tick, max_y, 210, 17);
-    let style = Style::default()
-        .fg(theme::AMBER_GLOW())
-        .add_modifier(Modifier::BOLD);
-    let rendered = lines
-        .into_iter()
-        .map(|line| Line::from(Span::styled(line, style)))
-        .collect::<Vec<_>>();
-    frame.render_widget(
-        Paragraph::new(rendered),
-        Rect::new(area.x + x as u16, area.y + y as u16, width as u16, 3),
-    );
+    }
 }
 
-/// Body width including the tail column, used to keep the wander on-screen.
-const PET_WIDTH: usize = 8;
-
-/// True when the strip art drawn at `tick` differs from the art at
-/// `tick - 1` for the given mood and wander travel: a wander step, a blink
-/// edge, or a tail flick edge. This is the exact inverse of the frame math in
-/// `draw_wandering_pet`/`tail`, so the render gate only pays frames on ticks
-/// where the strip actually moves; a parked (sad) pet is fully static.
-pub fn strip_frame_changed(mood: PetMood, tick: usize, travel: usize) -> bool {
-    let activity = pet_activity(mood);
-    if activity == 0 {
-        return false;
+/// Where the pet stands this tick, as (column, row) offsets inside its roam
+/// zone. A strolling pet wanders the whole box: each axis picks fresh
+/// destinations on its own cadence, so the path wanders instead of tracing
+/// a diagonal. A sulking or sleeping pet parks on the floor, mid-box. A
+/// watching pet sits still against the edge the tank is behind, on the
+/// floor when the tank is beside it. A perched pet is where the state says.
+fn pet_position(pose: PetPose, tick: usize, travel: PetTravel) -> (usize, usize) {
+    match pose {
+        PetPose::Sulk | PetPose::Sleep => (travel.x / 2, travel.y),
+        PetPose::Stroll => (
+            stroll_axis(tick, travel.x, 60, 0),
+            stroll_axis(tick, travel.y, 90, 17),
+        ),
+        PetPose::Watch(_, WatchSide::Left) => (0, travel.y),
+        PetPose::Watch(_, WatchSide::Right) => (travel.x, travel.y),
+        PetPose::Watch(_, WatchSide::Above) => (travel.x / 2, 0),
+        PetPose::Watch(_, WatchSide::Below) => (travel.x / 2, travel.y),
+        PetPose::At(perch) => (perch.x.min(travel.x), perch.y.min(travel.y)),
     }
+}
+
+/// True when the pet art drawn at `tick` differs from the art at `tick - 1`
+/// for the given mood, neighbours, perch, and travel: a stroll step, a
+/// blink, a tail flick, a gasp or sniff edge, or the walk to and from the
+/// glass. It compares the same `PetArt` the draw uses, so the render gate
+/// only pays frames on ticks where the box actually changes; a sleeping pet
+/// is fully static.
+pub fn frame_changed(
+    mood: PetMood,
+    neighbours: Neighbours,
+    perch: Option<Perch>,
+    tick: usize,
+    travel: PetTravel,
+) -> bool {
     let prev = tick.wrapping_sub(1);
-    if wander_x(tick, activity, travel) != wander_x(prev, activity, travel) {
-        return true;
-    }
-    let blink = |t: usize| t % 64 < 3;
-    if blink(tick) != blink(prev) {
-        return true;
-    }
-    tail(activity, tick) != tail(activity, prev)
+    let now = PetPose::for_frame(mood, neighbours, perch, tick);
+    let before = PetPose::for_frame(mood, neighbours, perch, prev);
+    PetArt::at(mood, now, tick, travel) != PetArt::at(mood, before, prev, travel)
 }
 
-/// Pseudo-random horizontal wander across the strip. The pet picks a fresh
-/// column each leg and strolls to it, so legs land anywhere edge-to-edge;
-/// livelier moods change their mind sooner. A still (sad) pet parks mid-zone.
-fn wander_x(tick: usize, activity: u8, travel: usize) -> usize {
-    if travel == 0 {
-        return 0;
-    }
-    if activity == 0 {
-        return travel / 2;
-    }
-    // Ticks per wander leg. Lower activity ambles more slowly.
-    let leg = match activity {
-        3 => 60,
-        2 => 100,
-        _ => 180,
-    };
-    let seg = tick / leg;
-    let into = (tick % leg) as i64;
-    let from = wander_target(seg, travel) as i64;
-    let to = wander_target(seg + 1, travel) as i64;
-    let pos = from + (to - from) * into / leg as i64;
-    pos.clamp(0, travel as i64) as usize
-}
-
-/// Deterministic pseudo-random destination column for one wander leg. Adjacent
+/// Deterministic pseudo-random destination for one stroll leg. Adjacent
 /// legs chain (this leg's end is the next leg's start) so motion never jumps.
 fn wander_target(seg: usize, travel: usize) -> usize {
     let mut h = (seg as u64)
@@ -328,6 +373,8 @@ fn wander_target(seg: usize, travel: usize) -> usize {
     (h % (travel as u64 + 1)) as usize
 }
 
+/// One axis of the stroll: `leg` ticks per destination, `salt` decorrelates
+/// the axes so x and y never pick the same sequence.
 fn stroll_axis(tick: usize, travel: usize, leg: usize, salt: usize) -> usize {
     if travel == 0 {
         return 0;
@@ -339,14 +386,23 @@ fn stroll_axis(tick: usize, travel: usize, leg: usize, salt: usize) -> usize {
     (from + (to - from) * into / leg as i64).clamp(0, travel as i64) as usize
 }
 
-/// How busy the pet looks, 0 (still) to 3 (bouncy). Drives the wander pace and
-/// how often the tail flicks.
-fn pet_activity(mood: PetMood) -> u8 {
-    match mood {
-        PetMood::Happy => 3,
-        PetMood::Content => 2,
-        PetMood::Hungry | PetMood::Thirsty => 1,
-        PetMood::Sad => 0,
+/// How busy the pet looks: 0 (still), 1 (rapt, the tail sways slowly), 2
+/// (content), or 3 (bouncy). Drives whether it blinks and how often the
+/// tail flicks.
+fn pet_activity(mood: PetMood, pose: PetPose) -> u8 {
+    match pose {
+        PetPose::Sleep => 0,
+        // Sulking: still, but awake enough to blink.
+        PetPose::Sulk => 1,
+        PetPose::Watch(..) => 1,
+        PetPose::Stroll | PetPose::At(_) => match mood {
+            PetMood::Proud => 3,
+            PetMood::Purring | PetMood::Chatty | PetMood::Vibing => 2,
+            PetMood::Idle => 1,
+            // Never strolls or perches in these; listed so a new mood has
+            // to choose.
+            PetMood::Sulking | PetMood::Asleep => 0,
+        },
     }
 }
 
@@ -368,31 +424,41 @@ fn tail(activity: u8, tick: usize) -> [&'static str; 2] {
     }
 }
 
-fn mouth(mood: PetMood, is_dog: bool) -> char {
-    if is_dog {
-        return match mood {
-            PetMood::Happy => 'd',
-            PetMood::Content => 'u',
-            PetMood::Hungry => 'o',
-            PetMood::Thirsty => 'v',
-            PetMood::Sad => '_',
-        };
-    }
+fn mood_eyes(mood: PetMood) -> &'static str {
     match mood {
-        PetMood::Happy => 'w',
-        PetMood::Content => '^',
-        PetMood::Hungry => 'o',
-        PetMood::Thirsty => 'u',
-        PetMood::Sad => '_',
+        PetMood::Purring => "^.^",
+        PetMood::Proud => "*.*",
+        PetMood::Sulking => "T_T",
+        PetMood::Chatty => "o.o",
+        PetMood::Vibing => "~.~",
+        PetMood::Asleep => "-.-",
+        PetMood::Idle => "o.o",
+    }
+}
+
+/// The mouth glyph. The bird's is its beak, always pointed: birds do not
+/// smile.
+fn mouth(mouth: Mouth, species: PetSpecies) -> char {
+    match (species, mouth) {
+        (PetSpecies::Bird, _) => '>',
+        (PetSpecies::Dog, Mouth::Mood(PetMood::Purring | PetMood::Proud | PetMood::Vibing)) => 'd',
+        (PetSpecies::Cat, Mouth::Mood(PetMood::Purring | PetMood::Proud | PetMood::Vibing)) => 'w',
+        (_, Mouth::Mood(PetMood::Chatty)) => 'o',
+        (_, Mouth::Mood(PetMood::Sulking)) => '_',
+        (_, Mouth::Mood(PetMood::Asleep)) => 'z',
+        (_, Mouth::Mood(PetMood::Idle)) => '.',
+        (_, Mouth::Hush) => '.',
+        (_, Mouth::Gasp) => 'o',
+        (_, Mouth::Sniff) => 'v',
     }
 }
 
 fn mood_color(mood: PetMood) -> Color {
     match mood {
-        PetMood::Happy => theme::AMBER_GLOW(),
-        PetMood::Content => theme::TEXT_BRIGHT(),
-        PetMood::Hungry | PetMood::Thirsty => theme::AMBER(),
-        PetMood::Sad => theme::TEXT_DIM(),
+        PetMood::Purring | PetMood::Proud => theme::AMBER_GLOW(),
+        PetMood::Chatty | PetMood::Vibing | PetMood::Idle => theme::AMBER(),
+        PetMood::Sulking => theme::TEXT_DIM(),
+        PetMood::Asleep => theme::TEXT_FAINT(),
     }
 }
 

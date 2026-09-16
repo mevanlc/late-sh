@@ -233,12 +233,39 @@ fn visible_components_drops_by_priority_not_position() {
     );
 }
 
+/// Survivors render in the user's display order, not the shrink one.
+#[test]
+fn visible_components_keeps_display_order_after_a_cut() {
+    let components = [
+        on(RightSidebarComponent::Daily),
+        on(RightSidebarComponent::Bonsai),
+        on(RightSidebarComponent::Music),
+    ];
+    // Room for the music stage, the lobby, and nothing else.
+    let height = TIME_HEIGHT + RULE_HEIGHT + MUSIC_STAGE_HEIGHT + RULE_HEIGHT + DAILY_HEIGHT;
+    assert_eq!(
+        visible_components(&components, height),
+        vec![RightSidebarComponent::Daily, RightSidebarComponent::Music]
+    );
+
+    // Given the whole rail, everything renders in the stored order.
+    assert_eq!(
+        visible_components(&components, 100),
+        vec![
+            RightSidebarComponent::Daily,
+            RightSidebarComponent::Bonsai,
+            RightSidebarComponent::Music,
+        ]
+    );
+}
+
 #[test]
 fn visible_components_skips_unfit_panel_without_stopping() {
     // Music (the biggest panel, now carrying the visualizer strip on top
-    // too) doesn't fit in a short rail, but Daily and Bonsai below the cut
-    // still do: the walk skips Music instead of ending, so lower-priority
-    // panels that fit are kept.
+    // too) doesn't fit in a short rail, but Daily below the cut still does:
+    // the walk skips Music instead of ending, so a lower-priority panel
+    // that fits is kept. Bonsai's fixed 13-row preview block no longer
+    // fits beside Daily in what Music leaves, so it is skipped too.
     let components = [
         on(RightSidebarComponent::Music),
         on(RightSidebarComponent::Daily),
@@ -247,6 +274,6 @@ fn visible_components_skips_unfit_panel_without_stopping() {
     let height = TIME_HEIGHT + RULE_HEIGHT + MUSIC_STAGE_HEIGHT - 1;
     assert_eq!(
         visible_components(&components, height),
-        vec![RightSidebarComponent::Daily, RightSidebarComponent::Bonsai]
+        vec![RightSidebarComponent::Daily]
     );
 }

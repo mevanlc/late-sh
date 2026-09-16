@@ -1,7 +1,7 @@
-use crate::app::chat::state::PomodoroRequest;
-use crate::app::common::pomodoro::PomodoroTimer;
+use crate::app::chat::state::{StatusChange, StatusRequest};
 use crate::app::common::primitives::Banner;
 use crate::app::common::readline::ctrl_byte_to_input;
+use crate::app::common::status::{SessionStatus, Status};
 use crate::app::help_modal::data::HelpTopic;
 use crate::app::state::App;
 use chrono::{DateTime, Utc};
@@ -129,7 +129,6 @@ fn open_mod_modal(app: &mut App) {
     app.show_hub_modal = false;
     app.show_profile_modal = false;
     app.show_bonsai_modal = false;
-    app.show_bonsai_v2_modal = false;
     app.show_poll_modal = false;
     app.poll_modal_state.close();
     app.show_quit_confirm = false;
@@ -146,7 +145,6 @@ fn open_poll_modal(app: &mut App, room_id: Uuid) {
     app.show_profile_modal = false;
     app.show_sheet_modal = false;
     app.show_bonsai_modal = false;
-    app.show_bonsai_v2_modal = false;
     app.show_quit_confirm = false;
     crate::app::input::close_icon_picker(app);
     app.chat.close_overlay();
@@ -154,6 +152,25 @@ fn open_poll_modal(app: &mut App, room_id: Uuid) {
     app.pending_chat_profile_open = None;
     app.poll_modal_state.open(room_id);
     app.show_poll_modal = true;
+}
+
+/// Open the tier picker on a message someone else wrote.
+fn open_gild_modal(app: &mut App, target: crate::app::chat::gild::state::GildTarget) {
+    app.show_help = false;
+    app.show_settings = false;
+    app.show_mod_modal = false;
+    app.show_hub_modal = false;
+    app.show_profile_modal = false;
+    app.show_sheet_modal = false;
+    app.show_poll_modal = false;
+    app.poll_modal_state.close();
+    app.show_bonsai_modal = false;
+    app.show_quit_confirm = false;
+    crate::app::input::close_icon_picker(app);
+    app.chat.close_overlay();
+    app.chat.close_news_modal();
+    app.gild_modal_state.open(target);
+    app.show_gild_modal = true;
 }
 
 pub(crate) fn open_requested_poll_modal(app: &mut App, room_id: Uuid, allow_poll_modal: bool) {
@@ -168,11 +185,8 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
     if app.chat.take_requested_quit() {
         crate::app::input::trigger_global_quit(app);
     }
-    if let Some(msg) = app.chat.take_requested_brb() {
-        app.go_afk(msg);
-    }
-    if app.chat.take_sent_regular_message() && app.afk.is_some() {
-        app.return_from_afk();
+    if app.chat.take_sent_regular_message() {
+        app.clear_status_on_post();
     }
     if let Some(url) = app.chat.take_requested_audio_url() {
         app.audio.submit_trusted(url);
@@ -192,24 +206,8 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
     }
     if let Some(command) = app.chat.take_requested_aquarium_command() {
         match command {
-            crate::app::chat::state::AquariumCommand::Toggle => {
-                crate::app::input::toggle_aquarium_tray_globally(app);
-            }
             crate::app::chat::state::AquariumCommand::Feed => {
                 crate::app::input::feed_aquarium_globally(app);
-            }
-        }
-    }
-    if let Some(command) = app.chat.take_requested_pet_command() {
-        match command {
-            crate::app::chat::state::PetCommand::Toggle => {
-                crate::app::input::toggle_pet_strip_globally(app);
-            }
-            crate::app::chat::state::PetCommand::Feed => {
-                crate::app::input::pet_feed_globally(app);
-            }
-            crate::app::chat::state::PetCommand::Water => {
-                crate::app::input::pet_water_globally(app);
             }
         }
     }
@@ -221,6 +219,18 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
     }
     if app.chat.take_requested_shop_modal() {
         crate::app::input::open_shop_modal_globally(app);
+    }
+    if app.chat.take_requested_lobby_toggle() {
+        crate::app::input::toggle_lobby_globally(app);
+    }
+    if app.chat.take_requested_zen_toggle() {
+        crate::app::input::toggle_zen_globally(app);
+    }
+    if app.chat.take_requested_guide() {
+        crate::app::input::open_guide_globally(app);
+    }
+    if app.chat.take_requested_redraw() {
+        app.force_full_repaint();
     }
     if let Some(request) = app.chat.take_requested_room_info_modal() {
         use crate::app::chat::state::RoomInfoRequest;
@@ -260,13 +270,21 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
             }
         }
     }
-    if let Some(request) = app.chat.take_requested_pomodoro() {
-        let banner = apply_pomodoro_request(&mut app.pomodoro, request, Utc::now());
-        app.publish_pomodoro();
-        app.banner = Some(banner);
+    if let Some(request) = app.chat.take_requested_status() {
+        match request {
+            StatusRequest::OpenPicker => crate::app::input::open_status_picker_globally(app),
+            StatusRequest::Apply(change) => {
+                let (status, banner) = resolve_status_change(app.status, change, Utc::now());
+                app.set_status(status);
+                app.banner = Some(banner);
+            }
+        }
     }
     if app.chat.take_requested_icon_picker() {
         crate::app::input::try_open_icon_picker(app);
+    }
+    if app.chat.take_requested_room_picker() {
+        crate::app::input::open_room_search_modal_globally(app);
     }
     if let Some(query) = app.chat.take_requested_message_search() {
         crate::app::input::open_message_search_modal_globally(app, &query);
@@ -275,10 +293,15 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
         app.banner = Some(apply_petname_request(app, request));
     }
     if let Some(upload) = app.chat.take_requested_url_upload() {
-        crate::app::input::trigger_url_image_upload(app, upload.url, upload.room_id);
+        crate::app::input::trigger_url_image_upload(
+            app,
+            upload.url,
+            upload.room_id,
+            upload.reply_target,
+        );
     }
     if let Some(upload) = app.chat.take_requested_clipboard_image_upload() {
-        if app.request_paired_clipboard_image_upload(upload.room_id) {
+        if app.request_paired_clipboard_image_upload(upload.room_id, upload.reply_target) {
             app.banner = Some(Banner::success(
                 "Reading image from paired CLI clipboard...",
             ));
@@ -291,36 +314,59 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
     }
 }
 
-/// Apply a parsed `/pomodoro` command to the session's timer and produce the
-/// banner to show. Takes the timer slot rather than the whole `App`: this is a
-/// pure state transition over session-local state, with no service to call and
-/// no other field to touch, so `now` comes from the caller the same way
-/// `PomodoroTimer::badge` takes it.
-fn apply_pomodoro_request(
-    timer: &mut Option<PomodoroTimer>,
-    request: PomodoroRequest,
+/// Resolve a parsed `/status` command against the session's current status:
+/// the new status to store, and the banner to show. Takes the current status
+/// by value rather than the whole `App` because this is a pure transition
+/// over session-local state, with no service to call and no other field to
+/// touch, so `now` comes from the caller the same way `hud_badge` takes it.
+///
+/// The banner spells out the clearing rule every time. It is the one thing
+/// about statuses nobody can infer from the badge, and saying it here is what
+/// makes the typed path as teachable as the picker.
+pub(super) fn resolve_status_change(
+    current: Option<SessionStatus>,
+    change: StatusChange,
     now: DateTime<Utc>,
-) -> Banner {
-    match request {
-        PomodoroRequest::Stop => match timer.take() {
-            Some(stopped) => Banner::success(&format!("stopped {}", stopped.label)),
-            None => Banner::error("no pomodoro running, start one with /pomodoro [minutes]"),
+) -> (Option<SessionStatus>, Banner) {
+    match change {
+        StatusChange::Clear => match current {
+            Some(cleared) => (
+                None,
+                Banner::success(&format!("cleared {}", cleared.status.word())),
+            ),
+            None => (
+                None,
+                Banner::error("no status set, start one with /status [word]"),
+            ),
         },
-        PomodoroRequest::Start { minutes, label } => {
-            // A second /pomodoro replaces the running one instead of being
-            // refused: restarting a focus block is the common case, and the
-            // banner says which it was.
-            let verb = if timer.is_some() {
-                "restarted"
-            } else {
-                "started"
-            };
-            *timer = Some(PomodoroTimer {
-                label: label.clone(),
-                ends_at: now + chrono::Duration::minutes(i64::from(minutes)),
-            });
-            Banner::success(&format!("{verb} {label} for {minutes} min"))
+        StatusChange::Set { status, minutes } => {
+            let ends_at =
+                minutes.map(|minutes| now + chrono::Duration::minutes(i64::from(minutes)));
+            (
+                Some(SessionStatus { status, ends_at }),
+                Banner::success(&status_set_message(status, minutes)),
+            )
         }
+    }
+}
+
+/// What a freshly set status does next, in plain words: the banner after a
+/// set, from the command or the picker.
+pub(crate) fn status_set_message(status: Status, minutes: Option<u32>) -> String {
+    format!(
+        "{} {}, {}",
+        status.glyph(),
+        status.word(),
+        status_clear_rule(minutes)
+    )
+}
+
+/// When a status clears, the one rule nobody can infer from the badge. The
+/// banner and the picker's live hint both print this, so they cannot drift.
+pub(crate) fn status_clear_rule(minutes: Option<u32>) -> String {
+    match minutes {
+        Some(minutes) => format!("clears in {minutes}m, stays while you chat"),
+        None => "clears when you next post".to_string(),
     }
 }
 
@@ -370,6 +416,13 @@ pub fn handle_scroll(app: &mut App, delta: isize) {
 }
 
 pub fn handle_scroll_in_room(app: &mut App, room_id: Uuid, delta: isize) {
+    // Wheel notches arrive as ±1 and get the same row-first fallback as
+    // `j`/`k` so a too-tall selected message stays readable. Larger deltas
+    // (PageUp/PageDown mirroring Ctrl-U/Ctrl-D) are deliberate jumps and
+    // skip it, like Ctrl-U/Ctrl-D themselves.
+    if delta.abs() == 1 && app.chat.scroll_selected_message_rows(-delta) {
+        return;
+    }
     select_message_in_room(app, room_id, delta);
 }
 
@@ -529,6 +582,21 @@ pub fn handle_message_action_in_room(app: &mut App, room_id: Uuid, byte: u8) -> 
                 return true;
             }
         }
+        // `g` opens the gild picker on the selected message. Its own key
+        // rather than a leader, because the modal is where the money is
+        // confirmed and a mistyped leader must not cost chips. With a
+        // message selected the key is always consumed: a message the picker
+        // could only refuse (your own, or one outside a public room) banners
+        // the refusal instead of opening.
+        b'g' if app.chat.selected_message_id_in_room(room_id).is_some() => {
+            match app.chat.gild_target_in_room(room_id) {
+                Ok(target) => open_gild_modal(app, target),
+                Err(refusal) => {
+                    app.banner = Some(Banner::error(refusal.message()));
+                }
+            }
+            return true;
+        }
         b'c' => {
             if let Some(body) = app.chat.selected_message_body_in_room(room_id) {
                 app.pending_clipboard = Some(body);
@@ -546,10 +614,11 @@ pub fn handle_message_action_in_room(app: &mut App, room_id: Uuid, byte: u8) -> 
             }
             return true;
         }
-        // `g` always jumps to a reply's referenced message. Enter is overloaded
+        // `G` always jumps to a reply's referenced message. Enter is overloaded
         // (image/News modals take precedence), so a reply that contains an image
-        // can't be followed with Enter alone; `g` reaches the parent regardless.
-        b'g' | b'G' if app.chat.try_jump_to_selected_reply_target_in_room(room_id) => {
+        // can't be followed with Enter alone; `G` reaches the parent regardless.
+        // Lowercase `g` is the gild key above.
+        b'G' if app.chat.try_jump_to_selected_reply_target_in_room(room_id) => {
             return true;
         }
         b'\r' | b'\n' if app.chat.open_selected_image_modal_in_room(room_id) => {
@@ -569,12 +638,20 @@ pub fn handle_message_action_in_room(app: &mut App, room_id: Uuid, byte: u8) -> 
     }
 
     match byte {
+        // Single-step moves scroll by rows inside a selected message that
+        // wraps taller than the pane before stepping off it; without the
+        // fallback a too-tall message's bottom is unreachable, since the
+        // viewport is otherwise derived purely from the selection.
         b'j' | b'J' => {
-            select_message_in_room(app, room_id, -1);
+            if !app.chat.scroll_selected_message_rows(1) {
+                select_message_in_room(app, room_id, -1);
+            }
             true
         }
         b'k' | b'K' => {
-            select_message_in_room(app, room_id, 1);
+            if !app.chat.scroll_selected_message_rows(-1) {
+                select_message_in_room(app, room_id, 1);
+            }
             true
         }
         0x04 => {
@@ -613,12 +690,18 @@ pub fn handle_message_arrow(app: &mut App, key: u8) -> bool {
 
 pub fn handle_message_arrow_in_room(app: &mut App, room_id: Uuid, key: u8) -> bool {
     match key {
+        // Arrows fall back the same way `j`/`k` do: rows inside a too-tall
+        // selected message first, then the adjacent message.
         b'A' => {
-            select_message_in_room(app, room_id, 1);
+            if !app.chat.scroll_selected_message_rows(-1) {
+                select_message_in_room(app, room_id, 1);
+            }
             true
         }
         b'B' => {
-            select_message_in_room(app, room_id, -1);
+            if !app.chat.scroll_selected_message_rows(1) {
+                select_message_in_room(app, room_id, -1);
+            }
             true
         }
         _ => false,
@@ -652,7 +735,7 @@ pub fn handle_arrow(app: &mut App, key: u8) -> bool {
     if app.chat.feeds_selected {
         return super::feeds::input::handle_arrow(app, key);
     }
-    if app.chat.cyberspace_selected {
+    if cyberspace_surface_active(app) {
         return super::cyberspace::input::handle_arrow(app, key);
     }
     if app.chat.news_selected {
@@ -665,6 +748,16 @@ pub fn handle_arrow(app: &mut App, key: u8) -> bool {
         return super::work::input::handle_arrow(app, key);
     }
     handle_message_arrow(app, key)
+}
+
+/// Whether a cyberspace surface owns navigation keys: the pane itself, a
+/// pinned room's rail slot, or a room opened from the roster without one.
+fn cyberspace_surface_active(app: &App) -> bool {
+    app.chat.cyberspace_selected
+        || app.chat.cyberspace_notifications_selected
+        || app.chat.cyberspace_room_selected.is_some()
+        || app.chat.cyberspace_mail_selected.is_some()
+        || app.chat.cyberspace.open_room_name().is_some()
 }
 
 pub fn handle_byte(app: &mut App, byte: u8) -> bool {
@@ -734,7 +827,27 @@ pub fn handle_byte(app: &mut App, byte: u8) -> bool {
         return super::feeds::input::handle_byte(app, byte);
     }
 
-    if app.chat.cyberspace_selected {
+    // An open room owns the pane whichever cyberspace entry is selected, so
+    // it is checked before the pane's own keys. A byte only reaches here
+    // while the room is being read: with the composer focused, `app::input`
+    // routes every one of them into it before chat routing runs.
+    if app.chat.cyberspace.open_room_name().is_some() {
+        if is_next_room_key(byte) {
+            switch_room(app, 1);
+            return true;
+        }
+        if is_prev_room_key(byte) {
+            switch_room(app, -1);
+            return true;
+        }
+        if matches!(byte, b'b' | b'B') {
+            app.leave_cyberspace_room();
+            return true;
+        }
+        return super::cyberspace::input::handle_room_byte(app, byte);
+    }
+
+    if app.chat.cyberspace_selected || app.chat.cyberspace_notifications_selected {
         if is_next_room_key(byte) {
             switch_room(app, 1);
             return true;

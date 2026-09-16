@@ -40,7 +40,7 @@
 
     /* Newly-revealed list items shouldn't fight the entrance stagger; only
        fade-up rows that are present on initial render. JS adds .live to new
-       items rendered after page load (none currently — kept for future). */
+       items rendered after page load (none currently, kept for future). */
     .list-item:not(.live) { opacity: 1; animation: none; }
 </style>
 
@@ -61,7 +61,7 @@
     <div class="stagger stagger-2 mb-10 text-sm text-gray-300">
         <p>work profiles posted by people on late.sh.</p>
         <p class="text-gray-400 text-xs mt-2">
-            want to be on this list? <span class="text-gray-200">ssh late.sh</span>, open the work room, press <span class="text-gray-200">i</span>.
+            want to be on this list? <span class="text-gray-200">ssh late.sh</span>, open Profiles (page <span class="text-gray-200">5</span>), press <span class="text-gray-200">w</span>.
         </p>
     </div>
 
@@ -69,7 +69,7 @@
     <!-- ─── empty state ─── -->
     <div class="stagger stagger-3 border border-gray-600 px-5 py-10 bg-gray-900/20 text-center">
         <div class="text-sm text-gray-200 mb-2">no profiles yet</div>
-        <div class="text-xs text-gray-400">be the first &mdash; ssh late.sh and post one.</div>
+        <div class="text-xs text-gray-400">be the first: ssh late.sh and post one.</div>
     </div>
     {% else %}
 

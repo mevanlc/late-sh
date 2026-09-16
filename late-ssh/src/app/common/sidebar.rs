@@ -16,7 +16,6 @@ use crate::app::audio::{
     viz::{EqState, render_eq},
 };
 use crate::app::bonsai::state::BonsaiState;
-use crate::app::bonsai_v2::state::BonsaiV2State;
 use late_core::models::user::{
     AudioSource, IcecastStream, RadioStation, RightSidebarComponent, RightSidebarComponentSetting,
 };
@@ -48,7 +47,8 @@ const MUSIC_DETAIL_HEIGHT: u16 = 6;
 const MUSIC_QUEUE_HEIGHT: u16 = 3;
 // Bonsai is kept fixed when shown; the preview renderer scales the tree to
 // whatever height it gets.
-const BONSAI_MIN_HEIGHT: u16 = 10;
+/// The bonsai preview block plus its footer row.
+const BONSAI_MIN_HEIGHT: u16 = crate::app::bonsai::render::PREVIEW_HEIGHT as u16 + 1;
 // Daily games: fixed, stable chrome (see `daily/panel.rs`).
 const DAILY_HEIGHT: u16 = crate::app::lobby::daily::panel::DAILY_PANEL_HEIGHT;
 
@@ -62,9 +62,9 @@ pub(crate) struct SidebarProps<'a> {
     pub components: &'a [RightSidebarComponentSetting],
     pub now_playing: Option<&'a NowPlaying>,
     pub paired_client: Option<&'a ClientAudioState>,
+    /// What the music stage's equalizer draws (`viz::eq_state`).
+    pub eq_state: EqState,
     pub bonsai: &'a BonsaiState,
-    pub bonsai_v2: &'a BonsaiV2State,
-    pub use_bonsai_v2: bool,
     pub clock_text: &'a str,
     /// YouTube queue snapshot — drives the music stage's active panel and
     /// peek strip. Fed from the same watch channel as the booth modal.
@@ -94,8 +94,6 @@ pub(crate) struct SidebarProps<'a> {
     /// Nightride metadata SSE; the dock row falls back to the station
     /// display name while this is absent.
     pub radio_now_playing: Option<&'a str>,
-    /// AFK message from /brb; None = not AFK.
-    pub afk: Option<&'a str>,
     /// Daily correspondence games: my matches, lobby activity, glow.
     pub daily: &'a crate::app::lobby::daily::state::DailyState,
     /// Unseen-challenge glow for the panel's status row.
@@ -175,12 +173,11 @@ fn draw_sidebar_new_shell(frame: &mut Frame, area: Rect, props: &SidebarProps<'_
 
     let mut i = 0usize;
 
-    // Core block: presence + clock, then friends (or the AFK indicator).
+    // Core block: presence + clock, then friends.
     draw_core_block(
         frame,
         inset(layout[i]),
         props.clock_text,
-        props.afk,
         props.online_count,
         props.active_friend_names,
         props.marquee_tick,
@@ -229,24 +226,16 @@ fn draw_sidebar_new_shell(frame: &mut Frame, area: Rect, props: &SidebarProps<'_
                         radio_source_count: props.radio_source_count,
                         marquee_tick: props.marquee_tick,
                     },
+                    props.eq_state,
                 );
             }
             RightSidebarComponent::Bonsai => {
-                if props.use_bonsai_v2 {
-                    crate::app::bonsai_v2::render::draw_bonsai_inline(
-                        frame,
-                        body,
-                        props.bonsai_v2,
-                        props.marquee_tick,
-                    );
-                } else {
-                    crate::app::bonsai::ui::draw_bonsai_inline(
-                        frame,
-                        body,
-                        props.bonsai,
-                        props.marquee_tick,
-                    );
-                }
+                crate::app::bonsai::render::draw_bonsai_inline(
+                    frame,
+                    body,
+                    props.bonsai,
+                    props.marquee_tick,
+                );
             }
             RightSidebarComponent::Daily => {
                 crate::app::lobby::daily::panel::draw_daily_inline(
@@ -321,13 +310,13 @@ fn visible_components(
 
 /// The pinned two-row core block at the top of the rail. Presence is chrome
 /// now, not a panel: row one is the online count (left) and the clock
-/// (right); row two is connected friends, or the AFK indicator while away.
-/// Both rows always render so the panel list below never shifts.
+/// (right); row two is connected friends. Both rows always render so the
+/// panel list below never shifts. The session's own `/status` is not here:
+/// the top border already carries it, and this row is the friends list.
 fn draw_core_block(
     frame: &mut Frame,
     area: Rect,
     clock_text: &str,
-    afk: Option<&str>,
     online_count: usize,
     active_friend_names: &[String],
     tick: usize,
@@ -386,27 +375,9 @@ fn draw_core_block(
         return;
     }
 
-    // Row 1 — AFK wins the row while away; otherwise connected friends.
-    // Blank when neither: the reserved row is what keeps chrome stable.
-    if let Some(msg) = afk {
-        let label = if msg.is_empty() {
-            "away".to_string()
-        } else {
-            format!("away · {msg}")
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("🌙 ", Style::default().fg(theme::AMBER_DIM())),
-                Span::styled(
-                    label,
-                    Style::default()
-                        .fg(theme::AMBER())
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ])),
-            row(1),
-        );
-    } else if !active_friend_names.is_empty() {
+    // Row 1 — connected friends. Blank when there are none: the reserved
+    // row is what keeps chrome stable.
+    if !active_friend_names.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 friend_names_text(active_friend_names, area.width as usize, tick),
@@ -559,9 +530,10 @@ struct MusicStageProps<'a> {
     marquee_tick: usize,
 }
 
-/// Music stage: a small ambient equalizer strip pinned on top, then the
-/// fixed dock and fixed detail area. Rows 0-2 the eq band (borderless,
-/// dancing only while a client is paired and unmuted), rows 3-4 volume, rows 5-10 a
+/// Music stage: a small equalizer strip pinned on top, then the fixed dock
+/// and fixed detail area. Rows 0-2 the eq band (borderless, moving only
+/// while a client is paired and unmuted: the client's live spectrum when it
+/// sends one, the ambient band otherwise), rows 3-4 volume, rows 5-10 a
 /// three-source dock in order radio → youtube → icecast (title bar +
 /// now-playing line per source; radio leads because it is the default
 /// source for new users), row 11 a labeled rule naming the active source,
@@ -581,18 +553,13 @@ struct MusicStageProps<'a> {
 /// frame, before the browser has finished pairing. `v+x` cycles sources
 /// in dock order (radio → youtube → icecast), so the amber `▌` accent
 /// walks down the dock as the user cycles.
-fn draw_music_stage(frame: &mut Frame, area: Rect, props: &MusicStageProps<'_>) {
+fn draw_music_stage(frame: &mut Frame, area: Rect, props: &MusicStageProps<'_>, eq_state: EqState) {
     if area.width == 0 || area.height == 0 {
         return;
     }
 
     let [viz_area, dock_area] =
         Layout::vertical([Constraint::Length(MUSIC_VIZ_HEIGHT), Constraint::Fill(1)]).areas(area);
-    let eq_state = match props.paired_client {
-        None => EqState::Unpaired,
-        Some(client) if client.muted => EqState::Muted,
-        Some(_) => EqState::Playing,
-    };
     render_eq(frame, viz_area, props.marquee_tick, eq_state);
 
     let lines = music_stage_lines(dock_area.width, props);
@@ -1175,6 +1142,26 @@ pub fn paint_vertical_separator(frame: &mut Frame, x: u16, y: u16, height: u16) 
         if let Some(cell) = buf.cell_mut((x, y + dy)) {
             cell.set_symbol("│").set_fg(theme::BORDER_DIM());
         }
+    }
+}
+
+/// The current track for the saved source, one line: the same text the
+/// dock row shows for that source.
+pub(crate) fn current_track_text(
+    source: AudioSource,
+    now_playing: Option<&NowPlaying>,
+    queue: &QueueSnapshot,
+    station: RadioStation,
+    radio_now_playing: Option<&str>,
+) -> String {
+    match source {
+        AudioSource::Radio => radio_now_playing
+            .map(str::to_string)
+            .unwrap_or_else(|| stations::radio_station_display_name(station).to_string()),
+        AudioSource::Youtube => youtube_track_text(queue),
+        AudioSource::Icecast => now_playing
+            .map(icecast_track_text)
+            .unwrap_or_else(|| "fallback stream".to_string()),
     }
 }
 

@@ -62,7 +62,7 @@ forwards traffic into the existing IPv4 ingress path.
 
 This enables:
 - `ssh late.sh` — SSH TUI
-- `irc.late.sh:6697` — IRC over TLS, when `IRC_ENABLED=1`
+- `irc.late.sh:6697` — IRC over TLS
 - `https://late.sh` — Web landing + audio pairing
 - `https://api.late.sh` — SSH API / WebSocket
 - `https://audio.late.sh` — Icecast audio stream
@@ -127,10 +127,15 @@ kubectl cp -n default ./music/. "$POD":/music/ -c liquidsoap
 | Icecast | `icecast-sv` | 8000 | Audio streaming server |
 | Liquidsoap | none (dials out to `icecast-sv`) | - | Playlist encoder |
 | LiveKit | `livekit-sv` | 7880 (WSS/API), 7881 TCP, 7882 UDP, 3478 UDP, 5349 TCP | Voice-room SFU, ICE/TURN media |
+| Minecraft | none (hostPort) | 25565 TCP on `agent-1` | Paper server with GriefPrevention, whitelist-only |
 | PostgreSQL | `postgres-rw` | 5432 | CloudNativePG cluster |
 | Monitoring | OpenTelemetry Collector, VictoriaMetrics, VictoriaLogs, VictoriaTraces, Grafana | various | Full observability stack |
 
 SSH traffic on port 22 is routed via NGINX TCP passthrough to late-ssh pod port 2222.
+IRC traffic follows the same TCP passthrough pattern when enabled. Both NGINX
+for IPv4 and the host-network HAProxy for IPv6 send PROXY v1 metadata before the
+application's in-process TLS handshake; late-ssh accepts it only from the CIDRs
+configured by `SSH_PROXY_TRUSTED_CIDRS`.
 LiveKit signaling is routed through NGINX ingress on `rtc.<domain>`, while
 LiveKit media ports are bound directly on the node by the `livekit` pod.
 On a fresh cluster, the `livekit` pod may wait for cert-manager to create the
@@ -138,53 +143,133 @@ On a fresh cluster, the `livekit` pod may wait for cert-manager to create the
 `ContainerCreating`, check certificate issuance before treating the rollout as
 failed.
 
+### Nodes
+
+| Node | RKE2 role | Placement | Runs |
+|------|-----------|-----------|------|
+| `server-1` | server (control plane, etcd) | untainted | service-ssh, redis, doors, ingress-nginx, ipv6-proxy, LiveKit, Postgres |
+| `agent-1` | agent | label and `NoSchedule` taint `role=support` | service-web, Icecast, Liquidsoap, otel-collector, vmagent, kube-state-metrics, VictoriaMetrics/Logs/Traces, Grafana, Minecraft, second CoreDNS replica |
+
+A workload lands on `agent-1` only when it carries both the `role=support`
+node selector and toleration (`support_node_*` locals in `defaults.tf`). The
+taint keeps everything else, service-ssh included, on `server-1`. Workloads
+with a `local-path` volume stay pinned to the node that holds the data, so
+moving one needs a fresh volume on the new node, not just the selector.
+
+`agent-1` is a worker, not a second control plane: with two etcd members both
+must be up, so a second server adds a failure mode without adding safety.
+Control-plane HA starts at three servers.
+
+#### Adding an agent node
+
+`setup_rke2.sh` bootstraps a whole cluster, including reinstalling
+`server-1` and overwriting kubeconfig and the `KUBE_CONFIG` secret, so do not
+rerun it to add a node. On a fresh Debian host, as root:
+
+```bash
+# on your laptop: the join token
+ssh -p 22222 root@<server-1-ip> cat /var/lib/rancher/rke2/server/node-token
+
+# on the new host: admin SSH on 22222, like every node
+tee /etc/ssh/sshd_config.d/99-admin.conf >/dev/null <<'CONFIG'
+Port 22222
+CONFIG
+sshd -t && systemctl reload ssh
+
+# on the new host: join as an agent at server-1's exact RKE2 version
+mkdir -p /etc/rancher/rke2
+tee /etc/rancher/rke2/config.yaml >/dev/null <<'CONFIG'
+server: https://<server-1-ip>:9345
+token: <token>
+node-name: agent-1
+node-label:
+  - role=support
+node-taint:
+  - role=support:NoSchedule
+CONFIG
+curl -sfL https://get.rke2.io | INSTALL_RKE2_TYPE=agent INSTALL_RKE2_VERSION=v1.34.4+rke2r1 sh -
+systemctl enable rke2-agent.service
+systemctl start rke2-agent.service
+```
+
+Pin `INSTALL_RKE2_VERSION` to whatever `kubectl get nodes` shows for
+`server-1`: an agent newer than its server is unsupported. Nodes talk on TCP
+9345 and 6443 (agent to server), UDP 8472 (Canal VXLAN) and TCP 10250
+(kubelet) both ways; open those in any Hetzner Cloud Firewall attached to
+either host.
+
+### Minecraft
+
+`infra/minecraft.tf` runs a Paper server on `agent-1`'s port 25565 as a pod
+hostPort, deliberately not through the ingress-nginx TCP map: nginx reloads
+drop long-lived TCP sessions, which would kick every player on each
+cert-manager renewal. `late.sh` and the `*.late.sh` wildcard point at
+`server-1`, so two DNS records, managed by hand like the rest of the zone,
+send players to `agent-1`:
+
+```
+mc.late.sh                A    <agent-1-ip>
+_minecraft._tcp.late.sh   SRV  0 5 25565 mc.late.sh.
+```
+
+The explicit A record overrides the wildcard, and the SRV record lets the
+client accept plain `late.sh`. Both must be DNS-only, never proxied: the
+traffic is raw TCP. The world lives on the `minecraft-data` PVC (`local-path`,
+`prevent_destroy`) on `agent-1`'s disk; `worldborder set 6000` at startup caps
+its disk growth there.
+
+Access is online-mode plus an enforced whitelist. `MINECRAFT_WHITELIST` and
+`MINECRAFT_OPS` seed the lists on every boot. Day-to-day changes go through
+rcon inside the pod and persist across restarts alongside the seeded names:
+
+```bash
+kubectl exec -n default deploy/minecraft -- rcon-cli whitelist add <name>
+kubectl exec -n default deploy/minecraft -- rcon-cli whitelist remove <name>
+kubectl exec -n default deploy/minecraft -- rcon-cli op <name>
+kubectl exec -n default deploy/minecraft -- rcon-cli list
+kubectl logs -n default deploy/minecraft --tail=200
+```
+
+Bumping the game version (`minecraft_version` in `defaults.tf`) is a one-way
+world upgrade and changes the client version every player needs; back up the
+PVC first. GriefPrevention resolves from Modrinth at boot for the pinned
+version, so a version bump can fail startup if the plugin has no matching
+release yet; the pod log says so.
+
 ## Configuration Parameters
 
-All parameters are set as Terraform variables (via GitHub secrets/variables for CI/CD).
+Application configuration does not live in Terraform. `service-ssh` and
+`service-web` read `LATE_ENV=prod` plus secrets; everything else is compiled
+into their `config.rs` profiles (`late-ssh/src/config.rs`,
+`late-web/src/config.rs`). The variables below exist only for infrastructure
+shape, images, and secrets, set as Terraform variables (via GitHub
+secrets/variables for CI/CD).
 
 ### Core
 
 | Variable | Description |
 |----------|-------------|
-| `DOMAIN` | Root domain (e.g., `late.sh`) |
 | `LOG_LEVEL` | Rust log level (`RUST_LOG`) |
 | `SSH_HOST_KEY` | Ed25519 private key for SSH server |
-| `SSH_IMAGE_TAG` | Docker image for late-ssh |
-| `WEB_IMAGE_TAG` | Docker image for late-web |
-
-### SSH / Rate Limits
-
-| Variable | Description |
-|----------|-------------|
-| `SSH_OPEN` | Allow open SSH access (no auth required) |
-| `MAX_CONNS_GLOBAL` | Max total concurrent SSH connections |
-| `MAX_CONNS_PER_IP` | Max concurrent SSH connections per IP |
-| `SSH_IDLE_TIMEOUT` | SSH idle timeout in seconds |
-| `FRAME_DROP_LOG_EVERY` | Log every Nth frame drop |
-| `SSH_MAX_ATTEMPTS_PER_IP` | Max SSH attempts per IP in rate limit window |
-| `SSH_RATE_LIMIT_WINDOW_SECS` | SSH rate limit window in seconds |
-| `SSH_PROXY_PROTOCOL` | Enable PROXY protocol parsing for SSH client IP resolution |
-| `SSH_PROXY_TRUSTED_CIDRS` | Comma-separated CIDRs trusted to send PROXY headers |
-| `WS_PAIR_MAX_ATTEMPTS_PER_IP` | Max WebSocket pair attempts per IP in window |
-| `WS_PAIR_RATE_LIMIT_WINDOW_SECS` | WebSocket pair rate limit window in seconds |
-| `DB_POOL_SIZE` | Database connection pool size |
+| `IMAGE_TAGS` | Component name -> image ref map (ssh, web, and each door). Only read when a deployment is created; deploys go through `kubectl set image` and every deployment ignores image changes |
 
 ### IRC
 
-IRC is disabled unless explicitly enabled. When `IRC_ENABLED=1`, Terraform
-requests a Let's Encrypt certificate for `IRC_HOST` with cert-manager, mounts
-the generated Kubernetes TLS secret into `service-ssh`, starts the embedded IRC
-listener with in-process TLS, and exposes the raw TCP port through ingress.
+The IRC edge is always provisioned: Terraform requests a Let's Encrypt
+certificate for `irc.late.sh` with cert-manager, mounts the generated
+Kubernetes TLS secret into `service-ssh`, and exposes port 6697 through
+ingress. The listener itself (ports, limits, TLS paths, trusted proxy CIDRs)
+is part of the late-ssh prod profile.
 
 | Variable | Description |
 |----------|-------------|
-| `IRC_ENABLED` | Enable embedded IRC listener, defaults to `0` |
-| `IRC_HOST` | Public IRC hostname, defaults to `irc.<DOMAIN>` |
-| `IRC_PORT` | IRC TLS port, defaults to `6697` |
-| `IRC_MAX_CONNS_GLOBAL` | Max total concurrent IRC connections, defaults to `200` |
-| `IRC_MAX_CONNS_PER_USER` | Max concurrent IRC connections per user, defaults to `3` |
-| `IRC_MAX_AUTH_FAILURES_PER_IP` | Max failed auth attempts per IP, defaults to `20` |
-| `IRC_AUTH_FAILURE_WINDOW_SECS` | Auth failure rate-limit window, defaults to `300` |
+| `IRC_PROXY_EMIT` | Make ingress-nginx and IPv6 HAProxy emit PROXY headers, defaults to `0` |
+
+`IRC_PROXY_EMIT` stays a variable because flipping edge emission is a
+deploy-time rollout step: deploy a parser-capable image first, then set the
+GitHub environment variable `IRC_PROXY_EMIT=1` and run a subsequent
+infrastructure deployment. Rollback reverses the order. The prod profile
+always accepts PROXY headers, so the old accept-side toggle is gone.
 
 ### IPv6 edge proxy
 
@@ -194,20 +279,17 @@ listener with in-process TLS, and exposes the raw TCP port through ingress.
 | `IPV6_PROXY_ADDRESS` | Public IPv6 address for the proxy to bind |
 | `IPV6_PROXY_IMAGE` | HAProxy image used by the proxy |
 
-### AI (Gemini)
+### Secrets injected into late-ssh
 
 | Variable | Description |
 |----------|-------------|
-| `AI_ENABLED` | Enable AI features (ghost chat, URL extraction) |
 | `AI_API_KEY` | Gemini API key |
+| `YOUTUBE_API_KEY` | YouTube Data API key |
 
 ### Voice / LiveKit
 
 | Variable | Description |
 |----------|-------------|
-| `VOICE_ENABLED` | Enable voice controls in late-ssh, defaults to `1` |
-| `VOICE_ROOM` | Shared MVP voice room name, defaults to `late-voice` |
-| `LIVEKIT_SUBDOMAIN` | Public LiveKit subdomain under `DOMAIN`, defaults to `rtc` |
 | `LIVEKIT_IMAGE` | LiveKit server image |
 | `LIVEKIT_LOG_LEVEL` | LiveKit server log level |
 | `LIVEKIT_API_KEY` | LiveKit API key; API secret is generated into the Kubernetes `livekit` secret |
@@ -217,17 +299,24 @@ listener with in-process TLS, and exposes the raw TCP port through ingress.
 | `LIVEKIT_TURN_UDP_PORT` | TURN/STUN UDP port, default `3478` |
 | `LIVEKIT_TURN_TLS_PORT` | TURN/TLS TCP port, default `5349` |
 
+### Minecraft
+
+| Variable | Description |
+|----------|-------------|
+| `MINECRAFT_WHITELIST` | Comma-separated usernames allowed to join, seeded on every boot. Empty seeds nobody; add names via rcon-cli |
+| `MINECRAFT_OPS` | Comma-separated usernames granted operator, seeded on every boot |
+
+Image, game version, heap, and port are locals in `defaults.tf`, not
+variables: a version bump is a reviewed diff.
+
 ### S3 Storage
 
 | Variable | Description |
 |----------|-------------|
-| `S3_ACCESS_KEY_ID` | S3 access key |
-| `S3_SECRET_ACCESS_KEY` | S3 secret key |
-| `S3_ENDPOINT` | S3 endpoint URL |
+| `S3_ACCESS_KEY_ID` | S3 access key (DB backups and file uploads) |
+| `S3_SECRET_ACCESS_KEY` | S3 secret key (DB backups and file uploads) |
+| `S3_ENDPOINT` | S3 endpoint URL (DB backups; the files endpoint is a prod-profile literal) |
 | `DB_BACKUPS_BUCKET` | Bucket for CloudNativePG backups |
-| `FILES_BUCKET` | Bucket for public uploaded chat files |
-| `FILES_PUBLIC_BASE_URL` | Public base URL for uploaded files |
-| `FILES_S3_REGION` | S3 signing region for file uploads, defaults to `auto` for R2 |
 
 ## Production Considerations
 

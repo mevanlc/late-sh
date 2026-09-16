@@ -4,8 +4,8 @@
 // carried and banked gold, vitals, and gear. It serializes to the JSON blob
 // stored in the mud_characters table (see late_core::models::mud_character).
 // Transient combat state (current target, active effects, cooldowns, respawn
-// timers) is deliberately NOT saved - a character reloads at full readiness in
-// a safe room.
+// timers) is deliberately NOT saved - a character reloads out of combat, in the
+// room it logged out in.
 //
 // The struct is versioned. Unknown/missing fields fall back to defaults via
 // serde, so adding fields later never breaks an old save.
@@ -17,7 +17,7 @@ use super::classes::Class;
 use super::stats::AbilityScores;
 use super::world::RoomId;
 
-const SCHEMA_VERSION: u32 = 17;
+const SCHEMA_VERSION: u32 = 19;
 const WORLD_SCHEMA_VERSION: u32 = 1;
 
 pub struct SavedCharacterInit {
@@ -33,6 +33,7 @@ pub struct SavedCharacterInit {
     pub inventory: Vec<u32>,
     pub equipped: Vec<(String, u32)>,
     pub scores: AbilityScores,
+    pub score_points_spent: i32,
     pub titles: Vec<String>,
     pub title_levels: Vec<i32>,
     pub active_title: Option<usize>,
@@ -55,6 +56,14 @@ pub struct SavedCharacterInit {
     pub craft_skills: Vec<(String, i64)>,
     pub taming_xp: i64,
     pub rpg_mode: bool,
+    /// Lifetime adventurers slain in the Wildbound Waste's pvp rooms.
+    pub pvp_kills: i64,
+    /// Index of the next uncompleted starter-chain quest (== chain length once
+    /// the chain is done).
+    pub starter_stage: u8,
+    /// Kills counted toward the current starter-chain stage, if it is a slay
+    /// stage.
+    pub starter_kills: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -94,6 +103,10 @@ pub struct SavedCharacter {
     /// Rolled D&D ability scores; default (all 10s) for pre-v2 saves.
     #[serde(default)]
     pub scores: AbilityScores,
+    /// Attribute points placed on the scores; 0 for saves from before points
+    /// existed, which then have every earned point still to place.
+    #[serde(default)]
+    pub score_points_spent: i32,
     /// Titles earned by slaying notable foes (most recent last).
     #[serde(default)]
     pub titles: Vec<String>,
@@ -161,6 +174,18 @@ pub struct SavedCharacter {
     /// field come back with the map enabled.
     #[serde(default = "enabled")]
     pub rpg_mode: bool,
+    /// Lifetime adventurers slain in the Wildbound Waste's pvp rooms; 0 for
+    /// pre-Wildbound-Waste (schema < 18) saves.
+    #[serde(default)]
+    pub pvp_kills: i64,
+    /// Index of the next uncompleted starter-chain quest; 0 for pre-v19 saves
+    /// (hydration marks the chain complete for characters past level 10, so
+    /// veterans are not handed the tutorial chain).
+    #[serde(default)]
+    pub starter_stage: u8,
+    /// Kill progress within the current starter-chain stage; 0 for pre-v19 saves.
+    #[serde(default)]
+    pub starter_kills: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -196,6 +221,13 @@ pub struct SavedMobDot {
     pub owner: Uuid,
     pub damage: i32,
     pub remaining_ticks: u8,
+    /// True for a weapon-coat wound, which keeps one refreshing stack per
+    /// attacker rather than stacking (see `svc::DotSource`). Defaulting to
+    /// false hydrates pre-coat saves as ability stacks, which is what they
+    /// were; without it a reload would untag a live coat and let a second
+    /// stack open beside it.
+    #[serde(default)]
+    pub from_coat: bool,
 }
 
 fn one() -> i32 {
@@ -230,6 +262,7 @@ impl SavedCharacter {
             inventory: init.inventory,
             equipped: init.equipped,
             scores: init.scores,
+            score_points_spent: init.score_points_spent,
             titles: init.titles,
             title_levels: init.title_levels,
             active_title: init.active_title,
@@ -249,6 +282,9 @@ impl SavedCharacter {
             craft_skills: init.craft_skills,
             taming_xp: init.taming_xp,
             rpg_mode: init.rpg_mode,
+            pvp_kills: init.pvp_kills,
+            starter_stage: init.starter_stage,
+            starter_kills: init.starter_kills,
         }
     }
 

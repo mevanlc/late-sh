@@ -1,14 +1,15 @@
 pub mod composer;
+pub(crate) mod emoji;
 pub mod markdown;
 pub(crate) mod marquee;
 pub(crate) mod mentions;
 pub mod overlay;
-pub mod pomodoro;
 pub mod primitives;
 pub mod qr;
 pub mod readline;
 pub mod sidebar;
 pub mod splash_tips;
+pub mod status;
 pub mod textarea_input;
 pub mod theme;
 pub mod time;
@@ -16,6 +17,9 @@ pub mod username_effect;
 
 #[cfg(test)]
 mod composer_test;
+
+#[cfg(test)]
+mod emoji_test;
 
 #[cfg(test)]
 mod markdown_test;

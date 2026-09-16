@@ -4,7 +4,7 @@
 - Scope: the Usurper door as a whole, the **client** in `late-ssh/src/app/door/usurper` (proxy/identity/state/render/mod) plus its screen lifecycle wiring in `late-ssh/src/app` (state/input/render/tick) **and the standalone host crate `late-usurper/`**. There is no separate `late-usurper/CONTEXT.md`; this file is the single source for both halves.
 - Domain: Usurper, the real upstream LORD-era BBS door game (Jakob Dangarden 1993-2009, GPL-2.0-or-later; Rick Parrish's 32/64-bit Free Pascal port), run on a PTY inside a **dedicated `late-usurper` SSH host** and reached by late-ssh as a network-proxied door (the same model as the NetHack/DCSS doors).
 - Primary audience: LLM agents changing the Usurper launcher UI, the SSH client transport, the host crate (PTY bridge / auth / dropfiles / node leases / CP437), input forwarding/filtering, or its config/deploy wiring.
-- Last updated: 2026-07-22 (Apple Silicon Compose build support)
+- Last updated: 2026-08-24 (`forward_input` goes through `keys_for_game`, the shared `app/door/keys.rs` cursor-key gate wired into every vt100-backed door; a no-op for this DOS-era game unless the guest ever requests application cursor mode)
 - Status: Active
 - Parent context: `../../../../../CONTEXT.md`
 - Stability note: `[STABLE]` sections change rarely; `[VOLATILE]` sections change with the launcher UI, keybindings, or build/deploy wiring.
@@ -41,7 +41,7 @@ Core shape (mirrors DCSS unless noted):
 - **Teardown**: on client disconnect or host SIGTERM with a live child, SIGHUP then a 3s grace then SIGKILL. Unlike crawl there is no hangup-save to protect, the game writes the world to disk as it goes, but the shape (and the `watch`-broadcast pod shutdown with `SHUTDOWN_GRACE` 8s) matches the other hosts. A hard-killed session can leave a stale online entry; the game's own kick-out ages it and the boot sweep clears it.
 - **Boot-time seeding + sweeps** (`seed.rs`, run by `main.rs` before serving): copy files missing from the game dir out of the image's `/opt/usurper/seed` template (never overwriting, the live world survives image upgrades), then delete `DATA/MAINT.FLG` (the maintenance lock; left behind by a mid-maintenance crash it would wedge the whole door) and `NODE/ONLINERS.DAT` (the who-is-playing table; provably stale at boot).
 
-The door is gated behind `LATE_USURPER_ENABLED` (default `false`); when disabled, `connect` is a no-op and the launcher shows "Currently unavailable". The host pod is deployed unconditionally (the flag gates only the client).
+The door is gated by the `usurper_enabled` profile flag in `late-ssh/src/config.rs` (enabled in every current profile); when disabled, `connect` is a no-op and the launcher shows "Currently unavailable". The host pod is deployed unconditionally (the flag gates only the client).
 
 ---
 
@@ -80,7 +80,7 @@ Cross-module wiring (client side) mirrors dcss exactly: `app/state.rs` (`usurper
 ## 3. Config And Deploy [VOLATILE]
 
 ### Client (env → `Config` → `SessionConfig` → `App`)
-- `LATE_USURPER_ENABLED` (default `false`), `LATE_USURPER_HOST` (default `127.0.0.1`; compose `service-usurper`, prod `late-usurper-sv`), `LATE_USURPER_PORT` (default `2326`), `LATE_USURPER_SECRET` (must equal the host's; required when enabled).
+- Client enabled/host/port are profile literals in `late-ssh/src/config.rs` (dev `service-usurper`, prod `late-usurper-sv`, port 2326); `LATE_USURPER_SECRET` is the only env the client reads (must equal the host's).
 
 ### Host (`late-usurper` env)
 - `LATE_USURPER_SECRET` (required), `LATE_USURPER_BIN` (default `/opt/usurper/bin/USURPER.EXE`), `LATE_USURPER_GAME_DIR` (default `/var/lib/late-usurper`; the PVC in prod), `LATE_USURPER_SEED_DIR` (default `/opt/usurper/seed`), `LATE_USURPER_LISTEN_ADDR`, `LATE_USURPER_PORT` (default `2326`), `LATE_USURPER_IDLE_TIMEOUT`, `LATE_USURPER_MAX_NODES` (default `10`).
@@ -93,8 +93,8 @@ Cross-module wiring (client side) mirrors dcss exactly: `app/state.rs` (`usurper
 
 ### Images / infra / CI
 - `runtime-usurper` stage: `/opt/usurper` (bins + seed) + `/var/lib/late-usurper` chowned to `late`. `dev-usurper` copies the same tree directly; other dev targets do not depend on the Usurper build stage. Compose gives the emulated amd64 service its own `cargo-target-amd64` volume so its native Rust artifacts cannot collide with the ARM services' shared `cargo-target` volume.
-- `infra/usurper.tf`: the RWO `usurper-save` PVC (1Gi, `prevent_destroy`) + locals. `infra/service-usurper.tf`: the `late-usurper` Deployment (replicas **1**, kill-before-create, `terminationGracePeriodSeconds=30` > `SHUTDOWN_GRACE`, chown-only initContainer, the host seeds itself) + the `late-usurper-sv` ClusterIP Service on 2326. `infra/secrets.tf`: `usurper-identity-secret` injected into both service-ssh and late-usurper.
-- CI: `.github/workflows/deploy_usurper.yml` builds and rolls out usurper, and only usurper, for `-usurper` releases: `ci` + `build`, then `kubectl set image` on the `late-usurper` deployment (both the chown-only init container and the main container) and a rollout wait. No terraform runs on ordinary releases, so nothing else in the cluster is touched. When the `late-usurper` deployment is missing the run auto-bootstraps (a terraform apply `-target`-scoped to the usurper resources only); other manifest changes go through `deploy_infra.yml`; other deploy workflows that do run terraform read the live tag off the `late-usurper` deployment and pass it through the required Terraform input, so an ordinary release never rebuilds or restarts the door. Same rule as codekeep, nethack, dcss, brogue, and dopewars. `usurper.yml` (PR/weekly build-validate, manual verify_deployed). License obligations tracked in `NOTICE` (GPL-2.0-or-later).
+- `infra/doors.tf` (`usurper` entry, stamped out by the `infra/door` module): the RWO `usurper-save` PVC (1Gi, `prevent_destroy`), the `late-usurper` Deployment (replicas **1**, kill-before-create, `terminationGracePeriodSeconds=30` > `SHUTDOWN_GRACE`, chown-only initContainer, the host seeds itself), the `late-usurper-sv` ClusterIP Service on 2326, and the `usurper-identity-secret` injected into both service-ssh and late-usurper.
+- CI: `-usurper` releases route through `release.yml` to the generic `deploy_service.yml`: `ci` + `build`, then `kubectl set image deployment/late-usurper '*=<image>'` (covers the chown-only init container and the main container) and a rollout wait. No terraform runs on ordinary releases, so nothing else in the cluster is touched; when the `late-usurper` deployment is missing the run auto-bootstraps (a terraform apply `-target=module.door["usurper"]`). Other manifest changes go through `deploy_infra.yml`; terraform never reads or rewrites live image tags (deployments carry `ignore_changes` on images), so an ordinary release never rebuilds or restarts the door. Same rule as every other door. `doors.yml` (PR/weekly build-validate via `docker/doors/smoke/usurper.sh`, manual verify_deployed). License obligations tracked in `NOTICE` (GPL-2.0-or-later).
 
 ---
 

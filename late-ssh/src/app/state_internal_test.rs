@@ -45,13 +45,38 @@ fn shared_buffer_default_is_empty() {
 }
 
 #[test]
-fn leave_alt_screen_resets_cursor_shape() {
+fn leave_alt_screen_hands_the_cursor_shape_back_to_the_terminal() {
     let bytes = App::leave_alt_screen();
     assert!(
         bytes
+            .windows(CURSOR_SHAPE_DEFAULT.len())
+            .any(|w| w == CURSOR_SHAPE_DEFAULT),
+        "expected the default cursor shape in shutdown bytes, got: {bytes:?}"
+    );
+    assert!(
+        !bytes
             .windows(CURSOR_SHAPE_STEADY_BLOCK.len())
             .any(|w| w == CURSOR_SHAPE_STEADY_BLOCK),
-        "expected steady block cursor reset in shutdown bytes, got: {bytes:?}"
+        "shutdown must not pin the shell to a steady block cursor, got: {bytes:?}"
+    );
+}
+
+#[test]
+fn alt_screen_names_the_window_and_gives_the_old_title_back() {
+    let enter = App::enter_alt_screen(true);
+    assert!(
+        enter
+            .windows(SET_WINDOW_TITLE.len())
+            .any(|w| w == SET_WINDOW_TITLE),
+        "expected the window title to be pushed and set on entry, got: {enter:?}"
+    );
+
+    let leave = App::leave_alt_screen();
+    assert!(
+        leave
+            .windows(POP_WINDOW_TITLE.len())
+            .any(|w| w == POP_WINDOW_TITLE),
+        "expected the user's own window title restored on exit, got: {leave:?}"
     );
 }
 
@@ -63,6 +88,7 @@ fn alt_screen_boundaries_recover_terminal_string_state() {
 
 #[test]
 fn cursor_shape_sequences_match_expected_descusr_codes() {
+    assert_eq!(CURSOR_SHAPE_DEFAULT, b"\x1b[0 q");
     assert_eq!(CURSOR_SHAPE_STEADY_BLOCK, b"\x1b[2 q");
     assert_eq!(CURSOR_SHAPE_STEADY_UNDERLINE, b"\x1b[4 q");
 }

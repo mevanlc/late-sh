@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Paragraph, Wrap},
 };
@@ -15,6 +15,8 @@ use crate::app::{
     state::App,
 };
 use crate::usernames::UsernameLookup;
+
+use super::svc::{CHARACTER_SLOTS, SlotList};
 
 pub const GAME: LateaniaDoorGame = LateaniaDoorGame;
 
@@ -60,10 +62,6 @@ impl DoorGame for LateaniaDoorGame {
     fn handle_mouse(&self, app: &mut App, mouse: crate::app::input::MouseEvent) -> bool {
         handle_mouse(app, mouse)
     }
-
-    fn leave_active(&self, app: &mut App) -> bool {
-        leave_active_game(app)
-    }
 }
 
 pub struct LateaniaScreenView<'a> {
@@ -72,6 +70,10 @@ pub struct LateaniaScreenView<'a> {
     pub usernames: &'a UsernameLookup<'a>,
     /// Players currently in the Lateania world, shown on the landing.
     pub online: usize,
+    /// This account's character list, for the landing's select list.
+    pub slots: &'a SlotList,
+    /// Highlighted slot on the landing.
+    pub slot_cursor: usize,
 }
 
 fn draw_screen(frame: &mut Frame, area: Rect, view: &LateaniaScreenView<'_>) {
@@ -85,7 +87,15 @@ fn draw_screen(frame: &mut Frame, area: Rect, view: &LateaniaScreenView<'_>) {
         return;
     }
 
-    draw_landing(frame, area, view.delete_confirm, view.online);
+    draw_landing(
+        frame,
+        area,
+        view.delete_confirm,
+        view.online,
+        view.slots,
+        view.slot_cursor,
+        0,
+    );
 }
 
 fn handle_key(app: &mut App, byte: u8) -> bool {
@@ -98,18 +108,38 @@ fn handle_key(app: &mut App, byte: u8) -> bool {
     }
 
     match byte {
-        b'j' | b'J' | b'k' | b'K' => true,
+        b'j' | b'J' => {
+            move_slot_cursor(app, 1);
+            true
+        }
+        b'k' | b'K' => {
+            move_slot_cursor(app, -1);
+            true
+        }
         b'\r' | b'\n' => {
             app.door_delete_confirm = false;
+            app.lateania_service
+                .select_slot(app.user_id, app.lateania_slot_cursor as i16);
             app.enter_lateania();
             true
         }
         b'd' | b'D' => {
-            app.door_delete_confirm = true;
+            // A list still being read cannot say whether the highlighted slot
+            // holds a character, and `d` deletes one for good.
+            if let SlotList::Ready(_) = app.lateania_service.character_slots(app.user_id) {
+                app.door_delete_confirm = true;
+            }
             true
         }
         _ => false,
     }
+}
+
+/// Move the landing's slot cursor, clamped to the character slots that exist.
+fn move_slot_cursor(app: &mut App, delta: i32) {
+    let max = CHARACTER_SLOTS as i32 - 1;
+    let next = app.lateania_slot_cursor as i32 + delta;
+    app.lateania_slot_cursor = next.clamp(0, max) as usize;
 }
 
 fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) -> bool {
@@ -134,20 +164,16 @@ fn handle_arrow(app: &mut App, key: u8) -> bool {
         return true;
     }
 
-    matches!(key, b'A' | b'B')
-}
-
-fn leave_active_game(app: &mut App) -> bool {
-    if app.door_delete_confirm {
-        app.door_delete_confirm = false;
-        return true;
-    }
-
-    if app.lateania_state.is_some() {
-        app.leave_lateania();
-        true
-    } else {
-        false
+    match key {
+        b'A' => {
+            move_slot_cursor(app, -1);
+            true
+        }
+        b'B' => {
+            move_slot_cursor(app, 1);
+            true
+        }
+        _ => false,
     }
 }
 
@@ -155,11 +181,20 @@ fn handle_delete_confirm_key(app: &mut App, byte: u8) -> bool {
     match byte {
         b'y' | b'Y' | b'\r' | b'\n' => {
             app.door_delete_confirm = false;
+            let slot = app.lateania_slot_cursor as i16;
+            // A reset slot must not stay a backtick stop: hopping back in
+            // would silently start a fresh character there.
+            app.lateania_detached_at = None;
             app.leave_lateania();
-            app.lateania_service.delete_character_task(app.user_id);
-            app.banner = Some(Banner::success(
-                "Lateania character reset. Enter the world to start over.",
-            ));
+            app.lateania_service.delete_character_task(
+                app.user_id,
+                slot,
+                app.repaint_signal.clone(),
+            );
+            app.banner = Some(Banner::success(&format!(
+                "Slot {} reset. Enter to start a new character there.",
+                slot + 1
+            )));
             true
         }
         b'n' | b'N' | b'd' | b'D' | b'q' | b'Q' | 0x1B => {
@@ -171,27 +206,126 @@ fn handle_delete_confirm_key(app: &mut App, byte: u8) -> bool {
 }
 
 fn handle_active_lateania_key(app: &mut App, byte: u8) -> bool {
-    if byte == 0x1B {
-        app.leave_lateania();
-        return true;
-    }
-
+    // Esc must route through `input::handle_key` like every other byte, not
+    // be special-cased here: that function is what cancels an in-progress
+    // chat compose on Esc instead of leaving, and what gates a genuine leave
+    // behind a confirming second press. Short-circuiting Esc here used to
+    // skip both, so Esc while chatting closed the game and a single
+    // accidental Esc always logged the player straight out.
     let Some(state) = app.lateania_state.as_mut() else {
         return true;
     };
-    if super::input::handle_key(state, byte) == super::input::InputAction::Leave {
-        app.leave_lateania();
+    match super::input::handle_key(state, byte) {
+        super::input::InputAction::Leave => {
+            app.lateania_detached_at = None;
+            app.leave_lateania();
+        }
+        // Arm the recency window that keeps Lateania on the backtick cycle,
+        // then hop: the cycle's screen switch tears the session down
+        // (autosave + world leave), so this must be armed before it runs.
+        super::input::InputAction::Detach => {
+            app.lateania_detached_at = Some(std::time::Instant::now());
+            app.detach_door_game();
+        }
+        super::input::InputAction::Ignored | super::input::InputAction::Handled => {}
     }
     true
 }
 
 /// Lateania landing, used both by the standalone screen fallback and the Games
 /// hub when Lateania is the selected card.
-pub fn draw_landing(frame: &mut Frame, area: Rect, delete_confirm: bool, online: usize) {
-    draw_launch_copy(frame, area, delete_confirm, online);
+pub fn draw_landing(
+    frame: &mut Frame,
+    area: Rect,
+    delete_confirm: bool,
+    online: usize,
+    slots: &SlotList,
+    slot_cursor: usize,
+    scroll: u16,
+) -> u16 {
+    draw_launch_copy(
+        frame,
+        area,
+        delete_confirm,
+        online,
+        slots,
+        slot_cursor,
+        scroll,
+    )
 }
 
-fn draw_launch_copy(frame: &mut Frame, area: Rect, delete_confirm: bool, online: usize) {
+/// One row of the character-select list: the highlighted slot gets a `>`
+/// marker and bright text.
+fn slot_row(slot: i16, desc: String, desc_color: Color, highlighted: bool) -> Line<'static> {
+    let marker_color = if highlighted {
+        theme::SUCCESS()
+    } else {
+        theme::TEXT_FAINT()
+    };
+    let marker_style = if highlighted {
+        Style::default()
+            .fg(marker_color)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(marker_color)
+    };
+    Line::from(vec![
+        Span::styled(
+            format!("{} {}. ", if highlighted { ">" } else { " " }, slot + 1),
+            marker_style,
+        ),
+        Span::styled(desc, Style::default().fg(desc_color)),
+    ])
+}
+
+/// The character-select rows. A saved character reads as itself, an empty slot
+/// as an invitation to start one, and a list still being read says so: those
+/// last two used to look identical, so the landing invited you to start a new
+/// character over one it had not heard about yet.
+fn slot_rows(slots: &SlotList, slot_cursor: usize) -> Vec<Line<'static>> {
+    match slots {
+        SlotList::Loading => (0..CHARACTER_SLOTS)
+            .map(|slot| {
+                slot_row(
+                    slot,
+                    "loading".to_string(),
+                    theme::TEXT_FAINT(),
+                    slot as usize == slot_cursor,
+                )
+            })
+            .collect(),
+        SlotList::Ready(rows) => rows
+            .iter()
+            .map(|row| {
+                let (desc, color) = match (row.occupied, row.class) {
+                    (false, _) => (
+                        "empty - start a new character".to_string(),
+                        theme::TEXT_FAINT(),
+                    ),
+                    (true, Some(class)) => (
+                        format!("{}, Lv {}", class.name(), row.level),
+                        theme::TEXT_BRIGHT(),
+                    ),
+                    (true, None) => (
+                        format!("Lv {} - no class chosen yet", row.level),
+                        theme::TEXT_BRIGHT(),
+                    ),
+                };
+                slot_row(row.slot, desc, color, row.slot as usize == slot_cursor)
+            })
+            .collect(),
+    }
+}
+
+fn draw_launch_copy(
+    frame: &mut Frame,
+    area: Rect,
+    delete_confirm: bool,
+    online: usize,
+    slots: &SlotList,
+    slot_cursor: usize,
+    scroll: u16,
+) -> u16 {
     let inner = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -226,40 +360,43 @@ fn draw_launch_copy(frame: &mut Frame, area: Rect, delete_confirm: bool, online:
     lines.push(landing::heading("Boss Achievements"));
     lines.push(landing::stat(
         "Archdemon Mal'gareth",
-        "10,000 chips + LMG badge, once per account",
-        22,
+        "10,000 chips, and the LMG badge the first time",
+        24,
     ));
     lines.push(landing::stat(
         "Frontier King",
-        "20,000 chips + LKN badge, once per account",
-        22,
+        "10,000 chips, and the LKN badge the first time",
+        24,
     ));
     lines.push(landing::stat(
         "Yssgar, Sundering Deep",
-        "LYS badge, once per account; no chips, only glory",
-        22,
+        "20,000 chips, and the LYS badge the first time",
+        24,
     ));
     lines.push(landing::stat(
         "Kaethyr Ascendant",
-        "LKA badge, once per account; no chips, only glory",
-        22,
+        "20,000 chips, and the LKA badge the first time",
+        24,
     ));
     lines.push(Line::from(Span::styled(
-        "  Repeat clears keep titles and loot, but these chip payouts are lifetime claims.",
+        "  Each crown pays once per character, and at most once every 7 days per account.",
         Style::default().fg(theme::TEXT_FAINT()),
     )));
     lines.push(Line::raw(""));
-    lines.push(landing::heading("Enter The World"));
+    lines.push(landing::heading("Choose Your Character"));
+    lines.extend(slot_rows(slots, slot_cursor));
+    lines.push(Line::raw(""));
+    lines.push(landing::hint("j/k or up/down", "highlight a slot", 19));
     lines.push(landing::action(
         ">",
         "Enter",
-        "step through the gate",
+        "play the highlighted slot",
         theme::SUCCESS(),
     ));
     lines.push(landing::action(
         " ",
         "d",
-        "reset your saved character",
+        "reset the highlighted slot",
         theme::ERROR(),
     ));
     lines.push(landing::action(" ", "?", "open the guide", theme::AMBER()));
@@ -276,7 +413,7 @@ fn draw_launch_copy(frame: &mut Frame, area: Rect, delete_confirm: bool, online:
     if delete_confirm {
         lines.push(Line::raw(""));
         lines.push(Line::from(vec![Span::styled(
-            "Delete your Lateania character?",
+            format!("Delete the character in slot {}?", slot_cursor + 1),
             Style::default()
                 .fg(theme::ERROR())
                 .add_modifier(Modifier::BOLD),
@@ -295,7 +432,12 @@ fn draw_launch_copy(frame: &mut Frame, area: Rect, delete_confirm: bool, online:
         )));
     }
 
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    crate::app::door::landing::render_scrolled(
+        frame,
+        inner,
+        Paragraph::new(lines).wrap(Wrap { trim: false }),
+        scroll,
+    )
 }
 
 fn lateania_logo() -> Vec<Line<'static>> {

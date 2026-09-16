@@ -102,16 +102,14 @@ cargo build --release --bin late
 
 ## Local Development
 
-For development without Docker wrapping the Rust builds, you can run the
-infrastructure in Docker and the apps natively:
+The dev profiles use Compose-internal hostnames and container paths. Run the
+development stack in Docker:
 
 ```bash
-docker compose up -d postgres icecast liquidsoap
-cargo run -p late-ssh
-cargo run -p late-web
+make start
 ```
 
-Local host development can use Cargo's normal defaults, including the standard
+Local builds and tests can use Cargo's normal defaults, including the standard
 repo-local `target/` directory. The `/app/target` path is only for Docker/dev
 containers.
 
@@ -121,6 +119,11 @@ export CARGO_HOME=$HOME/.cargo
 
 Use `mise install` to get the expected Rust toolchain, `mold` linker, and
 `cargo-nextest`.
+
+For a second concurrent instance, use `make -f Makefile2 start` from a separate
+clone or worktree. Both Makefiles share recipes in `common.mk`; they select
+`.env.dev` or `.env.dev2` and separate check databases. Edit those templates and
+the matching compiled `dev` / `dev2` profiles instead of the generated `.env`.
 
 ### macOS
 

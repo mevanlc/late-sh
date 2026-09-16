@@ -12,6 +12,34 @@ fn species_keys_are_unique_and_round_trip() {
 }
 
 #[test]
+fn the_stable_climbs_to_mid_game_and_leaves_the_top_to_taming() {
+    // The Stable list reads as a ladder: every pet is bought, and each costs
+    // more and sits on a higher rung than the one before it.
+    let ladder: Vec<(i64, i32)> = PET_SPECIES
+        .iter()
+        .map(|s| match s.source {
+            PetSource::Stable { price, rung } => (price, rung),
+            PetSource::Wild { .. } => panic!("{} is on the Stable list but wild", s.name),
+        })
+        .collect();
+    for (w, names) in ladder.windows(2).zip(PET_SPECIES.windows(2)) {
+        assert!(
+            w[1].0 > w[0].0 && w[1].1 > w[0].1,
+            "{} must cost more and rank higher than {}",
+            names[1].name,
+            names[0].name
+        );
+    }
+    // Gold reaches the middle of the Greenwood, not its end: the second half
+    // of the ladder is the taming trade's alone.
+    let (_, top_rung) = ladder[ladder.len() - 1];
+    assert!(
+        top_rung <= 35,
+        "the best Stable pet sits at rung {top_rung}"
+    );
+}
+
+#[test]
 fn feeding_grows_loyalty_health_and_attack() {
     let species = pet_species_by_key("war_hound").unwrap();
     let mut pet = Pet::new(species, 0);

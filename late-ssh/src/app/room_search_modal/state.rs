@@ -164,25 +164,42 @@ pub(crate) fn search_items(chat: &ChatState, current_user_id: Uuid) -> Vec<RoomS
     let mut items = Vec::new();
     for slot in chat.visual_order() {
         match slot {
-            RoomSlot::Room(room_id) => {
-                let Some((room, _)) = chat.rooms.iter().find(|(room, _)| room.id == room_id) else {
-                    continue;
-                };
-                if !is_chat_list_room(room) {
-                    continue;
-                }
-                items.push(RoomSearchItem {
+            RoomSlot::Room(room_id) => match chat.stream_for_room(room_id) {
+                // The rail order carries a stream room only while it is live.
+                // It is `kind='game'` and may not be joined yet, so the row is
+                // built from the stream; the pick joins lazily.
+                Some(stream) => items.push(RoomSearchItem {
                     slot,
-                    label: room_label(room, current_user_id, &chat.usernames),
-                    meta: room_meta(room),
-                    unread_count: chat.unread_counts.get(&room.id).copied().unwrap_or(0),
-                    last_message_at: room_activity_at(room.id, &chat.room_last_message_at),
-                    favorite: chat.favorite_room_ids().contains(&room.id),
-                });
-            }
+                    label: format!("#{}-live", stream.username),
+                    meta: format!("live stream: {}", stream.title),
+                    unread_count: chat.unread_counts.get(&room_id).copied().unwrap_or(0),
+                    last_message_at: room_activity_at(room_id, &chat.room_last_message_at),
+                    favorite: false,
+                }),
+                None => {
+                    let Some((room, _)) = chat.rooms.iter().find(|(room, _)| room.id == room_id)
+                    else {
+                        continue;
+                    };
+                    if !is_chat_list_room(room) {
+                        continue;
+                    }
+                    items.push(RoomSearchItem {
+                        slot,
+                        label: room_label(room, current_user_id, &chat.usernames),
+                        meta: room_meta(room),
+                        unread_count: chat.unread_counts.get(&room.id).copied().unwrap_or(0),
+                        last_message_at: room_activity_at(room.id, &chat.room_last_message_at),
+                        favorite: chat.favorite_room_ids().contains(&room.id),
+                    });
+                }
+            },
             RoomSlot::Feeds
             | RoomSlot::News
             | RoomSlot::Cyberspace
+            | RoomSlot::CyberspaceNotifications
+            | RoomSlot::CyberspaceRoom(_)
+            | RoomSlot::CyberspaceMail(_)
             | RoomSlot::Notifications
             | RoomSlot::Discover
             | RoomSlot::Showcase
@@ -239,13 +256,54 @@ fn item_matches_query(item: &RoomSearchItem, query: &SearchQuery) -> bool {
 }
 
 fn synthetic_item(slot: RoomSlot, chat: &ChatState) -> RoomSearchItem {
+    // The pinned cyberspace rooms and conversations are the synthetic entries
+    // with names of their own rather than fixed labels, so they are resolved
+    // before the roster below.
+    if let RoomSlot::CyberspaceRoom(index) = slot {
+        let label = match chat.cyberspace.pinned_rooms().get(index) {
+            Some(slug) => format!("#{slug}"),
+            None => "#room".to_string(),
+        };
+        return RoomSearchItem {
+            slot,
+            label,
+            meta: "cyberspace chat".to_string(),
+            unread_count: 0,
+            last_message_at: None,
+            favorite: false,
+        };
+    }
+    if let RoomSlot::CyberspaceMail(index) = slot {
+        let label = match chat.cyberspace.pinned_cmail().get(index) {
+            Some(thread) => format!("@{}", thread.username),
+            None => "@?".to_string(),
+        };
+        return RoomSearchItem {
+            slot,
+            label,
+            meta: "cyberspace c-mail".to_string(),
+            unread_count: chat
+                .cyberspace
+                .cmail_unread_counts()
+                .get(index)
+                .copied()
+                .unwrap_or(0),
+            last_message_at: None,
+            favorite: false,
+        };
+    }
     let (label, meta, unread_count) = match slot {
         RoomSlot::Feeds => ("rss", "rss inbox", chat.feeds.unread_count()),
         RoomSlot::News => ("news", "shared links", chat.news.unread_count()),
         RoomSlot::Cyberspace => (
-            "cyberspace",
+            "feeds",
             "cyberspace.online",
-            chat.cyberspace.unread_count(),
+            chat.cyberspace.unread_entries(),
+        ),
+        RoomSlot::CyberspaceNotifications => (
+            "notifications",
+            "cyberspace.online",
+            chat.cyberspace.unread_notifications(),
         ),
         RoomSlot::Notifications => (
             "mentions",
@@ -255,8 +313,8 @@ fn synthetic_item(slot: RoomSlot, chat: &ChatState) -> RoomSearchItem {
         RoomSlot::Discover => ("browse rooms", "custom rooms", 0),
         RoomSlot::Showcase => ("showcases", "projects", chat.showcase.unread_count()),
         RoomSlot::Work => ("work", "profiles", chat.work.unread_count()),
-        RoomSlot::Room(_) => {
-            unreachable!("real rooms are built from ChatRoom")
+        RoomSlot::Room(_) | RoomSlot::CyberspaceRoom(_) | RoomSlot::CyberspaceMail(_) => {
+            unreachable!("real rooms are built from ChatRoom, pinned entries just above")
         }
     };
 

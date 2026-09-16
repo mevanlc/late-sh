@@ -19,15 +19,15 @@
 // step) lives in `svc.rs` / `state.rs` / `ui.rs`; only the data and the pure
 // maths live here.
 
-use super::pets::PetSpecies;
+use super::pets::{PetSource, PetSpecies};
 use super::skills::{TamingSkill, skill_level_for_xp};
 use super::world::{BROCELIANDE_BASE, BROCELIANDE_ZONE_COUNT, BROCELIANDE_ZONE_STRIDE, RoomId};
 
-/// The fifty tameable beasts of Broceliande, ordered smallest to largest. The
-/// `tame_level` climbs from 1 to 50 across the list, so early beasts fall to a
-/// novice and the great forest wyrm needs a near-master tamer. Health and attack
-/// scale with size, so a bigger beast is a stronger companion. `price` is unused
-/// for tameables (they are earned, not bought).
+/// The tameable beasts of Broceliande, ordered smallest to largest. The
+/// `tame_level` climbs from 1 to 54 across the classic fifty, so early beasts
+/// fall to a novice and the great forest wyrm needs a near-master tamer, then
+/// from 55 to 100 across the ten Wildbound summit beasts. Health and attack
+/// scale with size, so a bigger beast is a stronger companion.
 ///
 /// KEYS ARE PERSISTED - never reorder or rename an existing key.
 pub const TAMEABLE: &[PetSpecies] = &[
@@ -324,7 +324,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Worldroot Delver",
         "\u{1F994}",
         46,
-        320,
+        340,
         24,
         "a huge burrowing root-beast of the deep caverns",
     ),
@@ -333,7 +333,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Storm-Crowned Elk",
         "\u{1F98C}",
         47,
-        288,
+        310,
         29,
         "a lightning-antlered elk of the standing kings",
     ),
@@ -342,7 +342,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Greenwood Alpha",
         "\u{1F43A}",
         47,
-        300,
+        330,
         28,
         "the grey alpha whose howl empties a valley",
     ),
@@ -352,7 +352,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "\u{1F409}",
         48,
         340,
-        28,
+        30,
         "a young forest-wyrm, coiled and cunning",
     ),
     beast(
@@ -360,8 +360,8 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Oakheart Treantling",
         "\u{1F333}",
         48,
-        400,
-        24,
+        420,
+        25,
         "a walking oak-child of the Oakheart grove",
     ),
     beast(
@@ -369,8 +369,8 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Vine-Choked Dire-Drake",
         "\u{1F409}",
         49,
-        360,
-        30,
+        350,
+        31,
         "a dire-drake wound about with strangler-vine",
     ),
     beast(
@@ -378,16 +378,16 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Barrowgreen Great-Wyrm",
         "\u{1F409}",
         49,
-        380,
-        31,
+        400,
+        29,
         "a barrow-wyrm risen green from the burial mounds",
     ),
     beast(
         "wt_fae_lord",
         "Erlking's Great Hart",
         "\u{1F98C}",
-        49,
-        340,
+        50,
+        370,
         33,
         "the Erlking's own hart, antlers hung with gold",
     ),
@@ -396,7 +396,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "Cernun Hunt-Beast",
         "\u{1F43A}",
         50,
-        360,
+        350,
         34,
         "the lead beast of the Wild Hunt itself",
     ),
@@ -404,92 +404,89 @@ pub const TAMEABLE: &[PetSpecies] = &[
         "wt_ruin_wyrm",
         "Greenmantle Guard-Wyrm",
         "\u{1F409}",
-        50,
-        420,
-        30,
+        51,
+        460,
+        31,
         "the coiled wyrm that guards the taken keep",
     ),
     beast(
         "wt_stormwyrm",
         "Storm-Wyrm of the Kings",
         "\u{1F409}",
-        50,
+        51,
         400,
-        33,
+        35,
         "a wyrm crowned in the standing-stones' storm",
     ),
     beast(
         "wt_deepdrake",
         "Worldroot Deep-Drake",
         "\u{1F409}",
-        50,
-        440,
-        32,
+        52,
+        480,
+        34,
         "a pale eyeless drake of the World-Oak's roots",
     ),
     beast(
         "wt_greattreant",
         "Greenmarch Treant",
         "\u{1F332}",
-        50,
-        520,
-        28,
+        52,
+        560,
+        30,
         "a great treant that walks the wood's still heart",
     ),
     beast(
         "wt_heartwyrm",
         "Heart-Oak Wyrm",
         "\u{1F409}",
-        50,
-        460,
-        34,
+        53,
+        500,
+        36,
         "the green wyrm coiled in the Heart-Oak's shade",
     ),
     beast(
         "wt_ancient_drake",
         "Ancient Forest-Drake",
         "\u{1F409}",
-        50,
-        500,
-        36,
+        53,
+        470,
+        37,
         "an ancient drake, old as the first wood",
     ),
     beast(
         "wt_worldtreant",
         "Elder World-Treant",
         "\u{1F332}",
-        50,
-        620,
-        30,
+        53,
+        640,
+        33,
         "an elder treant, a moving hill of ancient oak",
     ),
     beast(
         "wt_greenwyrm",
         "Green Wyrm of the World-Oak",
         "\u{1F409}",
-        50,
-        560,
-        38,
+        54,
+        580,
+        39,
         "a great green wyrm coiled through the World-Oak's crown",
     ),
     beast(
         "wt_worldoak",
         "Scion of the World-Oak",
         "\u{1F333}",
-        50,
-        700,
-        34,
+        54,
+        720,
+        35,
         "a living scion of the World-Oak, oldest and mightiest of all beasts",
     ),
-    // ---- Wildbound: the rideable beasts (five wild, five mythical) -------
+    // ---- Wildbound: the summit beasts (five wild, five mythical) ---------
     //
     // These sit above the fifty classic beasts on the taming ladder, so their
-    // stats have to *start* above the best tame-50 beast (the Green Wyrm of the
-    // World-Oak at attack 38, the Scion at hp 700) and climb from there. They
-    // originally began at attack 22 / hp 420, which meant taming 51..=79 earned
-    // you a strictly worse companion than the one you already had - twenty-five
-    // levels of the trade spent going backwards. Pinned by
-    // `every_taming_tier_offers_a_better_companion_than_the_one_below`.
+    // stats have to *start* above the best tame-54 beasts (the Green Wyrm of
+    // the World-Oak at attack 39, the Scion at hp 720) and climb from there.
+    // Pinned by `no_companion_is_out_classed_by_an_easier_one`.
     beast(
         "wb_palfrey",
         "Duskmane Palfrey",
@@ -497,7 +494,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         55,
         720,
         40,
-        "a calm-eyed forest horse, dusk-grey down the mane; steady under a saddle",
+        "a calm-eyed forest horse, dusk-grey down the mane; steady as the old oaks",
     ),
     beast(
         "wb_elk",
@@ -506,7 +503,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         60,
         760,
         42,
-        "a bull elk whose antlers scrape the low boughs; strong enough to carry two",
+        "a bull elk whose antlers scrape the low boughs; it clears a path wherever it goes",
     ),
     beast(
         "wb_ram",
@@ -533,7 +530,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         75,
         880,
         48,
-        "a stag grown vast and wary in the deep wood; it suffers only a worthy rider",
+        "a stag grown vast and wary in the deep wood; it suffers only a worthy master",
     ),
     beast(
         "wb_unicorn",
@@ -542,7 +539,7 @@ pub const TAMEABLE: &[PetSpecies] = &[
         80,
         920,
         50,
-        "a unicorn seen only where moonlight pools; its stride bends the miles",
+        "a unicorn seen only where moonlight pools; its horn turns aside the dark",
     ),
     beast(
         "wb_hippogriff",
@@ -578,38 +575,15 @@ pub const TAMEABLE: &[PetSpecies] = &[
         100,
         1000,
         56,
-        "the horizon-swimmer of the old sagas; to ride it is to arrive before you left",
+        "the horizon-swimmer of the old sagas; where it coils, the world holds its breath",
     ),
 ];
 
-/// Number of tameable beasts (the design target is fifty).
+/// Number of tameable beasts: the classic fifty plus the ten Wildbound.
 pub const TAMEABLE_COUNT: usize = TAMEABLE.len();
 
-/// The rideable species and how far they carry you: one keypress while mounted
-/// strides this many rooms. The wild mounts walk 2-3; the mythicals at the top
-/// of the taming ladder stride 4, and the very best skip 5 rooms at a time.
-pub const RIDEABLE: &[(&str, u8)] = &[
-    ("wb_palfrey", 2),
-    ("wb_elk", 2),
-    ("wb_ram", 3),
-    ("wb_strider", 3),
-    ("wb_direstag", 3),
-    ("wb_unicorn", 4),
-    ("wb_hippogriff", 4),
-    ("wb_griffin", 4),
-    ("wb_wyvern", 5),
-    ("wb_worldserpent", 5),
-];
-
-/// How many rooms one mounted step covers for a species, if it can be ridden.
-pub fn mount_stride(species_key: &str) -> Option<u8> {
-    RIDEABLE
-        .iter()
-        .find(|(key, _)| *key == species_key)
-        .map(|&(_, stride)| stride)
-}
-
 /// A `const` constructor for a tameable species (keeps the table readable).
+/// Every classic/Wildbound beast walks the shared `PET_SKILLS` ladder.
 const fn beast(
     key: &'static str,
     name: &'static str,
@@ -619,15 +593,41 @@ const fn beast(
     base_attack: i32,
     desc: &'static str,
 ) -> PetSpecies {
+    beast_with_skills(
+        key,
+        name,
+        glyph,
+        tame_level,
+        base_hp,
+        base_attack,
+        desc,
+        PET_SKILLS,
+    )
+}
+
+/// Like [`beast`], but with its own auto-skill ladder instead of the shared
+/// one - what makes the five Aelunor companions genuinely play differently
+/// from each other and from the classic fifty.
+#[allow(clippy::too_many_arguments)]
+const fn beast_with_skills(
+    key: &'static str,
+    name: &'static str,
+    glyph: &'static str,
+    tame_level: i32,
+    base_hp: i32,
+    base_attack: i32,
+    desc: &'static str,
+    skills: &'static [PetSkill],
+) -> PetSpecies {
     PetSpecies {
         key,
         name,
         glyph,
-        price: 0,
         base_hp,
         base_attack,
         desc,
-        tame_level,
+        source: PetSource::Wild { tame_level },
+        skills,
     }
 }
 
@@ -642,27 +642,30 @@ pub fn tameable_by_key(key: &str) -> Option<&'static PetSpecies> {
 #[derive(Clone, Copy, Debug)]
 pub struct WildBeast {
     pub home: RoomId,
-    /// Index into `TAMEABLE` of the beast that roams here.
+    /// Index into the *combined* `TAMEABLE` then `AELUNOR_TAMEABLE` pool -
+    /// resolve with `beast_species`, never by indexing `TAMEABLE` directly.
     pub species: usize,
 }
 
-/// Every place a tameable beast roams, keyed to a Broceliande room. Built once
-/// and cached: each of the fifty beasts is placed in the zone whose depth suits
-/// its taming difficulty (small easy beasts near the eaves, the great wyrms in
-/// the deep). Beasts gather at that zone's **forest gate** - the entrance room,
-/// which is always real and safe (offset 0), so every beast is guaranteed a live
-/// home room a tamer can reach and work at in peace. Several beasts share a
-/// gate, reading as a menagerie at each woodward-holt.
+/// Every place a tameable beast roams: the classic fifty at a Broceliande
+/// forest gate, plus the five Aelunor companions at an Aelunor wood-gate
+/// (`world::aelunor_entrances` - never offset 0, since every Aelunor zone is
+/// cavern-carved and offset 0 is always solid rock there; Broceliande's own
+/// maze zones are the one place offset 0 genuinely is the entrance, since
+/// `carve_maze`'s DFS always starts at cell 0). Built once and cached: each
+/// beast is placed in the zone whose depth suits its taming difficulty, at
+/// that zone's entrance, which is always real and safe. Several beasts can
+/// share a gate, reading as a menagerie at each woodward-holt.
 pub fn wild_beasts() -> &'static [WildBeast] {
     use std::sync::OnceLock;
     static BEASTS: OnceLock<Vec<WildBeast>> = OnceLock::new();
     BEASTS
         .get_or_init(|| {
             // Map each beast onto a zone by its rank (0..50 -> zone 0..N), and
-            // home it at that zone's entrance gate (offset 0), which always
-            // exists whether the zone was carved as a maze or a sparse cavern.
+            // home it at that zone's entrance gate (offset 0, always real for
+            // Broceliande's maze-carved DFS - see the fn doc comment).
             let zones = BROCELIANDE_ZONE_COUNT.max(1);
-            TAMEABLE
+            let mut beasts: Vec<WildBeast> = TAMEABLE
                 .iter()
                 .enumerate()
                 .map(|(i, _)| {
@@ -670,7 +673,20 @@ pub fn wild_beasts() -> &'static [WildBeast] {
                     let home = BROCELIANDE_BASE + zone as u32 * BROCELIANDE_ZONE_STRIDE;
                     WildBeast { home, species: i }
                 })
-                .collect()
+                .collect();
+
+            let entrances = super::world::aelunor_entrances();
+            let ae_zones = entrances.len().max(1);
+            beasts.extend(AELUNOR_TAMEABLE.iter().enumerate().filter_map(|(i, _)| {
+                let zone = (i * ae_zones / AELUNOR_TAMEABLE.len()).min(ae_zones - 1);
+                entrances.get(zone).map(|&home| WildBeast {
+                    home,
+                    // Continues past TAMEABLE's own index range - see
+                    // `beast_species`.
+                    species: TAMEABLE.len() + i,
+                })
+            }));
+            beasts
         })
         .as_slice()
 }
@@ -684,15 +700,18 @@ pub fn beasts_at(room: RoomId) -> Vec<&'static WildBeast> {
 /// Animal Taming xp. Driven by how far the tamer's level exceeds the beast's
 /// required level: at the exact required level it is a coin-toss-minus; each
 /// level of surplus adds a solid margin; being under-level is refused entirely
-/// (returns 0). Capped below certainty so even a master can be thrown.
-pub fn tame_chance(taming_xp: i64, beast: &PetSpecies) -> u32 {
+/// (returns 0). `cha_pct` is the tamer's Charisma (`AbilityScores::tame_pct`),
+/// percent points on top. Capped below certainty so even a master can be
+/// thrown.
+pub fn tame_chance(taming_xp: i64, beast: &PetSpecies, cha_pct: i32) -> u32 {
     let level = skill_level_for_xp(taming_xp);
-    if level < beast.tame_level {
+    if level < beast.tame_level() {
         return 0;
     }
-    let surplus = level - beast.tame_level;
-    // 40% at exactly the required level, +9% per level of surplus, capped at 95.
-    (40 + surplus * 9).clamp(0, 95) as u32
+    let surplus = level - beast.tame_level();
+    // 40% at exactly the required level, +9% per level of surplus, plus
+    // Charisma, capped at 95.
+    (40 + surplus * 9 + cha_pct).clamp(0, 95) as u32
 }
 
 /// Xp awarded for a *successful* tame: scales with the beast's difficulty, so
@@ -700,7 +719,7 @@ pub fn tame_chance(taming_xp: i64, beast: &PetSpecies) -> u32 {
 /// working up the beasts is a real, rewarding progression on the shared
 /// skill curve.
 pub fn tame_xp(beast: &PetSpecies) -> i32 {
-    30 + beast.tame_level * beast.tame_level / 2
+    30 + beast.tame_level() * beast.tame_level() / 2
 }
 
 // ---- Pet auto-skills ------------------------------------------------------
@@ -728,6 +747,8 @@ pub enum PetSkillEffect {
     Guard,
     /// A killing pounce: a heavy burst of bonus damage.
     Pounce,
+    /// A mend: heals the owner directly (fae/druidic pets only).
+    Mend,
 }
 
 /// One unlockable pet auto-skill.
@@ -789,6 +810,228 @@ pub const PET_SKILLS: &[PetSkill] = &[
 /// The pet auto-skills unlocked at a given pet level (those with `level <= lvl`).
 pub fn pet_skills_at(level: i32) -> impl Iterator<Item = &'static PetSkill> {
     PET_SKILLS.iter().filter(move |s| s.level <= level)
+}
+
+// ---- Aelunor companions: five tameable beasts, each with its own spells ---
+//
+// Unlike the fifty classic beasts (all sharing `PET_SKILLS`), each of these
+// carries its own auto-skill ladder, so they play differently from each
+// other, not just look different. Home of the region's own species: a
+// support healer, a tank, a glass-cannon, a bleed hybrid, and an apex
+// all-rounder. Placed one per gate at five of Aelunor's twelve zones (see
+// `aelunor_wild_beasts`), so each is genuinely exclusive to Aelunor.
+//
+// KEYS ARE PERSISTED - never reorder or rename.
+
+const AELUNOR_FAERIE_SKILLS: &[PetSkill] = &[
+    PetSkill {
+        level: 2,
+        name: "Fae Mending",
+        effect: PetSkillEffect::Mend,
+        cooldown: 4,
+        power: 10,
+    },
+    PetSkill {
+        level: 5,
+        name: "Glamour",
+        effect: PetSkillEffect::Roar,
+        cooldown: 6,
+        power: 5,
+    },
+    PetSkill {
+        level: 8,
+        name: "Thorn Rend",
+        effect: PetSkillEffect::Rend,
+        cooldown: 4,
+        power: 5,
+    },
+];
+
+const AELUNOR_SAPLING_SKILLS: &[PetSkill] = &[
+    PetSkill {
+        level: 2,
+        name: "Root Guard",
+        effect: PetSkillEffect::Guard,
+        cooldown: 5,
+        power: 10,
+    },
+    PetSkill {
+        level: 6,
+        name: "Sap Mending",
+        effect: PetSkillEffect::Mend,
+        cooldown: 6,
+        power: 14,
+    },
+    PetSkill {
+        level: 10,
+        name: "Heartwood Slam",
+        effect: PetSkillEffect::SavageBite,
+        cooldown: 5,
+        power: 10,
+    },
+];
+
+const AELUNOR_OWL_SKILLS: &[PetSkill] = &[
+    PetSkill {
+        level: 2,
+        name: "Talon Strike",
+        effect: PetSkillEffect::SavageBite,
+        cooldown: 3,
+        power: 8,
+    },
+    PetSkill {
+        level: 6,
+        name: "Silent Stoop",
+        effect: PetSkillEffect::Pounce,
+        cooldown: 5,
+        power: 14,
+    },
+    PetSkill {
+        level: 10,
+        name: "Moonlit Dive",
+        effect: PetSkillEffect::Pounce,
+        cooldown: 6,
+        power: 22,
+    },
+];
+
+const AELUNOR_FOX_SKILLS: &[PetSkill] = &[
+    PetSkill {
+        level: 3,
+        name: "Briar Rend",
+        effect: PetSkillEffect::Rend,
+        cooldown: 4,
+        power: 5,
+    },
+    PetSkill {
+        level: 7,
+        name: "Druid's Blessing",
+        effect: PetSkillEffect::Roar,
+        cooldown: 6,
+        power: 6,
+    },
+    PetSkill {
+        level: 10,
+        name: "Pounce from the Bracken",
+        effect: PetSkillEffect::Pounce,
+        cooldown: 7,
+        power: 18,
+    },
+];
+
+const AELUNOR_HOUND_SKILLS: &[PetSkill] = &[
+    PetSkill {
+        level: 2,
+        name: "Wild Hunt Bite",
+        effect: PetSkillEffect::SavageBite,
+        cooldown: 3,
+        power: 7,
+    },
+    PetSkill {
+        level: 5,
+        name: "Baying Rend",
+        effect: PetSkillEffect::Rend,
+        cooldown: 4,
+        power: 5,
+    },
+    PetSkill {
+        level: 7,
+        name: "Huntmaster's Guard",
+        effect: PetSkillEffect::Guard,
+        cooldown: 6,
+        power: 12,
+    },
+    PetSkill {
+        level: 9,
+        name: "Second Wind",
+        effect: PetSkillEffect::Mend,
+        cooldown: 7,
+        power: 16,
+    },
+    PetSkill {
+        level: 10,
+        name: "the Wild Hunt's Kill",
+        effect: PetSkillEffect::Pounce,
+        cooldown: 7,
+        power: 20,
+    },
+];
+
+/// The five tameable companions of Aelunor, ordered easy to hard. Stats climb
+/// with `tame_level` under the same "no companion Pareto-dominated by an
+/// easier one" rule as the classic fifty: same-tier beasts may trade attack
+/// for hp, but nothing may lose on both axes to something at the same or a
+/// lower rung. The rule spans every pool (both wild lists and the Stable),
+/// since a player grinds one Animal Taming level and takes the best pet it
+/// opens wherever it comes from - `taming_test`'s
+/// `no_companion_is_out_classed_by_an_easier_one` walks the combined list, so
+/// a stat edit here is checked against every other companion too.
+pub const AELUNOR_TAMEABLE: &[PetSpecies] = &[
+    beast_with_skills(
+        "ae_faerie",
+        "Moonlit Faerie",
+        "\u{1F9DA}",
+        8,
+        58,
+        10,
+        "a small fae creature trailing cold moonlight, quick to heal what it loves",
+        AELUNOR_FAERIE_SKILLS,
+    ),
+    beast_with_skills(
+        "ae_sapling",
+        "Woodkin Sapling",
+        "\u{1F331}",
+        18,
+        130,
+        11,
+        "a walking sapling of the deep wood, slow, patient, and hard to fell",
+        AELUNOR_SAPLING_SKILLS,
+    ),
+    beast_with_skills(
+        "ae_owl",
+        "High Elf Owl",
+        "\u{1F989}",
+        26,
+        70,
+        22,
+        "a silver-eyed owl bonded to the high elves, all speed and talon",
+        AELUNOR_OWL_SKILLS,
+    ),
+    beast_with_skills(
+        "ae_fox",
+        "Druid's Fox",
+        "\u{1F98A}",
+        34,
+        150,
+        22,
+        "a russet fox that runs at a druid's heel and fights with the wood's own cunning",
+        AELUNOR_FOX_SKILLS,
+    ),
+    beast_with_skills(
+        "ae_hound",
+        "Wild Hunt Hound",
+        "\u{1F415}",
+        44,
+        200,
+        28,
+        "a spectral hound of the Wild Hunt, the rarest and deadliest companion Aelunor offers",
+        AELUNOR_HOUND_SKILLS,
+    ),
+];
+
+/// Resolve a `WildBeast.species` index to its `PetSpecies`, across **both**
+/// pools `wild_beasts()` can place: the classic fifty (`TAMEABLE`, indices
+/// `0..TAMEABLE.len()`) and the five Aelunor companions (`AELUNOR_TAMEABLE`,
+/// indices continuing on from there). `wild_beasts()` is the one thing that
+/// actually builds `WildBeast.species` values, so this is its match - every
+/// external consumer of a `WildBeast` (the tame panel, the tame action, the
+/// map POI index) should resolve through this, never index `TAMEABLE`
+/// directly, or an Aelunor placement panics on an out-of-range index.
+pub fn beast_species(index: usize) -> &'static PetSpecies {
+    TAMEABLE
+        .get(index)
+        .or_else(|| AELUNOR_TAMEABLE.get(index - TAMEABLE.len()))
+        .expect("WildBeast.species always indexes TAMEABLE then AELUNOR_TAMEABLE")
 }
 
 /// The Animal Taming trade's stable key (for persistence/display parity).

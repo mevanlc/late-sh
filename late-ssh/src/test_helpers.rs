@@ -8,6 +8,7 @@ use crate::app::arcade::minesweeper::svc::MinesweeperService;
 use crate::app::arcade::nonogram::state::Library as NonogramLibrary;
 use crate::app::arcade::nonogram::svc::NonogramService;
 use crate::app::arcade::rubiks_cube::svc::RubiksCubeService;
+use crate::app::arcade::sliding_puzzle::svc::SlidingPuzzleService;
 use crate::app::arcade::snake::svc::SnakeService;
 use crate::app::arcade::solitaire::svc::SolitaireService;
 use crate::app::arcade::sudoku::svc::SudokuService;
@@ -95,6 +96,7 @@ fn test_sudoku_games(user_id: Uuid) -> Vec<late_core::models::sudoku::Game> {
             puzzle_seed: idx as i64,
             grid: serde_json::to_value(grid).expect("sudoku grid json"),
             fixed_mask: serde_json::to_value(fixed_mask).expect("sudoku fixed mask json"),
+            notes: serde_json::to_value([[0u16; 9]; 9]).expect("sudoku notes json"),
             is_game_over: false,
             score: 0,
         }
@@ -120,8 +122,41 @@ fn test_house_registry(db: Db) -> crate::app::lobby::house::registry::HouseTable
     )
 }
 
+/// Inert IRC factory defaults for tests; production profiles spell their
+/// IrcConfig out in `config.rs` and there is no `Default` impl to lean on.
+pub fn test_irc_config() -> crate::config::IrcConfig {
+    crate::config::IrcConfig {
+        enabled: false,
+        port: 6667,
+        tls_cert_path: None,
+        tls_key_path: None,
+        proxy_protocol: false,
+        proxy_trusted_cidrs: Vec::new(),
+        max_conns_global: 200,
+        max_conns_per_user: 3,
+        max_auth_failures_per_ip: 20,
+        auth_failure_window_secs: 300,
+    }
+}
+
+/// Session-scoped `StreamService` for app tests. Every session has one, in
+/// tests as in production; what tests lack is LiveKit, so `/golive` here fails
+/// the voice check inside `prepare_go_live` rather than the service missing.
+fn test_stream_service(
+    db: Db,
+    activity_tx: broadcast::Sender<ActivityEvent>,
+) -> crate::app::stream::svc::StreamService {
+    crate::app::stream::svc::StreamService::new(
+        db.clone(),
+        VoiceService::new(VoiceConfig::disabled()),
+        ActivityPublisher::new(db, activity_tx),
+        "http://localhost:3000".to_string(),
+    )
+}
+
 pub fn test_config(db_config: late_core::db::DbConfig) -> Config {
     Config {
+        env: crate::config::Env::Dev,
         ssh_port: 0,
         api_port: 0,
         icecast_url: "http://localhost:8000".to_string(),
@@ -146,11 +181,12 @@ pub fn test_config(db_config: late_core::db::DbConfig) -> Config {
         },
         youtube_api_key: None,
         voice: VoiceConfig::disabled(),
-        irc: crate::config::IrcConfig::default(),
+        irc: test_irc_config(),
+        files: None,
         rebels_enabled: true,
         rebels_host: "frittura.org".to_string(),
         rebels_port: 3788,
-        rebels_secret: String::new(),
+        rebels_secret: "test-secret".to_string(),
         nethack_enabled: false,
         nethack_host: String::new(),
         nethack_port: 2323,
@@ -171,6 +207,10 @@ pub fn test_config(db_config: late_core::db::DbConfig) -> Config {
         dopewars_host: String::new(),
         dopewars_port: 2324,
         dopewars_secret: String::new(),
+        bashquest_enabled: false,
+        bashquest_host: String::new(),
+        bashquest_port: 2330,
+        bashquest_secret: String::new(),
         codekeep_enabled: false,
         codekeep_host: String::new(),
         codekeep_port: 2328,
@@ -180,7 +220,6 @@ pub fn test_config(db_config: late_core::db::DbConfig) -> Config {
 
 pub fn test_app_state(db: Db, config: Config) -> State {
     let active_users = Arc::new(Mutex::new(HashMap::new()));
-    let afk_users = crate::state::new_afk_users();
     let username_directory = Arc::new(Mutex::new(Arc::new(HashMap::new())));
     let (activity_tx, _) = broadcast::channel::<ActivityEvent>(64);
     let session_registry = SessionRegistry::new();
@@ -195,6 +234,13 @@ pub fn test_app_state(db: Db, config: Config) -> State {
     let ai_service = AiService::new(false, None);
     let translation_service =
         crate::app::ai::translate::TranslationService::new(db.clone(), ai_service.clone());
+    let summary_service =
+        crate::app::ai::summary::SummaryService::new(db.clone(), ai_service.clone());
+    let paper_service = crate::app::paper::svc::PaperService::new(
+        db.clone(),
+        ai_service.clone(),
+        test_app_flags_rx(),
+    );
     let article_service = ArticleService::new(db.clone(), ai_service.clone(), chat_service.clone());
     let feed_service = crate::app::chat::feeds::svc::FeedService::new(db.clone());
     let showcase_service = crate::app::chat::showcase::svc::ShowcaseService::new(db.clone());
@@ -223,6 +269,7 @@ pub fn test_app_state(db: Db, config: Config) -> State {
     let traffic_service = TrafficService::new(db.clone());
     let le_word_service = LeWordService::new(db.clone(), activity_tx.clone());
     let rubiks_cube_service = RubiksCubeService::new(db.clone(), activity_tx.clone());
+    let sliding_puzzle_service = SlidingPuzzleService::new(db.clone(), activity_tx.clone());
     let chip_service = ChipService::new(db.clone());
     let activity_publisher = ActivityPublisher::new(db.clone(), activity_tx.clone());
     let sudoku_service = SudokuService::new(db.clone(), activity_tx.clone());
@@ -230,13 +277,21 @@ pub fn test_app_state(db: Db, config: Config) -> State {
     let solitaire_service = SolitaireService::new(db.clone(), activity_tx.clone());
     let minesweeper_service = MinesweeperService::new(db.clone(), activity_tx.clone());
     let bonsai_service = BonsaiService::new(db.clone(), activity_tx.clone());
-    let pet_service = PetService::new(db.clone());
+    let pet_service = PetService::new(db.clone(), activity_tx.clone());
+    let aquarium_service =
+        crate::app::hub::aquarium::svc::AquariumService::new(db.clone(), activity_tx.clone());
     let dartboard_server = crate::dartboard::spawn_server();
     let leaderboard_service = LeaderboardService::new(db.clone());
     let quest_service = QuestService::new(db.clone(), activity_tx.clone());
     let shop_service = ShopService::new(db.clone());
     let ultimate_service = crate::app::UltimateService::new(db.clone());
     let voice_service = VoiceService::new(config.voice.clone());
+    let stream_service = crate::app::stream::svc::StreamService::new(
+        db.clone(),
+        voice_service.clone(),
+        activity_publisher.clone(),
+        config.web_url.clone(),
+    );
     State {
         conn_limit: Arc::new(Semaphore::new(config.max_conns_global)),
         conn_counts: Arc::new(Mutex::new(HashMap::<IpAddr, usize>::new())),
@@ -245,10 +300,13 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         clubhouse_lobby: crate::app::clubhouse::lobby::SharedLobby::with_seed(7),
         mention_ladders: crate::app::ai::ladder::MentionLadders::new(),
         scratchpad_registry: crate::app::scratchpad::registry::SharedScratchpadRegistry::new(),
-        afk_users,
+        app_flags: crate::app::flags::svc::AppFlagService::new(db.clone()),
+        runner_looks: crate::app::deadchannel::runner::svc::RunnerLookService::new(db.clone()),
         username_directory,
         flair_directory: crate::app::common::username_effect::new_directory(),
-        pomodoro_directory: crate::app::common::pomodoro::new_directory(),
+        status_directory: crate::app::common::status::new_directory(),
+        crown_service: crate::app::crown::svc::CrownService::new(db.clone()),
+        pot_service: crate::app::pot::svc::PotService::new(db.clone()),
         config,
         db: db.clone(),
         audio_service: crate::app::audio::svc::AudioService::new(
@@ -258,10 +316,13 @@ pub fn test_app_state(db: Db, config: Config) -> State {
             Arc::new(Mutex::new(HashMap::new())),
         ),
         voice_service,
+        stream_service,
         chat_service,
         notification_service,
         ai_service,
         translation_service,
+        summary_service,
+        paper_service,
         article_service,
         feed_service,
         cyberspace_service: crate::app::chat::cyberspace::svc::CyberspaceService::new(
@@ -277,12 +338,14 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         traffic_service,
         le_word_service,
         rubiks_cube_service,
+        sliding_puzzle_service,
         sudoku_service,
         nonogram_service,
         solitaire_service,
         minesweeper_service,
         bonsai_service,
         pet_service,
+        aquarium_service,
         nonogram_library: NonogramLibrary::default(),
         chip_service: chip_service.clone(),
         lateania_service: crate::app::door::lateania::svc::LateaniaService::new(
@@ -295,7 +358,11 @@ pub fn test_app_state(db: Db, config: Config) -> State {
             chip_service.clone(),
             db.clone(),
         ),
-        darkroom_service: crate::app::door::darkroom::svc::DarkroomService::new(db.clone()),
+        darkroom_service: crate::app::door::darkroom::svc::DarkroomService::new(
+            activity_publisher.clone(),
+            chip_service.clone(),
+            db.clone(),
+        ),
         arcade_handle_service: crate::app::door::arcade::ArcadeHandleService::new(db.clone()),
         door_rc_service: crate::app::door::rc::DoorRcService::new(db.clone()),
         daily_service: crate::app::lobby::daily::svc::DailyService::new(
@@ -306,6 +373,10 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         house_registry: test_house_registry(db.clone()),
         dartboard_server,
         dartboard_provenance: test_dartboard_provenance(),
+        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(
+            db.clone(),
+            test_app_flags_rx(),
+        ),
         leaderboard_service,
         quest_service,
         shop_service,
@@ -370,6 +441,16 @@ pub struct SessionWorld {
     /// refresh. Unset means the session gets no leaderboard channel at all.
     pub leaderboard_rx:
         Option<watch::Receiver<Arc<late_core::models::leaderboard::LeaderboardData>>>,
+    /// The account's "Land on" tweak. Unset lands in the Clubhouse, the
+    /// production default.
+    pub landing_page: Option<late_core::models::user::LandingPage>,
+    /// A first-ever session, which always starts in the Clubhouse.
+    pub is_new_user: bool,
+    /// One replica's chat service, shared the way production shares it:
+    /// every session on it hears every other's `ChatEvent`s. Unset gives
+    /// the session its own. Mention notifications ride the app's own
+    /// `NotificationService`, which this does not share.
+    pub chat_service: Option<ChatService>,
 }
 
 pub fn make_app_in_world(db: Db, user_id: Uuid, session_token: &str, world: SessionWorld) -> App {
@@ -394,7 +475,10 @@ fn make_app_with_chat_service_and_permissions(
     // main.rs: mention events broadcast on the instance's channel, so a second
     // instance would never deliver them to the app.
     let notification_service = NotificationService::new(db.clone());
-    let chat_service = ChatService::new(db.clone(), notification_service.clone());
+    let chat_service = match world.chat_service.clone() {
+        Some(shared) => shared,
+        None => ChatService::new(db.clone(), notification_service.clone()),
+    };
     let activity_tx = broadcast::channel::<ActivityEvent>(64).0;
     let quest_service = QuestService::new(db.clone(), activity_tx.clone());
     let quest_snapshot_rx = quest_service.subscribe_snapshot(user_id);
@@ -413,10 +497,20 @@ fn make_app_with_chat_service_and_permissions(
             Arc::new(Mutex::new(HashMap::new())),
         ),
         voice_service: VoiceService::new(VoiceConfig::disabled()),
+        stream_service: test_stream_service(db.clone(), activity_tx.clone()),
         chat_service: chat_service.clone(),
         translation_service: crate::app::ai::translate::TranslationService::new(
             db.clone(),
             AiService::new(false, None),
+        ),
+        summary_service: crate::app::ai::summary::SummaryService::new(
+            db.clone(),
+            AiService::new(false, None),
+        ),
+        paper_service: crate::app::paper::svc::PaperService::new(
+            db.clone(),
+            AiService::new(false, None),
+            test_app_flags_rx(),
         ),
         notification_service: notification_service.clone(),
         article_service: ArticleService::new(
@@ -447,6 +541,8 @@ fn make_app_with_chat_service_and_permissions(
         le_word_service: LeWordService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         rubiks_cube_service: RubiksCubeService::new(db.clone(), activity_tx.clone()),
         initial_rubiks_cube_game: None,
+        sliding_puzzle_service: SlidingPuzzleService::new(db.clone(), activity_tx.clone()),
+        initial_sliding_puzzle_games: Vec::new(),
         initial_le_word_daily_word: None,
         initial_le_word_game: None,
         sudoku_service: SudokuService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
@@ -476,7 +572,11 @@ fn make_app_with_chat_service_and_permissions(
             chip_service.clone(),
             db.clone(),
         ),
-        darkroom_service: crate::app::door::darkroom::svc::DarkroomService::new(db.clone()),
+        darkroom_service: crate::app::door::darkroom::svc::DarkroomService::new(
+            ActivityPublisher::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
+            chip_service.clone(),
+            db.clone(),
+        ),
         daily_service: crate::app::lobby::daily::svc::DailyService::new(
             db.clone(),
             chip_service.clone(),
@@ -488,14 +588,21 @@ fn make_app_with_chat_service_and_permissions(
         artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService::new(
             db.clone(),
         ),
+        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(
+            db.clone(),
+            test_app_flags_rx(),
+        ),
         username: world.username.unwrap_or_else(|| "test-user".to_string()),
         bonsai_service: BonsaiService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_bonsai_tree: None,
-        initial_bonsai_care: None,
-        initial_bonsai_v2_tree: None,
         initial_bonsai_decay_protection: None,
-        pet_service: PetService::new(db.clone()),
+        pet_service: PetService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_pet: None,
+        aquarium_service: crate::app::hub::aquarium::svc::AquariumService::new(
+            db.clone(),
+            broadcast::channel::<ActivityEvent>(64).0,
+        ),
+        initial_aquarium_care: Default::default(),
         quest_service,
         quest_snapshot_rx,
         shop_service,
@@ -515,7 +622,7 @@ fn make_app_with_chat_service_and_permissions(
         nethack_host: String::new(),
         nethack_port: 2323,
         nethack_secret: String::new(),
-        nethack_awards: None,
+        nethack_activity: None,
         arcade_handle_service: crate::app::door::arcade::ArcadeHandleService::new(db.clone()),
         door_rc_service: crate::app::door::rc::DoorRcService::new(db.clone()),
         initial_door_rcs: Vec::new(),
@@ -535,6 +642,11 @@ fn make_app_with_chat_service_and_permissions(
         dopewars_host: String::new(),
         dopewars_port: 2324,
         dopewars_secret: String::new(),
+        bashquest_enabled: false,
+        bashquest_host: String::new(),
+        bashquest_port: 2330,
+        bashquest_secret: String::new(),
+        bashquest_awards: None,
         codekeep_enabled: false,
         codekeep_host: String::new(),
         codekeep_port: 2328,
@@ -548,25 +660,41 @@ fn make_app_with_chat_service_and_permissions(
         user_id,
         permissions,
         artboard_banned: false,
+        splash_piece: None,
         artboard_ban_expires_at: None,
         active_users: world.active_users,
         clubhouse_lobby: None,
         mention_ladders: crate::app::ai::ladder::MentionLadders::new(),
+        files: None,
         scratchpad_registry: world.scratchpad_registry,
         clubhouse_tutorial_done: true,
-        show_aquarium_tray: false,
+        // Everything already spent: no first-contact stage can fire inside
+        // a test app unless a test arms one on purpose.
+        first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks::spent_for_tests(),
+        first_contact_gate: crate::app::deadchannel::haunt::state::FirstContactGate::closed(),
+        app_flags_rx: test_app_flags_rx(),
+        app_flags: None,
+        runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
+            std::collections::HashMap::new(),
+        ),
+        zen_layout: None,
         // No SSH key: test apps follow the account default and persist no
         // per-device layout, which is also what ghost bot sessions do.
         key_fingerprint: None,
         key_layout: None,
-        afk_users: crate::state::new_afk_users(),
+        key_left_at: None,
         username_directory: None,
         flair_directory: None,
-        pomodoro_directory: None,
+        status_directory: None,
+        crown_service: None,
+        pot_service: None,
         activity_feed_rx: None,
-        initial_announcements: None,
-        is_new_user: false,
-        land_on_home: false,
+        is_new_user: world.is_new_user,
+        landing_page: match world.landing_page {
+            Some(page) => page,
+            None => late_core::models::user::LandingPage::Clubhouse,
+        },
+        paper_at_login: false,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         initial_theme_id: "contrast".to_string(),
         initial_interaction_mode: None,
@@ -575,7 +703,14 @@ fn make_app_with_chat_service_and_permissions(
         initial_radio_station: late_core::models::user::RadioStation::default(),
     })
     .expect("app");
+    let landed = app.screen;
     app.skip_splash_for_tests();
+    // The suite starts on Home, but a test that sets the landing inputs is
+    // asserting where the session landed, so it keeps that screen.
+    if world.landing_page.is_some() || world.is_new_user {
+        app.screen = landed;
+        app.sync_visible_chat_room();
+    }
     (app, chat_service)
 }
 
@@ -616,10 +751,20 @@ pub fn make_app_with_paired_client(
             Arc::new(Mutex::new(HashMap::new())),
         ),
         voice_service: VoiceService::new(VoiceConfig::disabled()),
+        stream_service: test_stream_service(db.clone(), activity_tx.clone()),
         chat_service: ChatService::new(db.clone(), notification_service.clone()),
         translation_service: crate::app::ai::translate::TranslationService::new(
             db.clone(),
             AiService::new(false, None),
+        ),
+        summary_service: crate::app::ai::summary::SummaryService::new(
+            db.clone(),
+            AiService::new(false, None),
+        ),
+        paper_service: crate::app::paper::svc::PaperService::new(
+            db.clone(),
+            AiService::new(false, None),
+            test_app_flags_rx(),
         ),
         notification_service: notification_service.clone(),
         article_service: ArticleService::new(
@@ -650,6 +795,8 @@ pub fn make_app_with_paired_client(
         le_word_service: LeWordService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         rubiks_cube_service: RubiksCubeService::new(db.clone(), activity_tx.clone()),
         initial_rubiks_cube_game: None,
+        sliding_puzzle_service: SlidingPuzzleService::new(db.clone(), activity_tx.clone()),
+        initial_sliding_puzzle_games: Vec::new(),
         initial_le_word_daily_word: None,
         initial_le_word_game: None,
         sudoku_service: SudokuService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
@@ -679,7 +826,11 @@ pub fn make_app_with_paired_client(
             chip_service.clone(),
             db.clone(),
         ),
-        darkroom_service: crate::app::door::darkroom::svc::DarkroomService::new(db.clone()),
+        darkroom_service: crate::app::door::darkroom::svc::DarkroomService::new(
+            ActivityPublisher::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
+            chip_service.clone(),
+            db.clone(),
+        ),
         daily_service: crate::app::lobby::daily::svc::DailyService::new(
             db.clone(),
             chip_service.clone(),
@@ -691,14 +842,21 @@ pub fn make_app_with_paired_client(
         artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService::new(
             db.clone(),
         ),
+        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(
+            db.clone(),
+            test_app_flags_rx(),
+        ),
         username: "test-user".to_string(),
         bonsai_service: BonsaiService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_bonsai_tree: None,
-        initial_bonsai_care: None,
-        initial_bonsai_v2_tree: None,
         initial_bonsai_decay_protection: None,
-        pet_service: PetService::new(db.clone()),
+        pet_service: PetService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_pet: None,
+        aquarium_service: crate::app::hub::aquarium::svc::AquariumService::new(
+            db.clone(),
+            broadcast::channel::<ActivityEvent>(64).0,
+        ),
+        initial_aquarium_care: Default::default(),
         quest_service,
         quest_snapshot_rx,
         shop_service,
@@ -718,7 +876,7 @@ pub fn make_app_with_paired_client(
         nethack_host: String::new(),
         nethack_port: 2323,
         nethack_secret: String::new(),
-        nethack_awards: None,
+        nethack_activity: None,
         arcade_handle_service: crate::app::door::arcade::ArcadeHandleService::new(db.clone()),
         door_rc_service: crate::app::door::rc::DoorRcService::new(db.clone()),
         initial_door_rcs: Vec::new(),
@@ -738,6 +896,11 @@ pub fn make_app_with_paired_client(
         dopewars_host: String::new(),
         dopewars_port: 2324,
         dopewars_secret: String::new(),
+        bashquest_enabled: false,
+        bashquest_host: String::new(),
+        bashquest_port: 2330,
+        bashquest_secret: String::new(),
+        bashquest_awards: None,
         codekeep_enabled: false,
         codekeep_host: String::new(),
         codekeep_port: 2328,
@@ -751,25 +914,38 @@ pub fn make_app_with_paired_client(
         user_id,
         permissions: Permissions::default(),
         artboard_banned: false,
+        splash_piece: None,
         artboard_ban_expires_at: None,
         active_users: None,
         clubhouse_lobby: None,
         mention_ladders: crate::app::ai::ladder::MentionLadders::new(),
+        files: None,
         scratchpad_registry: None,
         clubhouse_tutorial_done: true,
-        show_aquarium_tray: false,
+        // Everything already spent: no first-contact stage can fire inside
+        // a test app unless a test arms one on purpose.
+        first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks::spent_for_tests(),
+        first_contact_gate: crate::app::deadchannel::haunt::state::FirstContactGate::closed(),
+        app_flags_rx: test_app_flags_rx(),
+        app_flags: None,
+        runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
+            std::collections::HashMap::new(),
+        ),
+        zen_layout: None,
         // No SSH key: test apps follow the account default and persist no
         // per-device layout, which is also what ghost bot sessions do.
         key_fingerprint: None,
         key_layout: None,
-        afk_users: crate::state::new_afk_users(),
+        key_left_at: None,
         username_directory: None,
         flair_directory: None,
-        pomodoro_directory: None,
+        status_directory: None,
+        crown_service: None,
+        pot_service: None,
         activity_feed_rx: None,
-        initial_announcements: None,
         is_new_user: false,
-        land_on_home: false,
+        landing_page: late_core::models::user::LandingPage::Clubhouse,
+        paper_at_login: false,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         initial_icecast_stream: late_core::models::user::IcecastStream::default(),
         initial_radio_station: late_core::models::user::RadioStation::default(),
@@ -846,6 +1022,26 @@ pub async fn wait_for_render_contains(app: &mut App, needle: &str) {
     panic!("timed out waiting for render to contain {needle:?}; last render:\n{last_plain}");
 }
 
+/// Tick and render until `needle` disappears from the frame; panics at the
+/// timeout if it is still there. The absence counterpart of
+/// [`wait_for_render_contains`], for state that clears asynchronously.
+pub async fn wait_for_render_not_contains(app: &mut App, needle: &str) {
+    let deadline = Instant::now() + ASYNC_TEST_TIMEOUT;
+    let mut last_plain = String::new();
+    while Instant::now() < deadline {
+        app.tick();
+        app.reset_render();
+        let frame = app.render().expect("render");
+        let plain = strip_ansi(&String::from_utf8_lossy(&frame));
+        if !plain.contains(needle) {
+            return;
+        }
+        last_plain = plain;
+        sleep(Duration::from_millis(30)).await;
+    }
+    panic!("timed out waiting for render to drop {needle:?}; last render:\n{last_plain}");
+}
+
 pub async fn assert_render_not_contains_for(app: &mut App, needle: &str, duration: Duration) {
     let deadline = Instant::now() + duration;
     while Instant::now() < deadline {
@@ -889,4 +1085,19 @@ pub fn strip_ansi(input: &str) -> String {
         }
     }
     out
+}
+
+/// The switches a test app runs under: kill switch on (so an armed whisper
+/// or a forced burst plays), fuse unlit. The sender is dropped on purpose;
+/// a `watch` receiver keeps serving the last value.
+pub fn test_app_flags_rx()
+-> tokio::sync::watch::Receiver<Option<late_core::models::app_flag::AppFlags>> {
+    let (_tx, rx) = tokio::sync::watch::channel(Some(late_core::models::app_flag::AppFlags {
+        haunt_enabled: true,
+        haunt_live: false,
+        paper_enabled: true,
+        paper_outside_enabled: false,
+        artboard_gallery_enabled: true,
+    }));
+    rx
 }

@@ -61,13 +61,13 @@ fn every_equippable_item_carries_real_stats() {
 fn crafted_goods_form_a_clean_catalog() {
     assert_eq!(
         crafted().len(),
-        62,
-        "ten crafted kinds x six tiers, plus two masterwork sinks"
+        86,
+        "fourteen crafted kinds (ten plus the four oil families) x six tiers, plus two masterwork sinks"
     );
     for c in crafted() {
         assert!(
-            c.id >= CRAFTED_BASE && c.id < CRAFTED_BASE + 300,
-            "crafted item {} sits in the 4200 band",
+            c.id >= CRAFTED_BASE && c.id < CRAFTED_BASE + 400,
+            "crafted item {} sits in the 4200..4600 band",
             c.id
         );
         assert!(c.sell_price() >= 1, "crafted goods are worth something");
@@ -115,6 +115,7 @@ fn fish_catalog_is_a_clean_band_of_sell_and_edible_species() {
             }
             ItemKind::Valuable => sell_only += 1,
             ItemKind::Equipment(_) => panic!("no fish is equipment"),
+            ItemKind::Utility => panic!("no fish is a utility item"),
         }
     }
     // Roughly a third edible, the rest pure sell loot.
@@ -304,6 +305,40 @@ fn frontier_tier_one_beats_every_shop_slot() {
             "Frontier tier-1 {slot:?} (power {}) should clear the shop ceiling (power {ceiling}) with headroom",
             piece.power()
         );
+    }
+}
+
+#[test]
+fn the_market_ladder_walks_the_three_realms_and_keeps_its_slot() {
+    // The shops' deep stock is a slice of the realm catalogs, not a second copy
+    // of them, so the ladder has to be continuous across the Frontier/Reaches/
+    // Kaelmyr handoffs and always hand back the slot it was asked for. A drift
+    // between `GENERATED_SLOTS` and `market_item_id` would silently sell a helm
+    // as a ring.
+    for slot in Slot::WEARABLE {
+        let mut last = 0;
+        for tier in 1..=MARKET_TIER_MAX {
+            let it = item(market_item_id(tier, slot))
+                .unwrap_or_else(|| panic!("market tier {tier} has no {slot:?}"));
+            assert_eq!(it.slot(), Some(slot), "tier {tier} sold the wrong slot");
+            assert!(
+                it.power() > last,
+                "{slot:?} power should climb every market tier (tier {tier}: {} after {last})",
+                it.power()
+            );
+            last = it.power();
+        }
+    }
+    // Consumables are pointedly not on the market: the shops sell gear only, so
+    // the heal curve the whole combat tuning rests on stays where it was.
+    for shop in SHOPS {
+        for slot in shop.market_slots {
+            assert!(
+                item(market_item_id(1, *slot)).is_some_and(|it| it.slot().is_some()),
+                "{} stocks only wearable slots",
+                shop.shop_name
+            );
+        }
     }
 }
 
@@ -620,4 +655,22 @@ fn generated_loot_covers_the_previously_dropped_gear_slots() {
             );
         }
     }
+}
+
+#[test]
+fn oil_ids_roundtrip_school_and_tier() {
+    // `use_item` routes a vial to the coating action purely by id; a drifted
+    // id table would silently turn an oil into an unusable trinket.
+    for (s, school) in OIL_SCHOOLS.iter().enumerate() {
+        for t in 0..6u32 {
+            let id = oil_id(s as u32, t);
+            assert_eq!(
+                oil_school_tier(id),
+                Some((*school, t)),
+                "oil id {id} must map back to its school and tier"
+            );
+            assert!(item(id).is_some(), "oil id {id} resolves to a real item");
+        }
+    }
+    assert_eq!(oil_school_tier(poison_id(2)), None, "poisons are not oils");
 }

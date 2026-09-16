@@ -1,4 +1,5 @@
-use late_core::models::user_ssh_key::{KeyLayout, UserSshKey};
+use chrono::{DateTime, Utc};
+use late_core::models::user_ssh_key::{KeyLayout, UserSshKey, extract_key_layout};
 use late_core::models::{artboard_ban::ArtboardBan, user::User};
 use tokio::sync::{broadcast, mpsc};
 use uuid::Uuid;
@@ -37,6 +38,7 @@ pub struct ArcadeSessionPreloads {
     pub initial_le_word_daily_word: Option<late_core::models::le_word::DailyWord>,
     pub initial_le_word_game: Option<late_core::models::le_word::Game>,
     pub initial_rubiks_cube_game: Option<late_core::models::rubiks_cube::Game>,
+    pub initial_sliding_puzzle_games: Vec<late_core::models::sliding_puzzle::Game>,
     pub initial_sudoku_games: Vec<late_core::models::sudoku::Game>,
     pub initial_nonogram_games: Vec<late_core::models::nonogram::Game>,
     pub initial_solitaire_games: Vec<late_core::models::solitaire::Game>,
@@ -50,6 +52,7 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
     let traffic_service = state.traffic_service.clone();
     let le_word_service = state.le_word_service.clone();
     let rubiks_cube_service = state.rubiks_cube_service.clone();
+    let sliding_puzzle_service = state.sliding_puzzle_service.clone();
     let sudoku_service = state.sudoku_service.clone();
     let nonogram_service = state.nonogram_service.clone();
     let solitaire_service = state.solitaire_service.clone();
@@ -67,6 +70,7 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
         initial_le_word_daily_word,
         initial_le_word_game,
         initial_rubiks_cube_game,
+        initial_sliding_puzzle_games,
         initial_sudoku_games,
         initial_nonogram_games,
         initial_solitaire_games,
@@ -173,6 +177,15 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
             }
         },
         async {
+            match sliding_puzzle_service.load_games(user_id).await {
+                Ok(games) => games,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "failed to load Sliding Puzzle game states");
+                    Vec::new()
+                }
+            }
+        },
+        async {
             match sudoku_service.load_games(user_id).await {
                 Ok(games) => games,
                 Err(e) => {
@@ -222,6 +235,7 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
         initial_le_word_daily_word,
         initial_le_word_game,
         initial_rubiks_cube_game,
+        initial_sliding_puzzle_games,
         initial_sudoku_games,
         initial_nonogram_games,
         initial_solitaire_games,
@@ -229,30 +243,51 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
     }
 }
 
-/// This device's stored home rail layout, keyed by the SSH key the session
-/// authenticated with. `None` for a keyless session, a key with nothing stored,
-/// or a failed read: all three follow the account default, which is why a
-/// failure here is logged and swallowed rather than failing the connection.
-pub async fn load_device_rails(
+/// What the SSH key a session authenticated with remembers about its device.
+/// Every field is `None` for a keyless session, a key with nothing stored, or
+/// a failed read, and every consumer treats `None` as "no device fact":
+/// the rails follow the account default and a bare `/summary` opens its
+/// default window. That is why a failure here is logged and swallowed rather
+/// than failing the connection.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct DeviceState {
+    pub layout: Option<KeyLayout>,
+    /// When the last session on this device went quiet before it ended.
+    /// Taken, not read: the row is cleared by the read, so this session is
+    /// the only one that will ever be handed this particular leave.
+    pub left_at: Option<DateTime<Utc>>,
+}
+
+pub async fn load_device_state(
     state: &State,
     user_id: Uuid,
     key_fingerprint: Option<&str>,
-) -> Option<KeyLayout> {
-    let fingerprint = key_fingerprint?;
+) -> DeviceState {
+    let Some(fingerprint) = key_fingerprint else {
+        return DeviceState::default();
+    };
     let client = match state.db.get().await {
         Ok(client) => client,
         Err(e) => {
-            tracing::warn!(error = ?e, "failed to get db client for device rail layout");
-            return None;
+            tracing::warn!(error = ?e, "failed to get db client for device state");
+            return DeviceState::default();
         }
     };
-    match UserSshKey::layout_for(&client, user_id, fingerprint).await {
-        Ok(layout) => layout,
+    let layout = match UserSshKey::find_by_fingerprint(&client, user_id, fingerprint).await {
+        Ok(key) => key.and_then(|key| extract_key_layout(&key.settings)),
         Err(e) => {
             tracing::warn!(error = ?e, "failed to load device rail layout");
             None
         }
-    }
+    };
+    let left_at = match UserSshKey::take_left_at(&client, user_id, fingerprint).await {
+        Ok(left_at) => left_at,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to take device left_at");
+            None
+        }
+    };
+    DeviceState { layout, left_at }
 }
 
 pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs) -> SessionConfig {
@@ -283,45 +318,33 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         initial_le_word_daily_word,
         initial_le_word_game,
         initial_rubiks_cube_game,
+        initial_sliding_puzzle_games,
         initial_sudoku_games,
         initial_nonogram_games,
         initial_solitaire_games,
         initial_minesweeper_games,
     } = load_arcade_session_preloads(state, user_id).await;
-    let (initial_bonsai_tree, initial_bonsai_care, initial_bonsai_decay_protection) =
-        match state.bonsai_service.ensure_tree_with_care(user_id).await {
-            Ok((tree, care, protection)) => (Some(tree), Some(care), protection),
-            Err(e) => {
-                tracing::warn!(error = ?e, "failed to load/create bonsai tree");
-                (None, None, None)
-            }
-        };
-    let shop_snapshot_rx = state.shop_service.subscribe_snapshot(user_id);
-    let shop_snapshot = match state.shop_service.refresh_user(user_id).await {
-        Ok(snapshot) => Some(snapshot),
+    let initial_bonsai_tree = match state.bonsai_service.ensure_tree(user_id).await {
+        Ok(tree) => Some(tree),
         Err(e) => {
-            tracing::warn!(error = ?e, "failed to refresh shop snapshot");
+            tracing::warn!(error = ?e, "failed to load/create bonsai tree");
             None
         }
     };
-    let initial_bonsai_v2_tree = if shop_snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.entitlements.has_dynamic_bonsai())
+    let initial_bonsai_decay_protection = match state.bonsai_service.decay_protection(user_id).await
     {
-        match state
-            .bonsai_service
-            .ensure_v2_tree(user_id, initial_bonsai_tree.as_ref())
-            .await
-        {
-            Ok(tree) => Some(tree),
-            Err(e) => {
-                tracing::warn!(error = ?e, "failed to load/create bonsai v2 tree");
-                None
-            }
+        Ok(protection) => protection,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to load bonsai decay protection");
+            None
         }
-    } else {
-        None
     };
+    let shop_snapshot_rx = state.shop_service.subscribe_snapshot(user_id);
+    // Primes the per-user snapshot channel subscribed above; the session
+    // reads everything it needs from that channel.
+    if let Err(e) = state.shop_service.refresh_user(user_id).await {
+        tracing::warn!(error = ?e, "failed to refresh shop snapshot");
+    }
     let initial_chip_balance = match state.chip_service.ensure_chips(user_id).await {
         Ok(chips) => chips.balance,
         Err(e) => {
@@ -329,11 +352,18 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
             0
         }
     };
-    let initial_pet = match state.pet_service.ensure_cat(user_id).await {
-        Ok(cat) => Some(cat),
+    let initial_pet = match state.pet_service.ensure_pet(user_id).await {
+        Ok(pet) => Some(pet),
         Err(e) => {
-            tracing::warn!(error = ?e, "failed to load/create cat companion");
+            tracing::warn!(error = ?e, "failed to load/create pet companion");
             None
+        }
+    };
+    let initial_aquarium_care = match state.aquarium_service.bootstrap(user_id).await {
+        Ok(care) => care,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to load aquarium care");
+            Default::default()
         }
     };
     let quest_snapshot_rx = state.quest_service.subscribe_snapshot(user_id);
@@ -360,22 +390,10 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
             None
         }
     };
-    let initial_announcements = match state.db.get().await {
-        Ok(client) => {
-            match crate::app::announcements::load_login_announcements(&client, user_id).await {
-                Ok(announcements) => announcements,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "failed to load login announcements");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = ?e, "failed to get db client for login announcements");
-            None
-        }
-    };
-
+    // The door: the next of last month's podium pieces this account has
+    // not seen, or the cup. One claim per login, the gallery logs its
+    // own failures.
+    let splash_piece = state.gallery_service.claim_splash_piece(user_id).await;
     let initial_door_rcs = match state.door_rc_service.list(user_id).await {
         Ok(rcs) => rcs,
         Err(e) => {
@@ -384,18 +402,28 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         }
     };
 
-    let key_layout = load_device_rails(state, user_id, key_fingerprint.as_deref()).await;
+    let device = load_device_state(state, user_id, key_fingerprint.as_deref()).await;
 
+    let first_contact_gate = crate::app::deadchannel::haunt::svc::bootstrap_gate(
+        state,
+        permissions.can_moderate(),
+        &user,
+    )
+    .await;
     SessionConfig {
         cols,
         rows,
         term,
         key_fingerprint,
-        key_layout,
+        key_layout: device.layout,
+        key_left_at: device.left_at,
         audio_service: state.audio_service.clone(),
         voice_service: state.voice_service.clone(),
+        stream_service: state.stream_service.clone(),
         chat_service: state.chat_service.clone(),
         translation_service: state.translation_service.clone(),
+        summary_service: state.summary_service.clone(),
+        paper_service: state.paper_service.clone(),
         notification_service: state.notification_service.clone(),
         article_service: state.article_service.clone(),
         feed_service: state.feed_service.clone(),
@@ -411,6 +439,8 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         traffic_service: state.traffic_service.clone(),
         rubiks_cube_service: state.rubiks_cube_service.clone(),
         initial_rubiks_cube_game,
+        sliding_puzzle_service: state.sliding_puzzle_service.clone(),
+        initial_sliding_puzzle_games,
         initial_tetris_game,
         initial_snake_game,
         initial_tetris_high_score,
@@ -439,14 +469,16 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         dartboard_server: state.dartboard_server.clone(),
         dartboard_provenance: state.dartboard_provenance.clone(),
         artboard_snapshot_service: ArtboardSnapshotService::new(state.db.clone()),
+        gallery_service: state.gallery_service.clone(),
+        splash_piece,
         username: user.username.clone(),
         bonsai_service: state.bonsai_service.clone(),
         initial_bonsai_tree,
-        initial_bonsai_care,
-        initial_bonsai_v2_tree,
         initial_bonsai_decay_protection,
         pet_service: state.pet_service.clone(),
         initial_pet,
+        aquarium_service: state.aquarium_service.clone(),
+        initial_aquarium_care,
         quest_service: state.quest_service.clone(),
         quest_snapshot_rx,
         shop_service: state.shop_service.clone(),
@@ -465,15 +497,13 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         nethack_host: state.config.nethack_host.clone(),
         nethack_port: state.config.nethack_port,
         nethack_secret: state.config.nethack_secret.clone(),
-        nethack_awards: Some(crate::app::door::nethack::award::NethackAwards::new(
-            state.chip_service.clone(),
-            state.db.clone(),
+        nethack_activity: Some(
             crate::app::activity::publisher::ActivityPublisher::new(
                 state.db.clone(),
                 state.activity_feed.clone(),
             )
             .with_username_directory(state.username_directory.clone()),
-        )),
+        ),
         dcss_enabled: state.config.dcss_enabled,
         dcss_host: state.config.dcss_host.clone(),
         dcss_port: state.config.dcss_port,
@@ -490,6 +520,13 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         dopewars_host: state.config.dopewars_host.clone(),
         dopewars_port: state.config.dopewars_port,
         dopewars_secret: state.config.dopewars_secret.clone(),
+        bashquest_enabled: state.config.bashquest_enabled,
+        bashquest_host: state.config.bashquest_host.clone(),
+        bashquest_port: state.config.bashquest_port,
+        bashquest_secret: state.config.bashquest_secret.clone(),
+        bashquest_awards: Some(crate::app::door::bashquest::graduate::BashquestAwards::new(
+            state.db.clone(),
+        )),
         codekeep_enabled: state.config.codekeep_enabled,
         codekeep_host: state.config.codekeep_host.clone(),
         codekeep_port: state.config.codekeep_port,
@@ -503,24 +540,33 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         active_users: Some(state.active_users.clone()),
         clubhouse_lobby: Some(state.clubhouse_lobby.clone()),
         mention_ladders: state.mention_ladders.clone(),
+        files: state.config.files.clone(),
         scratchpad_registry: Some(state.scratchpad_registry.clone()),
         clubhouse_tutorial_done: late_core::models::user::extract_clubhouse_tutorial_done(
             &user.settings,
         ),
-        show_aquarium_tray: late_core::models::user::extract_show_aquarium_tray(&user.settings),
-        afk_users: state.afk_users.clone(),
+        first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks::from_settings(
+            &user.settings,
+        ),
+        first_contact_gate,
+        app_flags_rx: state.app_flags.subscribe(),
+        app_flags: Some(state.app_flags.clone()),
+        runner_looks_rx: state.runner_looks.subscribe(),
+        zen_layout: late_core::models::user::extract_zen_layout(&user.settings),
         username_directory: Some(state.username_directory.clone()),
         flair_directory: Some(state.flair_directory.clone()),
-        pomodoro_directory: Some(state.pomodoro_directory.clone()),
+        status_directory: Some(state.status_directory.clone()),
+        crown_service: Some(state.crown_service.clone()),
+        pot_service: Some(state.pot_service.clone()),
         activity_feed_rx,
-        initial_announcements,
         user_id,
         permissions,
         artboard_banned: artboard_ban.is_some(),
         artboard_ban_expires_at: artboard_ban.and_then(|ban| ban.expires_at),
         leaderboard_rx: Some(state.leaderboard_service.subscribe()),
         is_new_user,
-        land_on_home: late_core::models::user::extract_land_on_home(&user.settings),
+        landing_page: late_core::models::user::extract_landing_page(&user.settings),
+        paper_at_login: late_core::models::user::extract_paper_at_login(&user.settings),
         initial_theme_id: late_core::models::user::extract_theme_id(&user.settings)
             .unwrap_or_else(|| theme::DEFAULT_ID.to_string()),
         initial_interaction_mode: late_core::models::user::extract_interaction_mode(&user.settings),

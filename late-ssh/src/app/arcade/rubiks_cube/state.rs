@@ -100,6 +100,14 @@ impl State {
         &self.stickers
     }
 
+    pub fn puzzle_date(&self) -> NaiveDate {
+        self.puzzle_date
+    }
+
+    pub fn user_moves(&self) -> u32 {
+        self.user_moves
+    }
+
     pub fn has_started(&self) -> bool {
         self.user_moves > 0
     }
@@ -124,7 +132,16 @@ impl State {
         self.reset_pending
     }
 
+    /// Arm the reset on the first press, perform it on the second. A solved
+    /// daily is finished: re-scrambling it would put the day's cube back on
+    /// the board with the win already banked, so the key is refused outright
+    /// rather than armed.
     pub fn request_reset(&mut self) -> bool {
+        if self.is_solved() {
+            self.reset_pending = false;
+            self.message = format!("Daily cube {} is already solved.", self.daily_label());
+            return false;
+        }
         if self.reset_pending {
             self.reset_pending = false;
             return true;
@@ -156,20 +173,20 @@ impl State {
         self.save_async();
     }
 
-    pub fn ensure_current_daily(&mut self) {
+    /// Roll the cube forward when the UTC date changes under a live session.
+    /// Returns true when it moved.
+    pub fn ensure_current_daily(&mut self) -> bool {
         let today = Utc::now().date_naive();
         if self.puzzle_date == today {
-            return;
+            return false;
         }
         *self = Self::new_for_date(self.user_id, self.svc.clone(), today);
+        true
     }
 
     fn apply_daily_scramble(&mut self) {
-        self.stickers = solved_stickers();
+        self.stickers = scrambled_stickers(self.puzzle_date);
         self.user_moves = 0;
-        for cube_move in daily_scramble(self.puzzle_date) {
-            self.apply_move_internal(cube_move);
-        }
     }
 
     pub fn turn_view(&mut self, turn: ViewTurn) {
@@ -235,39 +252,7 @@ impl State {
     }
 
     fn apply_move_internal(&mut self, cube_move: CubeMove) {
-        let (axis, layer, normal_sign) = move_axis(cube_move.face);
-        let mut quarter_turns = if cube_move.inverse {
-            normal_sign
-        } else {
-            -normal_sign
-        };
-        while quarter_turns < 0 {
-            quarter_turns += 4;
-        }
-        for _ in 0..quarter_turns {
-            self.rotate_layer_positive(axis, layer);
-        }
-    }
-
-    fn rotate_layer_positive(&mut self, axis: Axis, layer: i8) {
-        let old = self.stickers;
-        let mut next = old;
-        for face in FACES {
-            for row in 0..3 {
-                for col in 0..3 {
-                    let (position, normal) = sticker_coord(face, row, col);
-                    if coord_axis(position, axis) != layer {
-                        continue;
-                    }
-                    let new_position = rotate_coord_positive(position, axis);
-                    let new_normal = rotate_coord_positive(normal, axis);
-                    let (new_face, new_row, new_col) = face_row_col(new_normal, new_position);
-                    next[new_face.index()][new_row * 3 + new_col] =
-                        old[face.index()][row * 3 + col];
-                }
-            }
-        }
-        self.stickers = next;
+        apply_move(&mut self.stickers, cube_move);
     }
 }
 
@@ -314,6 +299,51 @@ impl Sticker {
             _ => None,
         }
     }
+}
+
+/// Today's cube as the player first sees it: a solved cube with the daily
+/// scramble applied. Pure, so the share card can draw the start.
+pub fn scrambled_stickers(puzzle_date: NaiveDate) -> [[Sticker; 9]; 6] {
+    let mut stickers = solved_stickers();
+    for cube_move in daily_scramble(puzzle_date) {
+        apply_move(&mut stickers, cube_move);
+    }
+    stickers
+}
+
+fn apply_move(stickers: &mut [[Sticker; 9]; 6], cube_move: CubeMove) {
+    let (axis, layer, normal_sign) = move_axis(cube_move.face);
+    let mut quarter_turns = if cube_move.inverse {
+        normal_sign
+    } else {
+        -normal_sign
+    };
+    while quarter_turns < 0 {
+        quarter_turns += 4;
+    }
+    for _ in 0..quarter_turns {
+        rotate_layer_positive(stickers, axis, layer);
+    }
+}
+
+fn rotate_layer_positive(stickers: &mut [[Sticker; 9]; 6], axis: Axis, layer: i8) {
+    let old = *stickers;
+    let mut next = old;
+    for face in FACES {
+        for row in 0..3 {
+            for col in 0..3 {
+                let (position, normal) = sticker_coord(face, row, col);
+                if coord_axis(position, axis) != layer {
+                    continue;
+                }
+                let new_position = rotate_coord_positive(position, axis);
+                let new_normal = rotate_coord_positive(normal, axis);
+                let (new_face, new_row, new_col) = face_row_col(new_normal, new_position);
+                next[new_face.index()][new_row * 3 + new_col] = old[face.index()][row * 3 + col];
+            }
+        }
+    }
+    *stickers = next;
 }
 
 fn daily_scramble(puzzle_date: NaiveDate) -> Vec<CubeMove> {

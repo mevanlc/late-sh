@@ -2,15 +2,16 @@
 
 use crate::authz::Permissions;
 use crate::test_helpers::{
-    assert_render_not_contains_for, chat_compose_app, make_app, make_app_with_chat_service,
-    make_app_with_permissions, new_test_db, render_plain, wait_for_render_contains, wait_until,
-    with_session_key,
+    assert_render_not_contains_for, chat_compose_app, make_app, make_app_in_world,
+    make_app_with_chat_service, make_app_with_permissions, new_test_db, render_plain, strip_ansi,
+    wait_for_render_contains, wait_for_render_not_contains, wait_until, with_session_key,
 };
 use late_core::models::cyberspace_account::CyberspaceAccount;
 use late_core::models::user::{RightSidebarMode, RoomListMode};
-use late_core::models::user_ssh_key::{KeyLayout, UserSshKey};
+use late_core::models::user_ssh_key::{KeyLayout, UserSshKey, extract_key_layout};
 use late_core::models::{
     chat_message::{ChatMessage, ChatMessageParams},
+    chat_message_gild::{ChatMessageGild, GildPlacement, GildTier},
     chat_message_reaction::ChatMessageReaction,
     chat_room::ChatRoom,
     chat_room_member::ChatRoomMember,
@@ -132,8 +133,210 @@ async fn backtick_detaches_a_running_roguelike_and_hops_back_in() {
 }
 
 #[tokio::test]
+async fn backtick_hops_out_of_lateania_and_back_in_while_the_window_is_live() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "lateania-detach-flow").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "lateania-detach-flow-it");
+
+    app.set_screen(Screen::Lateania);
+    app.enter_lateania();
+    assert!(app.lateania_state.is_some(), "the world is live");
+
+    // Backtick hops out: unlike the roguelikes the session tears down (the
+    // character autosaves out of the world), but the recency window keeps
+    // Lateania on the cycle. With no other stops the hop wraps to Home chat.
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert!(
+        app.lateania_state.is_none(),
+        "expected the hop-out to drop the per-session world state"
+    );
+    assert!(
+        app.lateania_recently_active(),
+        "expected the detach to arm the recency window"
+    );
+
+    // From Home, the same backtick re-joins the saved character directly,
+    // skipping the character-select landing.
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Lateania);
+    assert!(
+        app.lateania_state.is_some(),
+        "expected the hop-in to re-enter the world"
+    );
+
+    // Hop out again, then clear the window: without it Lateania is no longer
+    // a stop, so backtick from Home has nowhere to go.
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Dashboard);
+    app.lateania_detached_at = None;
+    app.handle_input(b"`");
+    assert_eq!(
+        app.screen,
+        Screen::Dashboard,
+        "expected no hop once the recency window is gone"
+    );
+    assert!(app.lateania_state.is_none());
+}
+
+#[tokio::test]
+async fn backtick_hops_out_of_darkroom_and_the_idle_deadline_ends_the_visit() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "darkroom-detach-flow").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "darkroom-detach-flow-it");
+
+    app.set_screen(Screen::Darkroom);
+    app.enter_darkroom();
+    assert!(app.darkroom_state.is_some(), "the door is loaded");
+
+    // Backtick hops out with the door still loaded (the village goes on
+    // growing off-screen). With no other stops the hop wraps to Home chat.
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert!(
+        app.darkroom_state.is_some(),
+        "expected the hop-out to keep the door loaded"
+    );
+
+    // From Home, the same backtick hops straight back in.
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Darkroom);
+
+    // Sitting on the door reading is not being away: with the idle deadline
+    // forced, a tick with the door as the open screen keeps the visit alive
+    // and stamps presence, so a keyless exit right after (a Ctrl+G lobby
+    // jump, played here as a bare screen switch) inherits none of the
+    // banked on-screen time.
+    app.darkroom_state
+        .as_mut()
+        .expect("darkroom state")
+        .force_idle_for_test();
+    app.tick();
+    assert!(
+        app.darkroom_state.is_some(),
+        "expected the open screen to shield the door from the reap"
+    );
+    app.set_screen(Screen::Dashboard);
+    app.tick();
+    assert!(
+        app.darkroom_state.is_some(),
+        "expected on-screen time not to count toward the idle deadline"
+    );
+
+    // Now actually go away for half an hour: the next tick ends the visit
+    // exactly as an explicit leave would, and the door stops being a stop
+    // on the cycle.
+    app.darkroom_state
+        .as_mut()
+        .expect("darkroom state")
+        .force_idle_for_test();
+    assert!(
+        app.tick(),
+        "expected the reaping tick to dirty the frame so the hub pip clears"
+    );
+    assert!(
+        app.darkroom_state.is_none(),
+        "expected the idle deadline to save and drop the door"
+    );
+    app.handle_input(b"`");
+    assert_eq!(
+        app.screen,
+        Screen::Dashboard,
+        "expected no hop once the door has idled out"
+    );
+}
+
+#[tokio::test]
+async fn backtick_hops_out_of_green_dragon_and_the_idle_deadline_ends_the_visit() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "greendragon-detach-flow").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "greendragon-detach-flow-it");
+
+    app.set_screen(Screen::GreenDragon);
+    app.enter_greendragon();
+    assert!(app.greendragon_state.is_some(), "the door is loaded");
+
+    // Same hop-out/hop-in as Dark Room: the character stays loaded (and so
+    // still listed as online) across the hop.
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert!(
+        app.greendragon_state.is_some(),
+        "expected the hop-out to keep the character loaded"
+    );
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::GreenDragon);
+
+    // Same presence rule as Dark Room: an open door is never reaped, and the
+    // on-screen tick stamps the clock, so a keyless exit does not inherit
+    // the banked on-screen time.
+    app.greendragon_state
+        .as_mut()
+        .expect("greendragon state")
+        .force_idle_for_test();
+    app.tick();
+    assert!(
+        app.greendragon_state.is_some(),
+        "expected the open screen to shield the door from the reap"
+    );
+    app.set_screen(Screen::Dashboard);
+    app.tick();
+    assert!(
+        app.greendragon_state.is_some(),
+        "expected on-screen time not to count toward the idle deadline"
+    );
+
+    app.greendragon_state
+        .as_mut()
+        .expect("greendragon state")
+        .force_idle_for_test();
+    assert!(
+        app.tick(),
+        "expected the reaping tick to dirty the frame so the hub pip clears"
+    );
+    assert!(
+        app.greendragon_state.is_none(),
+        "expected the idle deadline to save and drop the character"
+    );
+}
+
+#[tokio::test]
+async fn backtick_is_refused_mid_fight_in_green_dragon() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "greendragon-fight-hold").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "greendragon-fight-hold-it");
+
+    app.set_screen(Screen::GreenDragon);
+    app.enter_greendragon();
+    app.greendragon_state
+        .as_mut()
+        .expect("greendragon state")
+        .force_fight_for_test();
+
+    // Esc mid-fight is a flee roll, and PvP, dragon, and master fights refuse
+    // to let you run at all; a backtick hop would sidestep all of that (the
+    // idle reap would erase the encounter), so the key stays with the fight.
+    app.handle_input(b"`");
+    assert_eq!(
+        app.screen,
+        Screen::GreenDragon,
+        "expected the hop to be refused mid-fight"
+    );
+    assert!(app.greendragon_state.is_some());
+}
+
+#[tokio::test]
 async fn games_hub_config_modal_saves_and_clears_the_door_rc() {
     use crate::app::common::primitives::Screen;
+    use crate::app::door::hub::state::HubGame;
     use late_core::models::door_rc::{DoorRc, DoorRcGame};
 
     let test_db = new_test_db().await;
@@ -141,10 +344,15 @@ async fn games_hub_config_modal_saves_and_clears_the_door_rc() {
     let client = test_db.db.get().await.expect("db client");
     let mut app = make_app(test_db.db.clone(), user.id, "door-rc-flow-it");
 
-    // Walk the hub sidebar to NetHack (Lateania, DCSS, NetHack) and open the
-    // config box.
+    // Walk the hub sidebar down to NetHack and open the config box. The step
+    // count comes from the selector order itself, so a game inserted above
+    // NetHack moves the cursor here instead of opening another game's config.
+    let steps = HubGame::ALL
+        .iter()
+        .position(|game| *game == HubGame::Nethack)
+        .expect("nethack is in the selector");
     app.set_screen(Screen::Games);
-    app.handle_input(b"jj");
+    app.handle_input(&b"j".repeat(steps));
     app.handle_input(b"c");
     let frame = render_plain(&mut app);
     assert!(
@@ -485,8 +693,61 @@ async fn global_ctrl_g_toggles_lobby_and_slash_shop_opens_shop() {
     );
 }
 
+/// `/lobby`, `/zen`, and `/guide` are the typed fallbacks for Ctrl+G, Ctrl+F,
+/// and `?`, for terminals that swallow the chords.
 #[tokio::test]
-async fn global_w_keeps_old_bonsai_without_dynamic_selection() {
+async fn slash_lobby_zen_and_guide_mirror_their_keys() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "slash-nav-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut app = make_app(test_db.db.clone(), user.id, "slash-nav-flow-it");
+    wait_for_render_contains(&mut app, " Home ").await;
+    wait_for_render_contains(&mut app, "lounge").await;
+
+    app.handle_input(b"i/lobby\r");
+    wait_for_render_contains(&mut app, "house tables").await;
+    app.handle_input(b"\x07");
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("house tables"),
+        "expected Ctrl+G to close the lobby /lobby opened; frame={frame:?}"
+    );
+
+    app.handle_input(b"i/guide\r");
+    wait_for_render_contains(&mut app, " Guide ").await;
+    app.handle_input(b"?");
+    assert!(!app.show_help, "? should close the guide /guide opened");
+
+    app.handle_input(b"i/zen\r");
+    assert_eq!(app.screen, Screen::Zen);
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Dashboard);
+
+    // /redraw re-emits every cell, the way Ctrl+L does: the frame after it
+    // carries more than a settled diff.
+    let _ = app.render().expect("render");
+    let settled = strip_ansi(&String::from_utf8_lossy(&app.render().expect("render")));
+    app.handle_input(b"i/redraw\r");
+    let repainted = strip_ansi(&String::from_utf8_lossy(&app.render().expect("render")));
+    assert!(
+        repainted.contains("lounge") && repainted.len() > settled.len(),
+        "expected /redraw to repaint the whole screen; settled={} bytes, repainted={} bytes",
+        settled.len(),
+        repainted.len()
+    );
+}
+
+#[tokio::test]
+async fn global_w_opens_bonsai_care() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "w-bonsai-mod-it").await;
     let client = test_db.db.get().await.expect("db client");
@@ -505,11 +766,58 @@ async fn global_w_keeps_old_bonsai_without_dynamic_selection() {
     wait_for_render_contains(&mut app, " Home ").await;
 
     app.handle_input(b"w");
-    wait_for_render_contains(&mut app, " Bonsai Care ").await;
+    wait_for_render_contains(&mut app, " Bonsai ").await;
     let frame = render_plain(&mut app);
     assert!(
-        !frame.contains(" Dynamic Bonsai ") && !frame.contains("Branch Graph"),
-        "expected w to keep the old Bonsai care modal; frame={frame:?}"
+        frame.contains("Day 0") && frame.contains("vigor"),
+        "expected w to open the bonsai care modal; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn zen_yields_the_music_chord_and_w_to_bonsai_care() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-chords-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut app = make_app_with_permissions(
+        test_db.db.clone(),
+        user.id,
+        "zen-chords-flow-it",
+        Permissions::new(false, true),
+    );
+    wait_for_render_contains(&mut app, " Home ").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+    let tiles = app.zen.leaf_count();
+    let source = app.paired_source;
+
+    // `v x` is the global audio-source chord. The page used to claim `x`
+    // (and `X` still closes a tile), so the suffix must reach the chord.
+    app.handle_input(b"v");
+    app.handle_input(b"x");
+    assert_ne!(
+        app.paired_source, source,
+        "v x swaps the audio source on Zen"
+    );
+    assert_eq!(
+        app.zen.leaf_count(),
+        tiles,
+        "the chord suffix closes no tile"
+    );
+
+    // The bonsai is tended in the same modal as everywhere else.
+    app.handle_input(b"w");
+    wait_for_render_contains(&mut app, " Bonsai ").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Day 0") && frame.contains("vigor"),
+        "expected w on Zen to open the bonsai care modal; frame={frame:?}"
     );
 }
 
@@ -536,7 +844,7 @@ async fn global_ctrl_b_is_ignored_for_all_users() {
         app.handle_input(b"\x02");
         let frame = render_plain(&mut app);
         assert!(
-            !frame.contains(" Dynamic Bonsai ") && !frame.contains("Branch Graph"),
+            !frame.contains(" Bonsai ") && !app.show_bonsai_modal,
             "expected Ctrl+B to stay inert for {label}; frame={frame:?}"
         );
     }
@@ -552,6 +860,10 @@ async fn artboard_view_help_and_active_input_share_one_lifecycle() {
     wait_for_render_contains(&mut app, "Mode       view").await;
     wait_for_render_contains(&mut app, "Cursor     0,0").await;
 
+    // The page lands on the rail; Enter on Board hands the keys to the
+    // board cursor.
+    wait_for_render_contains(&mut app, "rail j/k").await;
+    app.handle_input(b"\r");
     app.handle_input(b"\x1b[C");
     wait_for_render_contains(&mut app, "Cursor     1,0").await;
 
@@ -574,14 +886,19 @@ async fn artboard_view_help_and_active_input_share_one_lifecycle() {
         "q should close local Artboard help"
     );
 
+    // `?` is the global guide here as on every page; Ctrl+P is the
+    // Artboard's own help.
     app.handle_input(b"?");
-    wait_for_render_contains(&mut app, "Artboard Help").await;
+    wait_for_render_contains(&mut app, " Guide ").await;
     assert!(
-        render_plain(&mut app).contains("Artboard Help"),
-        "? in view mode should open local Artboard help"
+        !render_plain(&mut app).contains("Artboard Help"),
+        "? in view mode should open the global guide, not the local help"
     );
-    app.handle_input(b"q");
+    app.handle_input(b"?");
+    assert!(!app.show_help, "? should close the guide");
 
+    // The rail folded away when the board took the keys, so the board's
+    // cell (8, 3) is at screen column 10.
     app.handle_input(b"\x1b[<0;10;5M");
     wait_for_render_contains(&mut app, "Mode       active").await;
     wait_for_render_contains(&mut app, "Cursor     8,3").await;
@@ -968,6 +1285,19 @@ async fn chat_reaction_leader_second_f_shows_reaction_owners_modal() {
     ChatMessageReaction::toggle(&client, message.id, thinking.id, "🤔")
         .await
         .expect("thinking reaction");
+    // Two gilds at different tiers: the overlay lists them above the
+    // reactions, best tier first, with the buyer under each.
+    {
+        let mut gild_client = test_db.db.get().await.expect("db client");
+        let tx = gild_client.transaction().await.expect("tx");
+        for (buyer, tier) in [(&thinking, GildTier::Bronze), (&thumbs_1, GildTier::Gold)] {
+            let placed = ChatMessageGild::place_in_tx(&tx, message.id, author.id, buyer.id, tier)
+                .await
+                .expect("place gild");
+            assert!(matches!(placed, GildPlacement::Placed(_)), "{placed:?}");
+        }
+        tx.commit().await.expect("commit gilds");
+    }
 
     let mut app = make_app(test_db.db.clone(), viewer.id, "f-owners-flow-it");
     wait_for_render_contains(&mut app, "owner reaction target").await;
@@ -980,7 +1310,20 @@ async fn chat_reaction_leader_second_f_shows_reaction_owners_modal() {
     wait_for_render_contains(&mut app, "👍 6 reactions").await;
     wait_for_render_contains(&mut app, "[+2 more]").await;
     wait_for_render_contains(&mut app, "@f-owners-thinking").await;
+    wait_for_render_contains(&mut app, "◆◆◆ 1 Gold gild").await;
+    wait_for_render_contains(&mut app, "◆ 1 Bronze gild").await;
     let plain = render_plain(&mut app);
+    let gold_at = plain.find("◆◆◆ 1 Gold gild").expect("gold block");
+    let bronze_at = plain.find("◆ 1 Bronze gild").expect("bronze block");
+    let thumbs_at = plain.find("👍 6 reactions").expect("reaction block");
+    assert!(
+        gold_at < bronze_at && bronze_at < thumbs_at,
+        "gilds lead, best tier first, then reactions: {plain:?}"
+    );
+    assert!(
+        plain[gold_at..bronze_at].contains("@f-owners-thumbs-1"),
+        "the gold buyer sits under the gold block: {plain:?}"
+    );
     assert!(
         !plain.contains("1 👍"),
         "reaction picker should be dismissed under owner modal: {plain:?}"
@@ -1086,12 +1429,198 @@ async fn linked_account_gets_the_rail_entry_and_the_pane() {
     // The pane header names the account and the notification key, so the
     // rail badge is not the only thing explaining the count.
     wait_for_render_contains(&mut app, "@oddity on cyberspace.online").await;
-    wait_for_render_contains(&mut app, "n notifications").await;
+    // Notifications are their own rail row with their own badge, so the row
+    // is where the count is explained now; the pane header speaks for the
+    // feed alone.
+    wait_for_render_contains(&mut app, "notifications").await;
     assert!(app.chat.cyberspace_selected, "/cs should open the pane");
     assert!(
         !app.chat.cyberspace.modal_active(),
         "a linked user gets the pane, not the link modal"
     );
+}
+
+#[tokio::test]
+async fn switching_screens_drops_the_open_cyberspace_room() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "cs-room-leaver").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer to lounge");
+    CyberspaceAccount::upsert_for_user(&client, viewer.id, "cs-uid", "oddity", "refresh-token")
+        .await
+        .expect("link cyberspace account");
+    CyberspaceAccount::set_circ_rooms(&client, viewer.id, &["circ-lab".to_string()])
+        .await
+        .expect("pin a chat room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "cs-room-leave-flow-it");
+    wait_for_render_contains(&mut app, "circ-lab").await;
+
+    app.chat.select_cyberspace_room(0);
+    assert_eq!(
+        app.chat.cyberspace.open_circ_slug(),
+        Some("circ-lab"),
+        "selecting the rail entry should open the room"
+    );
+
+    // A digit, Tab, or Ctrl+G switches screens without going through the
+    // rail; the room's stream and presence heartbeat must not survive it.
+    app.set_screen(Screen::Arcade);
+    assert_eq!(
+        app.chat.cyberspace.open_circ_slug(),
+        None,
+        "leaving Home must drop the room session"
+    );
+    assert_eq!(
+        app.chat.cyberspace_room_selected, None,
+        "the rail must not keep pointing at a room nobody is in"
+    );
+    assert!(
+        app.chat.cyberspace_selected,
+        "coming back to Home should land on the cyberspace pane, same as Esc"
+    );
+}
+
+#[tokio::test]
+async fn entering_a_cyberspace_room_reads_it_before_it_types_in_it() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "cs-room-reader").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer to lounge");
+    CyberspaceAccount::upsert_for_user(&client, viewer.id, "cs-uid", "oddity", "refresh-token")
+        .await
+        .expect("link cyberspace account");
+    CyberspaceAccount::set_circ_rooms(&client, viewer.id, &["circ-lab".to_string()])
+        .await
+        .expect("pin a chat room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "cs-room-read-flow-it");
+    wait_for_render_contains(&mut app, "circ-lab").await;
+
+    app.chat.select_cyberspace_room(0);
+    assert_eq!(app.chat.cyberspace.open_circ_slug(), Some("circ-lab"));
+
+    // Walking into a room is reading it, like every other room in the rail:
+    // `k` scrolls the conversation, it does not start a message.
+    app.handle_input(b"k");
+    assert_eq!(
+        room_draft(&app),
+        "",
+        "a room must not open with its composer focused"
+    );
+
+    // `i` is what focuses it, and from there the same letter is text.
+    app.handle_input(b"ik");
+    assert_eq!(room_draft(&app), "k");
+
+    // Esc drops the draft and hands the room back to reading; only the next
+    // one leaves the room.
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(&mut app, |app| room_draft(app).is_empty(), "room composer").await;
+    app.handle_input(b"k");
+    assert_eq!(room_draft(&app), "");
+    assert_eq!(
+        app.chat.cyberspace.open_circ_slug(),
+        Some("circ-lab"),
+        "the first Esc leaves the composer, not the room"
+    );
+}
+
+#[tokio::test]
+async fn end_in_a_room_draft_edits_the_line_instead_of_scrolling() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "cs-room-end-key").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer to lounge");
+    CyberspaceAccount::upsert_for_user(&client, viewer.id, "cs-uid", "oddity", "refresh-token")
+        .await
+        .expect("link cyberspace account");
+    CyberspaceAccount::set_circ_rooms(&client, viewer.id, &["circ-lab".to_string()])
+        .await
+        .expect("pin a chat room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "cs-room-end-key-it");
+    wait_for_render_contains(&mut app, "circ-lab").await;
+    app.chat.select_cyberspace_room(0);
+
+    app.handle_input(b"iab");
+    app.handle_input(b"\x1b[H");
+    app.handle_input(b"c");
+    assert_eq!(room_draft(&app), "cab", "Home moves the cursor to the head");
+
+    // End is Home's mirror while the row holds text: it must return the
+    // cursor to the end of the line, not scroll the conversation.
+    app.handle_input(b"\x1b[F");
+    app.handle_input(b"d");
+    assert_eq!(room_draft(&app), "cabd");
+}
+
+#[tokio::test]
+async fn our_own_command_typed_in_their_room_never_becomes_a_message() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "cs-room-command").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer to lounge");
+    CyberspaceAccount::upsert_for_user(&client, viewer.id, "cs-uid", "oddity", "refresh-token")
+        .await
+        .expect("link cyberspace account");
+    CyberspaceAccount::set_circ_rooms(&client, viewer.id, &["circ-lab".to_string()])
+        .await
+        .expect("pin a chat room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "cs-room-command-flow-it");
+    wait_for_render_contains(&mut app, "circ-lab").await;
+    app.chat.select_cyberspace_room(0);
+
+    // `/cs chat` is ours, not theirs. It opens the picker over the room the
+    // user is standing in, and the text never reaches their API as a message.
+    app.handle_input(b"i/cs chat\r");
+    assert!(
+        app.chat.cyberspace.modal_active(),
+        "the room picker should open over the room"
+    );
+    assert_eq!(
+        app.chat.cyberspace.open_circ_slug(),
+        Some("circ-lab"),
+        "opening a picker must not walk the user out of the room"
+    );
+    assert_eq!(
+        room_draft(&app),
+        "",
+        "the command must not stay in the draft"
+    );
+}
+
+/// What is currently typed into the open cyberspace room's composer.
+fn room_draft(app: &crate::app::state::App) -> String {
+    app.chat
+        .cyberspace
+        .room_composer()
+        .expect("a room is open")
+        .lines()
+        .join("")
 }
 
 #[tokio::test]
@@ -1425,7 +1954,7 @@ async fn cycling_rails_persists_only_to_authenticating_key_and_survives_unrelate
             let db = db.clone();
             async move {
                 let client = db.get().await.expect("db client");
-                UserSshKey::layout_for(&client, user.id, "SHA256:phone")
+                stored_layout(&client, user.id, "SHA256:phone")
                     .await
                     .expect("phone layout")
                     == Some(KeyLayout {
@@ -1438,7 +1967,7 @@ async fn cycling_rails_persists_only_to_authenticating_key_and_survives_unrelate
     )
     .await;
     assert_eq!(
-        UserSshKey::layout_for(&client, user.id, "SHA256:desktop")
+        stored_layout(&client, user.id, "SHA256:desktop")
             .await
             .expect("desktop layout"),
         None,
@@ -1489,7 +2018,7 @@ async fn cycling_rails_persists_only_to_authenticating_key_and_survives_unrelate
         "the legacy mirror must stay in step with the account default"
     );
     assert_eq!(
-        UserSshKey::layout_for(&client, user.id, "SHA256:phone")
+        stored_layout(&client, user.id, "SHA256:phone")
             .await
             .expect("phone layout after settings save"),
         Some(KeyLayout {
@@ -1499,7 +2028,7 @@ async fn cycling_rails_persists_only_to_authenticating_key_and_survives_unrelate
         "the unrelated account save must preserve this device's layout"
     );
     assert_eq!(
-        UserSshKey::layout_for(&client, user.id, "SHA256:desktop")
+        stored_layout(&client, user.id, "SHA256:desktop")
             .await
             .expect("desktop layout after settings save"),
         None,
@@ -1603,22 +2132,30 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
     // The gate swallows everything but the named key: no page hopping, no
-    // Tab, no help modal, no reserved chords, no composer.
-    for bytes in [&b"2"[..], b"\t", b"?", b"\x0f", b"\x07", b"i"] {
+    // Tab, no help modal, no reserved chords (Zen's included), no composer.
+    for bytes in [&b"2"[..], b"\t", b"?", b"\x0f", b"\x07", b"\x06", b"i"] {
         app.handle_input(bytes);
     }
     assert_eq!(app.screen, Screen::Clubhouse);
     assert!(!app.show_help);
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The named digits walk the route in order, nothing else moves it.
+    // The named keys walk the route in order, nothing else moves it. The
+    // two Enter interludes (the music, the lobby) stay on their page, and
+    // the last page hands over to Zen through its own chord.
     for (bytes, screen) in [
         (&b"1"[..], Screen::Dashboard),
+        (b"\r", Screen::Dashboard),
         (b"2", Screen::Arcade),
+        (b"\r", Screen::Arcade),
         (b"3", Screen::Games),
         (b"4", Screen::Artboard),
         (b"5", Screen::Profiles),
+        (b"0", Screen::Profiles),
         (b"6", Screen::Leaderboard),
+        (b"0", Screen::Leaderboard),
+        (b"\x06", Screen::Zen),
+        (b"\x06", Screen::Zen),
         (b"0", Screen::Clubhouse),
     ] {
         app.handle_input(bytes);
@@ -1631,4 +2168,1368 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert_eq!(app.clubhouse.tutorial, Tutorial::Done);
     app.handle_input(b"2");
     assert_eq!(app.screen, Screen::Arcade);
+}
+
+/// Some terminals and multiplexers swallow Ctrl+F, and the gate also blocks
+/// the `/zen` fallback, so the Zen stop needs a key every terminal sends.
+/// Without one the newcomer can only quit, and the tour restarts next session.
+#[tokio::test]
+async fn forced_tour_zen_stop_accepts_enter_when_the_chord_is_swallowed() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "tour-zen-enter-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-zen-enter-flow-it");
+
+    app.set_screen(Screen::Clubhouse);
+    app.clubhouse.tutorial = Tutorial::Pending;
+    app.clubhouse.enter_screen();
+    for bytes in [&b"1"[..], b"\r", b"2", b"\r", b"3", b"4", b"5", b"6"] {
+        app.handle_input(bytes);
+    }
+    assert_eq!(app.screen, Screen::Leaderboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLeaderboard);
+
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Zen);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitZen);
+
+    // Enter is not a way past the Zen box itself: that one still names `0`.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Zen);
+    app.handle_input(b"0");
+    assert_eq!(app.screen, Screen::Clubhouse);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
+}
+
+#[tokio::test]
+async fn only_esc_closes_the_stream_modal() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "stream-qr-esc").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "stream-qr-esc-it");
+    wait_for_render_contains(&mut app, "Home").await;
+
+    app.stream_modal = Some(crate::app::state::StreamModal::Qr(
+        crate::app::state::StreamQrModal {
+            url: "https://late.sh/golive/abc".to_string(),
+            title: "Go Live".to_string(),
+            subtitle: "scan to broadcast".to_string(),
+        },
+    ));
+
+    // The modal holds a hand-copied capability URL: ordinary keys, Enter, and
+    // a left click all leave it up rather than taking the URL off the screen.
+    app.handle_input(b"x");
+    app.handle_input(b"\r");
+    app.handle_input(b" ");
+    app.handle_input(b"\x1b[<0;10;10M");
+    assert!(
+        app.stream_modal.is_some(),
+        "only esc should close the stream qr modal"
+    );
+
+    // A lone Esc dispatches via the pending-escape flush on a later tick,
+    // not through the swallow-everything gate the other keys hit.
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(
+        &mut app,
+        |app| app.stream_modal.is_none(),
+        "esc closes the stream qr modal",
+    )
+    .await;
+}
+
+/// A lone Esc dispatches through `dispatch_escape`, never through the history
+/// modal's own input handler, so the modal needs its arm there: without it
+/// Esc leaves the modal stuck open over the room.
+#[tokio::test]
+async fn history_modal_opens_from_command_and_closes_on_esc() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "history-esc-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: lounge.id,
+            user_id: viewer.id,
+            body: "hello from the archive".to_string(),
+        },
+    )
+    .await
+    .expect("create message");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "history-esc-flow-it");
+    wait_for_render_contains(&mut app, "lounge").await;
+
+    app.handle_input(b"i/history\r");
+    wait_for_render_contains(&mut app, "History ·").await;
+    wait_for_render_contains(&mut app, "hello from the archive").await;
+
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(
+        &mut app,
+        |app| !app.chat.history_modal.is_open(),
+        "esc closes the history modal",
+    )
+    .await;
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("History ·"),
+        "expected the history modal gone after Esc; frame={frame:?}"
+    );
+}
+
+/// Ctrl+L is the escape hatch for a terminal left damaged by something outside
+/// late.sh. It has to re-emit every cell: the failure mode worth pinning is a
+/// repaint that clears the screen and then sends an empty diff, leaving the
+/// user staring at a blank terminal that is worse than the damage.
+#[tokio::test]
+async fn ctrl_l_repaints_the_whole_screen_rather_than_blanking_it() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-l-repaint").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-l-repaint-flow-it");
+
+    wait_for_render_contains(&mut app, "lounge").await;
+
+    // Let the screen settle: with nothing changed, a frame is only a small diff.
+    let _ = app.render().expect("render");
+    let settled = strip_ansi(&String::from_utf8_lossy(&app.render().expect("render")));
+
+    app.handle_input(b"\x0c");
+    let repainted = strip_ansi(&String::from_utf8_lossy(&app.render().expect("render")));
+
+    assert!(
+        repainted.contains("lounge"),
+        "expected Ctrl+L to re-emit the whole screen; repainted={repainted:?}"
+    );
+    assert!(
+        repainted.len() > settled.len(),
+        "expected the Ctrl+L frame to carry more than the settled diff; \
+         settled={} bytes, repainted={} bytes",
+        settled.len(),
+        repainted.len()
+    );
+}
+
+/// Uploading an image while replying used to come back as a plain message:
+/// both the `/paste-image` submit and reopening the composer with the finished
+/// URL run through paths that clear the reply target.
+#[tokio::test]
+async fn image_upload_keeps_the_reply_it_was_composed_against() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "f-upload-viewer").await;
+    let author = create_test_user(&test_db.db, "f-upload-author").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, lounge.id, author.id)
+        .await
+        .expect("join author");
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: lounge.id,
+            user_id: author.id,
+            body: "upload target".to_string(),
+        },
+    )
+    .await
+    .expect("create message");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "f-upload-flow-it");
+    app.resize(160, 32).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "upload target").await;
+
+    app.handle_input(b"j");
+    app.handle_input(b"r");
+    assert!(
+        app.chat.reply_target().is_some(),
+        "r should open a reply composer"
+    );
+
+    // Stand in for the upload itself: the reply target travels with the
+    // request from here, and the composer is reopened when the URL lands.
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let reply_target = app.chat.reply_target().cloned();
+    assert!(
+        app.chat
+            .begin_image_upload(Some(lounge.id), reply_target, rx)
+            .is_none(),
+        "the upload should start"
+    );
+    tx.send(Ok("https://files.late.sh/chat/x.png".to_string()))
+        .expect("deliver the uploaded url");
+
+    wait_for_render_contains(&mut app, "files.late.sh/chat/x.png").await;
+    assert!(
+        app.chat.reply_target().is_some(),
+        "the upload dropped the reply it was composed against"
+    );
+}
+
+/// A mention read in its own room used to sit on the rail badge for the rest
+/// of the session: the DB count moved but nothing republished it. Rendering
+/// the mention's message now stamps `notifications.read_at` and the service
+/// republishes the count in the same task, so the badge clears live.
+#[tokio::test]
+async fn mention_rendered_in_its_room_clears_the_rail_badge() {
+    use late_core::models::notification::Notification;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "f-badge-viewer").await;
+    let actor = create_test_user(&test_db.db, "f-badge-actor").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, lounge.id, actor.id)
+        .await
+        .expect("join actor");
+    let message = ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: lounge.id,
+            user_id: actor.id,
+            body: "@f-badge-viewer over here".to_string(),
+        },
+    )
+    .await
+    .expect("create mention message");
+    Notification::create_mentions_batch(&client, &[viewer.id], actor.id, message.id, lounge.id)
+        .await
+        .expect("create mention notification");
+
+    // The session must know its own username for the rendered-mention match.
+    let mut app = make_app_in_world(
+        test_db.db.clone(),
+        viewer.id,
+        "f-badge-flow-it",
+        crate::test_helpers::SessionWorld {
+            username: Some("f-badge-viewer".to_string()),
+            ..Default::default()
+        },
+    );
+    app.resize(160, 32).expect("resize test terminal");
+
+    // The mention's message lands on screen in its own room.
+    wait_for_render_contains(&mut app, "over here").await;
+
+    // That must stamp the mention read without the Mentions entry ever being
+    // opened. The stamp rides the app tick's read-cursor flush, so keep
+    // ticking while polling for it; asserting a lit badge first would race
+    // the very fix under test (the stamp can beat the initial count render).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        app.tick();
+        app.reset_render();
+        app.render().expect("render");
+        let unread = Notification::unread_count(&client, viewer.id)
+            .await
+            .expect("unread count");
+        if unread == 0 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the rendered mention was never stamped read"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    }
+
+    // The count republished after the stamp committed reaches the rail: the
+    // badge is dark for good, with the mention read where it was said.
+    wait_for_render_not_contains(&mut app, "mentions (").await;
+}
+
+/// The stored rail layout, read the way bootstrap reads it.
+async fn stored_layout(
+    client: &tokio_postgres::Client,
+    user_id: Uuid,
+    fingerprint: &str,
+) -> anyhow::Result<Option<KeyLayout>> {
+    let key = UserSshKey::find_by_fingerprint(client, user_id, fingerprint).await?;
+    Ok(key.and_then(|key| extract_key_layout(&key.settings)))
+}
+
+#[tokio::test]
+async fn whisper_holds_the_splash_door_then_releases_and_marks_delivery() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "whisper-door-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "whisper-door-it");
+
+    // `make_app` skips the splash; the replay hook re-raises it armed, the
+    // same way `/haunt replay` does.
+    crate::app::deadchannel::haunt::svc::replay_whisper(&mut app);
+    assert!(app.show_splash);
+
+    // Esc does nothing: the door is held and the splash does not skip.
+    app.tick();
+    app.handle_input(b"\x1b");
+    assert!(app.show_splash, "expected the whisper to hold the splash");
+
+    // The machine releases on its own clock, hard-capped well under the
+    // ticks driven here, and the splash comes down with it.
+    for _ in 0..200 {
+        app.tick();
+        if !app.show_splash {
+            break;
+        }
+    }
+    assert!(!app.show_splash, "expected the whisper to release the door");
+
+    // Delivery spends the once-ever mark (fire-and-forget write).
+    wait_until(
+        || async {
+            let client = test_db.db.get().await.expect("db client");
+            let user = User::find_by_username(&client, &user.username)
+                .await
+                .expect("find user")
+                .expect("user exists");
+            late_core::models::user::extract_first_contact_whisper_at(&user.settings).is_some()
+        },
+        "first contact whisper stamp persisted",
+    )
+    .await;
+}
+
+/// Arm stage 4 the way `/haunt invite` leaves it: the next send this
+/// session makes asks for the invitation claim, due or not.
+fn arm_forced_breakthrough(app: &mut crate::app::state::App) {
+    let mut breakthrough =
+        crate::app::deadchannel::haunt::state::Breakthrough::for_user(app.user_id);
+    breakthrough.force_next();
+    app.haunt.breakthrough = Some(breakthrough);
+}
+
+#[tokio::test]
+async fn breakthrough_swallows_every_key_even_inside_a_running_door_game() {
+    use crate::app::common::primitives::Screen;
+
+    let (_test_db, mut app) = chat_compose_app("breakthrough-swallow").await;
+    app.resize(160, 40).expect("resize test terminal");
+    arm_forced_breakthrough(&mut app);
+
+    // The send wins the invitation claim and the screen tears.
+    app.handle_input(b"anyone out there\r");
+    wait_for_render_contains(&mut app, "we finally reached you").await;
+
+    // A key that opens the quit confirm does nothing while it plays.
+    app.handle_input(b"q");
+
+    // Inside a running roguelike too: backtick, which detaches, never
+    // reaches the door routing. No awaits until the fabricated game is gone
+    // again, so its proxy stays Connecting (see the backtick detach test).
+    app.set_screen(Screen::Games);
+    app.enter_nethack();
+    app.nethack_state
+        .as_mut()
+        .expect("nethack state")
+        .force_running_for_test();
+    app.set_screen(Screen::Nethack);
+    app.handle_input(b"`");
+    assert_eq!(
+        app.screen,
+        Screen::Nethack,
+        "expected the breakthrough to swallow the door's detach key"
+    );
+    app.nethack_state = None;
+    app.set_screen(Screen::Dashboard);
+
+    // The screen heals, the swallowed `q` left nothing behind, and keys work
+    // again.
+    wait_for_render_not_contains(&mut app, "we finally reached you").await;
+    assert_render_not_contains_for(&mut app, " Quit? ", Duration::from_millis(100)).await;
+    app.handle_input(b"q");
+    wait_for_render_contains(&mut app, " Quit? ").await;
+}
+
+#[tokio::test]
+async fn breakthrough_waits_for_a_send_from_its_own_session() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "breakthrough-own-send-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+
+    // The same person on two devices of one replica: one chat service, so
+    // each session hears the other's sends, as in production. Only the
+    // phone has the breakthrough armed.
+    let world = crate::test_helpers::SessionWorld {
+        chat_service: Some(crate::app::chat::svc::ChatService::new(
+            test_db.db.clone(),
+            crate::app::chat::notifications::svc::NotificationService::new(test_db.db.clone()),
+        )),
+        ..Default::default()
+    };
+    let mut phone = make_app_in_world(
+        test_db.db.clone(),
+        user.id,
+        "breakthrough-phone-it",
+        world.clone(),
+    );
+    let mut laptop =
+        make_app_in_world(test_db.db.clone(), user.id, "breakthrough-laptop-it", world);
+    phone.resize(160, 40).expect("resize phone terminal");
+    for app in [&mut phone, &mut laptop] {
+        wait_for_render_contains(app, "lounge").await;
+        app.handle_input(b"i");
+        wait_for_render_contains(app, "Compose (Enter send").await;
+    }
+    arm_forced_breakthrough(&mut phone);
+
+    // The laptop's send lands on the phone too, and asks for nothing there.
+    laptop.handle_input(b"typed on the laptop\r");
+    wait_for_render_contains(&mut phone, "typed on the laptop").await;
+    assert_render_not_contains_for(
+        &mut phone,
+        "we finally reached you",
+        Duration::from_millis(500),
+    )
+    .await;
+    let stored = User::find_by_username(&client, &user.username)
+        .await
+        .expect("find user")
+        .expect("user exists");
+    assert_eq!(
+        late_core::models::user::extract_first_contact_invited_at(&stored.settings),
+        None,
+        "expected another session's send to leave the invitation unclaimed"
+    );
+
+    // The phone's own send is the one that breaks through.
+    phone.handle_input(b"typed on the phone\r");
+    wait_for_render_contains(&mut phone, "we finally reached you").await;
+}
+
+/// The gallery end to end: paint a block, frame it from the rail, name it,
+/// and find it under Mine. The rail is the only way in, so this is also the
+/// rail's keyboard contract.
+#[tokio::test]
+async fn artboard_archives_time_travel_from_the_rail() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "artboard-archive-it").await;
+    let mut archived = dartboard_core::Canvas::with_size(
+        crate::dartboard::CANVAS_WIDTH,
+        crate::dartboard::CANVAS_HEIGHT,
+    );
+    for x in 0..8 {
+        archived.set(dartboard_core::Pos { x, y: 0 }, 'A');
+    }
+    let client = test_db.db.get().await.expect("db client");
+    late_core::models::artboard::Snapshot::upsert(
+        &client,
+        "daily:2026-04-23",
+        serde_json::to_value(&archived).expect("canvas json"),
+        serde_json::json!({ "cells": [] }),
+    )
+    .await
+    .expect("insert daily snapshot");
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-archive-flow-it");
+
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "ARCHIVES").await;
+    wait_for_render_contains(&mut app, "Daily").await;
+
+    // Down the rail past Board, four gallery rows, and Hang a piece.
+    for _ in 0..6 {
+        app.handle_input(b"j");
+    }
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "DAILY").await;
+    wait_for_render_contains(&mut app, "2026-04-23").await;
+    // The key under the cursor lands on the board by itself.
+    wait_for_render_contains(&mut app, "Mode       snapshot").await;
+    wait_for_render_contains(&mut app, "AAAAAAAA").await;
+
+    // Tab back to the rail, up to Board, Enter: live again.
+    app.handle_input(b"\t");
+    wait_for_render_contains(&mut app, "archive").await;
+    for _ in 0..6 {
+        app.handle_input(b"k");
+    }
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("AAAAAAAA"),
+        "the live board should be back; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn artboard_gallery_hangs_a_framed_piece_from_the_rail() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "artboard-gallery-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-gallery-flow-it");
+
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    wait_for_render_contains(&mut app, "GALLERY").await;
+    wait_for_render_contains(&mut app, "Hang a piece").await;
+
+    // Paint a 10x4 block: forty glyphs, the floor for a piece.
+    app.handle_input(b"i");
+    wait_for_render_contains(&mut app, "Mode       active").await;
+    app.handle_input(b"\x1b[200~##########\n##########\n##########\n##########\x1b[201~");
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+
+    // Esc on the board unfolds the rail; down it to Hang a piece: Board,
+    // four gallery rows, then it.
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "rail j/k").await;
+    for _ in 0..5 {
+        app.handle_input(b"j");
+    }
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "Frame your work").await;
+
+    // A frame with nothing in it is refused on the bar, not hung.
+    app.handle_input(b"\r");
+    // The framing bar is one line; wait on the head of the notice.
+    wait_for_render_contains(&mut app, "Select a frame").await;
+
+    // Drag the frame over the block: board (0,0) to (9,3). Framing hands
+    // the keys to the board, so the rail is folded and the board starts at
+    // screen column 2.
+    app.handle_input(b"\x1b[<0;2;2M");
+    app.handle_input(b"\x1b[<32;11;5M");
+    app.handle_input(b"\x1b[<0;11;5m");
+    wait_for_render_contains(&mut app, "frame 10x4").await;
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "Hang it in the").await;
+    wait_for_render_contains(&mut app, "100% yours").await;
+
+    // No title, no hang. The title takes every printable key: `m`, `v`,
+    // `w`, `+`, `-`, and the digits are global hotkeys everywhere else and
+    // must not be read as one while a title is being typed.
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "Give it a title").await;
+    app.handle_input(b"warm view +1 -2");
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("warm view +1 -2"),
+        "every key typed belongs to the title; frame={frame:?}"
+    );
+    assert!(
+        !app.music_prefix_armed,
+        "`v` in a title must not arm the music prefix"
+    );
+    assert!(
+        !app.show_bonsai_modal,
+        "`w` in a title must not open the bonsai modal"
+    );
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "now hangs").await;
+    wait_for_render_contains(&mut app, "warm view +1 -2").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Mine"),
+        "the hung piece should open under Mine; frame={frame:?}"
+    );
+
+    // `v` on a listing is the gallery's applause key, not the music prefix.
+    // The preview pane only draws once the listing holds the piece.
+    wait_for_render_contains(&mut app, "by @artboard-gallery-it").await;
+    app.handle_input(b"v");
+    wait_for_render_contains(&mut app, "cannot applaud your own piece").await;
+    assert!(
+        !app.music_prefix_armed,
+        "`v` on the Artboard belongs to the gallery"
+    );
+
+    // `x` asks first; any other key withdraws the question; `x` twice
+    // takes the hanger's own piece down and Mine empties.
+    app.handle_input(b"x");
+    wait_for_render_contains(&mut app, "x again to confirm").await;
+    app.handle_input(b"j");
+    wait_for_render_not_contains(&mut app, "x again to confirm").await;
+    app.handle_input(b"x");
+    wait_for_render_contains(&mut app, "x again to confirm").await;
+    app.handle_input(b"x");
+    wait_for_render_contains(&mut app, "Taken down").await;
+    // The pane is narrow in the test terminal; the head of the empty
+    // listing's line is enough.
+    wait_for_render_contains(&mut app, "you have not hung a piece").await;
+
+    // The letter hotkeys are off the whole page, typing or not.
+    app.banner = None;
+    app.handle_input(b"m");
+    assert!(
+        app.banner.is_none(),
+        "`m` must not reach the paired-client mute from the Artboard"
+    );
+    app.handle_input(b"w");
+    assert!(
+        !app.show_bonsai_modal,
+        "`w` must not open Bonsai Care from the Artboard"
+    );
+
+    // Back out: list to rail. Esc on the rail is not the page's, so the
+    // digit keys still switch pages from there.
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "rail j/k").await;
+    app.handle_input(b"1");
+    wait_for_render_contains(&mut app, " Home ").await;
+}
+
+#[tokio::test]
+async fn zen_tab_cycles_tile_focus_instead_of_switching_pages() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-tab-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut app = make_app(test_db.db.clone(), user.id, "zen-tab-flow-it");
+    wait_for_render_contains(&mut app, " Home ").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+    let tiles = app.zen.leaf_count();
+    let start = app.zen.focus;
+
+    // Tab walks the tiles in layout order and stays on the page: Zen is
+    // not in the page cycle, so the global Tab would drop back to Home.
+    app.handle_input(b"\t");
+    assert_eq!(app.screen, Screen::Zen, "Tab on Zen stays on Zen");
+    assert_eq!(
+        app.zen.focus,
+        (start + 1) % tiles,
+        "Tab focuses the next tile"
+    );
+
+    // Shift+Tab walks back.
+    app.handle_input(b"\x1b[Z");
+    assert_eq!(app.screen, Screen::Zen, "Shift+Tab on Zen stays on Zen");
+    assert_eq!(app.zen.focus, start, "Shift+Tab focuses the previous tile");
+
+    // Tab wraps past the last tile to the first.
+    for _ in 0..tiles {
+        app.handle_input(b"\t");
+    }
+    assert_eq!(app.zen.focus, start, "Tab wraps around the tiles");
+    assert_eq!(app.screen, Screen::Zen);
+}
+
+#[tokio::test]
+async fn landing_page_tweak_picks_the_first_screen_except_for_new_users() {
+    use crate::app::common::primitives::Screen;
+    use crate::test_helpers::SessionWorld;
+    use late_core::models::user::LandingPage;
+
+    let test_db = new_test_db().await;
+    for (idx, (page, is_new_user, expected)) in [
+        (LandingPage::Clubhouse, false, Screen::Clubhouse),
+        (LandingPage::Home, false, Screen::Dashboard),
+        (LandingPage::Zen, false, Screen::Zen),
+        // A first session always starts in the tavern, where the tour runs.
+        (LandingPage::Zen, true, Screen::Clubhouse),
+        (LandingPage::Home, true, Screen::Clubhouse),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let user = create_test_user(&test_db.db, &format!("landing-it-{idx}")).await;
+        let app = make_app_in_world(
+            test_db.db.clone(),
+            user.id,
+            &format!("landing-flow-it-{idx}"),
+            SessionWorld {
+                landing_page: Some(page),
+                is_new_user,
+                ..SessionWorld::default()
+            },
+        );
+        assert_eq!(
+            app.screen, expected,
+            "landing {page:?}, new user {is_new_user}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn zen_is_left_only_by_ctrl_f_which_returns_where_it_was_opened() {
+    use crate::app::common::primitives::Screen;
+    use crate::test_helpers::SessionWorld;
+    use late_core::models::user::LandingPage;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-leave-it").await;
+    let mut app = make_app_in_world(
+        test_db.db.clone(),
+        user.id,
+        "zen-leave-flow-it",
+        SessionWorld {
+            landing_page: Some(LandingPage::Zen),
+            ..SessionWorld::default()
+        },
+    );
+    assert_eq!(app.screen, Screen::Zen);
+
+    // Landed on Zen: there is no page to hand back, so the chord walks
+    // into the tavern.
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Clubhouse);
+
+    // Opened from The Arcade, a lone Esc stays on the page.
+    app.handle_input(b"2");
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(&mut app, |app| !app.pending_escape, "esc flushes on zen").await;
+    assert_eq!(app.screen, Screen::Zen, "Esc never leaves Zen");
+
+    // The chord hands the page back to where it was opened.
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Arcade);
+
+    // Leaving by a digit forgets the return page: a later chord on Zen
+    // must not jump back to The Arcade.
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+    app.handle_input(b"1");
+    assert_eq!(app.screen, Screen::Dashboard);
+    app.set_screen(Screen::Zen);
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Clubhouse);
+}
+
+#[tokio::test]
+async fn backtick_from_zen_hops_through_the_games_and_comes_home_to_zen() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-backtick-flow").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "zen-backtick-flow-it");
+
+    // Zen opened over the Leaderboards, nothing waiting: the hop stays put.
+    app.set_screen(Screen::Leaderboard);
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Zen);
+
+    // A loaded Dark Room is a stop: the hop goes in, and the same key comes
+    // home to Zen rather than Home chat.
+    app.enter_darkroom();
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Darkroom);
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Zen);
+
+    // The trip through the games kept Zen's own way back.
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Leaderboard);
+
+    // Going in from Home comes home to Home.
+    app.set_screen(Screen::Dashboard);
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Darkroom);
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Dashboard);
+}
+
+#[tokio::test]
+async fn a_table_opened_from_zen_hands_back_to_zen_on_esc_and_on_backtick() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::lobby::house::tables::HouseTable;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-table-base").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "zen-table-base-it");
+
+    app.set_screen(Screen::Leaderboard);
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+
+    // Opened from Zen the way the Lobby modal opens it; Esc hands back to
+    // Zen with the Lobby reopened over it, and Zen still knows its way out.
+    assert!(
+        app.house
+            .enter(HouseTable::Blackjack, Screen::Zen, app.chip_balance)
+    );
+    app.set_screen(Screen::HouseTable);
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(
+        &mut app,
+        |app| app.screen != Screen::HouseTable,
+        "esc leaves the table",
+    )
+    .await;
+    assert_eq!(app.screen, Screen::Zen);
+    assert!(app.show_lobby_modal, "expected Esc to reopen the Lobby");
+    app.handle_input(b"\x07");
+    assert!(!app.show_lobby_modal);
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Leaderboard);
+
+    // Backtick off the same table, nothing else waiting, wraps to Zen too.
+    app.handle_input(b"\x06");
+    assert!(
+        app.house
+            .enter(HouseTable::Blackjack, Screen::Zen, app.chip_balance)
+    );
+    app.set_screen(Screen::HouseTable);
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Zen);
+    assert!(!app.show_lobby_modal, "the wrap never opens the Lobby");
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Leaderboard);
+}
+
+/// Zen opened over a table, then a Lobby jump from Zen onto a table: the
+/// jump lands on the same screen Ctrl+F would hand back, but it is going in
+/// from Zen, not closing it. Esc and backtick must agree that home is Zen.
+#[tokio::test]
+async fn a_lobby_jump_from_zen_opened_over_a_table_comes_home_to_zen() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::lobby::house::tables::HouseTable;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-jump-base").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "zen-jump-base-it");
+
+    // Went into the table from Home, so the chain's base is Home.
+    app.set_screen(Screen::Dashboard);
+    assert!(
+        app.house
+            .enter(HouseTable::Blackjack, Screen::Dashboard, app.chip_balance)
+    );
+    app.set_screen(Screen::HouseTable);
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+
+    // Jumped onto a table from Zen the way the Lobby modal does it.
+    assert!(
+        app.house
+            .enter(HouseTable::Blackjack, Screen::Zen, app.chip_balance)
+    );
+    app.set_screen(Screen::HouseTable);
+    app.handle_input(b"`");
+    assert_eq!(
+        app.screen,
+        Screen::Zen,
+        "backtick wraps to Zen, where Esc would go"
+    );
+
+    // Zen still hands back the table it was first opened over.
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::HouseTable);
+}
+
+#[tokio::test]
+async fn zen_chat_keys_belong_to_the_focused_chat_tile() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-jk-viewer").await;
+    let author = create_test_user(&test_db.db, "zen-jk-author").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, lounge.id, author.id)
+        .await
+        .expect("join author");
+    let message = ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: lounge.id,
+            user_id: author.id,
+            body: "zen select target".to_string(),
+        },
+    )
+    .await
+    .expect("create message");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-jk-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "zen select target").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+
+    // The first opening lands on the chat tile: `j` selects in its room.
+    assert_eq!(
+        app.zen.focused_kind(),
+        Some(crate::app::zen::state::TileKind::Chat)
+    );
+    app.handle_input(b"j");
+    assert_eq!(
+        app.chat.selected_message_id,
+        Some(message.id),
+        "j on the focused chat tile selects the newest message"
+    );
+
+    // Focus moves off the chat: the selection is dropped and `j` is
+    // swallowed rather than scrolling a chat nobody is looking at.
+    app.handle_input(b"\x1b[D");
+    assert_ne!(
+        app.zen.focused_kind(),
+        Some(crate::app::zen::state::TileKind::Chat)
+    );
+    assert_eq!(app.chat.selected_message_id, None);
+    app.handle_input(b"j");
+    assert_eq!(
+        app.chat.selected_message_id, None,
+        "j with the bonsai focused selects nothing"
+    );
+
+    // `i` on the chat tile composes in its room; elsewhere it does nothing.
+    app.handle_input(b"i");
+    assert!(
+        !app.chat.composing,
+        "i with the bonsai focused composes nothing"
+    );
+    app.handle_input(b"\x1b[C");
+    app.handle_input(b"i");
+    assert!(app.chat.composing, "i on the focused chat tile composes");
+}
+
+#[tokio::test]
+async fn zen_inbox_enter_opens_an_unread_dm_in_the_first_chat_tile() {
+    use crate::app::zen::state::{KindPick, TileKind};
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-inbox-viewer").await;
+    let peer = create_test_user(&test_db.db, "zen-inbox-peer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    let dm = ChatRoom::get_or_create_dm(&client, viewer.id, peer.id)
+        .await
+        .expect("dm room");
+    ChatRoomMember::join(&client, dm.id, viewer.id)
+        .await
+        .expect("join viewer");
+    ChatRoomMember::join(&client, dm.id, peer.id)
+        .await
+        .expect("join peer");
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: dm.id,
+            user_id: peer.id,
+            body: "psst".to_string(),
+        },
+    )
+    .await
+    .expect("dm message");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-inbox-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "lounge").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+
+    // The lobby tile becomes an Inbox, which lists the unread DM.
+    app.zen.focus = app
+        .zen
+        .first_tile_of(TileKind::Lobby)
+        .expect("the default has a lobby");
+    app.zen.open_kind_picker();
+    while app.zen.kind_picker_selection() != Some(TileKind::Inbox) {
+        app.zen.move_kind_picker(1);
+    }
+    assert_eq!(app.zen.pick_kind(), KindPick::Changed);
+    wait_for_render_contains(&mut app, "@zen-inbox-peer").await;
+
+    app.handle_input(b"\r");
+    assert_eq!(
+        app.zen.focused_kind(),
+        Some(TileKind::Chat),
+        "Enter moves the focus to the chat tile"
+    );
+    assert_eq!(
+        app.zen_chat_room_id(),
+        Some(dm.id),
+        "the chat tile now shows the DM"
+    );
+}
+
+#[tokio::test]
+async fn zen_a_draft_stays_in_its_room_when_the_focus_moves_and_zoom_shows_the_focused_chat() {
+    use crate::app::zen::state::TileKind;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-draft-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    let quiet = ChatRoom::get_or_create_public_room(&client, "zen-quiet")
+        .await
+        .expect("second room");
+    ChatRoomMember::join(&client, quiet.id, viewer.id)
+        .await
+        .expect("join second room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-draft-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "zen-quiet").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+
+    // A second chat tile beside the default one, bound to the second room;
+    // the first keeps the current room, #lounge.
+    let first = app
+        .zen
+        .first_tile_of(TileKind::Chat)
+        .expect("the default has a chat");
+    assert_eq!(app.zen.focus, first);
+    assert!(app.zen.split_focused(true));
+    let second = app.zen.focus;
+    assert!(app.zen.rice.root.set_kind(second, TileKind::Chat));
+    assert!(app.zen.bind_focused_chat_room(Some(quiet.id)));
+
+    // A draft written in the second tile, then a click on the first: the
+    // draft is closed rather than carried under #lounge, where Enter would
+    // have posted it to the room it was written for.
+    app.handle_input(b"i");
+    app.handle_input(b"secret");
+    assert!(app.chat.composing);
+    assert_eq!(app.chat.composer_room_id(), Some(quiet.id));
+    let (cols, rows) = app.size;
+    let (tiles_area, _) =
+        crate::app::zen::layout::rice_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let rects = crate::app::zen::layout::tile_rects(
+        &app.zen.rice.root,
+        tiles_area,
+        app.zen.rice.look.gap as u16,
+        None,
+    );
+    let (_, rect) = rects[first];
+    let click = format!(
+        "\x1b[<0;{};{}M",
+        rect.x + rect.width / 2 + 1,
+        rect.y + rect.height / 2 + 1
+    );
+    app.handle_input(click.as_bytes());
+    assert_eq!(
+        app.zen.focus, first,
+        "the click focused the first chat tile"
+    );
+    assert!(
+        !app.chat.composing,
+        "the draft written for the second room is closed, not shown under #lounge"
+    );
+    assert_eq!(app.chat.composer_room_id(), None);
+    app.handle_input(b"i");
+    assert_eq!(
+        app.chat.composer_room_id(),
+        Some(lounge.id),
+        "a new draft belongs to the focused tile's room"
+    );
+    app.chat.reset_composer();
+
+    // Zoom the second tile: the one pane on show is its room.
+    app.handle_input(b"\x1b[C");
+    assert_eq!(app.zen.focus, second);
+    app.handle_input(b"z");
+    assert!(app.zen.zoomed);
+    let rendered = strip_ansi(&render_plain(&mut app));
+    assert!(
+        rendered.contains("#zen-quiet"),
+        "the zoomed pane is the focused tile's room, not the first chat's:\n{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn zen_petting_the_pet_leaves_the_focus_on_the_chat() {
+    use crate::app::hub::shop::{
+        entitlements::ShopEntitlements, state::ShopState, svc::ShopSnapshot,
+    };
+    use crate::app::zen::state::TileKind;
+    use late_core::models::marketplace::PET_COMPANION_SKU;
+    use late_core::models::pet::PetMood;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-pet-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-pet-flow-it");
+    app.shop_state = ShopState::for_test_snapshot(ShopSnapshot {
+        entitlements: ShopEntitlements::from_owned_skus([PET_COMPANION_SKU.to_string()]),
+        ..Default::default()
+    });
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "lounge").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+
+    let chat = app
+        .zen
+        .first_tile_of(TileKind::Chat)
+        .expect("the default has a chat");
+    assert_eq!(app.zen.focus, chat, "the page opens on its chat tile");
+
+    // The pet sits on the rail, in a tile of its own. Petting it is a
+    // passing gesture: the keys stay with the chat.
+    let pet = app.last_pet_rect.get().expect("the pet drew on its tile");
+    let click = format!("\x1b[<0;{};{}M", pet.x + 1, pet.y + 1);
+    app.handle_input(click.as_bytes());
+    assert_eq!(
+        app.zen.focus, chat,
+        "petting the pet leaves the focus on the chat tile"
+    );
+    render_plain(&mut app);
+    assert_eq!(
+        app.pet_state.mood(),
+        PetMood::Purring,
+        "the click landed on the pet"
+    );
+}
+
+#[tokio::test]
+async fn zen_every_chat_tile_keeps_its_composer_whatever_is_focused() {
+    use crate::app::zen::state::TileKind;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-composer-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    let quiet = ChatRoom::get_or_create_public_room(&client, "zen-comp")
+        .await
+        .expect("second room");
+    ChatRoomMember::join(&client, quiet.id, viewer.id)
+        .await
+        .expect("join second room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-composer-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "lounge").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+
+    let first = app
+        .zen
+        .first_tile_of(TileKind::Chat)
+        .expect("the default has a chat");
+    assert!(app.zen.split_focused(true));
+    let second = app.zen.focus;
+    assert!(app.zen.rice.root.set_kind(second, TileKind::Chat));
+    assert!(app.zen.bind_focused_chat_room(Some(quiet.id)));
+
+    // Both tiles carry a composer, and walking the focus moves nothing:
+    // an input box that comes and goes is the layout jumping under you.
+    // The focused tile's strip is live, the other's says it only watches
+    // (its keys act on the focused tile, so it must not name them).
+    let frame = render_plain(&mut app);
+    assert_eq!(
+        (
+            frame.matches("Compose").count(),
+            frame.matches("watching").count()
+        ),
+        (1, 1),
+        "both chat tiles draw a composer, one live and one watching; frame={frame:?}"
+    );
+    assert_eq!(
+        frame.matches("j/k select").count(),
+        1,
+        "only the live composer names the chat keys; frame={frame:?}"
+    );
+
+    app.zen.focus = first;
+    crate::app::zen::input::focus_moved(&mut app);
+    let frame = render_plain(&mut app);
+    assert_eq!(
+        (
+            frame.matches("Compose").count(),
+            frame.matches("watching").count()
+        ),
+        (1, 1),
+        "the composers stay put when the focus walks; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn zen_room_picker_binds_the_focused_chat_tile_and_slash_picker_opens_it() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::zen::state::TileKind;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-picker-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    let quiet = ChatRoom::get_or_create_public_room(&client, "zen-picked")
+        .await
+        .expect("second room");
+    ChatRoomMember::join(&client, quiet.id, viewer.id)
+        .await
+        .expect("join second room");
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-picker-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "zen-picked").await;
+    let home_selection = app.chat.selected_room_id;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+    assert_eq!(app.zen.focused_kind(), Some(TileKind::Chat));
+    assert_eq!(
+        app.zen.focused_chat_room(),
+        Some(None),
+        "the default chat tile follows Home's selection"
+    );
+
+    // `/picker` from the tile's composer opens the same modal as Ctrl+/.
+    app.handle_input(b"i/picker\r");
+    assert!(
+        app.room_search_modal_state.is_open(),
+        "/picker opens the room picker"
+    );
+
+    // A room picked with a chat tile focused binds that tile, like [ ]:
+    // the page stays up and Home's selection is untouched.
+    app.handle_input(b"zen-picked\r");
+    assert!(
+        !app.room_search_modal_state.is_open(),
+        "the pick closes the picker"
+    );
+    assert_eq!(app.screen, Screen::Zen, "the pick stays on Zen");
+    assert_eq!(
+        app.zen.focused_chat_room(),
+        Some(Some(quiet.id)),
+        "the focused chat tile is bound to the picked room"
+    );
+    assert_eq!(app.zen_chat_room_id(), Some(quiet.id));
+    assert_eq!(
+        app.chat.selected_room_id, home_selection,
+        "Home's selection does not move"
+    );
+
+    // With no chat tile focused the pick moves Home's selection as before.
+    app.handle_input(b"\x1b[D");
+    assert_ne!(app.zen.focused_kind(), Some(TileKind::Chat));
+    app.handle_input(b"\x1f");
+    assert!(
+        app.room_search_modal_state.is_open(),
+        "Ctrl+/ opens the picker"
+    );
+    app.handle_input(b"zen-picked\r");
+    assert_eq!(app.screen, Screen::Zen);
+    assert_eq!(app.chat.selected_room_id, Some(quiet.id));
+}
+
+#[tokio::test]
+async fn zen_space_opens_a_tile_picker_that_owns_the_keys_until_a_pick_or_esc() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::zen::state::TileKind;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "zen-picker-tiles").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut app = make_app(test_db.db.clone(), user.id, "zen-tile-picker-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, " Home ").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "Ctrl+F back").await;
+    assert_eq!(app.zen.focused_kind(), Some(TileKind::Chat));
+    let tiles = app.zen.leaf_count();
+
+    // Space opens the list on the tile's own kind, and names it.
+    app.handle_input(b" ");
+    assert_eq!(app.zen.kind_picker_selection(), Some(TileKind::Chat));
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" tile ") && frame.contains("current") && frame.contains("visualizer"),
+        "the picker lists every kind and marks the current one; frame={frame:?}"
+    );
+    assert!(
+        frame.contains("jk move") && frame.contains("enter pick") && frame.contains("esc close"),
+        "the picker names its keys; frame={frame:?}"
+    );
+
+    // The picker owns the keys: `S` splits nothing and `q` quits nothing.
+    app.handle_input(b"S");
+    app.handle_input(b"q");
+    assert_eq!(
+        app.zen.leaf_count(),
+        tiles,
+        "S under the picker splits nothing"
+    );
+    assert!(!app.show_quit_confirm, "q under the picker quits nothing");
+    assert!(app.zen.kind_picker.is_some());
+
+    // One row down and Enter: the tile is a clock, the picker is gone.
+    app.handle_input(b"j");
+    app.handle_input(b"\r");
+    assert!(app.zen.kind_picker.is_none(), "a pick closes the picker");
+    assert_eq!(app.zen.focused_kind(), Some(TileKind::Clock));
+    assert_eq!(app.screen, Screen::Zen);
+
+    // Esc closes it without a change and stays on the page.
+    app.handle_input(b" ");
+    app.handle_input(b"k");
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(
+        &mut app,
+        |app| app.zen.kind_picker.is_none(),
+        "esc closes the tile picker",
+    )
+    .await;
+    assert_eq!(app.zen.focused_kind(), Some(TileKind::Clock));
+    assert_eq!(
+        app.screen,
+        Screen::Zen,
+        "Esc under the picker does not leave Zen"
+    );
 }

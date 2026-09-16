@@ -19,14 +19,22 @@ pub const DAILY_BATTLESHIP_WIN_REWARD_KEY: &str = "daily_battleship_win_payout";
 pub const DAILY_BRISCOLA_WIN_REWARD_KEY: &str = "daily_briscola_win_payout";
 pub const DAILY_CHECKERS_WIN_REWARD_KEY: &str = "daily_checkers_win_payout";
 pub const DAILY_CHESS_WIN_REWARD_KEY: &str = "daily_chess_win_payout";
+pub const DAILY_CHESS960_WIN_REWARD_KEY: &str = "daily_chess960_win_payout";
 pub const DAILY_CONNECT4_WIN_REWARD_KEY: &str = "daily_connect4_win_payout";
 pub const DAILY_REVERSI_WIN_REWARD_KEY: &str = "daily_reversi_win_payout";
+pub const DARKROOM_ESCAPE_REWARD_KEY: &str = "darkroom_escape";
+pub const DARKROOM_BEACON_REWARD_KEY: &str = "darkroom_beacon_escape";
 pub const LATEANIA_ARCHDEMON_REWARD_KEY: &str = "lateania_archdemon_defeat";
 pub const LATEANIA_FRONTIER_KING_REWARD_KEY: &str = "lateania_frontier_king_defeat";
+pub const LATEANIA_SUNDERING_DEEP_REWARD_KEY: &str = "lateania_sundering_deep_defeat";
+pub const LATEANIA_KAETHYR_ASCENDANT_REWARD_KEY: &str = "lateania_kaethyr_ascendant_defeat";
 pub const GREENDRAGON_DRAGON_REWARD_KEY: &str = "greendragon_dragon_slain";
 pub const NETHACK_AMULET_REWARD_KEY: &str = "nethack_amulet";
 pub const NETHACK_ASCENSION_REWARD_KEY: &str = "nethack_ascension";
-pub const SSNAKE_WIN_REWARD_KEY: &str = "ssnake_win";
+pub const DCSS_ORB_REWARD_KEY: &str = "dcss_orb";
+pub const DCSS_WIN_REWARD_KEY: &str = "dcss_win";
+pub const BROGUE_ESCAPE_REWARD_KEY: &str = "brogue_escape";
+pub const BROGUE_MASTERY_REWARD_KEY: &str = "brogue_mastery";
 pub const TRON_WIN_2P_REWARD_KEY: &str = "tron_win_2p";
 pub const TRON_WIN_3P_REWARD_KEY: &str = "tron_win_3p";
 pub const TRON_WIN_4P_REWARD_KEY: &str = "tron_win_4p";
@@ -37,6 +45,7 @@ pub enum DailyPuzzleRewardGame {
     Minesweeper,
     Nonogram,
     RubiksCube,
+    SlidingPuzzle,
     Solitaire,
     Sudoku,
 }
@@ -48,6 +57,7 @@ impl DailyPuzzleRewardGame {
             Self::Minesweeper => "minesweeper",
             Self::Nonogram => "nonogram",
             Self::RubiksCube => "rubiks_cube",
+            Self::SlidingPuzzle => "sliding_puzzle",
             Self::Solitaire => "solitaire",
             Self::Sudoku => "sudoku",
         }

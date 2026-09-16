@@ -8,16 +8,18 @@ use uuid::Uuid;
 use crate::app::common::primitives::Banner;
 
 use super::{
-    catalog::ShopCategory,
+    catalog::{CompanionSection, ShopCategory},
     entitlements::ShopEntitlements,
     svc::{
-        ActiveChatRoomEffect, ActiveUsernameEffect, ShopCatalogItem, ShopEvent, ShopService,
-        ShopSnapshot,
+        ActiveChatRoomEffect, ActiveRental, ActiveUsernameEffect, ShopCatalogItem, ShopEvent,
+        ShopService, ShopSnapshot,
     },
 };
 use late_core::models::{
+    aquarium_shield::AquariumShield,
     bonsai_decay_protection::BonsaiDecayProtection,
-    marketplace::{AQUARIUM_FOOD_SKU, CHAT_CONSUMABLE_ITEM_KIND, PET_FOOD_SKU},
+    marketplace::{CHAT_CONSUMABLE_ITEM_KIND, TankStockKind},
+    rental::TITLE_MAX_LEN,
     username_effect::{GlowColor, GradientPair, UsernameEffect},
 };
 
@@ -31,6 +33,7 @@ pub(crate) struct ShopState {
     selected_index: usize,
     pending_room_effect: Option<PendingRoomEffect>,
     pending_username_effect: Option<PendingUsernameEffect>,
+    pending_custom_title: Option<PendingCustomTitle>,
     category_rects: Cell<[Rect; ShopCategory::ALL.len()]>,
     item_rects: RefCell<Vec<(Rect, usize)>>,
 }
@@ -63,6 +66,9 @@ pub(crate) struct PendingUsernameEffect {
     pub sku: String,
     pub item_name: String,
     pub price_chips: i64,
+    /// How long the bought tier runs, so the confirm modal quotes the window
+    /// the buyer is actually paying for.
+    pub duration_secs: i64,
     pub options: Vec<UsernameEffect>,
     pub selected: usize,
 }
@@ -70,6 +76,32 @@ pub(crate) struct PendingUsernameEffect {
 impl PendingUsernameEffect {
     pub(crate) fn selected_effect(&self) -> Option<UsernameEffect> {
         self.options.get(self.selected).copied()
+    }
+}
+
+/// The text prompt armed by Enter on a custom title: type up to
+/// `TITLE_MAX_LEN` characters, Enter sends them to be screened and bought.
+/// Same shape as the style picker above, with a line of text where the
+/// swatches are.
+#[derive(Clone, Debug)]
+pub(crate) struct PendingCustomTitle {
+    pub sku: String,
+    pub price_chips: i64,
+    /// How long the bought tier runs, so the prompt quotes the window the
+    /// buyer is actually paying for.
+    pub duration_secs: i64,
+    pub input: String,
+}
+
+impl PendingCustomTitle {
+    /// What the buyer has typed, with the surrounding whitespace gone. Empty
+    /// until there is a title worth screening, which is what gates Enter.
+    pub(crate) fn trimmed(&self) -> &str {
+        self.input.trim()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.input.chars().count()
     }
 }
 
@@ -113,6 +145,7 @@ impl ShopState {
             selected_index: 0,
             pending_room_effect: None,
             pending_username_effect: None,
+            pending_custom_title: None,
             category_rects: Cell::new([Rect::new(0, 0, 0, 0); ShopCategory::ALL.len()]),
             item_rects: RefCell::new(Vec::new()),
         }
@@ -178,13 +211,37 @@ impl ShopState {
             .iter()
             .filter(|item| category.matches_item(item))
             .collect();
-        // Username effects lead the list; stable, so catalog order holds
-        // within each group.
-        items.sort_by_key(|item| !item.is_username_effect());
+        // Two tabs order their sections themselves, stable, so catalog
+        // order holds inside each group. Chat: the name-adjacent rentals
+        // lead, username effects first, then titles, then the room
+        // consumables. Companions: `CompanionSection` order, the tank's
+        // growth and plants between the tank and its fish.
+        items.sort_by_key(|item| match category {
+            ShopCategory::Chat => match item {
+                item if item.is_username_effect() => 0,
+                item if item.is_title_rental() => 1,
+                _ => 2,
+            },
+            ShopCategory::Companions => CompanionSection::of(item) as usize,
+            ShopCategory::Badges | ShopCategory::Flags | ShopCategory::Ultimates => 0,
+        });
         items
     }
 
-    pub(crate) fn active_aquarium_fish(&self) -> Vec<(String, usize)> {
+    /// How many of one kind the user owns, in the water and parked: what
+    /// the kind's cap counts (`TankStockKind::cap`).
+    pub(crate) fn owned_tank_stock(&self, kind: TankStockKind) -> i32 {
+        self.snapshot
+            .items
+            .iter()
+            .filter(|item| item.tank_stock_kind() == Some(kind))
+            .map(|item| item.quantity.max(0))
+            .sum()
+    }
+
+    /// Every creature in the water, fish and plants alike, as the tank
+    /// draws them: `(creature, active count)`.
+    pub(crate) fn active_aquarium_creatures(&self) -> Vec<(String, usize)> {
         if !self.snapshot.entitlements.has_aquarium() {
             return Vec::new();
         }
@@ -211,6 +268,16 @@ impl ShopState {
         self.pending_username_effect.as_ref()
     }
 
+    pub(crate) fn pending_custom_title(&self) -> Option<&PendingCustomTitle> {
+        self.pending_custom_title.as_ref()
+    }
+
+    /// Whether the Shop can sell a buyer-written title at all. False means no
+    /// screen is configured, and an unscreened title never ships.
+    pub(crate) fn custom_titles_available(&self) -> bool {
+        self.snapshot.custom_titles_available
+    }
+
     pub(crate) fn active_username_effect(&self) -> Option<ActiveUsernameEffect> {
         self.snapshot.active_username_effect
     }
@@ -219,57 +286,37 @@ impl ShopState {
         self.snapshot.active_bonsai_decay_protection
     }
 
-    pub(crate) fn pet_food_quantity(&self) -> i32 {
-        self.snapshot
-            .items
-            .iter()
-            .find(|item| item.sku == PET_FOOD_SKU)
-            .map(|item| item.quantity.max(0))
-            .unwrap_or(0)
+    pub(crate) fn active_aquarium_shield(&self) -> Option<AquariumShield> {
+        self.snapshot.active_aquarium_shield
     }
 
-    pub(crate) fn aquarium_food_quantity(&self) -> i32 {
-        self.snapshot
-            .items
-            .iter()
-            .find(|item| item.sku == AQUARIUM_FOOD_SKU)
-            .map(|item| item.quantity.max(0))
-            .unwrap_or(0)
+    pub(crate) fn active_badge_rental(&self) -> Option<&ActiveRental> {
+        self.snapshot.active_badge_rental.as_ref()
     }
 
-    pub(crate) fn aquarium_hungry(&self) -> bool {
-        self.snapshot.aquarium_hungry
+    pub(crate) fn active_flag_rental(&self) -> Option<&ActiveRental> {
+        self.snapshot.active_flag_rental.as_ref()
     }
 
+    pub(crate) fn active_title(&self) -> Option<&ActiveRental> {
+        self.snapshot.active_title.as_ref()
+    }
+
+    /// The badge string this user's chat label carries, flag first then badge,
+    /// exactly as `chat_author_badge` joins them for every other viewer. Comes
+    /// straight off the snapshot, which read it from the one query that
+    /// resolves the live rentals.
     pub(crate) fn equipped_chat_badge(&self) -> Option<String> {
-        let mut pieces = Vec::new();
-        pieces.extend(
-            self.snapshot
-                .items
-                .iter()
-                .filter(|item| item.is_flag_badge() && item.equipped)
-                .filter_map(|item| item.badge_emoji.as_deref()),
-        );
-        pieces.extend(
-            self.snapshot
-                .items
-                .iter()
-                .filter(|item| item.is_chat_badge() && !item.is_flag_badge() && item.equipped)
-                .filter_map(|item| item.badge_emoji.as_deref()),
-        );
-        let badge = pieces.join(" ");
+        let badge = [
+            self.snapshot.chat_label_flag.as_deref(),
+            self.snapshot.chat_label_badge.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
         (!badge.is_empty()).then_some(badge)
-    }
-
-    pub(crate) fn dynamic_bonsai_enabled(&self) -> bool {
-        self.snapshot
-            .items
-            .iter()
-            .any(|item| item.is_dynamic_bonsai() && item.equipped)
-    }
-
-    pub(crate) fn has_dynamic_bonsai(&self) -> bool {
-        self.snapshot.entitlements.has_dynamic_bonsai()
     }
 
     pub(crate) fn selected_index(&self) -> usize {
@@ -293,6 +340,7 @@ impl ShopState {
     pub(crate) fn select_next_category(&mut self) {
         self.pending_room_effect = None;
         self.pending_username_effect = None;
+        self.pending_custom_title = None;
         self.category_index = (self.category_index + 1) % ShopCategory::ALL.len();
         self.selected_index = 0;
     }
@@ -307,12 +355,14 @@ impl ShopState {
             self.selected_index = 0;
             self.pending_room_effect = None;
             self.pending_username_effect = None;
+            self.pending_custom_title = None;
         }
     }
 
     pub(crate) fn select_previous_category(&mut self) {
         self.pending_room_effect = None;
         self.pending_username_effect = None;
+        self.pending_custom_title = None;
         self.category_index =
             (self.category_index + ShopCategory::ALL.len() - 1) % ShopCategory::ALL.len();
         self.selected_index = 0;
@@ -363,6 +413,7 @@ impl ShopState {
             self.selected_index = 0;
             self.pending_room_effect = None;
             self.pending_username_effect = None;
+            self.pending_custom_title = None;
         }
     }
 
@@ -371,7 +422,6 @@ impl ShopState {
         current_room: Option<RoomEffectTarget>,
     ) -> Option<Banner> {
         let item = self.selected_item()?.clone();
-        let is_dynamic_bonsai = item.is_dynamic_bonsai();
         let current_room_id = current_room.as_ref().map(|room| room.room_id);
         if item.is_username_effect() {
             let options = username_effect_options(item.username_effect_variant.as_deref());
@@ -379,6 +429,7 @@ impl ShopState {
                 return Some(Banner::error("This effect is not available"));
             }
             self.pending_username_effect = Some(PendingUsernameEffect {
+                duration_secs: item.rental_duration(),
                 sku: item.sku,
                 item_name: item.name,
                 price_chips: item.price_chips,
@@ -387,13 +438,52 @@ impl ShopState {
             });
             return Some(Banner::success("Pick a style"));
         }
-        if item.is_aquarium_fish() {
+        if item.is_sprout() {
+            return Some(Banner::error(
+                "Sprouts come up on their own, every 14 days; - cuts the one on the floor",
+            ));
+        }
+        if item.is_welcome_fish() {
+            return Some(Banner::error(
+                "Fry are not for sale, they only breed: one with the tank, one per fourteen-day streak",
+            ));
+        }
+        if item.is_tank_stock() {
             if !self.snapshot.entitlements.has_aquarium() {
-                return Some(Banner::error("Unlock Aquarium before buying fish"));
+                return Some(Banner::error(
+                    "Unlock Aquarium before buying fish or plants",
+                ));
             }
             self.service
                 .purchase_item_task(self.user_id, item.sku, current_room_id, None);
             return Some(Banner::success(&format!("Buying {}", item.name)));
+        }
+        // A custom title has no text until the buyer writes one, so Enter
+        // opens a prompt instead of buying. With no screen configured there is
+        // nothing to sell: an unscreened title never ships.
+        if item.is_custom_title() {
+            if !self.snapshot.custom_titles_available {
+                return Some(Banner::error("Custom titles are closed right now"));
+            }
+            self.pending_custom_title = Some(PendingCustomTitle {
+                duration_secs: item.rental_duration(),
+                sku: item.sku,
+                price_chips: item.price_chips,
+                input: String::new(),
+            });
+            return Some(Banner::success("Write your title"));
+        }
+        // Rentals are bought outright, every time: there is no picker and no
+        // equip step, and a rebuy replaces the live row and resets its clock.
+        if item.is_badge_rental() || item.is_title_rental() {
+            self.service
+                .purchase_item_task(self.user_id, item.sku, None, None);
+            return Some(Banner::success(&format!("Renting {}", item.name)));
+        }
+        // The shield minds a tank; without one it would take the chips and
+        // mind nothing.
+        if item.is_aquarium_shield() && !self.snapshot.entitlements.has_aquarium() {
+            return Some(Banner::error("Unlock Aquarium before buying a shield"));
         }
         if item.is_consumable() {
             if item.requires_room {
@@ -426,23 +516,9 @@ impl ShopState {
             return Some(Banner::success(&format!("{action} {}", item.name)));
         }
         if item.owned {
-            if item.equipped {
-                if let Some(slot) = item.slot {
-                    self.service.unequip_slot_task(self.user_id, slot);
-                    if is_dynamic_bonsai {
-                        return Some(Banner::success("Using classic Bonsai"));
-                    }
-                    return Some(Banner::success("Clearing displayed badge"));
-                }
-                return Some(Banner::success(&format!("{} already unlocked", item.name)));
-            }
-            if item.slot.is_some() {
-                self.service.equip_item_task(self.user_id, item.sku);
-                if is_dynamic_bonsai {
-                    return Some(Banner::success("Using Dynamic Bonsai"));
-                }
-                return Some(Banner::success(&format!("Displaying {}", item.name)));
-            }
+            // Nothing on sale equips a slot any more: badges and flags went
+            // all-rental in migration 148, and the bonsai variant unlock was
+            // retired in migration 177.
             return Some(Banner::success(&format!("{} already unlocked", item.name)));
         }
 
@@ -495,29 +571,55 @@ impl ShopState {
         Some(Banner::success(&format!("Cancelled {}", pending.item_name)))
     }
 
-    pub(crate) fn adjust_selected_aquarium_fish(&mut self, delta: i32) -> Option<Banner> {
+    /// Type one character into the title prompt. The cap is the renderers'
+    /// (`TITLE_MAX_LEN`), enforced here so the prompt simply stops accepting
+    /// rather than letting someone type a title the purchase would refuse.
+    pub(crate) fn push_custom_title_char(&mut self, ch: char) {
+        if let Some(pending) = &mut self.pending_custom_title
+            && pending.len() < TITLE_MAX_LEN
+        {
+            pending.input.push(ch);
+        }
+    }
+
+    pub(crate) fn backspace_custom_title(&mut self) {
+        if let Some(pending) = &mut self.pending_custom_title {
+            pending.input.pop();
+        }
+    }
+
+    /// Send the typed title to be screened and bought. A blank prompt is not a
+    /// refusal, it is an unfinished one: the modal stays open and nothing is
+    /// sent.
+    pub(crate) fn confirm_pending_custom_title(&mut self) -> Option<Banner> {
+        let text = self.pending_custom_title.as_ref()?.trimmed().to_string();
+        if text.is_empty() {
+            return Some(Banner::error("Type a title first"));
+        }
+        let pending = self.pending_custom_title.take()?;
+        self.service
+            .purchase_custom_title_task(self.user_id, pending.sku, text);
+        Some(Banner::success("Screening your title"))
+    }
+
+    pub(crate) fn cancel_pending_custom_title(&mut self) -> Option<Banner> {
+        self.pending_custom_title.take()?;
+        Some(Banner::success("Cancelled custom title"))
+    }
+
+    /// `+` / `-` on a fish or a plant: one copy into or out of the water.
+    pub(crate) fn adjust_selected_tank_stock(&mut self, delta: i32) -> Option<Banner> {
         let item = self.selected_item()?.clone();
-        if !item.is_aquarium_fish() {
+        if !item.is_tank_stock() {
             return None;
         }
         if !self.snapshot.entitlements.has_aquarium() {
-            return Some(Banner::error("Unlock Aquarium before managing fish"));
+            return Some(Banner::error("Unlock Aquarium before managing the tank"));
         }
         self.service
-            .adjust_aquarium_fish_task(self.user_id, item.sku, delta);
+            .adjust_aquarium_active_task(self.user_id, item.sku, delta);
         let label = if delta > 0 { "Adding" } else { "Removing" };
         Some(Banner::success(&format!("{label} {}", item.name)))
-    }
-
-    pub(crate) fn use_aquarium_food(&mut self) -> Banner {
-        if !self.snapshot.entitlements.has_aquarium() {
-            return Banner::error("Unlock Aquarium before feeding it");
-        }
-        if self.aquarium_food_quantity() <= 0 {
-            return Banner::error("Buy Aquarium Food first");
-        }
-        self.service.use_aquarium_food_task(self.user_id);
-        Banner::success("Feeding aquarium")
     }
 
     fn clamp_selection(&mut self) {
@@ -546,6 +648,20 @@ impl ShopState {
         {
             self.snapshot.active_username_effect = None;
             changed = true;
+        }
+        // The rentals lapse in the detail pane on their own clock, with no
+        // refresh to wait for. `chat_label_*` is deliberately left alone: what
+        // the label carries is the label query's call, and it arrives with the
+        // next snapshot.
+        for rental in [
+            &mut self.snapshot.active_badge_rental,
+            &mut self.snapshot.active_flag_rental,
+            &mut self.snapshot.active_title,
+        ] {
+            if rental.as_ref().is_some_and(|rental| rental.ends_at <= now) {
+                *rental = None;
+                changed = true;
+            }
         }
         changed
     }
@@ -587,6 +703,7 @@ impl ShopState {
             selected_index: 0,
             pending_room_effect: None,
             pending_username_effect: None,
+            pending_custom_title: None,
             category_rects: Cell::new([Rect::new(0, 0, 0, 0); ShopCategory::ALL.len()]),
             item_rects: RefCell::new(Vec::new()),
         }

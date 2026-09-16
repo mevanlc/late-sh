@@ -1,24 +1,27 @@
-use crate::app::common::primitives::Screen;
+use crate::app::arcade::share::{self, ShareCard, ShareCardKind, ShareFormat};
+use crate::app::common::primitives::{Banner, Screen};
 use crate::app::help_modal::data::HelpTopic;
 use ratatui::layout::Rect;
 
 use crate::app::state::{
     App, GAME_SELECTION_2048, GAME_SELECTION_LE_WORD, GAME_SELECTION_MINESWEEPER,
-    GAME_SELECTION_NONOGRAMS, GAME_SELECTION_RUBIKS_CUBE, GAME_SELECTION_SNAKE,
-    GAME_SELECTION_SOLITAIRE, GAME_SELECTION_SUDOKU, GAME_SELECTION_TETRIS, GAME_SELECTION_TRAFFIC,
+    GAME_SELECTION_NONOGRAMS, GAME_SELECTION_RUBIKS_CUBE, GAME_SELECTION_SLIDING_PUZZLE,
+    GAME_SELECTION_SNAKE, GAME_SELECTION_SOLITAIRE, GAME_SELECTION_SUDOKU, GAME_SELECTION_TETRIS,
+    GAME_SELECTION_TRAFFIC,
 };
 
-const LOBBY_GAME_ORDER: [usize; 10] = [
-    GAME_SELECTION_2048,
-    GAME_SELECTION_TETRIS,
-    GAME_SELECTION_SNAKE,
-    GAME_SELECTION_TRAFFIC,
+const LOBBY_GAME_ORDER: [usize; 11] = [
     GAME_SELECTION_LE_WORD,
     GAME_SELECTION_RUBIKS_CUBE,
+    GAME_SELECTION_SLIDING_PUZZLE,
     GAME_SELECTION_SUDOKU,
     GAME_SELECTION_NONOGRAMS,
     GAME_SELECTION_MINESWEEPER,
     GAME_SELECTION_SOLITAIRE,
+    GAME_SELECTION_2048,
+    GAME_SELECTION_TETRIS,
+    GAME_SELECTION_SNAKE,
+    GAME_SELECTION_TRAFFIC,
 ];
 
 fn lobby_order_position(selection: usize) -> usize {
@@ -44,8 +47,16 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
         // Backtick hops the workspace cycle out of daily puzzles. Real-time
         // games (Lateris, Snake, Traffic) and personal (non-daily) boards
         // are not stops and keep the byte for themselves.
-        if byte == b'`' && super::workspace::active_daily_stop(app).is_some() {
-            return crate::app::lobby::workspace::cycle_game_workspace(app);
+        if byte == b'`' && crate::app::workspace::arcade::active_daily_stop(app).is_some() {
+            return crate::app::workspace::cycle::cycle_game_workspace(app);
+        }
+        // A finished daily offers its share card on `s`. Only then: while a
+        // board is open the byte is the game's (a Le Word letter).
+        if byte == b's'
+            && let Some((kind, card)) = active_daily_card(app)
+        {
+            share_card(app, kind, &card);
+            return true;
         }
         if app.game_selection == GAME_SELECTION_2048 {
             if byte == 0x1B || byte == b'q' || byte == b'Q' {
@@ -90,6 +101,12 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
             }
             app.rubiks_cube_state.ensure_current_daily();
             return super::rubiks_cube::input::handle_key(&mut app.rubiks_cube_state, byte);
+        } else if app.game_selection == GAME_SELECTION_SLIDING_PUZZLE {
+            if byte == 0x1B || byte == b'q' || byte == b'Q' {
+                app.is_playing_game = false;
+                return true;
+            }
+            return super::sliding_puzzle::input::handle_key(&mut app.sliding_puzzle_state, byte);
         } else if app.game_selection == GAME_SELECTION_LE_WORD {
             if byte == b'?' {
                 app.le_word_state.close_rules();
@@ -133,6 +150,11 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
     }
 
     // Lobby mode
+    if byte == b's' {
+        let card = day_card(app);
+        share_card(app, ShareCardKind::Day, &card);
+        return true;
+    }
     match byte {
         b'j' | b'J' => {
             app.game_selection = next_lobby_selection(app.game_selection);
@@ -148,6 +170,7 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
                 || app.game_selection == GAME_SELECTION_SNAKE
                 || app.game_selection == GAME_SELECTION_TRAFFIC
                 || app.game_selection == GAME_SELECTION_RUBIKS_CUBE
+                || app.game_selection == GAME_SELECTION_SLIDING_PUZZLE
                 || app.game_selection == GAME_SELECTION_LE_WORD
                 || app.game_selection == GAME_SELECTION_SUDOKU
                 || (app.game_selection == GAME_SELECTION_NONOGRAMS
@@ -164,6 +187,57 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
         }
         _ => false,
     }
+}
+
+/// The share card of the daily on screen, once it is finished.
+fn active_daily_card(app: &App) -> Option<(ShareCardKind, ShareCard)> {
+    let selection = app.game_selection;
+    if selection == GAME_SELECTION_LE_WORD {
+        super::le_word::share::from_state(&app.le_word_state).map(|c| (ShareCardKind::LeWord, c))
+    } else if selection == GAME_SELECTION_RUBIKS_CUBE {
+        super::rubiks_cube::share::from_state(&app.rubiks_cube_state)
+            .map(|c| (ShareCardKind::RubiksCube, c))
+    } else if selection == GAME_SELECTION_SLIDING_PUZZLE {
+        super::sliding_puzzle::share::from_state(&app.sliding_puzzle_state)
+            .map(|c| (ShareCardKind::SlidingPuzzle, c))
+    } else if selection == GAME_SELECTION_SUDOKU {
+        super::sudoku::share::from_state(&app.sudoku_state).map(|c| (ShareCardKind::Sudoku, c))
+    } else if selection == GAME_SELECTION_NONOGRAMS {
+        super::nonogram::share::from_state(&app.nonogram_state)
+            .map(|c| (ShareCardKind::Nonogram, c))
+    } else if selection == GAME_SELECTION_MINESWEEPER {
+        super::minesweeper::share::from_state(&app.minesweeper_state)
+            .map(|c| (ShareCardKind::Minesweeper, c))
+    } else if selection == GAME_SELECTION_SOLITAIRE {
+        super::solitaire::share::from_state(&app.solitaire_state)
+            .map(|c| (ShareCardKind::Solitaire, c))
+    } else {
+        None
+    }
+}
+
+/// Today's day card: the leaderboard snapshot's completion marks OR'd
+/// with this session's own wins, so a puzzle solved a moment ago counts.
+pub(crate) fn day_card(app: &App) -> ShareCard {
+    let snapshot = app.leaderboard.user_daily_statuses.get(&app.user_id);
+    let session = app.session_daily_wins.today();
+    let streak = app.quest_state.snapshot().daily_streak.consecutive_days;
+    share::day_card(
+        chrono::Utc::now().date_naive(),
+        |puzzle| {
+            snapshot.is_some_and(|s| s.completed(puzzle))
+                || session.is_some_and(|s| s.completed(puzzle))
+        },
+        streak,
+    )
+}
+
+/// Copy a rendered card to the clipboard, then count it. The one place a
+/// card leaves the session, so the banner and the metric live here.
+fn share_card(app: &mut App, kind: ShareCardKind, card: &ShareCard) {
+    app.pending_clipboard = Some(share::render(card, ShareFormat::Emoji));
+    app.banner = Some(Banner::success("Card copied. Paste it anywhere."));
+    crate::metrics::record_share_card(kind);
 }
 
 fn open_global_help(app: &mut App) {
@@ -189,6 +263,8 @@ pub fn handle_arrow(app: &mut App, key: u8) -> bool {
         } else if app.game_selection == GAME_SELECTION_RUBIKS_CUBE {
             app.rubiks_cube_state.ensure_current_daily();
             return super::rubiks_cube::input::handle_arrow(&mut app.rubiks_cube_state, key);
+        } else if app.game_selection == GAME_SELECTION_SLIDING_PUZZLE {
+            return super::sliding_puzzle::input::handle_arrow(&mut app.sliding_puzzle_state, key);
         } else if app.game_selection == GAME_SELECTION_LE_WORD {
             return super::le_word::input::handle_arrow(&mut app.le_word_state, key);
         } else if app.game_selection == GAME_SELECTION_SUDOKU {
@@ -225,6 +301,14 @@ pub(crate) fn handle_event(app: &mut App, event: &crate::app::input::ParsedInput
     };
 
     let area = arcade_content_area(app);
+    if app.game_selection == GAME_SELECTION_SLIDING_PUZZLE {
+        return super::sliding_puzzle::input::handle_mouse(
+            &mut app.sliding_puzzle_state,
+            area,
+            *mouse,
+        );
+    }
+
     if app.game_selection == GAME_SELECTION_LE_WORD {
         return super::le_word::input::handle_mouse(&mut app.le_word_state, area, *mouse);
     }
@@ -241,39 +325,9 @@ pub(crate) fn handle_event(app: &mut App, event: &crate::app::input::ParsedInput
 }
 
 fn arcade_content_area(app: &App) -> Rect {
-    let area = Rect::new(0, 0, app.size.0, app.size.1);
-    let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y.saturating_add(1),
-        width: area.width.saturating_sub(2),
-        height: area.height.saturating_sub(2),
-    };
-
-    if right_sidebar_visible(app) {
-        Rect {
-            width: inner.width.saturating_sub(24),
-            ..inner
-        }
-    } else {
-        inner
-    }
-}
-
-fn right_sidebar_visible(app: &App) -> bool {
-    if app.show_settings {
-        return crate::app::render::resolve_right_sidebar_enabled(
-            app.settings_modal_state.device_rails().1,
-            Screen::Arcade,
-            app.size.0,
-        );
-    }
-
-    let (_, right_sidebar_mode) = app.rail_modes();
-    crate::app::render::resolve_right_sidebar_enabled(
-        right_sidebar_mode,
-        Screen::Arcade,
-        app.size.0,
-    )
+    // Mouse coordinates must land on the same cells the draw path used, so
+    // this reads the shared definition rather than re-deriving the layout.
+    app.content_area()
 }
 
 #[cfg(test)]

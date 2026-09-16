@@ -13,7 +13,7 @@ use crate::app::{
     state::App,
 };
 
-use super::state::{Selection, State};
+use super::state::{Mode, Selection, State};
 
 pub const GAME: GreenDragonDoorGame = GreenDragonDoorGame;
 
@@ -55,15 +55,6 @@ impl DoorGame for GreenDragonDoorGame {
     fn handle_arrow(&self, app: &mut App, key: u8) -> bool {
         handle_arrow(app, key)
     }
-
-    fn leave_active(&self, app: &mut App) -> bool {
-        if app.greendragon_state.is_some() {
-            leave(app);
-            true
-        } else {
-            false
-        }
-    }
 }
 
 pub struct GreenDragonScreenView<'a> {
@@ -75,7 +66,7 @@ fn draw_screen(frame: &mut Frame, area: Rect, view: &GreenDragonScreenView<'_>) 
     if let Some(state) = view.state {
         super::ui::draw_page(frame, area, state);
     } else {
-        super::ui::draw_landing(frame, area, view.delete_confirm);
+        super::ui::draw_landing(frame, area, view.delete_confirm, 0);
     }
 }
 
@@ -87,6 +78,26 @@ fn handle_key(app: &mut App, byte: u8) -> bool {
             return true;
         }
         return false;
+    }
+
+    app.greendragon_state.as_mut().unwrap().touch();
+
+    // Backtick hops onward on the workspace cycle. Unlike Esc this keeps the
+    // character loaded (and so still listed as online): the idle deadline in
+    // `App::tick` is what eventually ends the visit. Two exceptions keep the
+    // key: a talk line under composition, where a ` is a character and not a
+    // hop, and a fight. Leaving mid-fight is never free (Esc is a flee roll,
+    // and PvP, dragon, and master fights refuse to let you run at all), so a
+    // hop here would be a free exit: wait out the idle reap and the encounter,
+    // which lives only on this session's `State`, is erased.
+    if byte == b'`'
+        && app
+            .greendragon_state
+            .as_ref()
+            .is_some_and(|state| !state.is_typing() && state.mode() != Mode::Fight)
+    {
+        app.detach_door_game();
+        return true;
     }
 
     // Compute the selection in a tight borrow, then act on `app` once it's
@@ -130,6 +141,7 @@ fn handle_arrow(app: &mut App, key: u8) -> bool {
     let Some(state) = app.greendragon_state.as_mut() else {
         return false;
     };
+    state.touch();
     if state.is_typing() {
         return true;
     }
@@ -151,6 +163,6 @@ fn leave(app: &mut App) {
 }
 
 /// Two-column landing card for the Games hub (delegates to the renderer).
-pub fn draw_landing(frame: &mut Frame, area: Rect, delete_confirm: bool) {
-    super::ui::draw_landing(frame, area, delete_confirm);
+pub fn draw_landing(frame: &mut Frame, area: Rect, delete_confirm: bool, scroll: u16) -> u16 {
+    super::ui::draw_landing(frame, area, delete_confirm, scroll)
 }
