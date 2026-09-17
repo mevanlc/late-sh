@@ -23,6 +23,8 @@ fn all_purpose_guide_splits_game_topics() {
     assert!(bot_app_context().contains("## Arcade\n"));
     assert!(bot_app_context().contains("## Lobby\n"));
     assert!(bot_app_context().contains("## Lateania\n"));
+    assert!(bot_app_context().contains("## Minecraft\n"));
+    assert!(bot_app_context().contains("mc.late.sh"));
     assert!(!bot_app_context().contains("## Games\n"));
 }
 
@@ -40,11 +42,17 @@ fn all_purpose_guide_folds_music_into_pair_topic() {
 fn bot_context_includes_hub_guide_facts() {
     let context = bot_app_context();
     assert!(context.contains("## Economy\n"));
-    assert!(
-        context.contains("Monthly Top Chips counts only chips the house paid you for playing.")
-    );
+    assert!(context.contains("Monthly Top Chips counts what you earned"));
     assert!(context.contains("Lateris, 2048, Snake, and Traffic record run scores."));
     assert!(context.contains("Four-seat fixed-stack Texas Hold'em"));
+}
+
+#[test]
+fn sliding_puzzle_guide_documents_the_session_only_image_view() {
+    let arcade = lines_for(HelpTopic::Arcade, false, "").join("\n");
+    assert!(arcade.contains("i toggles numbered and image tiles"));
+    assert!(arcade.contains("session only"));
+    assert!(arcade.contains("same board and rewards"));
 }
 
 /// The Lobby replaced the rooms-era Tables screen: no table creation, no
@@ -132,9 +140,7 @@ fn chips_guide_lists_every_earning_surface() {
     // Economy keeps ranking rules; the amounts live here, in one place.
     let economy = lines_for(HelpTopic::Economy, false, "").join("\n");
     assert!(economy.contains("The Chips tab lists every way to earn chips"));
-    assert!(
-        economy.contains("Monthly Top Chips counts only chips the house paid you for playing.")
-    );
+    assert!(economy.contains("Monthly Top Chips counts what you earned"));
 }
 
 #[test]
@@ -185,7 +191,7 @@ fn bot_context_includes_irc_access_flow() {
 fn chat_guide_lists_user_facing_slash_commands() {
     let lines = chat_help_lines(false).join("\n");
     for expected in [
-        "/brb [message]",
+        "/brb               shortcut for /status away",
         "/coffee",
         "/friend [@user]",
         "/friends",
@@ -194,6 +200,7 @@ fn chat_guide_lists_user_facing_slash_commands() {
         "/petname [name]",
         "/poll",
         "/profile [@user]",
+        "/status [word] [m] set your status",
         "/tea",
         "/upload <url>",
     ] {

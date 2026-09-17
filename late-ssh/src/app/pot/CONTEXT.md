@@ -55,10 +55,9 @@ Two `ChipMove` variants, both in the roster in `late-core/src/models/chips.rs`:
   id. One ledger row per buy, not per ticket.
 - `PotWon`: credit, `source_ref` is the pot id.
 
-**Both are `counts_as_earnings = false`.** The win is excluded because a
-lottery must not top the earners board; the ticket is excluded because if the
-win is out and the ticket is in, buying into the pot would be a pure negative
-on a board the winner cannot climb back up.
+`PotWon` is `counts_as_earnings = true` (the house mints it) and `PotTicket`
+is `false`: Top Chips ranks earnings, and a debit never counts, so buying
+tickets cannot lower a place.
 
 The burn is the gap between the two reasons, exactly like the gild's missing
 third: there is no third ledger row and no wallet holding the fifth.
@@ -136,7 +135,7 @@ own balance (`... | pot 84,200 · 3h12m | 1500 chips`). It reads the same
 `App.pot_view` `/pot` does, so it costs no query and repaints on the same
 ~1s edge. The HUD is painted over the left title, so under a tight border it
 degrades: countdown first (`pot 84,200`), then the whole badge, and it yields
-before the pomodoro badge does because it is ambient and `/pot` still answers.
+before the status badge does because it is ambient and `/pot` still answers.
 Absent before the first refresh and in a process with no pot service.
 
 ## 8. Feed lines

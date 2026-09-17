@@ -1,6 +1,5 @@
 use late_core::models::marketplace::{
-    AQUARIUM_FOOD_SKU, AQUARIUM_MAX_FISH, BONSAI_CONSUMABLE_ITEM_KIND, CHAT_CONSUMABLE_ITEM_KIND,
-    PET_FOOD_SKU,
+    BONSAI_CONSUMABLE_ITEM_KIND, CHAT_CONSUMABLE_ITEM_KIND, TankStockKind,
 };
 use ratatui::{
     Frame,
@@ -14,21 +13,33 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use late_core::models::rental::{TITLE_MAX_LEN, duration_label, duration_tag};
 use late_core::models::username_effect::UsernameEffect;
 
+use chrono::{NaiveDate, Utc};
+
 use crate::app::{
+    common::markdown::wrap_plain_line,
     common::theme,
     common::username_effect::{resolve, styled_name_spans},
     hub::aquarium::creature::{CreatureDef, load_default_creatures},
+    hub::aquarium::state::{AquariumCare, SproutStatus},
 };
 
 use super::{
-    catalog::ShopCategory,
+    catalog::{CompanionSection, ShopCategory},
     state::{PendingCustomTitle, PendingRoomEffect, PendingUsernameEffect, ShopState},
     svc::ShopCatalogItem,
 };
 
 use std::sync::OnceLock;
 
-pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &ShopState, pet_species: &str) {
+use late_core::models::pet::PetSpecies;
+
+pub(crate) fn draw(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ShopState,
+    pet_species: PetSpecies,
+    care: &AquariumCare,
+) {
     let sections = Layout::vertical([
         Constraint::Length(1), // heading
         Constraint::Length(1), // breathing
@@ -41,7 +52,7 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &ShopState, pet_species
 
     frame.render_widget(Paragraph::new(section_heading("Shop")), sections[0]);
     draw_categories(frame, sections[2], state);
-    draw_body(frame, sections[4], state, pet_species);
+    draw_body(frame, sections[4], state, pet_species, care);
     draw_footer(frame, sections[5], state, pet_species);
     if let Some(pending) = state.pending_room_effect() {
         draw_room_effect_confirm(frame, area, pending);
@@ -79,10 +90,17 @@ fn draw_categories(frame: &mut Frame, area: Rect, state: &ShopState) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_body(frame: &mut Frame, area: Rect, state: &ShopState, pet_species: &str) {
+fn draw_body(
+    frame: &mut Frame,
+    area: Rect,
+    state: &ShopState,
+    pet_species: PetSpecies,
+    care: &AquariumCare,
+) {
     let columns =
         Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(area);
-    draw_item_list(frame, columns[0], state);
+    let today = Utc::now().date_naive();
+    draw_item_list(frame, columns[0], state, care.sprout_status_on(today));
     draw_item_detail(
         frame,
         columns[1],
@@ -90,10 +108,12 @@ fn draw_body(frame: &mut Frame, area: Rect, state: &ShopState, pet_species: &str
         state.selected_item(),
         state.entitlements().has_aquarium(),
         pet_species,
+        care,
+        today,
     );
 }
 
-fn draw_item_list(frame: &mut Frame, area: Rect, state: &ShopState) {
+fn draw_item_list(frame: &mut Frame, area: Rect, state: &ShopState, sprout: SproutStatus) {
     let items = state.visible_items();
     if items.is_empty() {
         state.set_item_rects(Vec::new());
@@ -126,9 +146,13 @@ fn draw_item_list(frame: &mut Frame, area: Rect, state: &ShopState) {
         .take(height)
         .map(|row| match row {
             ItemListRow::Section(label) => section_row(label),
-            ItemListRow::Item { index, item } => {
-                item_row(category, *index == state.selected_index(), item, state)
-            }
+            ItemListRow::Item { index, item } => item_row(
+                category,
+                *index == state.selected_index(),
+                item,
+                state,
+                sprout,
+            ),
         })
         .collect::<Vec<_>>();
     let mut item_rects = Vec::new();
@@ -162,7 +186,8 @@ fn item_list_rows<'a>(
         ShopCategory::Chat => chat_section_label,
         ShopCategory::Badges => badge_section_label,
         ShopCategory::Ultimates => ultimates_section_label,
-        ShopCategory::Flags | ShopCategory::Companions | ShopCategory::Aquarium => {
+        ShopCategory::Companions => companion_section_label,
+        ShopCategory::Flags => {
             return items
                 .iter()
                 .enumerate()
@@ -207,6 +232,13 @@ fn ultimates_section_label(item: &ShopCatalogItem) -> &'static str {
     }
 }
 
+/// The Companions tab in `CompanionSection` order: the pet, the bonsai
+/// shield, the tank and its shield, what the tank grows on its own, the
+/// plants, then the fish.
+fn companion_section_label(item: &ShopCatalogItem) -> &'static str {
+    CompanionSection::of(item).label()
+}
+
 fn badge_section_label(item: &ShopCatalogItem) -> &'static str {
     match item.badge_tier.as_deref() {
         Some("premium") => "Premium",
@@ -226,26 +258,26 @@ fn visible_window_start(selected_index: usize, item_count: usize, height: usize)
         .min(item_count.saturating_sub(height))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_item_detail(
     frame: &mut Frame,
     area: Rect,
     state: &ShopState,
     item: Option<&ShopCatalogItem>,
     has_aquarium: bool,
-    pet_species: &str,
+    pet_species: PetSpecies,
+    care: &AquariumCare,
+    today: NaiveDate,
 ) {
     let Some(item) = item else {
         return;
     };
+    let sprout = care.sprout_status_on(today);
 
     let chat_effect_active =
         item.item_kind == CHAT_CONSUMABLE_ITEM_KIND && chat_consumable_active(item, state);
     let effect_active = username_effect_active(item, state);
-    let action = if item.is_dynamic_bonsai() && item.equipped {
-        "dynamic"
-    } else if item.is_dynamic_bonsai() && item.owned {
-        "classic"
-    } else if item.is_username_effect() {
+    let action = if item.is_username_effect() {
         if effect_active {
             "active"
         } else {
@@ -267,8 +299,18 @@ fn draw_item_detail(
         }
     } else if item.is_consumable() {
         consumable_action_label(item, Some(chat_consumable_active(item, state)))
-    } else if item.is_aquarium_fish() && !has_aquarium {
+    } else if item.is_sprout() {
+        match sprout {
+            SproutStatus::Standing { .. } => "on the floor",
+            SproutStatus::Rooting => "rooting",
+            SproutStatus::Bare { .. } => "bare floor",
+        }
+    } else if item.is_welcome_fish() {
+        "with the tank"
+    } else if item.is_tank_stock() && !has_aquarium {
         "needs aquarium"
+    } else if item.is_aquarium_plant() {
+        "buy plant"
     } else if item.is_aquarium_fish() {
         "buy fish"
     } else if item.owned {
@@ -285,11 +327,14 @@ fn draw_item_detail(
     let status = if chat_effect_active
         || rental_active(item, state)
         || (item.owned && !item.is_consumable() && !item.is_rental())
+        || (item.is_sprout() && matches!(sprout, SproutStatus::Standing { .. }))
     {
         Style::default()
             .fg(theme::SUCCESS())
             .add_modifier(Modifier::BOLD)
-    } else if (item.is_aquarium_fish() && !has_aquarium)
+    } else if item.is_welcome_fish()
+        || item.is_sprout()
+        || (item.is_tank_stock() && !has_aquarium)
         || (item.is_custom_title() && !state.custom_titles_available())
     {
         Style::default()
@@ -299,28 +344,40 @@ fn draw_item_detail(
         Style::default().fg(theme::AMBER())
     };
 
-    let mut lines = vec![
-        section_heading(&item_detail_title(item)),
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                item.description.clone(),
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ]),
+    // The description wraps to the pane: the fish detail is drawn without
+    // paragraph wrapping (its art sits under a fixed-height info block),
+    // so the rows are wrapped here and counted.
+    let description_width = area.width.saturating_sub(2).max(1) as usize;
+    let mut lines = vec![section_heading(&item_detail_title(item)), Line::from("")];
+    lines.extend(
+        wrap_plain_line(&item.description, description_width)
+            .into_iter()
+            .map(|row| {
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(row, Style::default().fg(theme::TEXT_DIM())),
+                ])
+            }),
+    );
+    lines.extend([
         Line::from(""),
         Line::from(vec![
             Span::raw("  price  "),
-            Span::styled(
-                format!("{} chips", item.price_chips),
-                Style::default()
-                    .fg(theme::AMBER())
-                    .add_modifier(Modifier::BOLD),
-            ),
+            if item.is_sprout() {
+                Span::styled("grows on its own", Style::default().fg(theme::TEXT_DIM()))
+            } else if item.is_welcome_fish() {
+                Span::styled("free with the tank", Style::default().fg(theme::TEXT_DIM()))
+            } else {
+                Span::styled(
+                    format!("{} chips", item.price_chips),
+                    Style::default()
+                        .fg(theme::AMBER())
+                        .add_modifier(Modifier::BOLD),
+                )
+            },
         ]),
         Line::from(vec![Span::raw("  state  "), Span::styled(action, status)]),
-    ];
+    ]);
     if item.owned
         && item.quantity > 0
         && item.item_kind != CHAT_CONSUMABLE_ITEM_KIND
@@ -414,13 +471,13 @@ fn draw_item_detail(
         lines.push(Line::from(vec![
             Span::raw("  ascii  "),
             Span::styled(
-                pet_species.to_string(),
+                pet_species.as_str().to_string(),
                 Style::default()
                     .fg(theme::AMBER())
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "   t to toggle cat/dog",
+                "   t for the next: cat, dog, bird",
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ]));
@@ -451,14 +508,21 @@ fn draw_item_detail(
                 Span::styled("current room", Style::default().fg(theme::TEXT_DIM())),
             ]));
         }
-        if item.is_bonsai_decay_shield() {
-            if let Some(protection) = state.active_bonsai_decay_protection() {
+        if item.is_bonsai_decay_shield() || item.is_aquarium_shield() {
+            let live_until = if item.is_aquarium_shield() {
+                state.active_aquarium_shield().map(|shield| shield.ends_at)
+            } else {
+                state
+                    .active_bonsai_decay_protection()
+                    .map(|protection| protection.ends_at)
+            };
+            if let Some(ends_at) = live_until {
                 lines.push(Line::from(vec![
                     Span::raw("  shield "),
                     Span::styled(
                         format!(
                             "protected, {}",
-                            remaining_label(protection.ends_at, chrono::Utc::now())
+                            remaining_label(ends_at, chrono::Utc::now())
                         ),
                         Style::default()
                             .fg(theme::SUCCESS())
@@ -475,22 +539,47 @@ fn draw_item_detail(
             ]));
         }
     }
-    if item.is_dynamic_bonsai() && item.owned {
+    if item.is_sprout() {
+        let dim = Style::default().fg(theme::TEXT_DIM());
+        let plants_full =
+            state.owned_tank_stock(TankStockKind::Plant) >= TankStockKind::Plant.cap();
+        let floor = match sprout {
+            SproutStatus::Standing { .. } | SproutStatus::Rooting if plants_full => {
+                format!(
+                    "it will wither: you already own {} plants",
+                    TankStockKind::Plant.cap()
+                )
+            }
+            SproutStatus::Standing { days_to_root: 1 } => {
+                "last day to cut it; tomorrow it roots as one of the plants".to_string()
+            }
+            SproutStatus::Standing { days_to_root } => {
+                format!("{days_to_root} days to cut it, then it roots as one of the plants")
+            }
+            SproutStatus::Rooting => "rooting as one of the plants, one moment".to_string(),
+            SproutStatus::Bare {
+                days_to_next: Some(0),
+            } => "the next sprout comes up today".to_string(),
+            SproutStatus::Bare {
+                days_to_next: Some(1),
+            } => "the next sprout comes up tomorrow".to_string(),
+            SproutStatus::Bare {
+                days_to_next: Some(days),
+            } => format!("the next sprout comes up in {days} days"),
+            SproutStatus::Bare { days_to_next: None } => "one comes up every 14 days".to_string(),
+        };
         lines.push(Line::from(vec![
-            Span::raw("  mode   "),
+            Span::raw("  floor  "),
+            Span::styled(floor, dim),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  keys   "),
             Span::styled(
-                if item.equipped { "dynamic" } else { "classic" },
-                Style::default()
-                    .fg(theme::AMBER())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                "   Enter toggles care modal",
-                Style::default().fg(theme::TEXT_DIM()),
+                "- cuts the sprout; nothing to buy or add, it comes up on its own",
+                dim,
             ),
         ]));
-    }
-    if item.is_aquarium_fish() {
+    } else if let Some(kind) = item.tank_stock_kind() {
         if !has_aquarium {
             lines.push(Line::from(vec![
                 Span::raw("  unlock "),
@@ -522,16 +611,65 @@ fn draw_item_detail(
         lines.push(Line::from(vec![
             Span::raw("  tank   "),
             Span::styled(
-                format!("max {AQUARIUM_MAX_FISH} active"),
+                match kind {
+                    TankStockKind::Fish => {
+                        format!("max {} fish, in the tank or parked", kind.cap())
+                    }
+                    TankStockKind::Plant => format!(
+                        "max {} plants, in the tank or parked; plants never die",
+                        kind.cap()
+                    ),
+                },
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ]));
+        if item.is_welcome_fish() && has_aquarium {
+            let dim = Style::default().fg(theme::TEXT_DIM());
+            let fed_days = care.fed_days_to_next_fry_on(today);
+            let fish_full =
+                state.owned_tank_stock(TankStockKind::Fish) >= TankStockKind::Fish.cap();
+            lines.push(Line::from(vec![
+                Span::raw("  next   "),
+                Span::styled(
+                    match fed_days {
+                        _ if fish_full => format!(
+                            "no room for a fry: you already own {} fish",
+                            TankStockKind::Fish.cap()
+                        ),
+                        1 => "a fry hatches at the next meal".to_string(),
+                        days => format!("a fry hatches after {days} more straight fed days"),
+                    },
+                    dim,
+                ),
+            ]));
+            if let Some((creature, days)) = care.fry_growing_on(today) {
+                lines.push(Line::from(vec![
+                    Span::raw("  small  "),
+                    Span::styled(
+                        match days {
+                            1 => format!("the {creature} fry grows up tomorrow"),
+                            days => format!("the {creature} fry grows up in {days} days"),
+                        },
+                        dim,
+                    ),
+                ]));
+            }
+        }
+        let keys = if item.is_welcome_fish() {
+            "+/- adds/removes your fry from the tank; fry only breed, one per streak"
+        } else {
+            match kind {
+                TankStockKind::Fish => {
+                    "Enter buys another; +/- adds/removes owned fish from the tank"
+                }
+                TankStockKind::Plant => {
+                    "Enter buys another; +/- adds/removes owned plants from the tank"
+                }
+            }
+        };
         lines.push(Line::from(vec![
             Span::raw("  keys   "),
-            Span::styled(
-                "Enter buys another; +/- adds/removes owned fish from the tray",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
+            Span::styled(keys, Style::default().fg(theme::TEXT_DIM())),
         ]));
     }
     if let Some(uses) = item.remaining_uses {
@@ -546,16 +684,6 @@ fn draw_item_detail(
             Span::styled(slot.clone(), Style::default().fg(theme::TEXT_DIM())),
         ]));
     }
-    if item.equipped && item.is_dynamic_bonsai() {
-        lines.push(Line::from(vec![
-            Span::raw("  bonsai "),
-            Span::styled(
-                "w opens dynamic care",
-                Style::default().fg(theme::SUCCESS()),
-            ),
-        ]));
-    }
-
     let preview = aquarium_preview_lines(item, area.width);
     if preview.is_empty() {
         frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), area);
@@ -625,16 +753,16 @@ fn truncate_display_width(value: &str, max_width: usize) -> String {
     out
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, state: &ShopState, _pet_species: &str) {
+fn draw_footer(frame: &mut Frame, area: Rect, state: &ShopState, _pet_species: PetSpecies) {
     let selected = state.selected_item();
     let has_aquarium = state.entitlements().has_aquarium();
-    let enter_label = if selected.is_some_and(|item| item.is_dynamic_bonsai() && item.equipped) {
-        "classic"
-    } else if selected.is_some_and(|item| item.is_dynamic_bonsai() && item.owned) {
-        "dynamic"
-    } else if selected.is_some_and(|item| item.is_aquarium_fish() && !has_aquarium) {
+    let enter_label = if selected.is_some_and(|item| item.is_sprout()) {
+        "grows on its own"
+    } else if selected.is_some_and(|item| item.is_welcome_fish()) {
+        "with the tank"
+    } else if selected.is_some_and(|item| item.is_tank_stock() && !has_aquarium) {
         "needs aquarium"
-    } else if selected.is_some_and(|item| item.is_aquarium_fish()) {
+    } else if selected.is_some_and(|item| item.is_tank_stock()) {
         "buy one"
     } else if selected.is_some_and(|item| item.is_username_effect()) {
         "pick style"
@@ -660,16 +788,18 @@ fn draw_footer(frame: &mut Frame, area: Rect, state: &ShopState, _pet_species: &
         Span::styled("Enter", key),
         Span::styled(format!(" {enter_label}"), text),
     ];
-    if selected.is_some_and(|item| item.is_aquarium_fish() && has_aquarium) {
+    if selected.is_some_and(|item| item.is_sprout() && has_aquarium) {
+        spans.extend([Span::styled("  -", key), Span::styled(" cut", text)]);
+    } else if selected.is_some_and(|item| item.is_tank_stock() && has_aquarium) {
         spans.extend([Span::styled("  +/-", key), Span::styled(" active", text)]);
     }
     if selected.is_some_and(|item| item.is_pet_companion() && item.owned) {
         spans.extend([
             Span::styled("  t", key),
-            Span::styled(" toggle cat/dog", text),
+            Span::styled(" cat/dog/bird", text),
         ]);
     }
-    if state.selected_category() == ShopCategory::Aquarium {
+    if selected.is_some_and(|item| item.is_tank_stock()) {
         spans.extend([
             Span::styled("  by ", text),
             Span::styled("github.com/mevanlc/reefs", key),
@@ -991,6 +1121,7 @@ fn item_row(
     selected: bool,
     item: &ShopCatalogItem,
     state: &ShopState,
+    sprout: SproutStatus,
 ) -> Line<'static> {
     let marker = if selected { ">" } else { " " };
     let name_style = if selected {
@@ -1000,11 +1131,7 @@ fn item_row(
     } else {
         Style::default().fg(theme::TEXT_BRIGHT())
     };
-    let status = if item.is_dynamic_bonsai() && item.equipped {
-        "dynamic"
-    } else if item.is_dynamic_bonsai() && item.owned {
-        "classic"
-    } else if item.is_rental() {
+    let status = if item.is_rental() {
         if rental_active(item, state) {
             "active"
         } else if item.is_custom_title() {
@@ -1019,9 +1146,15 @@ fn item_row(
         }
     } else if item.is_consumable() {
         consumable_row_status(item, state)
-    } else if item.is_aquarium_fish() && item.quantity > 0 {
+    } else if item.is_sprout() {
+        match sprout {
+            SproutStatus::Standing { .. } => "up",
+            SproutStatus::Rooting => "rooting",
+            SproutStatus::Bare { .. } => "bare",
+        }
+    } else if item.is_tank_stock() && item.quantity > 0 {
         "owned"
-    } else if item.is_aquarium_fish() {
+    } else if item.is_tank_stock() {
         "buy"
     } else if item.owned {
         "owned"
@@ -1035,15 +1168,23 @@ fn item_row(
         || item.equipped
         || rental_active(item, state)
         || bonsai_decay_shield_active(item, state)
+        || aquarium_shield_active(item, state)
     {
         Style::default()
             .fg(theme::SUCCESS())
             .add_modifier(Modifier::BOLD)
+    } else if item.is_sprout() {
+        match sprout {
+            SproutStatus::Standing { .. } => Style::default().fg(theme::SUCCESS()),
+            SproutStatus::Rooting | SproutStatus::Bare { .. } => {
+                Style::default().fg(theme::TEXT_FAINT())
+            }
+        }
     } else if item.is_consumable() || item.is_rental() {
         Style::default().fg(theme::AMBER())
-    } else if item.owned || (item.is_aquarium_fish() && item.quantity > 0) {
+    } else if item.owned || (item.is_tank_stock() && item.quantity > 0) {
         Style::default().fg(theme::SUCCESS())
-    } else if item.is_aquarium_fish() {
+    } else if item.is_tank_stock() {
         Style::default().fg(theme::AMBER())
     } else {
         Style::default().fg(theme::TEXT_FAINT())
@@ -1065,7 +1206,9 @@ fn item_row(
         Span::styled(pad_display_width(&display_name, 22), name_style),
         Span::styled(status, status_style),
         Span::styled(
-            if item.is_aquarium_fish() {
+            if item.is_sprout() {
+                String::new()
+            } else if item.is_tank_stock() {
                 format!(" {}/{}", item.active_quantity, item.quantity)
             } else if item.is_consumable()
                 && item.item_kind != CHAT_CONSUMABLE_ITEM_KIND
@@ -1106,8 +1249,6 @@ fn consumable_action_label(item: &ShopCatalogItem, active: Option<bool>) -> &'st
         "confirm room"
     } else if item.item_kind == CHAT_CONSUMABLE_ITEM_KIND {
         "activate now"
-    } else if item.sku == PET_FOOD_SKU || item.sku == AQUARIUM_FOOD_SKU {
-        "buy food"
     } else {
         "buy"
     }
@@ -1116,8 +1257,6 @@ fn consumable_action_label(item: &ShopCatalogItem, active: Option<bool>) -> &'st
 fn consumable_footer_label(item: &ShopCatalogItem) -> &'static str {
     if item.item_kind == CHAT_CONSUMABLE_ITEM_KIND {
         "activate"
-    } else if item.sku == PET_FOOD_SKU || item.sku == AQUARIUM_FOOD_SKU {
-        "buy food"
     } else {
         "buy"
     }
@@ -1132,17 +1271,22 @@ fn consumable_row_status(item: &ShopCatalogItem, state: &ShopState) -> &'static 
         "confirm"
     } else if item.item_kind == CHAT_CONSUMABLE_ITEM_KIND {
         "activate"
-    } else if bonsai_decay_shield_active(item, state) {
+    } else if bonsai_decay_shield_active(item, state) || aquarium_shield_active(item, state) {
         "active"
     } else {
         "buy"
     }
 }
 
+/// True while the Aquarium Shield's auto feeder is minding the user's tank;
+/// same shape as the bonsai's, one running window per user.
+fn aquarium_shield_active(item: &ShopCatalogItem, state: &ShopState) -> bool {
+    item.is_aquarium_shield() && state.active_aquarium_shield().is_some()
+}
+
 /// True when the Bonsai Decay Shield is currently protecting the user's
-/// bonsai. Purchases of the shield never decrement a per-purchase stock the
-/// way Pet/Aquarium Food does: every purchase collapses into one running
-/// protection window, so this is the only way the shop list row can show
+/// bonsai. Purchases of the shield never decrement a per-purchase stock:
+/// every purchase collapses into one running protection window, so this is the only way the shop list row can show
 /// whether the shield is actually doing anything right now.
 fn bonsai_decay_shield_active(item: &ShopCatalogItem, state: &ShopState) -> bool {
     item.is_bonsai_decay_shield() && state.active_bonsai_decay_protection().is_some()
@@ -1176,10 +1320,6 @@ fn consumable_use_hint(item: &ShopCatalogItem) -> &'static str {
         "Enter activates it on the selected chat room"
     } else if item.item_kind == CHAT_CONSUMABLE_ITEM_KIND {
         "Enter activates it immediately"
-    } else if item.sku == AQUARIUM_FOOD_SKU {
-        "/aquarium opens the tray; /aquarium feed spends one"
-    } else if item.sku == PET_FOOD_SKU {
-        "/pet feed spends one and sends the pet strolling"
     } else {
         "Enter buys one"
     }

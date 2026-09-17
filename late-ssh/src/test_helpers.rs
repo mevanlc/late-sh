@@ -220,7 +220,6 @@ pub fn test_config(db_config: late_core::db::DbConfig) -> Config {
 
 pub fn test_app_state(db: Db, config: Config) -> State {
     let active_users = Arc::new(Mutex::new(HashMap::new()));
-    let afk_users = crate::state::new_afk_users();
     let username_directory = Arc::new(Mutex::new(Arc::new(HashMap::new())));
     let (activity_tx, _) = broadcast::channel::<ActivityEvent>(64);
     let session_registry = SessionRegistry::new();
@@ -278,7 +277,9 @@ pub fn test_app_state(db: Db, config: Config) -> State {
     let solitaire_service = SolitaireService::new(db.clone(), activity_tx.clone());
     let minesweeper_service = MinesweeperService::new(db.clone(), activity_tx.clone());
     let bonsai_service = BonsaiService::new(db.clone(), activity_tx.clone());
-    let pet_service = PetService::new(db.clone());
+    let pet_service = PetService::new(db.clone(), activity_tx.clone());
+    let aquarium_service =
+        crate::app::hub::aquarium::svc::AquariumService::new(db.clone(), activity_tx.clone());
     let dartboard_server = crate::dartboard::spawn_server();
     let leaderboard_service = LeaderboardService::new(db.clone());
     let quest_service = QuestService::new(db.clone(), activity_tx.clone());
@@ -301,10 +302,9 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         scratchpad_registry: crate::app::scratchpad::registry::SharedScratchpadRegistry::new(),
         app_flags: crate::app::flags::svc::AppFlagService::new(db.clone()),
         runner_looks: crate::app::deadchannel::runner::svc::RunnerLookService::new(db.clone()),
-        afk_users,
         username_directory,
         flair_directory: crate::app::common::username_effect::new_directory(),
-        pomodoro_directory: crate::app::common::pomodoro::new_directory(),
+        status_directory: crate::app::common::status::new_directory(),
         crown_service: crate::app::crown::svc::CrownService::new(db.clone()),
         pot_service: crate::app::pot::svc::PotService::new(db.clone()),
         config,
@@ -345,6 +345,7 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         minesweeper_service,
         bonsai_service,
         pet_service,
+        aquarium_service,
         nonogram_library: NonogramLibrary::default(),
         chip_service: chip_service.clone(),
         lateania_service: crate::app::door::lateania::svc::LateaniaService::new(
@@ -440,6 +441,16 @@ pub struct SessionWorld {
     /// refresh. Unset means the session gets no leaderboard channel at all.
     pub leaderboard_rx:
         Option<watch::Receiver<Arc<late_core::models::leaderboard::LeaderboardData>>>,
+    /// The account's "Land on" tweak. Unset lands in the Clubhouse, the
+    /// production default.
+    pub landing_page: Option<late_core::models::user::LandingPage>,
+    /// A first-ever session, which always starts in the Clubhouse.
+    pub is_new_user: bool,
+    /// One replica's chat service, shared the way production shares it:
+    /// every session on it hears every other's `ChatEvent`s. Unset gives
+    /// the session its own. Mention notifications ride the app's own
+    /// `NotificationService`, which this does not share.
+    pub chat_service: Option<ChatService>,
 }
 
 pub fn make_app_in_world(db: Db, user_id: Uuid, session_token: &str, world: SessionWorld) -> App {
@@ -464,7 +475,10 @@ fn make_app_with_chat_service_and_permissions(
     // main.rs: mention events broadcast on the instance's channel, so a second
     // instance would never deliver them to the app.
     let notification_service = NotificationService::new(db.clone());
-    let chat_service = ChatService::new(db.clone(), notification_service.clone());
+    let chat_service = match world.chat_service.clone() {
+        Some(shared) => shared,
+        None => ChatService::new(db.clone(), notification_service.clone()),
+    };
     let activity_tx = broadcast::channel::<ActivityEvent>(64).0;
     let quest_service = QuestService::new(db.clone(), activity_tx.clone());
     let quest_snapshot_rx = quest_service.subscribe_snapshot(user_id);
@@ -581,11 +595,14 @@ fn make_app_with_chat_service_and_permissions(
         username: world.username.unwrap_or_else(|| "test-user".to_string()),
         bonsai_service: BonsaiService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_bonsai_tree: None,
-        initial_bonsai_care: None,
-        initial_bonsai_v2_tree: None,
         initial_bonsai_decay_protection: None,
-        pet_service: PetService::new(db.clone()),
+        pet_service: PetService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_pet: None,
+        aquarium_service: crate::app::hub::aquarium::svc::AquariumService::new(
+            db.clone(),
+            broadcast::channel::<ActivityEvent>(64).0,
+        ),
+        initial_aquarium_care: Default::default(),
         quest_service,
         quest_snapshot_rx,
         shop_service,
@@ -660,22 +677,23 @@ fn make_app_with_chat_service_and_permissions(
         runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
             std::collections::HashMap::new(),
         ),
-        show_aquarium_tray: false,
+        zen_layout: None,
         // No SSH key: test apps follow the account default and persist no
         // per-device layout, which is also what ghost bot sessions do.
         key_fingerprint: None,
         key_layout: None,
         key_left_at: None,
-        afk_users: crate::state::new_afk_users(),
         username_directory: None,
         flair_directory: None,
-        pomodoro_directory: None,
+        status_directory: None,
         crown_service: None,
         pot_service: None,
         activity_feed_rx: None,
-        initial_announcements: None,
-        is_new_user: false,
-        land_on_home: false,
+        is_new_user: world.is_new_user,
+        landing_page: match world.landing_page {
+            Some(page) => page,
+            None => late_core::models::user::LandingPage::Clubhouse,
+        },
         paper_at_login: false,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         initial_theme_id: "contrast".to_string(),
@@ -685,7 +703,14 @@ fn make_app_with_chat_service_and_permissions(
         initial_radio_station: late_core::models::user::RadioStation::default(),
     })
     .expect("app");
+    let landed = app.screen;
     app.skip_splash_for_tests();
+    // The suite starts on Home, but a test that sets the landing inputs is
+    // asserting where the session landed, so it keeps that screen.
+    if world.landing_page.is_some() || world.is_new_user {
+        app.screen = landed;
+        app.sync_visible_chat_room();
+    }
     (app, chat_service)
 }
 
@@ -824,11 +849,14 @@ pub fn make_app_with_paired_client(
         username: "test-user".to_string(),
         bonsai_service: BonsaiService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_bonsai_tree: None,
-        initial_bonsai_care: None,
-        initial_bonsai_v2_tree: None,
         initial_bonsai_decay_protection: None,
-        pet_service: PetService::new(db.clone()),
+        pet_service: PetService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_pet: None,
+        aquarium_service: crate::app::hub::aquarium::svc::AquariumService::new(
+            db.clone(),
+            broadcast::channel::<ActivityEvent>(64).0,
+        ),
+        initial_aquarium_care: Default::default(),
         quest_service,
         quest_snapshot_rx,
         shop_service,
@@ -903,22 +931,20 @@ pub fn make_app_with_paired_client(
         runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
             std::collections::HashMap::new(),
         ),
-        show_aquarium_tray: false,
+        zen_layout: None,
         // No SSH key: test apps follow the account default and persist no
         // per-device layout, which is also what ghost bot sessions do.
         key_fingerprint: None,
         key_layout: None,
         key_left_at: None,
-        afk_users: crate::state::new_afk_users(),
         username_directory: None,
         flair_directory: None,
-        pomodoro_directory: None,
+        status_directory: None,
         crown_service: None,
         pot_service: None,
         activity_feed_rx: None,
-        initial_announcements: None,
         is_new_user: false,
-        land_on_home: false,
+        landing_page: late_core::models::user::LandingPage::Clubhouse,
         paper_at_login: false,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         initial_icecast_stream: late_core::models::user::IcecastStream::default(),

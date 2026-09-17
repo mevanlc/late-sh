@@ -1,13 +1,9 @@
 pub mod activity;
 pub mod ai;
-pub mod announcements;
-#[cfg(test)]
-mod announcements_test;
 pub mod arcade;
 pub mod artboard;
 pub mod audio;
 pub mod bonsai;
-pub(crate) mod bonsai_v2;
 pub mod chat;
 pub mod clubhouse;
 pub mod common;
@@ -50,6 +46,7 @@ mod smoke_test;
 pub mod state;
 #[cfg(test)]
 mod state_test;
+pub(crate) mod status_picker;
 pub mod stream;
 pub mod tick;
 #[cfg(test)]
@@ -57,7 +54,9 @@ mod tick_test;
 pub(crate) mod ultimates;
 pub mod voice;
 pub mod workspace;
+pub mod zen;
 
+pub use hub::aquarium::svc::AquariumService;
 pub use hub::dailies::svc::QuestService;
 pub use hub::shop::svc::ShopService;
 pub use leaderboard::svc::LeaderboardService;

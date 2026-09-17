@@ -4,6 +4,13 @@ use late_core::models::leaderboard::DoorGame;
 use late_core::models::media_queue_item::SongQueueReward;
 
 use crate::app::activity::event::ActivityGame;
+use crate::app::arcade::share::ShareCardKind;
+use crate::app::arcade::sliding_puzzle::image::{
+    SlidingPuzzleImageOutcome, SlidingPuzzleImageStage,
+};
+use crate::app::bonsai::state::BonsaiAction;
+use crate::app::bonsai::svc::BonsaiActionResult;
+use crate::app::chat::news::svc::XMediaLookup;
 use crate::app::chat::svc::GildRefusal;
 use crate::app::crown::svc::CrownRefusal;
 use crate::app::deadchannel::haunt::state::GateVerdict;
@@ -128,7 +135,8 @@ pub enum FirstContactBeat {
     GlitchBurst,
     NameFlicker,
     WhisperDelivered,
-    InvitationRequested,
+    /// The breakthrough played on a won invitation claim; the DM follows.
+    Breakthrough,
     /// The invitation accepted: `/join #deadchannel` created the runner.
     RunnerCreated,
 }
@@ -167,6 +175,14 @@ pub enum SshRejectReason {
     GlobalLimit,
 }
 
+/// The band count a paired CLI's `viz` frame arrived with. CLIs from before
+/// the 16-band analyzer send 8, which the pair socket stretches to 16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VizWireBands {
+    Eight,
+    Sixteen,
+}
+
 #[cfg(feature = "otel")]
 mod inner {
     use std::sync::OnceLock;
@@ -176,13 +192,18 @@ mod inner {
         metrics::{Counter, UpDownCounter},
     };
 
+    use super::ShareCardKind;
+    use super::XMediaLookup;
     use super::{
         ActivityGame, BioScreenOutcome, CrownRefusal, DailyWinPayout, DoorGame, FirstContactBeat,
         GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult, GateVerdict, GildRefusal,
         GildTier, NewsShareReward, OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult,
         PotRefusal, RenderReason, RoundRefusal, SongQueueReward, SshRejectReason, SummaryResult,
-        TranslationResult,
+        TranslationResult, VizWireBands,
     };
+    use super::{BonsaiAction, BonsaiActionResult};
+    use super::{SlidingPuzzleImageOutcome, SlidingPuzzleImageStage};
+    use crate::app::bonsai::state::BranchAction;
 
     fn meter() -> opentelemetry::metrics::Meter {
         global::meter("late-ssh")
@@ -263,6 +284,16 @@ mod inner {
                 .with_description(
                     "Websocket pair attempts rejected because no live session owned the token",
                 )
+                .build()
+        })
+    }
+
+    fn pair_viz_frames_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pair_viz_frames_total")
+                .with_description("Spectrum frames accepted from paired CLIs, by wire band count")
                 .build()
         })
     }
@@ -393,6 +424,34 @@ mod inner {
             CrownRefusal::AlreadyYours => "already_yours",
             CrownRefusal::InsufficientChips { .. } => "insufficient_chips",
         }
+    }
+
+    fn bonsai_action_label(action: BonsaiAction) -> &'static str {
+        match action {
+            BonsaiAction::Water => "water",
+            BonsaiAction::Branch(BranchAction::Bend { .. }) => "bend",
+            BonsaiAction::Branch(BranchAction::Prune) => "prune",
+            BonsaiAction::Branch(BranchAction::Split) => "split",
+            BonsaiAction::Branch(BranchAction::Pinch) => "pinch",
+        }
+    }
+
+    fn bonsai_action_result_label(result: BonsaiActionResult) -> &'static str {
+        match result {
+            BonsaiActionResult::Stored => "stored",
+            BonsaiActionResult::Refused => "refused",
+            BonsaiActionResult::Failed => "failed",
+        }
+    }
+
+    fn bonsai_actions_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_bonsai_actions_total")
+                .with_description("Bonsai care actions, by action and how they settled")
+                .build()
+        })
     }
 
     fn crown_takes_total() -> &'static Counter<u64> {
@@ -595,6 +654,18 @@ mod inner {
         })
     }
 
+    fn news_x_media_lookups_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_news_x_media_lookups_total")
+                .with_description(
+                    "fxtwitter lookups behind X shares, the only NSFW gate on that path",
+                )
+                .build()
+        })
+    }
+
     fn news_share_chips_paid_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -685,7 +756,7 @@ mod inner {
             FirstContactBeat::GlitchBurst => "glitch_burst",
             FirstContactBeat::NameFlicker => "name_flicker",
             FirstContactBeat::WhisperDelivered => "whisper_delivered",
-            FirstContactBeat::InvitationRequested => "invitation_requested",
+            FirstContactBeat::Breakthrough => "breakthrough",
             FirstContactBeat::RunnerCreated => "runner_created",
         }
     }
@@ -770,6 +841,17 @@ mod inner {
         ws_pair_rejected_unknown_token_total().add(1, &[]);
     }
 
+    fn viz_wire_bands_label(bands: VizWireBands) -> &'static str {
+        match bands {
+            VizWireBands::Eight => "8",
+            VizWireBands::Sixteen => "16",
+        }
+    }
+
+    pub fn record_pair_viz_frame(bands: VizWireBands) {
+        pair_viz_frames_total().add(1, &[KeyValue::new("bands", viz_wire_bands_label(bands))]);
+    }
+
     pub fn record_cli_pair_usage(ssh_mode: &str, platform: &str) {
         cli_pair_usage_total().add(
             1,
@@ -822,6 +904,76 @@ mod inner {
         game_wins_total().add(1, &[KeyValue::new("game", game_label(game))]);
     }
 
+    fn share_cards_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_share_cards_total")
+                .with_description("Share cards copied to the clipboard")
+                .build()
+        })
+    }
+
+    fn share_card_kind_label(kind: ShareCardKind) -> &'static str {
+        match kind {
+            ShareCardKind::LeWord => "le_word",
+            ShareCardKind::Nonogram => "nonogram",
+            ShareCardKind::Sudoku => "sudoku",
+            ShareCardKind::Minesweeper => "minesweeper",
+            ShareCardKind::Solitaire => "solitaire",
+            ShareCardKind::RubiksCube => "rubiks_cube",
+            ShareCardKind::SlidingPuzzle => "sliding_puzzle",
+            ShareCardKind::Day => "day",
+        }
+    }
+
+    /// One share card copied.
+    pub fn record_share_card(kind: ShareCardKind) {
+        share_cards_total().add(1, &[KeyValue::new("card", share_card_kind_label(kind))]);
+    }
+
+    fn sliding_puzzle_image_stage_label(stage: SlidingPuzzleImageStage) -> &'static str {
+        match stage {
+            SlidingPuzzleImageStage::Preview => "preview",
+            SlidingPuzzleImageStage::Native => "native",
+        }
+    }
+
+    fn sliding_puzzle_image_outcome_label(outcome: SlidingPuzzleImageOutcome) -> &'static str {
+        match outcome {
+            SlidingPuzzleImageOutcome::Rendered => "rendered",
+            SlidingPuzzleImageOutcome::Cached => "cached",
+            SlidingPuzzleImageOutcome::Failed => "failed",
+        }
+    }
+
+    fn sliding_puzzle_images_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_sliding_puzzle_images_total")
+                .with_description(
+                    "Sliding Puzzle image stages finished; a run of failed is the artwork CDN refusing us",
+                )
+                .build()
+        })
+    }
+
+    /// One Sliding Puzzle image stage (Chafa preview or native cell set)
+    /// finished, from the cache or the encoder, or failed.
+    pub fn record_sliding_puzzle_image(
+        stage: SlidingPuzzleImageStage,
+        outcome: SlidingPuzzleImageOutcome,
+    ) {
+        sliding_puzzle_images_total().add(
+            1,
+            &[
+                KeyValue::new("stage", sliding_puzzle_image_stage_label(stage)),
+                KeyValue::new("outcome", sliding_puzzle_image_outcome_label(outcome)),
+            ],
+        );
+    }
+
     fn daily_win_payout_label(payout: DailyWinPayout) -> &'static str {
         match payout {
             DailyWinPayout::Paid => "paid",
@@ -857,6 +1009,23 @@ mod inner {
         news_share_chips_paid_total().add(reward.chips() as u64, &[]);
     }
 
+    /// `unavailable` is a share the gate rejected without a verdict; a run of
+    /// them is an fxtwitter outage.
+    fn news_x_media_lookup_label(lookup: XMediaLookup) -> &'static str {
+        match lookup {
+            XMediaLookup::Clean => "clean",
+            XMediaLookup::Sensitive => "sensitive",
+            XMediaLookup::Unavailable => "unavailable",
+        }
+    }
+
+    pub fn record_news_x_media_lookup(lookup: XMediaLookup) {
+        news_x_media_lookups_total().add(
+            1,
+            &[KeyValue::new("outcome", news_x_media_lookup_label(lookup))],
+        );
+    }
+
     /// Same shape as the News share: one counter for the submissions and one
     /// for the chips they minted, so the tracks that came in past the day's
     /// cap are visible beside the paid ones.
@@ -881,6 +1050,16 @@ mod inner {
 
     pub fn record_gild_refused(refusal: GildRefusal) {
         chat_gilds_refused_total().add(1, &[KeyValue::new("reason", gild_refusal_label(refusal))]);
+    }
+
+    pub fn record_bonsai_action(action: BonsaiAction, result: BonsaiActionResult) {
+        bonsai_actions_total().add(
+            1,
+            &[
+                KeyValue::new("action", bonsai_action_label(action)),
+                KeyValue::new("result", bonsai_action_result_label(result)),
+            ],
+        );
     }
 
     /// The price is burned whole, so one counter tracks the takeovers and
@@ -1193,13 +1372,17 @@ mod inner {
 
 #[cfg(not(feature = "otel"))]
 mod inner {
+    use super::ShareCardKind;
+    use super::XMediaLookup;
     use super::{
         ActivityGame, BioScreenOutcome, CrownRefusal, DailyWinPayout, DoorGame, FirstContactBeat,
         GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult, GateVerdict, GildRefusal,
         GildTier, NewsShareReward, OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult,
         PotRefusal, RenderReason, RoundRefusal, SongQueueReward, SshRejectReason, SummaryResult,
-        TranslationResult,
+        TranslationResult, VizWireBands,
     };
+    use super::{BonsaiAction, BonsaiActionResult};
+    use super::{SlidingPuzzleImageOutcome, SlidingPuzzleImageStage};
 
     pub fn record_ssh_connection() {}
     pub fn record_ssh_connection_rejected(_reason: SshRejectReason) {}
@@ -1211,6 +1394,7 @@ mod inner {
     pub fn add_ssh_session(_delta: i64) {}
     pub fn record_ws_pair_success() {}
     pub fn record_ws_pair_rejected_unknown_token() {}
+    pub fn record_pair_viz_frame(_bands: VizWireBands) {}
     pub fn record_cli_pair_usage(_ssh_mode: &str, _platform: &str) {}
     pub fn add_cli_pair_active(_delta: i64, _ssh_mode: &str, _platform: &str) {}
     pub fn record_render_frame_drop() {}
@@ -1219,11 +1403,19 @@ mod inner {
     pub fn record_chat_message_sent() {}
     pub fn record_chat_message_edited() {}
     pub fn record_game_win(_game: ActivityGame) {}
+    pub fn record_share_card(_kind: ShareCardKind) {}
+    pub fn record_sliding_puzzle_image(
+        _stage: SlidingPuzzleImageStage,
+        _outcome: SlidingPuzzleImageOutcome,
+    ) {
+    }
     pub fn record_daily_win_payout(_payout: DailyWinPayout) {}
     pub fn record_news_shared(_reward: NewsShareReward) {}
+    pub fn record_news_x_media_lookup(_lookup: XMediaLookup) {}
     pub fn record_song_queued(_reward: SongQueueReward) {}
     pub fn record_gild_bought(_tier: GildTier) {}
     pub fn record_gild_refused(_refusal: GildRefusal) {}
+    pub fn record_bonsai_action(_action: BonsaiAction, _result: BonsaiActionResult) {}
     pub fn record_crown_taken(_price: i64) {}
     pub fn record_crown_take_refused(_refusal: CrownRefusal) {}
     pub fn record_round_bought(_patrons: i64, _chips: i64) {}

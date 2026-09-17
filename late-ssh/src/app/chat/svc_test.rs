@@ -117,10 +117,9 @@ async fn send_pre_translates_to_english_for_opted_in_authors() {
             room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
-            land_on_home: false,
+            landing_page: late_core::models::user::LandingPage::Clubhouse,
             paper_at_login: true,
             show_flag_fallback: false,
-            show_pet_strip: true,
             translate_to: TranslateLang::En,
             auto_translate: false,
             translate_mine_to_en: true,
@@ -735,10 +734,9 @@ async fn room_tail_task_loads_favorite_room_history() {
             room_list_mode: late_core::models::user::RoomListMode::On,
             keep_composer_focused: false,
             start_with_music_muted: false,
-            land_on_home: false,
+            landing_page: late_core::models::user::LandingPage::Clubhouse,
             paper_at_login: true,
             show_flag_fallback: false,
-            show_pet_strip: true,
             translate_to: late_core::models::message_translation::TranslateLang::En,
             auto_translate: false,
             translate_mine_to_en: false,
@@ -1953,7 +1951,7 @@ async fn mod_server_kick_command_terminates_active_sessions_and_audits() {
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: Some(peer_ip),
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -2037,7 +2035,7 @@ async fn mod_server_ban_command_bans_and_terminates_active_sessions() {
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: Some(peer_ip),
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -2158,7 +2156,7 @@ async fn mod_artboard_ban_command_notifies_active_sessions() {
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: None,
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -2863,7 +2861,7 @@ async fn mod_room_ban_command_notifies_target_sessions_to_drop_room() {
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: None,
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -2940,7 +2938,7 @@ async fn mod_slow_command_creates_row_audits_and_notifies_target_session() {
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: None,
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -3041,7 +3039,7 @@ async fn mod_server_slow_command_creates_server_row_and_notifies_target_session(
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: None,
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -3133,7 +3131,7 @@ async fn grant_mod_command_updates_active_session_permissions() {
                 token: session_token.clone(),
                 fingerprint: Some(target.fingerprint.clone()),
                 peer_ip: None,
-                afk: None,
+                status: None,
             }],
             connection_count: 1,
             last_login_at: std::time::Instant::now(),
@@ -3206,7 +3204,7 @@ async fn admin_ultimate_cast_command_broadcasts_to_active_sessions_and_audits() 
                     token: actor_token.clone(),
                     fingerprint: Some(actor.fingerprint.clone()),
                     peer_ip: None,
-                    afk: None,
+                    status: None,
                 }],
                 connection_count: 1,
                 last_login_at: std::time::Instant::now(),
@@ -3222,7 +3220,7 @@ async fn admin_ultimate_cast_command_broadcasts_to_active_sessions_and_audits() 
                     token: target_token.clone(),
                     fingerprint: Some(target.fingerprint.clone()),
                     peer_ip: None,
-                    afk: None,
+                    status: None,
                 }],
                 connection_count: 1,
                 last_login_at: std::time::Instant::now(),
@@ -4542,7 +4540,7 @@ async fn is_member(db: &late_core::db::Db, room_id: Uuid, user_id: Uuid) -> bool
 mod gild {
     use super::*;
     use late_core::models::chat_message_gild::{ChatMessageGild, GildTier};
-    use late_core::models::chips::{ChipMove, UserChips};
+    use late_core::models::chips::UserChips;
 
     /// A public room, a message in it by `author`, and `buyer` in the room
     /// with enough chips for any tier.
@@ -4604,22 +4602,24 @@ mod gild {
         UserChips::ensure(&client, user_id)
             .await
             .expect("chips row");
-        UserChips::apply(&**client, user_id, ChipMove::Credit, 100_000, None)
+        UserChips::admin_grant(&**client, user_id, 100_000)
             .await
-            .expect("stake")
-            .expect("credit lands");
+            .expect("stake");
     }
 
-    /// Every ledger row written against this message, summed. Zero means
-    /// nothing was charged and nothing was paid.
+    /// Every ledger row written for a gild on this message, counted. The
+    /// rows carry the gild row id as their ref, so the count goes through
+    /// the gild table. Zero means nothing was charged and nothing was paid.
     async fn gild_ledger_total(db: &late_core::db::Db, message_id: Uuid) -> i64 {
         let client = db.get().await.expect("db client");
         let row = client
             .query_one(
                 "SELECT COUNT(*)::bigint AS rows
                  FROM chip_ledger
-                 WHERE source_ref = $1",
-                &[&message_id.to_string()],
+                 WHERE source_ref IN (
+                     SELECT id::text FROM chat_message_gilds WHERE message_id = $1
+                 )",
+                &[&message_id],
             )
             .await
             .expect("ledger count");
@@ -4992,7 +4992,9 @@ mod gild {
 
 #[tokio::test]
 async fn first_contact_invitation_sends_one_dm_and_claims_once() {
-    use crate::app::deadchannel::haunt::state::{VOICE_FINGERPRINT, VOICE_USERNAME};
+    use crate::app::deadchannel::haunt::state::{
+        InvitationClaim, VOICE_FINGERPRINT, VOICE_USERNAME,
+    };
 
     let test_db = new_test_db().await;
     let service = ChatService::new(
@@ -5001,10 +5003,30 @@ async fn first_contact_invitation_sends_one_dm_and_claims_once() {
     );
     let target = create_test_user(&test_db.db, "first-contact-target").await;
 
-    // Two racing requests (two devices noticing the due date): the claim
-    // lets exactly one DM through.
-    service.send_first_contact_invitation_task(target.id, target.username.clone());
-    service.send_first_contact_invitation_task(target.id, target.username.clone());
+    // Two racing requests (two devices whose sends came due at once): the
+    // claim lets exactly one of them play the scene and one DM through.
+    let first = service.send_first_contact_invitation_task(
+        target.id,
+        target.username.clone(),
+        Duration::ZERO,
+    );
+    let second = service.send_first_contact_invitation_task(
+        target.id,
+        target.username.clone(),
+        Duration::ZERO,
+    );
+    let answers = [
+        first.await.expect("first answer"),
+        second.await.expect("second answer"),
+    ];
+    assert_eq!(
+        answers
+            .iter()
+            .filter(|answer| **answer == InvitationClaim::Won)
+            .count(),
+        1,
+        "exactly one session may break through: {answers:?}"
+    );
 
     let client = test_db.db.get().await.expect("db client");
     crate::test_helpers::wait_until(
@@ -5172,7 +5194,7 @@ async fn first_contact_voice_ensure_is_idempotent_and_claims_the_name() {
 
 #[tokio::test]
 async fn first_contact_invitation_claim_survives_a_failed_send() {
-    use crate::app::deadchannel::haunt::state::VOICE_USERNAME;
+    use crate::app::deadchannel::haunt::state::{InvitationClaim, VOICE_USERNAME};
 
     let test_db = new_test_db().await;
     let service = ChatService::new(
@@ -5185,11 +5207,12 @@ async fn first_contact_invitation_claim_survives_a_failed_send() {
     let _squatter = create_test_user(&test_db.db, VOICE_USERNAME).await;
     let target = create_test_user(&test_db.db, "fc-claim-target").await;
 
-    service.send_first_contact_invitation_task(target.id, target.username.clone());
-
-    // The failure is silent from out here; give the task time to run its
-    // course (a negative assertion, like the racing-duplicate check above).
-    sleep(Duration::from_millis(400)).await;
+    // The asking session hears the failure, so nothing plays there.
+    let answer = service
+        .send_first_contact_invitation_task(target.id, target.username.clone(), Duration::ZERO)
+        .await
+        .expect("answer");
+    assert_eq!(answer, InvitationClaim::Failed);
 
     // The once-ever claim must not be burned by a DM that never sent: the
     // stamp stays absent so a later session retries the invitation.
@@ -5202,4 +5225,152 @@ async fn first_contact_invitation_claim_survives_a_failed_send() {
         late_core::models::user::extract_first_contact_invited_at(&target_row.settings).is_none(),
         "a failed invitation must leave the claim untaken"
     );
+}
+
+mod grant {
+    //! `/grant`: the admin mint. The flag is checked in the database, and
+    //! the credit is the one balance change that leaves no ledger row.
+    use super::*;
+    use crate::app::games::chips::svc::ChipService;
+    use late_core::models::chips::{INITIAL_CHIP_BALANCE, UserChips};
+
+    async fn grant(service: &ChatService, admin: Uuid, target: &str, amount: i64) -> ChatEvent {
+        let mut events = service.subscribe_events();
+        service.grant_chips_task(admin, target.to_string(), amount);
+        loop {
+            let event = timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("grant event timeout")
+                .expect("grant event");
+            if matches!(
+                event,
+                ChatEvent::GrantSucceeded { .. } | ChatEvent::GrantFailed { .. }
+            ) {
+                return event;
+            }
+        }
+    }
+
+    async fn ledger_rows(db: &late_core::db::Db, user_id: Uuid) -> Vec<(i64, String)> {
+        let client = db.get().await.expect("db client");
+        client
+            .query(
+                "SELECT delta, reason FROM chip_ledger WHERE user_id = $1 ORDER BY created_at",
+                &[&user_id],
+            )
+            .await
+            .expect("ledger rows")
+            .into_iter()
+            .map(|row| (row.get("delta"), row.get("reason")))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn an_admin_mints_chips_with_no_ledger_row() {
+        let test_db = new_test_db().await;
+        let service = ChatService::new(
+            test_db.db.clone(),
+            NotificationService::new(test_db.db.clone()),
+        )
+        .with_chip_service(ChipService::new(test_db.db.clone()));
+        let admin = create_test_user(&test_db.db, "grant-admin").await;
+        let player = create_test_user(&test_db.db, "grant-player").await;
+        {
+            let client = test_db.db.get().await.expect("db client");
+            User::set_admin(&client, admin.id, true)
+                .await
+                .expect("promote admin");
+        }
+
+        // The player has never logged in: the grant lands on top of the
+        // stipend, and only the stipend is written down.
+        let event = grant(&service, admin.id, "grant-player", 2_500).await;
+        match event {
+            ChatEvent::GrantSucceeded {
+                user_id,
+                recipient_id,
+                recipient_username,
+                amount,
+                recipient_balance,
+            } => {
+                assert_eq!(user_id, admin.id);
+                assert_eq!(recipient_id, player.id);
+                assert_eq!(recipient_username, "grant-player");
+                assert_eq!(amount, 2_500);
+                assert_eq!(recipient_balance, INITIAL_CHIP_BALANCE + 2_500);
+            }
+            other => panic!("expected the grant to land, got {other:?}"),
+        }
+
+        let client = test_db.db.get().await.expect("db client");
+        let chips = UserChips::find(&client, player.id)
+            .await
+            .expect("find chips")
+            .expect("chips row");
+        assert_eq!(chips.balance, INITIAL_CHIP_BALANCE + 2_500);
+        assert_eq!(
+            ledger_rows(&test_db.db, player.id).await,
+            vec![(INITIAL_CHIP_BALANCE, "initial_balance".to_string())],
+            "the grant itself must not be in the ledger"
+        );
+    }
+
+    /// Local and staging sessions are admins through `force_admin`, not the
+    /// `users.is_admin` column; the grant must apply the same rule the
+    /// session bootstrap does, or every dev account is refused.
+    #[tokio::test]
+    async fn force_admin_counts_as_admin() {
+        let test_db = new_test_db().await;
+        let service = ChatService::new(
+            test_db.db.clone(),
+            NotificationService::new(test_db.db.clone()),
+        )
+        .with_force_admin(true)
+        .with_chip_service(ChipService::new(test_db.db.clone()));
+        let dev = create_test_user(&test_db.db, "grant-forced-admin").await;
+        let player = create_test_user(&test_db.db, "grant-forced-player").await;
+
+        let event = grant(&service, dev.id, "grant-forced-player", 100).await;
+        match event {
+            ChatEvent::GrantSucceeded {
+                recipient_id,
+                recipient_balance,
+                ..
+            } => {
+                assert_eq!(recipient_id, player.id);
+                assert_eq!(recipient_balance, INITIAL_CHIP_BALANCE + 100);
+            }
+            other => panic!("a force_admin session grants like an admin, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_admin_is_refused_and_nothing_moves() {
+        let test_db = new_test_db().await;
+        let service = ChatService::new(
+            test_db.db.clone(),
+            NotificationService::new(test_db.db.clone()),
+        )
+        .with_chip_service(ChipService::new(test_db.db.clone()));
+        let civilian = create_test_user(&test_db.db, "grant-civilian").await;
+        let player = create_test_user(&test_db.db, "grant-mark").await;
+
+        let event = grant(&service, civilian.id, "grant-mark", 2_500).await;
+        match event {
+            ChatEvent::GrantFailed { user_id, message } => {
+                assert_eq!(user_id, civilian.id);
+                assert_eq!(message, "/grant is admin-only");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+
+        let client = test_db.db.get().await.expect("db client");
+        assert!(
+            UserChips::find(&client, player.id)
+                .await
+                .expect("find chips")
+                .is_none(),
+            "a refused grant must not even create the row"
+        );
+    }
 }

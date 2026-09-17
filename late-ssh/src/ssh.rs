@@ -458,7 +458,6 @@ impl Drop for ClientHandler {
         {
             metrics::add_ssh_session(-1);
             let user_id = user.id;
-            let mut user_still_afk = false;
             let mut became_offline = false;
             let mut active_users = self.state.active_users.lock_recover();
 
@@ -469,18 +468,8 @@ impl Drop for ClientHandler {
                 if active.connection_count <= 1 {
                     active_users.remove(&user_id);
                     became_offline = true;
-                    // Last connection gone: retire any running countdown so a
-                    // peer doesn't keep painting a badge for someone who left.
-                    // The timer is session-local, so there is nothing to
-                    // resume when they come back.
-                    crate::app::common::pomodoro::set_user(
-                        &self.state.pomodoro_directory,
-                        user_id,
-                        None,
-                    );
                 } else {
                     active.connection_count -= 1;
-                    user_still_afk = active.sessions.iter().any(|session| session.afk.is_some());
                 }
             }
             if became_offline {
@@ -489,7 +478,16 @@ impl Drop for ClientHandler {
                     .online_user_disconnected(user_id);
             }
             drop(active_users);
-            crate::state::set_afk_user(&self.state.afk_users, user_id, user_still_afk);
+            // A status is session-local, so this session's retires with it.
+            // The user's shared entry falls back to whatever their remaining
+            // sessions carry, and clears once none does (always, on the last
+            // connection). There is nothing to resume when they come back.
+            crate::app::common::status::publish_for_user(
+                &self.state.status_directory,
+                &self.state.active_users,
+                user_id,
+                None,
+            );
         }
 
         if !self.per_ip_incremented {
@@ -548,7 +546,7 @@ impl ClientHandler {
             token: session_token.to_string(),
             fingerprint: Some(user.fingerprint.clone()),
             peer_ip: self.peer_ip,
-            afk: None,
+            status: None,
         });
     }
 }
@@ -787,50 +785,39 @@ impl russh::server::Handler for ClientHandler {
             initial_solitaire_games,
             initial_minesweeper_games,
         } = load_arcade_session_preloads(&self.state, user_id).await;
-        let (initial_bonsai_tree, initial_bonsai_care, initial_bonsai_decay_protection) = match self
-            .state
-            .bonsai_service
-            .ensure_tree_with_care(user_id)
-            .await
-        {
-            Ok((tree, care, protection)) => (Some(tree), Some(care), protection),
+        let initial_bonsai_tree = match self.state.bonsai_service.ensure_tree(user_id).await {
+            Ok(tree) => Some(tree),
             Err(e) => {
                 tracing::warn!(error = ?e, "failed to load/create bonsai tree");
-                (None, None, None)
-            }
-        };
-        let shop_snapshot_rx = self.state.shop_service.subscribe_snapshot(user_id);
-        let shop_snapshot = match self.state.shop_service.refresh_user(user_id).await {
-            Ok(snapshot) => Some(snapshot),
-            Err(e) => {
-                tracing::warn!(error = ?e, "failed to refresh shop snapshot");
                 None
             }
         };
-        let initial_bonsai_v2_tree = if shop_snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.entitlements.has_dynamic_bonsai())
-        {
-            match self
-                .state
-                .bonsai_service
-                .ensure_v2_tree(user_id, initial_bonsai_tree.as_ref())
-                .await
-            {
-                Ok(tree) => Some(tree),
+        let initial_bonsai_decay_protection =
+            match self.state.bonsai_service.decay_protection(user_id).await {
+                Ok(protection) => protection,
                 Err(e) => {
-                    tracing::warn!(error = ?e, "failed to load/create bonsai v2 tree");
+                    tracing::warn!(error = ?e, "failed to load bonsai decay protection");
                     None
                 }
-            }
-        } else {
-            None
-        };
-        let initial_pet = match self.state.pet_service.ensure_cat(user_id).await {
-            Ok(cat) => Some(cat),
+            };
+        let shop_snapshot_rx = self.state.shop_service.subscribe_snapshot(user_id);
+        // Primes the per-user snapshot channel subscribed above; the session
+        // reads everything it needs from that channel.
+        if let Err(e) = self.state.shop_service.refresh_user(user_id).await {
+            tracing::warn!(error = ?e, "failed to refresh shop snapshot");
+        }
+        let initial_pet = match self.state.pet_service.ensure_pet(user_id).await {
+            Ok(pet) => Some(pet),
             Err(e) => {
-                tracing::warn!(error = ?e, "failed to load/create cat companion");
+                tracing::warn!(error = ?e, "failed to load/create pet companion");
                 None
+            }
+        };
+        let initial_aquarium_care = match self.state.aquarium_service.bootstrap(user_id).await {
+            Ok(care) => care,
+            Err(e) => {
+                tracing::warn!(error = ?e, "failed to load aquarium care");
+                Default::default()
             }
         };
 
@@ -878,21 +865,6 @@ impl russh::server::Handler for ClientHandler {
             key_fingerprint.as_deref(),
         )
         .await;
-        let initial_announcements = match self.state.db.get().await {
-            Ok(client) => {
-                match crate::app::announcements::load_login_announcements(&client, user_id).await {
-                    Ok(announcements) => announcements,
-                    Err(e) => {
-                        tracing::warn!(error = ?e, "failed to load login announcements");
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = ?e, "failed to get db client for login announcements");
-                None
-            }
-        };
         let initial_door_rcs = match self.state.door_rc_service.list(user_id).await {
             Ok(rcs) => rcs,
             Err(e) => {
@@ -973,11 +945,11 @@ impl russh::server::Handler for ClientHandler {
             username: user.username.clone(),
             bonsai_service: self.state.bonsai_service.clone(),
             initial_bonsai_tree,
-            initial_bonsai_care,
-            initial_bonsai_v2_tree,
             initial_bonsai_decay_protection,
             pet_service: self.state.pet_service.clone(),
             initial_pet,
+            aquarium_service: self.state.aquarium_service.clone(),
+            initial_aquarium_care,
             quest_service: self.state.quest_service.clone(),
             quest_snapshot_rx,
             shop_service: self.state.shop_service.clone(),
@@ -1054,25 +1026,23 @@ impl russh::server::Handler for ClientHandler {
             app_flags_rx: self.state.app_flags.subscribe(),
             app_flags: Some(self.state.app_flags.clone()),
             runner_looks_rx: self.state.runner_looks.subscribe(),
-            show_aquarium_tray: late_core::models::user::extract_show_aquarium_tray(&user.settings),
+            zen_layout: late_core::models::user::extract_zen_layout(&user.settings),
             key_fingerprint,
             key_layout: device.layout,
             key_left_at: device.left_at,
-            afk_users: self.state.afk_users.clone(),
             username_directory: Some(self.state.username_directory.clone()),
             flair_directory: Some(self.state.flair_directory.clone()),
-            pomodoro_directory: Some(self.state.pomodoro_directory.clone()),
+            status_directory: Some(self.state.status_directory.clone()),
             crown_service: Some(self.state.crown_service.clone()),
             pot_service: Some(self.state.pot_service.clone()),
             activity_feed_rx: self.activity_feed_rx.take(),
-            initial_announcements,
             user_id,
             permissions,
             artboard_banned: artboard_ban.is_some(),
             artboard_ban_expires_at: artboard_ban.and_then(|ban| ban.expires_at),
 
             is_new_user: self.is_new_user,
-            land_on_home: late_core::models::user::extract_land_on_home(&user.settings),
+            landing_page: late_core::models::user::extract_landing_page(&user.settings),
             paper_at_login: late_core::models::user::extract_paper_at_login(&user.settings),
 
             // Display config
@@ -1683,6 +1653,19 @@ async fn render_once(
                 if drops.is_multiple_of(ctx.frame_drop_log_every) {
                     tracing::debug!(drops, "frame drops (handle busy)");
                 }
+                // A dropped command is most often one chunk of an image
+                // transmission, and the placement diff already believes that
+                // image is on screen: nothing would ever resend it. Treat it
+                // like a dropped frame, so the next frame re-emits every
+                // raster from a clean slate, and abandon the rest of this
+                // batch rather than piling more chunks onto a busy handle.
+                // The output-budget guard in the render loop keeps a link
+                // that stays busy from turning this retry into a flood.
+                let mut app = app.lock().await;
+                app.force_full_repaint();
+                ctx.signal.dirty.store(true, Ordering::Release);
+                wake_hint = crate::app::tick::HOT_TICK;
+                break;
             }
         }
     }
