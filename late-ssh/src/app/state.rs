@@ -357,6 +357,9 @@ pub struct SessionConfig {
     /// Process-global clubhouse presence (seats, walkers, emotes). `None`
     /// on headless/test paths, which keeps the room session-local.
     pub clubhouse_lobby: Option<crate::app::clubhouse::lobby::SharedLobby>,
+    /// Process-global Nightcap seats. `None` on headless/test paths, same
+    /// as `clubhouse_lobby`.
+    pub nightcap_lobby: Option<crate::app::nightcap::lobby::SharedSeats>,
     /// Process-global ghost-bot mention cooldown ladders, peeked at composer
     /// submit for the cooldown banner. Tests pass a fresh instance.
     pub mention_ladders: crate::app::ai::ladder::MentionLadders,
@@ -533,6 +536,11 @@ pub struct App {
     >,
     /// Admin-gated clubhouse tavern (page `0`): avatar, crowd, animations.
     pub(crate) clubhouse: crate::app::clubhouse::state::State,
+    /// Nightcap: the small bar reachable with `n` from the clubhouse.
+    pub(crate) nightcap: crate::app::nightcap::state::State,
+    /// The night city page (`app/deadchannel/city`): where the runner
+    /// stands, the open shop panel, the street's last line.
+    pub(crate) city: crate::app::deadchannel::city::state::State,
     /// Chips backend, kept for the clubhouse's on-the-house welcome pour.
     pub(crate) chip_service: crate::app::games::chips::svc::ChipService,
     /// Staff bot ids from the active-users map, for speech bubbles and the
@@ -937,6 +945,15 @@ pub(super) fn listen_url(web_url: &str) -> String {
 }
 
 impl App {
+    /// A runner: this session's user has a `deadchannel_runners` row, the
+    /// one thing `/join #deadchannel` creates and nothing else does. The
+    /// gate for everything under the clubhouse (the undercity today). Read
+    /// from the owned looks map, so it costs nothing on the hot path and
+    /// follows a join on the next tick edge, on every replica.
+    pub fn is_runner(&self) -> bool {
+        self.runner_looks.contains_key(&self.user_id)
+    }
+
     pub fn is_running(&self) -> bool {
         self.running
     }
@@ -1433,6 +1450,12 @@ impl App {
                 config.username.clone(),
                 !config.clubhouse_tutorial_done,
             ),
+            nightcap: crate::app::nightcap::state::State::new(
+                config.nightcap_lobby.clone(),
+                config.user_id,
+                config.username.clone(),
+            ),
+            city: crate::app::deadchannel::city::state::State::new(),
             chip_service: config.chip_service,
             clubhouse_bartender_id: None,
             clubhouse_graybeard_id: None,
@@ -2267,6 +2290,16 @@ impl App {
             self.house.close();
         }
 
+        // A Nightcap stool is held only while its owner is in the room.
+        // There are six of them and sitting is the room's one verb, so a
+        // seat kept across a screen change is a claim that outlives the
+        // visit: six such claims close the bar for the rest of those
+        // sessions. `SharedSeats::sync` cannot clean this up, since it only
+        // evicts users who left `active_users`, which means disconnected.
+        if self.screen == Screen::Nightcap && screen != Screen::Nightcap {
+            self.nightcap.leave_screen();
+        }
+
         if self.screen == Screen::Scratchpad && screen != Screen::Scratchpad {
             // Dropping `scratchpad` here (rather than an explicit
             // `leave_scratchpad` method) runs `ScratchpadState`'s `Drop`
@@ -2698,6 +2731,34 @@ impl App {
             lounge_messages,
             chrono::Utc::now(),
         );
+    }
+
+    /// Sync Nightcap's seats with the active-users map about once a second
+    /// while the screen is up, same cadence as `tick_clubhouse`. Only drops
+    /// disconnected occupants — unlike the Clubhouse, nobody holds a seat
+    /// until they press a number key, so there is no roster to seat people
+    /// into.
+    pub(crate) fn tick_nightcap(&mut self) {
+        self.nightcap.tick(self.marquee_tick as u64);
+        if self.screen != Screen::Nightcap {
+            return;
+        }
+
+        if self.nightcap.roster_refresh_due() {
+            let mut roster = Vec::new();
+            if let Some(active_users) = &self.active_users {
+                let active_users = active_users.lock_recover();
+                for (user_id, user) in active_users.iter() {
+                    if user.fingerprint.is_none() {
+                        continue; // ghost bots don't hold a seat
+                    }
+                    roster.push((*user_id, user.username.clone()));
+                }
+            }
+            self.nightcap.refresh_roster(&roster);
+        }
+
+        self.nightcap.refresh_snapshot();
     }
 
     /// Persist "the clubhouse tutorial ran" (fire-and-forget).

@@ -367,6 +367,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     let clubhouse_lobby = late_ssh::app::clubhouse::lobby::SharedLobby::new();
+    let nightcap_lobby = late_ssh::app::nightcap::lobby::SharedSeats::new();
     let scratchpad_registry = late_ssh::app::scratchpad::registry::SharedScratchpadRegistry::new();
     let mention_ladders = late_ssh::app::ai::ladder::MentionLadders::new();
     let ghost_service = GhostService::new(
@@ -442,6 +443,7 @@ async fn main() -> anyhow::Result<()> {
         pair_ws_counts: Arc::new(Mutex::new(HashMap::new())),
         active_users,
         clubhouse_lobby,
+        nightcap_lobby,
         mention_ladders,
         scratchpad_registry,
         username_directory: username_directory.clone(),

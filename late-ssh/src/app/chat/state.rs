@@ -234,6 +234,8 @@ impl ComposerCommands {
             | Screen::Artboard
             | Screen::Profiles
             | Screen::Leaderboard
+            | Screen::Nightcap
+            | Screen::City
             | Screen::Zen
             | Screen::DailyMatch
             | Screen::HouseTable

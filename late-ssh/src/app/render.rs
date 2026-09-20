@@ -243,6 +243,7 @@ struct DrawContext<'a> {
     directory_state: &'a crate::app::directory::state::DirectoryState,
     clubhouse_state: &'a crate::app::clubhouse::state::State,
     clubhouse_own_username: &'a str,
+    nightcap_state: &'a crate::app::nightcap::state::State,
     /// Resolved name flair (color style and rented title) for clubhouse name
     /// labels.
     clubhouse_name_flair: &'a std::collections::HashMap<
@@ -256,6 +257,9 @@ struct DrawContext<'a> {
     clubhouse_bot_id: Option<uuid::Uuid>,
     /// The clubhouse composer footer; built only on that screen.
     clubhouse_composer: Option<chat::ui::ComposerBlockView<'a>>,
+    /// The night city page: the runner's spot and its look.
+    city_state: &'a crate::app::deadchannel::city::state::State,
+    city_look: Option<&'a crate::app::deadchannel::runner::state::Look>,
     /// A chat overlay that lands on the Lounge (a `/summary` or reaction list
     /// requested on Home); the Lounge composer itself opens none.
     clubhouse_overlay: Option<&'a crate::app::common::overlay::Overlay>,
@@ -1298,11 +1302,14 @@ impl App {
                         directory_state: &self.directory_state,
                         clubhouse_state: &self.clubhouse,
                         clubhouse_own_username: self.profile_state.profile().username.as_str(),
+                        nightcap_state: &self.nightcap,
                         clubhouse_name_flair: &self.name_flair,
                         clubhouse_lounge_messages,
                         clubhouse_graybeard_id: self.clubhouse_graybeard_id,
                         clubhouse_bot_id: self.clubhouse_bot_id,
                         clubhouse_composer,
+                        city_state: &self.city,
+                        city_look: self.runner_looks.get(&self.user_id),
                         clubhouse_overlay: self.chat.overlay(),
                         artboard_interacting: self.artboard_interacting,
                         leaderboard: &self.leaderboard,
@@ -1871,6 +1878,22 @@ impl App {
                     overlay: ctx.clubhouse_overlay,
                 },
             ),
+            Screen::City => crate::app::deadchannel::city::ui::draw(
+                frame,
+                content_area,
+                crate::app::deadchannel::city::ui::CityView {
+                    state: ctx.city_state,
+                    own_username: ctx.clubhouse_own_username,
+                    look: ctx.city_look,
+                },
+            ),
+            Screen::Nightcap => crate::app::nightcap::ui::draw(
+                frame,
+                content_area,
+                crate::app::nightcap::ui::NightcapView {
+                    state: ctx.nightcap_state,
+                },
+            ),
             Screen::Zen => {
                 let view = crate::app::zen::ui::ZenView {
                     zen: ctx.zen,
@@ -2291,7 +2314,9 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                         | Screen::GreenDragon
                 ))
             || (*tab_screen == Screen::Dashboard
-                && matches!(screen, Screen::DailyMatch | Screen::HouseTable));
+                && matches!(screen, Screen::DailyMatch | Screen::HouseTable))
+            || (*tab_screen == Screen::Clubhouse
+                && matches!(screen, Screen::City | Screen::Nightcap));
         let style = if active {
             Style::default()
                 .fg(theme::BG_SELECTION())
@@ -2322,6 +2347,8 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Profiles => "Profiles",
         Screen::Leaderboard => "Leaderboards",
         Screen::Clubhouse => "Clubhouse",
+        Screen::Nightcap => "Nightcap",
+        Screen::City => "Undercity",
         Screen::DailyMatch => "Daily Match",
         Screen::HouseTable => "House Table",
         Screen::Scratchpad => "Scratchpad",
