@@ -1,5 +1,4 @@
-//! The Late Edition's modal: a centered box over whatever screen is up,
-//! same shape as the login announcements.
+//! The Late Edition's modal: a centered box over whatever screen is up.
 
 use ratatui::{
     Frame,
@@ -89,9 +88,6 @@ fn ink_style(ink: PaperInk) -> Style {
         PaperInk::JoinHint => Style::default().fg(theme::AMBER_DIM()),
         PaperInk::Body => Style::default().fg(theme::TEXT()),
         PaperInk::Faint => Style::default().fg(theme::TEXT_FAINT()),
-        PaperInk::Paint(color) => {
-            Style::default().fg(ratatui::style::Color::Rgb(color.r, color.g, color.b))
-        }
     }
 }
 

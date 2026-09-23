@@ -36,7 +36,7 @@ pub fn lounge_includes(event: &ActivityEvent) -> bool {
         ActivityKind::SatDown { .. } => true,
         // Door-game stories: entering a world, felling its bosses.
         ActivityKind::GameStarted { .. } | ActivityKind::BossSlain { .. } => true,
-        ActivityKind::GameEvent { game, .. } => match game {
+        ActivityKind::GameEvent { game, .. } | ActivityKind::GameLost { game, .. } => match game {
             // Door games: their moments are curated at the source
             // (start/descend/die/milestones), so they read as stories. DCSS,
             // NetHack, and Brogue events come from the log pipe (deaths,
@@ -131,10 +131,12 @@ pub fn lounge_includes(event: &ActivityEvent) -> bool {
         // by price (each take is 1.5x the last), so this is the story the
         // crown exists to ship.
         ActivityKind::CrownTaken { .. } => true,
-        // The pot's one line: once a week when it draws. The size itself
-        // rides the status HUD all week, so there is nothing to nudge about
-        // before that.
+        // The pot's draw: once a week. The size itself rides the status HUD
+        // all week; the only nudge before the draw is the one last call below.
         ActivityKind::PotDrawn { .. } => true,
+        // The other pot line: half an hour before the draw, once per pot,
+        // so anyone who meant to buy in still can.
+        ActivityKind::PotClosing { .. } => true,
         // Publishing on cyberspace: our user's own action, rare by their API
         // rate limits (15 entries/day), and the funnel that advertises the
         // integration ("wait, you can post to cyberspace from here?").
@@ -153,6 +155,17 @@ pub fn lounge_includes(event: &ActivityEvent) -> bool {
         // death after N dry days belongs in the public feed.
         ActivityKind::BonsaiWatered => false,
         ActivityKind::BonsaiLost { .. } => false,
+        // Same for the tank: the daily feed is the owner's ritual.
+        ActivityKind::AquariumFed
+        | ActivityKind::AquariumFryHatched { .. }
+        | ActivityKind::AquariumFryNoRoom
+        | ActivityKind::AquariumFishLost { .. }
+        | ActivityKind::AquariumSprouted { .. }
+        | ActivityKind::AquariumSproutRooted { .. }
+        | ActivityKind::AquariumSproutCut
+        | ActivityKind::AquariumSproutWithered => false,
+        // And for the pet: a click is the owner's gesture, not news.
+        ActivityKind::PetPetted => false,
     }
 }
 
@@ -211,6 +224,29 @@ pub fn lounge_headline(event: &ActivityEvent) -> Option<String> {
                 thousands(*total_tickets)
             ))
         }
+        // The last call, worded like `/pot` itself so the command to buy in
+        // is right there. No `@`: nobody is being told anything personally.
+        ActivityKind::PotClosing {
+            size,
+            total_tickets,
+            ticket_price,
+            draws_in_secs,
+            ..
+        } => Some(format!(
+            "\u{1F3B0} Pot {} on {} tickets, draws in {}. /pot buy N at {} each.",
+            thousands(*size),
+            thousands(*total_tickets),
+            crate::app::pot::state::short_duration(*draws_in_secs),
+            thousands(*ticket_price)
+        )),
+        // A stream on air is an invitation that outlives the ticker: who,
+        // what they called it (`action` already carries the mention-safe
+        // title), and where to watch, on its own row so the URL is easy to
+        // pick out and copy. The streamer is the one @mention.
+        ActivityKind::WentLive { watch_url, .. } => Some(format!(
+            "\u{1F4FA} @{} {}.\n{watch_url}",
+            event.username, event.action
+        )),
         // No headline: @bartender already says it out loud in the room where
         // it was bought, and everyone it reached is online by definition, so a
         // #lounge row would be the third telling of one drink.
@@ -220,18 +256,27 @@ pub fn lounge_headline(event: &ActivityEvent) -> Option<String> {
         | ActivityKind::GameWon { .. }
         | ActivityKind::GameScored { .. }
         | ActivityKind::GameEvent { .. }
+        | ActivityKind::GameLost { .. }
         | ActivityKind::BossSlain { .. }
         | ActivityKind::SatDown { .. }
         | ActivityKind::DailyResult { .. }
         | ActivityKind::BonsaiWatered
         | ActivityKind::BonsaiLost { .. }
+        | ActivityKind::AquariumFed
+        | ActivityKind::AquariumFryHatched { .. }
+        | ActivityKind::AquariumFryNoRoom
+        | ActivityKind::AquariumFishLost { .. }
+        | ActivityKind::AquariumSprouted { .. }
+        | ActivityKind::AquariumSproutRooted { .. }
+        | ActivityKind::AquariumSproutCut
+        | ActivityKind::AquariumSproutWithered
+        | ActivityKind::PetPetted
         | ActivityKind::UsernameEffectApplied { .. }
         | ActivityKind::BadgeRented { .. }
         | ActivityKind::TitleApplied { .. }
         | ActivityKind::BurnMilestone { .. }
         | ActivityKind::MessageGilded { .. }
         | ActivityKind::CyberspacePosted { .. }
-        | ActivityKind::WentLive { .. }
         | ActivityKind::WatchingStream { .. } => None,
     }
 }

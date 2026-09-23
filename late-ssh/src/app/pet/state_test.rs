@@ -1,236 +1,300 @@
-use super::*;
-use chrono::TimeZone;
+use std::time::{Duration, Instant};
 
-#[test]
-fn food_is_due_every_two_days_while_water_is_daily() {
-    let today = NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
-    let yesterday = Utc.with_ymd_and_hms(2026, 5, 19, 12, 0, 0).unwrap();
-    let two_days = Utc.with_ymd_and_hms(2026, 5, 18, 12, 0, 0).unwrap();
-    let three_days = Utc.with_ymd_and_hms(2026, 5, 17, 12, 0, 0).unwrap();
+use late_core::models::pet::{PetCompanion, PetMood, PetSpecies};
+use late_core::test_utils::create_test_user;
+use ratatui::layout::Rect;
 
-    assert_eq!(
-        need_after(Some(yesterday), today, FOOD_DUE_AFTER_DAYS),
-        PetNeedStatus::Done
-    );
-    assert_eq!(
-        need_after(Some(two_days), today, FOOD_DUE_AFTER_DAYS),
-        PetNeedStatus::Due
-    );
-    assert_eq!(
-        need_after(Some(three_days), today, FOOD_DUE_AFTER_DAYS),
-        PetNeedStatus::Overdue
-    );
-    assert_eq!(
-        need_after(Some(yesterday), today, DAILY_DUE_AFTER_DAYS),
-        PetNeedStatus::Due
-    );
-    assert_eq!(
-        need_after(Some(two_days), today, DAILY_DUE_AFTER_DAYS),
-        PetNeedStatus::Overdue
-    );
+use super::{
+    ASLEEP_AFTER, Ambient, CHATTY_FOR, Look, MoodSignals, PROUD_FOR, PURR_FOR, Perch,
+    PetFrameInputs, PetState, PetTick, PetTravel, SULK_FOR, mood_at,
+};
+use crate::app::pet::ui::{Neighbours, WatchSide};
+use crate::test_helpers::new_test_db;
+
+fn awake(at: Instant) -> Ambient {
+    Ambient {
+        last_input: at,
+        music_playing: false,
+    }
 }
 
 #[test]
-fn weighted_needs_drive_mood() {
-    let today = NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
-    let cared = PetNeeds {
-        food: PetNeedStatus::Done,
-        water: PetNeedStatus::Done,
+fn the_reading_runs_in_precedence_and_every_window_closes() {
+    let t0 = Instant::now();
+    let signals = MoodSignals {
+        petted: Some(t0),
+        won: Some(t0),
+        lost: Some(t0),
+        spoke: Some(t0),
     };
+    // Everything at once: the click wins, then each window closes in turn.
+    assert_eq!(mood_at(signals, awake(t0), t0), PetMood::Purring);
+    assert_eq!(mood_at(signals, awake(t0), t0 + PURR_FOR), PetMood::Proud);
+    // The pet is an optimist: the loss is forgotten before the win is.
+    assert!(SULK_FOR < PROUD_FOR);
     assert_eq!(
-        mood_for_state(cared, HAPPY_CARE_STREAK_DAYS, Some(today), today),
-        PetMood::Happy
-    );
-    assert_eq!(
-        mood_for_state(cared, HAPPY_CARE_STREAK_DAYS - 1, Some(today), today),
-        PetMood::Content
-    );
-    assert_eq!(
-        mood_for_state(
-            cared,
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today.pred_opt().unwrap()),
-            today
-        ),
-        PetMood::Content
-    );
-
-    // A due water bowl reads thirsty, matching the amber bowl beside it.
-    assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                water: PetNeedStatus::Due,
-                ..cared
+        mood_at(
+            MoodSignals {
+                won: None,
+                ..signals
             },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
+            awake(t0),
+            t0 + PURR_FOR
         ),
-        PetMood::Thirsty
+        PetMood::Sulking
+    );
+    // The sulk and the chat windows are the same length, so a message
+    // sent mid-sulk is what shows once the sulk ends.
+    assert_eq!(
+        mood_at(
+            MoodSignals {
+                won: None,
+                spoke: Some(t0 + SULK_FOR / 2),
+                ..signals
+            },
+            awake(t0 + SULK_FOR),
+            t0 + SULK_FOR
+        ),
+        PetMood::Chatty
+    );
+    // Quiet, keys still moving: awake. Music on: vibing. Keys gone: asleep,
+    // radio or not.
+    let quiet = t0 + PROUD_FOR.max(CHATTY_FOR);
+    assert_eq!(mood_at(signals, awake(quiet), quiet), PetMood::Idle);
+    assert_eq!(
+        mood_at(
+            signals,
+            Ambient {
+                last_input: quiet,
+                music_playing: true
+            },
+            quiet
+        ),
+        PetMood::Vibing
     );
     assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                water: PetNeedStatus::Overdue,
-                ..cared
+        mood_at(
+            signals,
+            Ambient {
+                last_input: quiet,
+                music_playing: true
             },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
+            quiet + ASLEEP_AFTER
         ),
-        PetMood::Thirsty
+        PetMood::Asleep
     );
+    // A blank slate is simply awake.
     assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                food: PetNeedStatus::Due,
-                ..cared
-            },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
-        ),
-        PetMood::Hungry
-    );
-    // Score 50 sits exactly on the sad bar, so food still leads.
-    assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                food: PetNeedStatus::Due,
-                water: PetNeedStatus::Overdue,
-            },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
-        ),
-        PetMood::Hungry
-    );
-    // Overdue food alone (45) is sad on the score, with water fully done.
-    assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                food: PetNeedStatus::Overdue,
-                ..cared
-            },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
-        ),
-        PetMood::Sad
-    );
-    assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                food: PetNeedStatus::Overdue,
-                water: PetNeedStatus::Due,
-            },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
-        ),
-        PetMood::Sad
-    );
-    assert_eq!(
-        mood_for_state(
-            PetNeeds {
-                food: PetNeedStatus::Overdue,
-                water: PetNeedStatus::Overdue,
-            },
-            HAPPY_CARE_STREAK_DAYS,
-            Some(today),
-            today,
-        ),
-        PetMood::Sad
+        mood_at(MoodSignals::default(), awake(t0), t0),
+        PetMood::Idle
     );
 }
 
-#[test]
-fn completed_care_streak_advances_by_calendar_day() {
-    let today = NaiveDate::from_ymd_opt(2026, 5, 20).unwrap();
-    let yesterday = today.pred_opt().unwrap();
-    let two_days_ago = yesterday.pred_opt().unwrap();
-
-    assert_eq!(next_care_streak_days(0, None, today), 1);
-    assert_eq!(next_care_streak_days(1, Some(today), today), 1);
-    assert_eq!(next_care_streak_days(2, Some(yesterday), today), 3);
-    assert_eq!(next_care_streak_days(8, Some(two_days_ago), today), 1);
+async fn fresh_state(handle: &str) -> PetState {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, handle).await;
+    let svc = super::super::svc::PetService::new(
+        test_db.db.clone(),
+        tokio::sync::broadcast::channel::<crate::app::activity::event::ActivityEvent>(16).0,
+    );
+    let pet = svc.ensure_pet(user.id).await.expect("ensure pet");
+    PetState::new(user.id, svc, pet)
 }
 
-#[test]
-fn care_score_weights_food_more_than_water() {
-    let cared = PetNeeds {
-        food: PetNeedStatus::Done,
-        water: PetNeedStatus::Done,
-    };
-    assert_eq!(
-        PetNeeds {
-            water: PetNeedStatus::Due,
-            ..cared
-        }
-        .care_score(),
-        90
-    );
-    assert_eq!(
-        PetNeeds {
-            food: PetNeedStatus::Due,
-            ..cared
-        }
-        .care_score(),
-        75
-    );
-    assert_eq!(
-        PetNeeds {
-            food: PetNeedStatus::Overdue,
-            ..cared
-        }
-        .care_score(),
-        45
-    );
+fn frame(position: (usize, usize)) -> PetFrameInputs {
+    PetFrameInputs {
+        travel: PetTravel { x: 40, y: 5 },
+        zone: Rect::new(10, 20, 48, 8),
+        neighbours: Neighbours::default(),
+        position,
+        home: (0, 0),
+    }
+}
+
+/// Tick with the cursor outside the box until the pet is back on the
+/// stroll, asserting it walks there: never more than a cell per axis per
+/// animation edge. Returns the last perch it held, which must be right
+/// next to `home` so handing over to the stroll is not a jump either.
+fn walk_home(state: &mut PetState, mut wall: usize, now: Instant) -> Perch {
+    let mut last = state.perch().expect("perched before the cursor left");
+    for _ in 0..100 {
+        wall += 2;
+        state.tick(tick(wall, now, Some(frame((last.x, last.y))), Some((0, 0))));
+        let Some(next) = state.perch() else {
+            return last;
+        };
+        assert!(next.x.abs_diff(last.x) <= 1 && next.y.abs_diff(last.y) <= 1);
+        last = next;
+    }
+    panic!("the pet never got back to the stroll");
+}
+
+fn tick(
+    wall_tick: usize,
+    now: Instant,
+    frame: Option<PetFrameInputs>,
+    cursor: Option<(u16, u16)>,
+) -> PetTick {
+    PetTick {
+        wall_tick,
+        now,
+        ambient: awake(now),
+        frame,
+        cursor,
+        persist: false,
+    }
 }
 
 #[tokio::test]
-async fn sparse_ticks_expire_feedback_on_the_wall_clock() {
-    use crate::test_helpers::new_test_db;
-    use late_core::test_utils::create_test_user;
+async fn the_pet_walks_after_the_cursor_and_lets_go_when_it_leaves() {
+    let mut state = fresh_state("pet-follows").await;
+    assert_eq!(state.species, PetSpecies::Cat);
+    let now = Instant::now();
+    // The first tick wakes the stored (asleep) pet; after that a quiet
+    // tick has nothing to report.
+    assert!(state.tick(tick(0, now, None, None)), "the wake-up");
+    assert!(!state.tick(tick(0, now, None, None)), "nothing to report");
+    assert_eq!(state.perch(), None);
 
-    let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "cat-wall-tick").await;
-    let svc = super::super::svc::PetService::new(test_db.db.clone());
-    let cat = svc.ensure_cat(user.id).await.expect("ensure cat");
-    let mut state = PetState::new(user.id, svc, cat);
-
-    state.tick(10);
-    state.set_feedback("fed");
-
-    // The adaptive loop ticks sparsely: one call covering the whole
-    // feedback window must expire it, same wall time as dense ticking.
+    // The cursor lands far to the right inside the box: the pet turns and
+    // walks a cell per animation edge from where it stood.
+    let far_right = Some((10 + 3 + 30, 20 + 1 + 4));
+    assert!(state.tick(tick(2, now, Some(frame((0, 0))), far_right)));
+    assert_eq!(
+        state.perch(),
+        Some(Perch {
+            x: 1,
+            y: 1,
+            look: Look::Right
+        })
+    );
+    // A sparse tick covers the same ground as the edges it skipped.
+    assert!(state.tick(tick(12, now, Some(frame((1, 1))), far_right)));
+    assert_eq!(
+        state.perch(),
+        Some(Perch {
+            x: 6,
+            y: 4,
+            look: Look::Right
+        })
+    );
+    // Arrived: face under the cursor, looking up at it, and it stays put.
+    let mut wall = 12;
+    for _ in 0..40 {
+        wall += 2;
+        let at = state.perch().map(|perch| (perch.x, perch.y)).unwrap();
+        state.tick(tick(wall, now, Some(frame(at)), far_right));
+    }
+    assert_eq!(
+        state.perch(),
+        Some(Perch {
+            x: 30,
+            y: 4,
+            look: Look::Ahead
+        })
+    );
     assert!(
-        state.tick(10 + FEEDBACK_TICKS),
-        "feedback expiry must report changed"
+        !state.tick(tick(wall + 2, now, Some(frame((30, 4))), far_right)),
+        "a parked pet reports nothing"
     );
-    assert!(state.action_feedback.is_none());
-    assert_eq!(
-        state.animation_ticks(),
-        10 + FEEDBACK_TICKS,
-        "animation clock syncs to the wall tick, not the call count"
-    );
+
+    // The cursor leaves the box: the pet walks back to where the stroll
+    // is, a cell at a time, and only then does the stroll take over. It
+    // must not teleport there.
+    let last = walk_home(&mut state, wall + 2, now);
+    assert!(last.x <= 1 && last.y <= 1, "let go right beside the stroll");
+    assert_eq!(last.look, Look::Left, "facing the way it walked");
 }
 
 #[tokio::test]
-async fn end_roam_stops_an_in_progress_stroll() {
-    use crate::test_helpers::new_test_db;
-    use late_core::test_utils::create_test_user;
+async fn a_sulking_or_sleeping_pet_does_not_come_and_a_petted_one_is_not_pinned() {
+    let mut state = fresh_state("pet-sulks").await;
+    let t0 = Instant::now();
+    let inside = Some((10 + 20, 20 + 3));
 
+    state.note_loss(t0);
+    state.tick(tick(2, t0, Some(frame((5, 5))), inside));
+    assert_eq!(state.mood(), PetMood::Sulking);
+    assert_eq!(state.perch(), None, "sulking: not coming");
+
+    let asleep = PetTick {
+        ambient: Ambient {
+            last_input: t0,
+            music_playing: false,
+        },
+        ..tick(4, t0 + SULK_FOR + ASLEEP_AFTER, Some(frame((5, 5))), inside)
+    };
+    state.tick(asleep);
+    assert_eq!(state.mood(), PetMood::Asleep);
+    assert_eq!(state.perch(), None, "asleep: not coming");
+
+    // Petted (the click is a report inside the box), then the cursor
+    // leaves: it purrs, follows while the cursor is there, and strolls the
+    // way back once it is gone. Nothing pins a purring pet.
+    let later = t0 + SULK_FOR + ASLEEP_AFTER + Duration::from_secs(1);
+    state.note_petted(later);
+    assert!(state.tick(tick(6, later, Some(frame((7, 2))), inside)));
+    assert_eq!(state.mood(), PetMood::Purring);
+    assert!(state.perch().is_some(), "following the click");
+    walk_home(&mut state, 6, later);
+    assert_eq!(state.perch(), None, "cursor gone: back on the stroll");
+    // The purr ends on its own.
+    assert!(state.tick(tick(10, later + PURR_FOR, Some(frame((7, 2))), None)));
+    assert_eq!(state.mood(), PetMood::Idle);
+}
+
+#[tokio::test]
+async fn a_tank_beside_the_box_rides_the_frame_inputs() {
+    // The frame inputs carry the neighbour through unchanged: the pose is
+    // the box's business, the tick only needs the zone and the position.
+    let mut state = fresh_state("pet-frame").await;
+    let now = Instant::now();
+    let beside = PetFrameInputs {
+        neighbours: Neighbours {
+            tank: Some(WatchSide::Right),
+            bonsai: None,
+        },
+        ..frame((3, 3))
+    };
+    state.tick(tick(2, now, Some(beside), None));
+    assert_eq!(state.perch(), None);
+}
+
+#[tokio::test]
+async fn an_owner_coming_back_wakes_the_stored_sleeping_pet_on_the_profile() {
+    // The last session wrote `asleep` on its way out. A new session that
+    // is active but quiet (no chat, win, loss, music, or petting) reads
+    // idle, and that has to reach the row: otherwise the profile shows a
+    // sleeping pet for an owner who is right there.
     let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "cat-end-roam").await;
-    let svc = super::super::svc::PetService::new(test_db.db.clone());
-    let cat = svc.ensure_cat(user.id).await.expect("ensure cat");
-    let mut state = PetState::new(user.id, svc, cat);
+    let user = create_test_user(&test_db.db, "pet-wakes").await;
+    let svc = super::super::svc::PetService::new(
+        test_db.db.clone(),
+        tokio::sync::broadcast::channel::<crate::app::activity::event::ActivityEvent>(16).0,
+    );
+    let stored = svc.ensure_pet(user.id).await.expect("ensure pet");
+    assert_eq!(stored.mood(), PetMood::Asleep);
+    let mut state = PetState::new(user.id, svc, stored);
 
-    assert_eq!(state.feed(1), FeedOutcome::Fed);
-    assert!(state.roaming_active(), "feeding starts a stroll");
+    let now = Instant::now();
+    let awake_and_quiet = PetTick {
+        persist: true,
+        ..tick(0, now, None, None)
+    };
+    assert!(state.tick(awake_and_quiet), "waking up is a change");
+    assert_eq!(state.mood(), PetMood::Idle);
 
-    assert!(state.end_roam(), "an active stroll was cancelled");
-    assert!(!state.roaming_active(), "hiding the strip ends the stroll");
-    assert!(!state.end_roam(), "nothing left to cancel the second time");
+    let db = test_db.db.clone();
+    crate::test_helpers::wait_until(
+        || async {
+            let client = db.get().await.expect("db client");
+            PetCompanion::ensure(&client, user.id)
+                .await
+                .expect("reload")
+                .mood()
+                == PetMood::Idle
+        },
+        "the row says idle",
+    )
+    .await;
 }

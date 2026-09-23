@@ -12,10 +12,12 @@
 //! [`draw_from_seed`]). The chips move through `chips.rs`; the transaction
 //! that does both belongs to the caller.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Datelike, Duration, Utc, Weekday};
 use serde::{Deserialize, Serialize};
-use tokio_postgres::{Client, GenericClient, Row, Transaction};
+use tokio_postgres::{GenericClient, Row, Transaction};
 use uuid::Uuid;
 
 /// Cross-process refresh channel. A buy or a draw lands on one replica; every
@@ -134,13 +136,6 @@ impl PotChange {
     }
 }
 
-pub async fn listen_for_pot_changes(client: &Client) -> Result<()> {
-    client
-        .batch_execute(&format!("LISTEN {POT_CHANGED_CHANNEL};"))
-        .await?;
-    Ok(())
-}
-
 /// One pot. The settled fields are all `None` while it is open, and the
 /// table's CHECK constraints are what keep a half-settled row from existing.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -174,6 +169,15 @@ impl From<Row> for Pot {
             drawn_at: row.get("drawn_at"),
         }
     }
+}
+
+/// The pot a sweeper just claimed the last call for, with the ticket total
+/// the same statement read (see [`Pot::claim_reminder`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PotReminderClaim {
+    pub pot: Pot,
+    /// At least one: an empty pot is never claimed.
+    pub total_tickets: i64,
 }
 
 /// One player's holding in one pot: the shape the draw walks and the
@@ -253,6 +257,27 @@ fn mix(seed: u64) -> u64 {
 
 impl Pot {
     /// The pot taking tickets right now, if there is one.
+    /// The pots behind a batch of ledger refs, keyed by id: one primary-key
+    /// scan. Ids matching nothing are absent.
+    pub async fn find_by_ids(
+        client: &impl GenericClient,
+        ids: &[Uuid],
+    ) -> Result<HashMap<Uuid, Self>> {
+        if ids.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let rows = client
+            .query("SELECT * FROM pots WHERE id = ANY($1)", &[&ids])
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let pot = Self::from(row);
+                (pot.id, pot)
+            })
+            .collect())
+    }
+
     pub async fn find_open(client: &impl GenericClient) -> Result<Option<Self>> {
         let row = client
             .query_opt("SELECT * FROM pots WHERE status = 'open'", &[])
@@ -276,6 +301,41 @@ impl Pot {
             .query_opt("SELECT * FROM pots WHERE status = 'open' FOR UPDATE", &[])
             .await?;
         Ok(row.map(Self::from))
+    }
+
+    /// Claim the open pot's closing-soon reminder: the pot draws after `now`
+    /// and no later than `remind_until`, somebody holds a ticket, and nobody
+    /// has reminded for it yet. Stamps `reminded_at`, so exactly one sweeper
+    /// across every replica gets the row and the rest get `None`. The ticket
+    /// total rides the same statement: the stamp and the numbers it announces
+    /// land together, so a failure between them cannot spend the claim. An
+    /// empty pot is never claimed, so a buy later in the window still gets
+    /// its last call.
+    pub async fn claim_reminder(
+        client: &impl GenericClient,
+        now: DateTime<Utc>,
+        remind_until: DateTime<Utc>,
+    ) -> Result<Option<PotReminderClaim>> {
+        let row = client
+            .query_opt(
+                "UPDATE pots
+                 SET reminded_at = $1
+                 WHERE status = 'open'
+                   AND reminded_at IS NULL
+                   AND draws_at > $1
+                   AND draws_at <= $2
+                   AND EXISTS (SELECT 1 FROM pot_tickets WHERE pot_id = pots.id)
+                 RETURNING *,
+                     (SELECT COALESCE(SUM(count), 0)::BIGINT
+                      FROM pot_tickets
+                      WHERE pot_id = pots.id) AS total_tickets",
+                &[&now, &remind_until],
+            )
+            .await?;
+        Ok(row.map(|row| PotReminderClaim {
+            total_tickets: row.get("total_tickets"),
+            pot: Self::from(row),
+        }))
     }
 
     /// Open a pot that draws at `draws_at`. The caller decides the hour (the

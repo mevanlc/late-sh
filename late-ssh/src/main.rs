@@ -117,22 +117,31 @@ async fn main() -> anyhow::Result<()> {
 
     // Init database connection pool
     let db = Db::new(&config.db).context("failed to initialize database")?;
+    // The one Postgres LISTEN connection this process holds. Every domain
+    // that reacts to a cross-replica notify subscribes below and runs its
+    // own worker; the listener starts once all of them are subscribed. See
+    // `pg_listener.rs`.
+    let mut pg_listener = late_ssh::pg_listener::PgListener::new();
     db.health().await.context("database health check failed")?;
     db.migrate().await.context("database migration failed")?;
-    {
+    let nightcap_room_id = {
         let client = db.get().await.context("failed to get db client")?;
         let lounge = ChatRoom::ensure_lounge(&client)
             .await
             .context("failed to ensure lounge chat room")?;
         tracing::info!(room_id = %lounge.id, "ensured lounge chat room");
-    }
+        let nightcap = ChatRoom::ensure_nightcap(&client)
+            .await
+            .context("failed to ensure nightcap chat room")?;
+        tracing::info!(room_id = %nightcap.id, "ensured nightcap chat room");
+        nightcap.id
+    };
     tracing::info!("database initialized and migrations applied");
 
     // Initialize shared state
     let conn_limit = Arc::new(Semaphore::new(config.max_conns_global));
     let conn_counts = Arc::new(Mutex::new(HashMap::new()));
     let active_users = Arc::new(Mutex::new(HashMap::new()));
-    let afk_users = late_ssh::state::new_afk_users();
     let username_directory = late_ssh::usernames::load(&db)
         .await
         .context("failed to load username directory")?;
@@ -193,6 +202,8 @@ async fn main() -> anyhow::Result<()> {
         .with_session_registry(session_registry.clone())
         .with_irc_registry(irc_registry.clone());
     let article_service = ArticleService::new(db.clone(), ai_service.clone(), chat_service.clone());
+    let _article_notify_task =
+        article_service.start_notify_worker(pg_listener.subscribe(ArticleService::CHANNELS));
     let feed_service = FeedService::new(db.clone());
     feed_service.start_poll_task();
     let cyberspace_service = late_ssh::app::chat::cyberspace::svc::CyberspaceService::new(
@@ -273,7 +284,11 @@ async fn main() -> anyhow::Result<()> {
     );
     let bonsai_service =
         late_ssh::app::bonsai::svc::BonsaiService::new(db.clone(), activity_tx.clone());
-    let pet_service = late_ssh::app::pet::svc::PetService::new(db.clone());
+    let _bonsai_notify_task = bonsai_service.start_notify_worker(
+        pg_listener.subscribe(late_ssh::app::bonsai::svc::BonsaiService::CHANNELS),
+    );
+    let pet_service = late_ssh::app::pet::svc::PetService::new(db.clone(), activity_tx.clone());
+    let aquarium_service = late_ssh::app::AquariumService::new(db.clone(), activity_tx.clone());
     let initial_dartboard = match late_ssh::dartboard::load_persisted_artboard(&db).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
@@ -303,13 +318,17 @@ async fn main() -> anyhow::Result<()> {
         .with_activity(activity_publisher.clone());
     // Gild markers and stage-2 name hits cross replicas over Postgres, not
     // over this process's chat broadcast; see
-    // `ChatService::start_message_listener_task`.
-    let _chat_message_listener_task = chat_service.start_message_listener_task(config.db.clone());
+    // `ChatService::start_notify_worker`.
+    let _chat_notify_task = chat_service.start_notify_worker(
+        pg_listener.subscribe(late_ssh::app::chat::svc::ChatService::CHANNELS),
+    );
     // Process-wide switches (the haunt kill switch and fuse) cross replicas
     // over Postgres; the listener seeds this replica on every (re)connect.
     // See `app/flags/svc.rs`.
     let app_flag_service = late_ssh::app::flags::svc::AppFlagService::new(db.clone());
-    let _app_flag_listener_task = app_flag_service.start_listener_task(config.db.clone());
+    let _app_flag_notify_task = app_flag_service.start_notify_worker(
+        pg_listener.subscribe(late_ssh::app::flags::svc::AppFlagService::CHANNELS),
+    );
     // The Late Edition's press: every replica sweeps, the rows decide who
     // prints. See `app/paper/svc.rs`.
     let paper_service = late_ssh::app::paper::svc::PaperService::new(
@@ -318,6 +337,15 @@ async fn main() -> anyhow::Result<()> {
         app_flag_service.subscribe(),
     );
     let _paper_sweeper_task = paper_service.start_sweeper_task();
+    // The job feed's press: once a night, the run row decides which
+    // replica; every replica keeps its own shelf snapshot. See
+    // `app/jobs/svc.rs`.
+    let jobs_service = late_ssh::app::jobs::svc::JobsService::new(
+        db.clone(),
+        ai_service.clone(),
+        app_flag_service.subscribe(),
+    );
+    let _jobs_press_task = jobs_service.start_press_task();
     // The Artboard gallery: every replica re-reads last month's winner for
     // the splash; nothing here writes. See `app/artboard/gallery/svc.rs`.
     let gallery_service = late_ssh::app::artboard::gallery::svc::GalleryService::new(
@@ -330,19 +358,24 @@ async fn main() -> anyhow::Result<()> {
     // `app/deadchannel/runner/svc.rs`.
     let runner_look_service =
         late_ssh::app::deadchannel::runner::svc::RunnerLookService::new(db.clone());
-    let _runner_look_listener_task = runner_look_service.start_listener_task(config.db.clone());
+    let _runner_look_notify_task = runner_look_service.start_notify_worker(
+        pg_listener.subscribe(late_ssh::app::deadchannel::runner::svc::RunnerLookService::CHANNELS),
+    );
     // The crown's glyph crosses replicas over Postgres, not over any
     // in-process broadcast; the listener also seeds this replica's holder on
     // every (re)connect. See `app/crown/svc.rs`.
     let crown_service = late_ssh::app::crown::svc::CrownService::new(db.clone())
         .with_activity(activity_publisher.clone());
-    let _crown_listener_task = crown_service.start_listener_task(config.db.clone());
+    let _crown_notify_task = crown_service.start_notify_worker(
+        pg_listener.subscribe(late_ssh::app::crown::svc::CrownService::CHANNELS),
+    );
     // The pot's panel and its winner banner cross replicas over Postgres,
     // and the draw is settled by a status transition so exactly one replica
     // pays however many are sweeping. See `app/pot/svc.rs`.
     let pot_service = late_ssh::app::pot::svc::PotService::new(db.clone())
         .with_activity(activity_publisher.clone());
-    let _pot_listener_task = pot_service.start_listener_task(config.db.clone());
+    let _pot_notify_task = pot_service
+        .start_notify_worker(pg_listener.subscribe(late_ssh::app::pot::svc::PotService::CHANNELS));
     let _pot_sweeper_task = pot_service.start_sweeper_task();
     let leaderboard_service = late_ssh::app::LeaderboardService::new(db.clone());
     let _profile_award_snapshot_task = leaderboard_service
@@ -350,13 +383,19 @@ async fn main() -> anyhow::Result<()> {
         .start_profile_award_snapshot_loop();
     let quest_service = late_ssh::app::QuestService::new(db.clone(), activity_tx.clone());
     let _quest_activity_task = quest_service.start_activity_task();
-    let _quest_listener_task = quest_service.start_listener_task(config.db.clone());
+    let _quest_notify_task = quest_service
+        .start_notify_worker(pg_listener.subscribe(late_ssh::app::QuestService::CHANNELS));
     let flair_directory = late_ssh::app::common::username_effect::new_directory();
+    let clubhouse_lobby = late_ssh::app::clubhouse::lobby::SharedLobby::new();
     let shop_service = late_ssh::app::ShopService::new(db.clone())
         .with_flair_directory(flair_directory.clone())
         .with_activity(activity_publisher.clone())
-        .with_ai_service(ai_service.clone());
-    let _shop_listener_task = shop_service.start_listener_task(config.db.clone());
+        .with_ai_service(ai_service.clone())
+        .with_clubhouse_lobby(clubhouse_lobby.clone());
+    let _shop_notify_task = shop_service
+        .start_notify_worker(pg_listener.subscribe(late_ssh::app::ShopService::CHANNELS));
+    // Every notify-driven domain is subscribed by now.
+    let _pg_listener_task = pg_listener.start(config.db.clone());
     let ultimate_service = late_ssh::app::UltimateService::new(db.clone());
     let nonogram_library = match late_ssh::app::arcade::nonogram::state::load_default_library() {
         Ok(library) => library,
@@ -365,7 +404,11 @@ async fn main() -> anyhow::Result<()> {
             late_ssh::app::arcade::nonogram::state::Library::default()
         }
     };
-    let clubhouse_lobby = late_ssh::app::clubhouse::lobby::SharedLobby::new();
+    let nightcap_lobby = late_ssh::app::clubhouse::nightcap::lobby::SharedSeats::new();
+    let nightcap_house = late_ssh::app::clubhouse::nightcap::svc::NightcapHouse::new(
+        db.clone(),
+        late_ssh::app::clubhouse::nightcap::wall::SharedWall::new(),
+    );
     let scratchpad_registry = late_ssh::app::scratchpad::registry::SharedScratchpadRegistry::new();
     let mention_ladders = late_ssh::app::ai::ladder::MentionLadders::new();
     let ghost_service = GhostService::new(
@@ -378,6 +421,7 @@ async fn main() -> anyhow::Result<()> {
         chip_service.clone(),
         clubhouse_lobby.clone(),
         mention_ladders.clone(),
+        nightcap_room_id,
     );
     let ssh_attempt_limiter = IpRateLimiter::new(
         config.ssh_max_attempts_per_ip,
@@ -395,6 +439,7 @@ async fn main() -> anyhow::Result<()> {
         translation_service: translation_service.clone(),
         summary_service: summary_service.clone(),
         paper_service: paper_service.clone(),
+        jobs_service: jobs_service.clone(),
         audio_service: audio_service.clone(),
         voice_service,
         stream_service,
@@ -425,6 +470,7 @@ async fn main() -> anyhow::Result<()> {
         daily_service,
         bonsai_service,
         pet_service,
+        aquarium_service,
         nonogram_library,
         chip_service,
         house_registry,
@@ -440,12 +486,13 @@ async fn main() -> anyhow::Result<()> {
         pair_ws_counts: Arc::new(Mutex::new(HashMap::new())),
         active_users,
         clubhouse_lobby,
+        nightcap_lobby,
+        nightcap_house: nightcap_house.clone(),
         mention_ladders,
         scratchpad_registry,
-        afk_users,
         username_directory: username_directory.clone(),
         flair_directory: flair_directory.clone(),
-        pomodoro_directory: late_ssh::app::common::pomodoro::new_directory(),
+        status_directory: late_ssh::app::common::status::new_directory(),
         crown_service: crown_service.clone(),
         pot_service: pot_service.clone(),
         activity_feed: activity_tx,
@@ -464,6 +511,10 @@ async fn main() -> anyhow::Result<()> {
     let session_shutdown = CancellationToken::new();
     let accept_shutdown = CancellationToken::new();
     let singleton_shutdown = CancellationToken::new();
+    // The bar out back's wall (the TV captions, the tab board, the
+    // carvings): one slow reader for the whole process.
+    let _nightcap_wall_task = nightcap_house.spawn_wall_refresh_task(singleton_shutdown.clone());
+
     let _username_directory_refresh_task = late_ssh::usernames::start_refresh_task(
         db.clone(),
         username_directory,

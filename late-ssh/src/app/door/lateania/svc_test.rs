@@ -7,9 +7,24 @@ fn uid(n: u128) -> Uuid {
 fn craft_entry(name: &str, skill: &str) -> CraftEntryView {
     CraftEntryView {
         recipe: 0,
+        item_id: 0,
         name: name.to_string(),
+        rarity: "common".to_string(),
+        qty: 1,
         skill: skill.to_string(),
+        skill_level: 1,
+        level_req: 1,
+        xp: 10,
         inputs: String::new(),
+        ingredients: Vec::new(),
+        stats: String::new(),
+        compare: String::new(),
+        compare_pct: None,
+        slot: None,
+        worn_name: None,
+        worn_stats: None,
+        desc: "",
+        category: "Goods",
         craftable: true,
         reason: String::new(),
     }
@@ -342,12 +357,11 @@ fn a_poison_coats_the_weapon_instead_of_being_drunk() {
 #[test]
 fn a_coated_weapon_poisons_the_foe_and_spends_a_charge() {
     let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
-    s.players.get_mut(&uid(1)).unwrap().weapon_coat =
-        Some((DamageType::Poison, 10, POISON_CHARGES));
+    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Poison, 10, COAT_CHARGES));
     s.tick();
     assert_eq!(
         s.players[&uid(1)].weapon_coat.map(|(_, _, c)| c),
-        Some(POISON_CHARGES - 1),
+        Some(COAT_CHARGES - 1),
         "a landed strike spends one poison charge"
     );
     assert!(
@@ -373,10 +387,224 @@ fn an_oil_coats_the_weapon_with_its_school_and_replaces_the_last_coat() {
     let p = &s.players[&uid(1)];
     assert_eq!(
         p.weapon_coat,
-        Some((DamageType::Fire, OIL_PER_TICK[2], OIL_CHARGES)),
+        Some((DamageType::Fire, COAT_PER_TICK[2], COAT_CHARGES)),
         "the oil takes the one coat slot, replacing the poison"
     );
     assert!(!p.inventory.contains(&oil), "the vial is used up");
+}
+
+#[test]
+fn the_coat_key_picks_the_school_the_foe_is_weak_to_over_the_better_vial() {
+    // The whole reason the key can't just grab the biggest vial: every coat
+    // carries the same rider, so the school is the entire decision, and the
+    // foe in front of you is the only thing that answers it.
+    let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
+    s.mobs.get_mut(&mob_id).unwrap().spawn.profile =
+        DamageProfile::new(DamageType::Physical, None, Some(DamageType::Frost));
+    let top_fire = super::super::items::oil_id(0, 5);
+    let weak_frost = super::super::items::oil_id(1, 0);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(top_fire);
+        p.inventory.push(weak_frost);
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat.map(|(school, _, _)| school),
+        Some(DamageType::Frost),
+        "the tier-0 frost oil beats the tier-5 fire one against a frost-weak foe"
+    );
+    assert!(
+        s.players[&uid(1)].inventory.contains(&top_fire),
+        "and the fire oil is still in the bag, unspent"
+    );
+}
+
+#[test]
+fn the_coat_key_avoids_a_school_the_foe_resists_and_falls_back_to_tier() {
+    let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
+    // Resists fire, weak to nothing a coat can bring.
+    s.mobs.get_mut(&mob_id).unwrap().spawn.profile =
+        DamageProfile::new(DamageType::Physical, Some(DamageType::Fire), None);
+    let top_fire = super::super::items::oil_id(0, 5);
+    let lesser_frost = super::super::items::oil_id(1, 3);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(top_fire);
+        p.inventory.push(lesser_frost);
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat.map(|(school, _, _)| school),
+        Some(DamageType::Frost),
+        "a halved tier-5 rider loses to a full tier-3 one"
+    );
+}
+
+#[test]
+fn the_coat_key_takes_the_highest_tier_when_nothing_is_locked_on() {
+    // At a zone gate there is no foe to read, so the pick falls through to
+    // tier. This is the common case - coating is a thing you do before you
+    // walk in, not mid-swing.
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let low = super::super::items::oil_id(3, 1);
+    let high = super::super::items::oil_id(3, 4);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(low);
+        p.inventory.push(high);
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat,
+        Some((DamageType::Lightning, COAT_PER_TICK[4], COAT_CHARGES)),
+        "with no foe to read, the best coat is simply the best coat"
+    );
+}
+
+#[test]
+fn the_coat_key_refuses_to_throw_away_a_healthy_coat_of_the_same_school() {
+    // The one way a one-keystroke coat could cost you something: overwriting a
+    // coat that still had most of its strikes left. A nearly spent one still
+    // tops up, because that is what you actually want before a boss.
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let oil = super::super::items::oil_id(0, 3);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(oil);
+        p.inventory.push(oil);
+        p.weapon_coat = Some((DamageType::Fire, COAT_PER_TICK[3], COAT_CHARGES));
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)]
+            .inventory
+            .iter()
+            .filter(|&&i| i == oil)
+            .count(),
+        2,
+        "a full fire coat is not replaced by another fire oil"
+    );
+    s.players.get_mut(&uid(1)).unwrap().weapon_coat =
+        Some((DamageType::Fire, COAT_PER_TICK[3], COAT_TOPUP_AT));
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat.map(|(_, _, c)| c),
+        Some(COAT_CHARGES),
+        "but a nearly spent one tops back up to full"
+    );
+}
+
+#[test]
+fn the_coat_key_keeps_a_healthy_coat_of_another_school_when_nothing_calls_for_a_switch() {
+    // The cross-school version of the same promise. A better vial in the bag
+    // is not a reason to throw away thirty-nine strikes: with no foe locked
+    // on, or a foe that is neutral to both, the key refuses and spends
+    // nothing.
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let top_fire = super::super::items::oil_id(0, 5);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(top_fire);
+        p.weapon_coat = Some((DamageType::Frost, COAT_PER_TICK[0], COAT_CHARGES - 1));
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat,
+        Some((DamageType::Frost, COAT_PER_TICK[0], COAT_CHARGES - 1)),
+        "with no foe to read, the healthy frost coat stays"
+    );
+    assert!(
+        s.players[&uid(1)].inventory.contains(&top_fire),
+        "and the fire oil is still in the bag"
+    );
+    assert!(
+        s.players[&uid(1)]
+            .log
+            .iter()
+            .any(|l| l.text.contains("already carries frost")),
+        "and the refusal names the coat that is on the weapon"
+    );
+
+    // A foe neutral to both schools is no better a reason.
+    let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
+    s.mobs.get_mut(&mob_id).unwrap().spawn.profile =
+        DamageProfile::new(DamageType::Physical, None, None);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(top_fire);
+        p.weapon_coat = Some((DamageType::Frost, COAT_PER_TICK[0], COAT_CHARGES - 1));
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)]
+            .weapon_coat
+            .map(|(school, _, c)| (school, c)),
+        Some((DamageType::Frost, COAT_CHARGES - 1)),
+        "a neutral foe leaves the healthy coat alone too"
+    );
+}
+
+#[test]
+fn the_coat_key_switches_a_healthy_coat_only_when_the_foe_calls_for_it() {
+    // The two matchup upgrades that are worth a coat's remaining strikes: the
+    // foe is weak to what the bag holds, or resists what the weapon carries.
+    let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
+    s.mobs.get_mut(&mob_id).unwrap().spawn.profile =
+        DamageProfile::new(DamageType::Physical, None, Some(DamageType::Fire));
+    let fire = super::super::items::oil_id(0, 2);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(fire);
+        p.weapon_coat = Some((DamageType::Frost, COAT_PER_TICK[5], COAT_CHARGES));
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat,
+        Some((DamageType::Fire, COAT_PER_TICK[2], COAT_CHARGES)),
+        "a foe weak to fire is worth dropping a full frost coat for"
+    );
+
+    let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
+    s.mobs.get_mut(&mob_id).unwrap().spawn.profile =
+        DamageProfile::new(DamageType::Physical, Some(DamageType::Frost), None);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.inventory.push(fire);
+        p.weapon_coat = Some((DamageType::Frost, COAT_PER_TICK[5], COAT_CHARGES));
+    }
+    s.coat_best(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].weapon_coat,
+        Some((DamageType::Fire, COAT_PER_TICK[2], COAT_CHARGES)),
+        "a foe that resists the live coat is worth replacing it over"
+    );
+}
+
+#[test]
+fn the_coat_key_says_so_when_the_bag_is_empty_instead_of_coating_nothing() {
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    s.players.get_mut(&uid(1)).unwrap().inventory.clear();
+    s.coat_best(uid(1));
+    assert!(
+        s.players[&uid(1)].weapon_coat.is_none(),
+        "nothing is coated"
+    );
+    assert!(
+        s.players[&uid(1)]
+            .log
+            .iter()
+            .any(|l| l.text.contains("no coating")),
+        "and the player is told why"
+    );
 }
 
 #[test]
@@ -408,50 +636,71 @@ fn the_attack_bar_still_matches_a_real_character() {
 }
 
 #[test]
-fn the_coat_curves_stay_inside_their_share_of_the_bar() {
+fn the_coat_curve_stays_inside_its_share_of_the_bar() {
     // The balance contract for weapon coats, in the only terms that mean
-    // anything: what fraction of a real swing the rider is worth. An oil
-    // sustains about a fifth of the auto for a whole fight; a poison bursts
-    // about a third of it for a handful of strikes. Both are held to a band,
-    // and both are held to it at *every* tier, so the curves can never quietly
-    // outgrow the attack curve the way they did before.
+    // anything: what fraction of a real swing the rider is worth. One curve
+    // covers every coat in the game now, held to its band at *every* tier, so
+    // it can never quietly outgrow the attack curve the way it did before.
     for t in 0..6usize {
         let bar = TIER_ATTACK_BAR[t] as f64;
-        let oil = OIL_PER_TICK[t] as f64 / bar;
-        let poison = POISON_PER_TICK[t] as f64 / bar;
+        let share = COAT_PER_TICK[t] as f64 / bar;
         assert!(
-            (0.15..=0.22).contains(&oil),
-            "tier {t}: oil rider is {oil:.3} of the bar, outside the sustain band"
-        );
-        assert!(
-            (0.24..=0.32).contains(&poison),
-            "tier {t}: poison rider is {poison:.3} of the bar, outside the burst band"
-        );
-        assert!(
-            POISON_PER_TICK[t] > OIL_PER_TICK[t],
-            "tier {t}: poison must hit harder per tick than oil, or it is dead content"
+            (0.15..=0.22).contains(&share),
+            "tier {t}: coat rider is {share:.3} of the bar, outside the band"
         );
     }
-    // And the shape that keeps them from being the same item: the poison
-    // bursts, the oil lasts. A coat wound is live for its charges plus the
-    // trailing POISON_DOT_TICKS after the final swing.
-    let ticks = |charges: u8| (charges + POISON_DOT_TICKS - 1) as f64;
-    let oil_total = ticks(OIL_CHARGES) * OIL_PER_TICK[5] as f64;
-    let poison_total = ticks(POISON_CHARGES) * POISON_PER_TICK[5] as f64;
-    assert!(
-        poison_total < oil_total,
-        "the cheap vial must not out-total the prepared coat"
-    );
-    assert!(
-        poison_total / oil_total > 0.6,
-        "but it must stay a real alternative, not a strictly worse one"
+    // The curve climbs with the tier the whole way up, or the top tiers are
+    // dead content nobody would gather for.
+    for t in 1..6usize {
+        assert!(
+            COAT_PER_TICK[t] > COAT_PER_TICK[t - 1],
+            "tier {t}: the coat curve must keep climbing"
+        );
+    }
+}
+
+#[test]
+fn every_coat_in_the_game_carries_the_same_rider_and_differs_only_by_school() {
+    // Poison and oil were two curves for one mechanic, and the split was an
+    // accident of order: the vial shipped with crafting, the oils arrived with
+    // the resist/weak pass, and poison simply kept the older constants. This
+    // pins the merge - if a second curve is ever reintroduced, it should be
+    // because someone decided to, not because a family drifted.
+    use super::super::items::{COAT_SCHOOLS, coat_school_tier, item, oil_id, poison_id};
+    let mut seen: Vec<DamageType> = Vec::new();
+    let coats = (0..6u32)
+        .flat_map(|t| {
+            (0..4u32)
+                .map(move |s| oil_id(s, t))
+                .chain(std::iter::once(poison_id(t)))
+        })
+        .collect::<Vec<_>>();
+    for id in coats {
+        let (school, tier) = coat_school_tier(id).expect("every coat resolves a school and tier");
+        if !seen.contains(&school) {
+            seen.push(school);
+        }
+        let it = item(id).expect("coat exists");
+        assert_eq!(
+            it.sell_price(),
+            item(oil_id(0, tier)).expect("fire oil exists").sell_price(),
+            "{} is priced as the same tier of coat, not as its own family",
+            it.name
+        );
+    }
+    seen.sort_by_key(|d| format!("{d:?}"));
+    let mut want = COAT_SCHOOLS.to_vec();
+    want.sort_by_key(|d| format!("{d:?}"));
+    assert_eq!(
+        seen, want,
+        "the five coat schools are exactly what the catalog produces"
     );
 }
 
 #[test]
 fn a_coat_keeps_one_refreshing_wound_however_many_swings_land() {
     // A coat re-seeds on every landed strike, at the very cadence its DoT
-    // ticks. If each strike opened its own wound, POISON_DOT_TICKS of them
+    // ticks. If each strike opened its own wound, COAT_DOT_TICKS of them
     // would be live at once and the rider would be paid three times over -
     // which is not the bar the grind-rate budget is written against. One
     // wound per attacker, refreshed, is the contract.
@@ -462,7 +711,7 @@ fn a_coat_keeps_one_refreshing_wound_however_many_swings_land() {
     if let Some(m) = s.mobs.get_mut(&mob_id) {
         m.spawn.profile = DamageProfile::new(DamageType::Physical, None, None);
     }
-    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, OIL_CHARGES));
+    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, COAT_CHARGES));
     for _ in 0..5 {
         s.tick();
     }
@@ -487,7 +736,7 @@ fn ability_dots_still_stack_on_top_of_a_coat() {
     // keeps stacking (its cooldown is what rations it), and it stacks
     // alongside the coat's single wound rather than refreshing it.
     let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
-    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, OIL_CHARGES));
+    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, COAT_CHARGES));
     s.tick();
     s.seed_mob_dot(
         uid(1),
@@ -518,7 +767,7 @@ fn an_oiled_strike_rides_the_zone_profile() {
     if let Some(m) = s.mobs.get_mut(&mob_id) {
         m.spawn.profile = DamageProfile::new(DamageType::Physical, None, Some(DamageType::Fire));
     }
-    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, OIL_CHARGES));
+    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, COAT_CHARGES));
     s.tick();
     let seeded = s
         .mob_dots
@@ -676,12 +925,57 @@ fn abilities_scale_with_spell_power_and_the_auto_swings_by_calling() {
 }
 
 #[test]
+fn an_ability_killing_blow_reaches_the_next_tick_output() {
+    // Abilities land outside the tick (`mutate`), so their kill must survive
+    // until the tick hands it to `publish_kill_outcome`, or a crown taken
+    // with a spell pays nothing.
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Mage);
+    let mob_id = *s.mobs.keys().next().expect("world has mobs");
+    let mob_name = {
+        let m = s.mobs.get_mut(&mob_id).unwrap();
+        m.alive = true;
+        m.revealed = true;
+        m.current_room = 2001;
+        m.leash_home = 2001;
+        m.hp = 1;
+        m.spawn.damage = 1;
+        m.spawn.profile = DamageProfile::physical();
+        m.spawn.name.to_string()
+    };
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.room = 2001;
+        p.equipped.insert(Slot::Weapon, 1010);
+    }
+    s.engage_mob(uid(1), mob_id);
+    s.use_ability(uid(1), 1);
+    assert!(
+        !s.mobs[&mob_id].alive,
+        "the Firebolt lands the killing blow"
+    );
+
+    let kills: Vec<(Uuid, String)> = s
+        .tick()
+        .kills
+        .into_iter()
+        .map(|kill| (kill.user_id, kill.mob_name))
+        .collect();
+    assert_eq!(kills, vec![(uid(1), mob_name)]);
+}
+
+#[test]
 fn a_draught_needs_a_breath_between_gulps() {
     let mut s = world();
     s.join(uid(1));
     s.choose_class(uid(1), Class::Warrior);
     {
         let p = s.players.get_mut(&uid(1)).unwrap();
+        // Rolled scores can leave a level-1 Warrior under 41 max hp (a
+        // constitution of 4 caps it at 36), and the test reads the draught's
+        // full 40 back; the defaults keep the ceiling out of the picture.
+        p.scores = super::super::stats::AbilityScores::default();
         p.hp = 1;
         p.inventory = vec![1300, 1300, 1300]; // three Minor Healing Draughts (40)
     }
@@ -757,10 +1051,20 @@ fn fleeing_costs_a_parting_blow_and_the_foe_recovers() {
         hp_before - 10,
         "the foe strikes at a fleeing back (naked Warrior, no armor)"
     );
+    assert_eq!(
+        s.mobs[&mob_id].hp, 200,
+        "the foe keeps its wounds while the grace runs"
+    );
+    // The flight took the player out of the room, so the clock runs.
+    for _ in 1..MOB_RESET_TICKS {
+        s.tick();
+    }
+    assert_eq!(s.mobs[&mob_id].hp, 200, "still inside the grace");
+    s.tick();
     let m = &s.mobs[&mob_id];
     assert_eq!(
         m.hp, m.spawn.max_hp,
-        "a foe left with nobody fighting it recovers on the spot"
+        "a foe nobody came back for recovers once the grace is out"
     );
 }
 
@@ -785,6 +1089,13 @@ fn a_stunned_foe_cannot_strike_at_a_fleeing_back() {
         hp_before,
         "a reeling foe gets no blow"
     );
+    assert!(
+        s.mob_stuns.contains_key(&mob_id),
+        "the stun still stands while the grace runs"
+    );
+    for _ in 0..MOB_RESET_TICKS {
+        s.tick();
+    }
     let m = &s.mobs[&mob_id];
     assert_eq!(m.hp, m.spawn.max_hp);
     assert!(
@@ -792,6 +1103,116 @@ fn a_stunned_foe_cannot_strike_at_a_fleeing_back() {
         "the stun does not outlive the fight it was cast in"
     );
     assert!(!s.mob_dots.contains_key(&mob_id), "nor do the wounds");
+}
+
+#[test]
+fn a_boss_keeps_its_wounds_while_you_fight_the_add_it_summoned() {
+    let (mut s, mob_id) = engaged_with(MobBehavior::Summoner);
+    s.tick(); // the summoner calls an add into the fight
+    let add_id = *s
+        .mobs
+        .keys()
+        .find(|id| **id >= SUMMON_ID_START)
+        .expect("an add joined the fight");
+    let wounded = s.mobs[&mob_id].hp;
+    assert!(
+        wounded < s.mobs[&mob_id].spawn.max_hp,
+        "the boss is wounded"
+    );
+    // The player turns on the add: the lock moves, but the fight has not ended.
+    s.engage_mob(uid(1), add_id);
+    for _ in 0..MOB_RESET_TICKS + 1 {
+        s.tick();
+    }
+    assert_eq!(
+        s.mobs[&mob_id].hp, wounded,
+        "a foe whose own add you are killing keeps its wounds"
+    );
+}
+
+#[test]
+fn a_foe_you_turned_from_keeps_swinging_while_you_stand_in_its_room() {
+    let (mut s, mob_id) = engaged_with(MobBehavior::Sentinel);
+    s.mobs.get_mut(&mob_id).unwrap().spawn.damage = 10;
+    // Drop the lock but stand your ground: no flee, no exit, still its room.
+    s.players.get_mut(&uid(1)).unwrap().target = None;
+    let hp_before = s.players[&uid(1)].hp;
+    s.tick();
+    assert!(
+        s.players[&uid(1)].hp < hp_before,
+        "a foe you wounded keeps hitting you while you stand in its room"
+    );
+    for _ in 0..MOB_RESET_TICKS + 1 {
+        s.tick();
+    }
+    assert_eq!(
+        s.mobs[&mob_id].hp, 200,
+        "and it never sheds its wounds while you are standing there"
+    );
+}
+
+#[test]
+fn stepping_out_of_the_room_starts_the_recovery_clock() {
+    let (mut s, mob_id) = engaged_with(MobBehavior::Sentinel);
+    s.players.get_mut(&uid(1)).unwrap().target = None;
+    s.players.get_mut(&uid(1)).unwrap().room = 2002;
+    for _ in 1..MOB_RESET_TICKS {
+        s.tick();
+    }
+    assert_eq!(s.mobs[&mob_id].hp, 200, "a grace to duck out and come back");
+    s.tick();
+    assert_eq!(
+        s.mobs[&mob_id].hp, s.mobs[&mob_id].spawn.max_hp,
+        "then the foe recovers in full"
+    );
+}
+
+#[test]
+fn a_fighter_raised_where_they_fell_is_out_of_the_fight() {
+    let (mut s, mob_id) = engaged_with(MobBehavior::Sentinel);
+    s.mobs.get_mut(&mob_id).unwrap().spawn.damage = 10;
+    // The Warrior falls to the foe (Unbreakable already spent, no veteran
+    // charge) and a Cleric standing in the same room raises them on the spot.
+    s.players.get_mut(&uid(1)).unwrap().death_save_used = true;
+    s.strike_player(uid(1), 9999, DamageType::Physical, "the foe");
+    assert!(s.players[&uid(1)].dead, "the warrior is a corpse");
+    s.join(uid(2));
+    s.choose_class(uid(2), Class::Cleric);
+    s.players.get_mut(&uid(2)).unwrap().room = s.players[&uid(1)].room;
+    s.players.get_mut(&uid(2)).unwrap().resource = s.players[&uid(2)].max_resource;
+    s.resurrect_nearest(uid(2));
+    assert!(!s.players[&uid(1)].dead, "raised where they fell");
+    let hp_risen = s.players[&uid(1)].hp;
+    s.tick();
+    assert_eq!(
+        s.players[&uid(1)].hp,
+        hp_risen,
+        "falling ended your fight: the foe does not strike a fighter who just rose, untargeted, beside it"
+    );
+}
+
+#[test]
+fn a_full_health_foe_forgets_a_fighter_who_walked_off() {
+    let (mut s, mob_id) = engaged_with(MobBehavior::Sentinel);
+    // Drawn on but never wounded: nothing for the recovery sweep to shed.
+    {
+        let m = s.mobs.get_mut(&mob_id).unwrap();
+        m.hp = m.spawn.max_hp;
+        m.spawn.damage = 10;
+    }
+    s.players.get_mut(&uid(1)).unwrap().target = None;
+    s.players.get_mut(&uid(1)).unwrap().room = 2002;
+    s.tick();
+    // Back in the room later, with no engage: a foe with nothing to shake off
+    // must have let the fight go, not lie in wait for the next tick.
+    s.players.get_mut(&uid(1)).unwrap().room = 2001;
+    let hp_before = s.players[&uid(1)].hp;
+    s.tick();
+    assert_eq!(
+        s.players[&uid(1)].hp,
+        hp_before,
+        "an unwounded foe nobody fights forgets who drew on it"
+    );
 }
 
 #[test]
@@ -813,9 +1234,9 @@ fn a_shorter_stun_does_not_cut_a_longer_one_short() {
 #[test]
 fn a_wounded_foe_nobody_fights_recovers_after_a_few_ticks() {
     let (mut s, mob_id) = engaged_with(MobBehavior::Sentinel);
-    // The attacker is simply gone mid-fight (death, disconnect): no flee, the
-    // lock just vanishes.
-    s.players.get_mut(&uid(1)).unwrap().target = None;
+    // The attacker is simply gone mid-fight (a disconnect): no flee, the
+    // fighter just vanishes out of the room.
+    s.leave(uid(1));
     s.mob_stuns.insert(mob_id, 5);
     for _ in 1..MOB_RESET_TICKS {
         s.tick();
@@ -1829,6 +2250,114 @@ fn buying_costs_gold_and_adds_item() {
     assert!(p.inventory.contains(&1001));
 }
 
+/// A character standing at the smith with `level`, the gate titles named, and
+/// gold enough for anything.
+fn shopper(level: i32, titles: &[&str]) -> WorldState {
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let p = s.players.get_mut(&uid(1)).unwrap();
+    p.room = 3; // Market Row, the Ember Forge
+    p.scores = AbilityScores::default();
+    p.level = level;
+    p.gold = 10_000_000;
+    p.titles = titles.iter().map(|t| t.to_string()).collect();
+    s
+}
+
+#[test]
+fn the_shops_deep_stock_always_trails_the_kit_the_level_expects() {
+    // The balance contract behind the whole market: gold is a floor under a
+    // straggler, never a replacement for the hunt. Every piece Embergate will
+    // sell has to be weaker than what the character's own land drops at their
+    // level, at every rung of the ladder - otherwise farming gold in easy
+    // country becomes a better way to gear than clearing the zone you are in.
+    for level in [45, 55, 65, 75, 80, 100] {
+        let s = shopper(
+            level,
+            &[FRONTIER_GATE_TITLE, REACHES_GATE_TITLE, KAELMYR_GATE_TITLE],
+        );
+        let p = &s.players[&uid(1)];
+        let tier = p.market_tier().expect("a geared level has a market");
+        let expected = expected_kit_tier(level).min(super::super::items::MARKET_TIER_MAX);
+        assert!(
+            tier < expected,
+            "L{level}: the shop tier ({tier}) must trail the expected kit ({expected})"
+        );
+        for slot in super::super::items::Slot::WEARABLE {
+            let sold = item(super::super::items::market_item_id(tier, slot)).expect("stocked");
+            let dropped =
+                item(super::super::items::market_item_id(expected, slot)).expect("dropped");
+            assert!(
+                sold.power() < dropped.power(),
+                "L{level} {slot:?}: shop piece (power {}) must not match the land's own drop (power {})",
+                sold.power(),
+                dropped.power()
+            );
+        }
+    }
+}
+
+#[test]
+fn gold_cannot_buy_a_kit_out_of_a_continent_you_have_not_opened() {
+    // Level alone must not reach into a realm the character never earned the
+    // right to walk into: someone who ground to L80 in the ungated side country
+    // still shops in the Frontier's band until the King falls.
+    let frontier = shopper(80, &[FRONTIER_GATE_TITLE]);
+    assert_eq!(
+        frontier.players[&uid(1)].market_tier(),
+        Some(super::super::items::FRONTIER_TIERS as i32),
+        "the Frontier's top tier is the ceiling without the King's Bane"
+    );
+    let reaches = shopper(80, &[FRONTIER_GATE_TITLE, REACHES_GATE_TITLE]);
+    assert_eq!(
+        reaches.players[&uid(1)].market_tier(),
+        Some((super::super::items::FRONTIER_TIERS + super::super::items::REACHES_TIERS) as i32),
+        "the Reaches' top tier is the ceiling without Yssgar's Bane"
+    );
+    // And before the Frontier opens at all, the authored stock is the whole shop.
+    assert_eq!(
+        shopper(80, &[]).players[&uid(1)].market_tier(),
+        None,
+        "no gate title, no deep stock"
+    );
+}
+
+#[test]
+fn a_market_piece_you_have_not_earned_cannot_be_bought() {
+    // The panel is only a view; `buy` is the authority. A character who has not
+    // opened the Frontier must not be able to buy deep stock by sending its id.
+    let deep = super::super::items::market_item_id(
+        super::super::items::MARKET_TIER_MAX,
+        super::super::items::Slot::Weapon,
+    );
+    let mut s = shopper(80, &[]);
+    let before = s.players[&uid(1)].gold;
+    s.buy(uid(1), deep);
+    let p = &s.players[&uid(1)];
+    assert_eq!(p.gold, before, "no gold changes hands");
+    assert!(!p.inventory.contains(&deep), "and nothing is delivered");
+
+    // With every gate title and the level for it, the same shop sells a weapon
+    // at the character's own market tier, at the marked-up price.
+    let mut earned = shopper(
+        80,
+        &[FRONTIER_GATE_TITLE, REACHES_GATE_TITLE, KAELMYR_GATE_TITLE],
+    );
+    let tier = earned.players[&uid(1)].market_tier().expect("has a market");
+    let id = super::super::items::market_item_id(tier, super::super::items::Slot::Weapon);
+    let list = item(id).expect("stocked").price;
+    let before = earned.players[&uid(1)].gold;
+    earned.buy(uid(1), id);
+    let p = &earned.players[&uid(1)];
+    assert!(p.inventory.contains(&id), "the earned piece is delivered");
+    assert_eq!(
+        before - p.gold,
+        list * (100 + MARKET_MARKUP_PCT) / 100,
+        "deep stock is charged at the market markup, not list price"
+    );
+}
+
 #[test]
 fn waystone_travel_teleports_between_portals() {
     use super::super::archipelago::{island_entrance, village_room};
@@ -2049,6 +2578,70 @@ fn buying_a_companion_costs_gold_and_sets_a_pet() {
 }
 
 #[test]
+fn a_new_companion_sends_the_old_one_to_the_kennel_and_it_comes_back() {
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    // Embergate's square (room 1) has a stable.
+    s.players.get_mut(&uid(1)).unwrap().room = 1;
+    s.players.get_mut(&uid(1)).unwrap().gold = 10_000;
+    s.buy_pet(uid(1), "war_hound");
+    s.players
+        .get_mut(&uid(1))
+        .unwrap()
+        .pet
+        .as_mut()
+        .unwrap()
+        .loyalty_xp = 450;
+    s.buy_pet(uid(1), "emberdrake");
+
+    let led = |s: &WorldState| {
+        s.players[&uid(1)]
+            .pet
+            .map(|p| (p.species.key, p.loyalty_xp))
+    };
+    let kennel = |s: &WorldState| -> Vec<(&str, i64)> {
+        s.players[&uid(1)]
+            .kennel
+            .resting()
+            .iter()
+            .map(|p| (p.species.key, p.loyalty_xp))
+            .collect()
+    };
+    assert_eq!(led(&s), Some(("emberdrake", 0)));
+    assert_eq!(
+        kennel(&s),
+        vec![("war_hound", 450)],
+        "the hound rests, not released"
+    );
+
+    // An owned species is never sold twice.
+    let gold = s.players[&uid(1)].gold;
+    s.buy_pet(uid(1), "war_hound");
+    assert_eq!(
+        s.players[&uid(1)].gold,
+        gold,
+        "no charge for a refused sale"
+    );
+    assert_eq!(led(&s), Some(("emberdrake", 0)));
+
+    // The kennel survives a save and reload.
+    let saved = s.export_saved(uid(1)).expect("character saves");
+    s.hydrate(uid(1), &saved);
+    assert_eq!(kennel(&s), vec![("war_hound", 450)]);
+
+    // Calling the hound out swaps it with the drake, loyalty intact.
+    s.call_out_pet(uid(1), "war_hound");
+    assert_eq!(led(&s), Some(("war_hound", 450)));
+    assert_eq!(kennel(&s), vec![("emberdrake", 0)]);
+
+    // Away from a Stable the kennel cannot be reached.
+    s.players.get_mut(&uid(1)).unwrap().room = broceliande_beast_room();
+    s.call_out_pet(uid(1), "emberdrake");
+    assert_eq!(led(&s), Some(("war_hound", 450)));
+}
+
+#[test]
 fn a_companion_piles_onto_your_target_in_combat() {
     let (mut s, mob_id) = engaged_with(MobBehavior::Brute);
     // Give the fighter a companion (the stable is back in town).
@@ -2113,6 +2706,116 @@ fn feeding_at_a_stable_revives_and_strengthens_a_companion() {
 }
 
 #[test]
+fn feed_companion_feeds_a_healthy_pet_even_with_a_stray_in_the_square() {
+    // Reported: at the Stable, `x feed/tend (20g)` courted the Town Square's
+    // stray dog instead, because a healthy pet loses to an adoptable critter
+    // in the one-key `~` routing. `G` is for your own companion.
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let species = super::super::pets::pet_species_by_key("cave_bear").unwrap();
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.room = 1; // Embergate's Town Square: the Stable and a stray dog
+        p.pet = Some(super::super::pets::Pet::new(species, 0));
+        p.gold = 500;
+    }
+    assert!(
+        critters_at(1).iter().any(|c| c.adoptable),
+        "the square must hold a stray for this to test anything"
+    );
+    s.feed_companion(uid(1));
+    let p = &s.players[&uid(1)];
+    assert!(p.stray_bond.is_none(), "the stray is left alone");
+    assert!(p.pet.unwrap().loyalty_xp > 0, "the bear is fed");
+    assert_eq!(p.gold, 500 - PET_FEED_COST);
+}
+
+#[test]
+fn a_companion_grows_on_four_meals_a_day_and_is_only_mended_past_them() {
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let species = super::super::pets::pet_species_by_key("cave_bear").unwrap();
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.pet = Some(super::super::pets::Pet::new(species, 0));
+        p.gold = 1_000;
+    }
+    for _ in 0..super::super::pets::MEALS_PER_DAY {
+        s.feed_companion(uid(1));
+    }
+    let loyalty = super::super::pets::FEED_LOYALTY * i64::from(super::super::pets::MEALS_PER_DAY);
+    let spent = PET_FEED_COST * i64::from(super::super::pets::MEALS_PER_DAY);
+    assert_eq!(s.players[&uid(1)].pet.unwrap().loyalty_xp, loyalty);
+    assert_eq!(s.players[&uid(1)].gold, 1_000 - spent);
+
+    // A fifth feed of a healthy pet is turned away, and costs nothing.
+    s.feed_companion(uid(1));
+    assert_eq!(s.players[&uid(1)].pet.unwrap().loyalty_xp, loyalty);
+    assert_eq!(
+        s.players[&uid(1)].gold,
+        1_000 - spent,
+        "a sated, healthy pet is free"
+    );
+
+    // A downed pet past its meals is still roused, for the fee, with no loyalty.
+    {
+        let pet = s.players.get_mut(&uid(1)).unwrap().pet.as_mut().unwrap();
+        pet.downed = true;
+        pet.hp = 0;
+    }
+    s.feed_companion(uid(1));
+    let pet = s.players[&uid(1)].pet.unwrap();
+    assert!(!pet.downed, "the cap never leaves a pet downed");
+    assert_eq!(pet.hp, pet.max_hp());
+    assert_eq!(pet.loyalty_xp, loyalty, "but it grows no fonder");
+    assert_eq!(s.players[&uid(1)].gold, 1_000 - spent - PET_FEED_COST);
+
+    // A new day brings the meals back.
+    let (day, meals) = s.players[&uid(1)].pet_meals;
+    s.players.get_mut(&uid(1)).unwrap().pet_meals = (day - 1, meals);
+    s.feed_companion(uid(1));
+    assert_eq!(
+        s.players[&uid(1)].pet.unwrap().loyalty_xp,
+        loyalty + super::super::pets::FEED_LOYALTY
+    );
+}
+
+#[test]
+fn a_healthy_companion_at_the_level_cap_is_turned_away_free() {
+    // Loyalty past the cap raises nothing, so there is no meal to sell.
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    let species = super::super::pets::pet_species_by_key("cave_bear").unwrap();
+    let capped =
+        super::super::pets::LOYALTY_PER_LEVEL * i64::from(super::super::pets::PET_MAX_LEVEL - 1);
+    {
+        let p = s.players.get_mut(&uid(1)).unwrap();
+        p.pet = Some(super::super::pets::Pet::new(species, capped));
+        p.gold = 500;
+    }
+    s.feed_companion(uid(1));
+    let p = &s.players[&uid(1)];
+    assert_eq!(p.gold, 500, "nothing to pay for");
+    assert_eq!(p.pet.unwrap().loyalty_xp, capped);
+    assert_eq!(p.pet_meals, (0, 0), "and no meal is spent");
+
+    // Hurt, it is still mended for the fee.
+    {
+        let pet = s.players.get_mut(&uid(1)).unwrap().pet.as_mut().unwrap();
+        pet.downed = true;
+        pet.hp = 0;
+    }
+    s.feed_companion(uid(1));
+    let p = &s.players[&uid(1)];
+    assert!(!p.pet.unwrap().downed);
+    assert_eq!(p.gold, 500 - PET_FEED_COST);
+    assert_eq!(p.pet.unwrap().loyalty_xp, capped);
+}
+
+#[test]
 fn feeding_works_anywhere_not_just_at_a_stable() {
     // Reported pain point: a pet going down mid-fight deep in the Frontier
     // used to be stuck downed until a long walk back to a capital's Stable.
@@ -2157,7 +2860,7 @@ fn taming_a_beast_makes_it_your_companion_and_trains_the_trade() {
     let beast_index = beasts[0].species;
     let species = super::super::taming::beast_species(beast_index);
     let cooldown_key = (user_id, beast_index);
-    let baseline_xp = super::super::skills::xp_for_skill_level(species.tame_level);
+    let baseline_xp = super::super::skills::xp_for_skill_level(species.tame_level());
     s.players.get_mut(&user_id).unwrap().taming_xp = baseline_xp;
 
     // Exercise both real RNG outcomes. The old retry loop was flaky because a
@@ -3043,6 +3746,40 @@ fn loading_saved_character_reconciles_level_from_xp() {
     );
 }
 
+// The rows that pick a spell are where the school has to be: the battle panel
+// already names the foe's attack school and its weak/resist, and both ability
+// lists (`v` and the battle side panel) render this one string.
+#[test]
+fn the_ability_rows_a_player_sees_carry_the_school_they_land_in() {
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Runemaster);
+    let mut saved = s.export_saved(uid(1)).expect("character saves");
+    saved.level = 1;
+    saved.xp = xp_for_level(16);
+    s.hydrate(uid(1), &saved);
+
+    let snap = s.snapshot();
+    let view = snap.players.get(&uid(1)).expect("player view");
+    let row = |name: &str| {
+        view.abilities
+            .iter()
+            .find(|a| a.name == name)
+            .unwrap_or_else(|| panic!("a level 16 Runemaster knows {name}"))
+            .effect
+            .clone()
+    };
+
+    // One Fire among four Arcane - the whole reason the row has to say it.
+    assert_eq!(row("Force Rune"), "arcane damage");
+    assert_eq!(row("Graven Rune"), "fire damage over time");
+    assert_eq!(row("Binding Rune"), "arcane stun");
+    // A ward and an empower never reach `damage_target`, so their rows claim
+    // no school rather than showing the inert one the roster carries.
+    assert_eq!(row("Ward Rune"), "shield");
+    assert_eq!(row("Overcharge"), "empower");
+}
+
 #[test]
 fn gold_math_keeps_rewards_and_death_loss_predictable() {
     assert_eq!(gold_for_kill(80, false), 19);
@@ -3744,92 +4481,6 @@ fn nearby_players_lists_adventurers_in_neighbouring_rooms() {
     assert!(
         !snap.players[&uid(1)].nearby_players.contains(&HERE),
         "you don't count yourself"
-    );
-}
-
-// Wildbound riding: mounted movement strides multiple rooms per keypress.
-#[test]
-fn a_mounted_step_strides_the_full_length_of_the_road() {
-    let mut s = world();
-    s.join(uid(1));
-    s.choose_class(uid(1), Class::Warrior);
-    // Find a straight 6-room east chain inside one region (no gateways).
-    let chain = {
-        let mut found: Option<Vec<RoomId>> = None;
-        'scan: for &start in s.world.rooms.keys() {
-            let mut chain = vec![start];
-            let mut cur = start;
-            for _ in 0..5 {
-                let Some(&next) = s.world.room(cur).and_then(|r| r.exits.get(&Dir::East)) else {
-                    continue 'scan;
-                };
-                // Stay well inside one id band so no progression gate triggers.
-                if next.abs_diff(start) > 300 {
-                    continue 'scan;
-                }
-                chain.push(next);
-                cur = next;
-            }
-            found = Some(chain);
-            break;
-        }
-        found.expect("the world has a straight six-room east road somewhere")
-    };
-    {
-        let p = s.players.get_mut(&uid(1)).unwrap();
-        p.room = chain[0];
-        p.base_max_hp = 5000; // survive anything roaming the road
-        p.hp = 5000;
-        let serpent = super::super::taming::tameable_by_key("wb_worldserpent").unwrap();
-        p.pet = Some(Pet::new(serpent, 0));
-    }
-    s.toggle_mount(uid(1));
-    assert!(s.players[&uid(1)].mounted, "saddled up");
-    s.move_player(uid(1), Dir::East);
-    let landed = s.players[&uid(1)].room;
-    assert_eq!(
-        landed, chain[5],
-        "a stride-5 mount covers five rooms in one step"
-    );
-}
-
-#[test]
-fn you_cannot_ride_the_unrideable_and_combat_grounds_you() {
-    const ROOM: RoomId = 2001;
-    let mut s = world();
-    s.join(uid(1));
-    s.choose_class(uid(1), Class::Warrior);
-    // No pet at all: refused.
-    s.toggle_mount(uid(1));
-    assert!(!s.players[&uid(1)].mounted);
-    // A hare is not a horse: refused.
-    {
-        let p = s.players.get_mut(&uid(1)).unwrap();
-        let hare = super::super::taming::tameable_by_key("wt_hare").unwrap();
-        p.pet = Some(Pet::new(hare, 0));
-    }
-    s.toggle_mount(uid(1));
-    assert!(!s.players[&uid(1)].mounted, "a hare cannot carry a rider");
-    // A palfrey can - but starting a fight puts you back on your feet.
-    {
-        let p = s.players.get_mut(&uid(1)).unwrap();
-        let palfrey = super::super::taming::tameable_by_key("wb_palfrey").unwrap();
-        p.pet = Some(Pet::new(palfrey, 0));
-        p.room = ROOM;
-    }
-    s.toggle_mount(uid(1));
-    assert!(s.players[&uid(1)].mounted);
-    let mob_id = *s.mobs.keys().next().unwrap();
-    {
-        let m = s.mobs.get_mut(&mob_id).unwrap();
-        m.alive = true;
-        m.revealed = true;
-        m.current_room = ROOM;
-    }
-    s.engage(uid(1));
-    assert!(
-        !s.players[&uid(1)].mounted,
-        "combat slides you out of the saddle"
     );
 }
 
@@ -4671,6 +5322,226 @@ async fn a_second_session_picking_another_slot_cannot_overwrite_the_live_charact
     );
 }
 
+/// The row the landing would draw for one slot, or `None` while the account's
+/// list is still being read.
+fn landing_row(svc: &LateaniaService, user_id: Uuid, slot: i16) -> Option<SlotSummary> {
+    match svc.character_slots(user_id) {
+        SlotList::Loading => None,
+        SlotList::Ready(rows) => Some(rows[slot as usize]),
+    }
+}
+
+#[tokio::test]
+async fn slot_list_changes_wake_the_render_loop_when_they_land() {
+    // The landing draws the service's list, and the render loop only paints on
+    // input or a reported change. `App::tick` notices a changed list within
+    // one idle tick; these wakes are what make the first read and a delete
+    // land on screen immediately rather than half a tick later.
+    let db = crate::test_helpers::new_test_db().await;
+    let client = db.db.get().await.expect("db client");
+    let user = late_core::models::user::User::create(
+        &client,
+        late_core::models::user::UserParams {
+            fingerprint: "slot-wake-fp".to_string(),
+            username: "slotwaker".to_string(),
+            settings: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("test account")
+    .id;
+    let app = crate::test_helpers::make_app(db.db.clone(), user, "slot-wake");
+    let svc = app.lateania_service.clone();
+    let signal = Arc::new(crate::render_signal::RenderSignal::new());
+
+    // A saved Mage in slot 1, so the refresh has something to change.
+    join_and_wait(&svc, user, uid(21), 1).await;
+    class_up_and_wait(&svc, user, Class::Mage).await;
+    svc.leave_task(user, uid(21));
+    crate::test_helpers::wait_until(
+        || async { saved_class(&db.db, user, 1).await == Some(Class::Mage.as_key().to_string()) },
+        "the Mage's logout save reaches slot 1",
+    )
+    .await;
+
+    svc.fill_slots_task(user, Some(signal.clone()));
+    crate::test_helpers::wait_until(
+        || async { landing_row(&svc, user, 1).is_some_and(|row| row.occupied) },
+        "the first read of the slot list shows the saved Mage",
+    )
+    .await;
+    assert!(
+        signal.dirty.load(std::sync::atomic::Ordering::Acquire),
+        "a landed slot refresh must wake the render loop, or the landing stays stale"
+    );
+
+    signal
+        .dirty
+        .store(false, std::sync::atomic::Ordering::Release);
+    svc.delete_character_task(user, 1, Some(signal.clone()));
+    crate::test_helpers::wait_until(
+        || async { landing_row(&svc, user, 1).is_some_and(|row| !row.occupied) },
+        "the delete empties slot 1 on the landing",
+    )
+    .await;
+    assert!(
+        signal.dirty.load(std::sync::atomic::Ordering::Acquire),
+        "a delete must wake the render loop, or the deleted character lingers"
+    );
+}
+
+#[tokio::test]
+async fn a_logout_save_puts_a_new_character_on_the_landing() {
+    // The bug this pins: the landing's list was refreshed by a query fired
+    // alongside the logout save, so it read the database from before that save
+    // and a character created during the session read as "empty - start a new
+    // character" (while Enter on that same row happily played him, since the
+    // join loads the slot straight from the database). The list is written by
+    // the save itself now, so nothing has to re-read it to see the character.
+    let db = crate::test_helpers::new_test_db().await;
+    let client = db.db.get().await.expect("db client");
+    let user = late_core::models::user::User::create(
+        &client,
+        late_core::models::user::UserParams {
+            fingerprint: "slot-writethrough-fp".to_string(),
+            username: "slotwriter".to_string(),
+            settings: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("test account")
+    .id;
+    let app = crate::test_helpers::make_app(db.db.clone(), user, "slot-writethrough");
+    let svc = app.lateania_service.clone();
+
+    // The one database read this account gets: the list as it looks before the
+    // character exists.
+    svc.fill_slots_task(user, None);
+    crate::test_helpers::wait_until(
+        || async { landing_row(&svc, user, 2).is_some() },
+        "the account's slot list is read once",
+    )
+    .await;
+
+    join_and_wait(&svc, user, uid(61), 2).await;
+    class_up_and_wait(&svc, user, Class::Runemaster).await;
+    svc.leave_task(user, uid(61));
+
+    // Asserted with nothing left to paper over it: no staged save and nobody
+    // in the world, so the row can only be the one the save wrote.
+    crate::test_helpers::wait_until(
+        || async {
+            svc.prepared_saves.lock_recover().is_empty()
+                && !svc.is_user_present(user)
+                && landing_row(&svc, user, 2)
+                    .is_some_and(|row| row.occupied && row.class == Some(Class::Runemaster))
+        },
+        "the logout save puts the new Runemaster on the landing",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn a_character_in_the_world_is_never_an_empty_slot_on_the_landing() {
+    // A character's first database row is written by its logout save or the
+    // autosave a minute in, whichever comes first, so for a while the only
+    // place it exists is the world. The landing reads the live character off
+    // the world snapshot for exactly that reason.
+    let db = crate::test_helpers::new_test_db().await;
+    let client = db.db.get().await.expect("db client");
+    let user = late_core::models::user::User::create(
+        &client,
+        late_core::models::user::UserParams {
+            fingerprint: "slot-live-fp".to_string(),
+            username: "slotliver".to_string(),
+            settings: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("test account")
+    .id;
+    let app = crate::test_helpers::make_app(db.db.clone(), user, "slot-live");
+    let svc = app.lateania_service.clone();
+
+    svc.fill_slots_task(user, None);
+    crate::test_helpers::wait_until(
+        || async { landing_row(&svc, user, 3).is_some() },
+        "the account's slot list is read once",
+    )
+    .await;
+
+    join_and_wait(&svc, user, uid(71), 3).await;
+    class_up_and_wait(&svc, user, Class::Mage).await;
+
+    assert!(
+        saved_class(&db.db, user, 3).await.is_none(),
+        "nothing has been written for this character yet"
+    );
+    let row = landing_row(&svc, user, 3).expect("the slot list has been read");
+    assert!(
+        row.occupied,
+        "a character standing in the world is not an empty slot"
+    );
+    assert_eq!(
+        row.class,
+        Some(Class::Mage),
+        "and the row is the character that is actually live"
+    );
+}
+
+#[tokio::test]
+async fn a_database_read_never_replaces_a_known_slot_list() {
+    // The rule the whole design rests on: the list is read once, and every
+    // change after that rides the write that made it. A read still free to
+    // overwrite a known list could land after a save and walk its row
+    // backwards, which is how the old refresh-on-leave lost characters.
+    let db = crate::test_helpers::new_test_db().await;
+    let client = db.db.get().await.expect("db client");
+    let user = late_core::models::user::User::create(
+        &client,
+        late_core::models::user::UserParams {
+            fingerprint: "slot-onceread-fp".to_string(),
+            username: "slotreader".to_string(),
+            settings: serde_json::json!({}),
+        },
+    )
+    .await
+    .expect("test account")
+    .id;
+    let app = crate::test_helpers::make_app(db.db.clone(), user, "slot-onceread");
+    let svc = app.lateania_service.clone();
+
+    join_and_wait(&svc, user, uid(81), 1).await;
+    class_up_and_wait(&svc, user, Class::Mage).await;
+    svc.leave_task(user, uid(81));
+    crate::test_helpers::wait_until(
+        || async { saved_class(&db.db, user, 1).await == Some(Class::Mage.as_key().to_string()) },
+        "the Mage's logout save reaches slot 1",
+    )
+    .await;
+    svc.fill_slots_task(user, None);
+    crate::test_helpers::wait_until(
+        || async { landing_row(&svc, user, 1).is_some_and(|row| row.occupied) },
+        "the first read of the slot list shows the saved Mage",
+    )
+    .await;
+
+    // Drop the row behind the service's back: any further read would see an
+    // empty slot 1 and, if it were allowed to publish, empty the landing.
+    MudCharacter::delete_slot(&client, user, 1)
+        .await
+        .expect("the row is deleted");
+    svc.fill_slots_task(user, None);
+    assert!(
+        saved_class(&db.db, user, 1).await.is_none(),
+        "the row really is gone, so a read would have something to get wrong"
+    );
+    assert!(
+        landing_row(&svc, user, 1).is_some_and(|row| row.occupied),
+        "a known slot list is never replaced by a database read"
+    );
+}
+
 #[test]
 fn starter_chain_walks_a_new_player_to_the_first_gate() {
     let mut s = world();
@@ -4953,11 +5824,11 @@ fn the_top_poison_tier_is_no_longer_a_clone_of_the_fourth() {
     s.use_item(uid(1), vial);
     assert_eq!(
         s.players[&uid(1)].weapon_coat,
-        Some((DamageType::Poison, POISON_PER_TICK[5], POISON_CHARGES)),
+        Some((DamageType::Poison, COAT_PER_TICK[5], COAT_CHARGES)),
         "tier 5 continues the per-tick curve instead of clamping to tier 4's"
     );
     assert!(
-        POISON_PER_TICK[5] > POISON_PER_TICK[4],
+        COAT_PER_TICK[5] > COAT_PER_TICK[4],
         "and the curve really does keep climbing at the top"
     );
 }
@@ -4969,10 +5840,11 @@ fn the_active_coat_shows_on_the_player_view() {
     s.choose_class(uid(1), Class::Warrior);
     s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 21, 8));
     let view = s.snapshot().players[&uid(1)].clone();
+    let coat = view.coat.expect("the view carries the live coat");
     assert_eq!(
-        view.coat.as_deref(),
-        Some("fire coat x8"),
-        "the battle panels read the coat from the view"
+        (coat.school.as_str(), coat.charges),
+        ("fire", 8),
+        "the battle panels and the action-bar chip read the coat from the view"
     );
 }
 
@@ -4987,7 +5859,7 @@ fn a_coated_weapon_works_in_a_duel_too() {
     s.players.get_mut(&uid(1)).unwrap().room = pvp_room;
     s.players.get_mut(&uid(2)).unwrap().room = pvp_room;
     s.engage_player(uid(1), uid(2));
-    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, OIL_CHARGES));
+    s.players.get_mut(&uid(1)).unwrap().weapon_coat = Some((DamageType::Fire, 10, COAT_CHARGES));
     s.tick();
     assert!(
         s.pvp_dots.get(&uid(2)).is_some_and(|d| d.iter().any(|dot| {
@@ -4997,13 +5869,13 @@ fn a_coated_weapon_works_in_a_duel_too() {
     );
     assert_eq!(
         s.players[&uid(1)].weapon_coat.map(|(_, _, c)| c),
-        Some(OIL_CHARGES - 1),
+        Some(COAT_CHARGES - 1),
         "the duel swing spends one coat charge"
     );
     // And the one-wound rule holds in a duel too. It matters more here than
     // against a mob: a pvp dot is *not* pre-scaled, so each tick is charged
     // against the victim's armor live, and a stacking coat would have made a
-    // 12-charge vial worth a third of an endgame duel all by itself.
+    // full coat worth a large slice of an endgame duel all by itself.
     // Both duellists need the hit points to still be trading blows five
     // swings in, or the wound count below only proves someone died.
     for id in [uid(1), uid(2)] {
@@ -5023,5 +5895,44 @@ fn a_coated_weapon_works_in_a_duel_too() {
         stacks.iter().filter(|d| d.owner == uid(1)).count(),
         1,
         "five landed duel swings, one coat wound"
+    );
+}
+
+#[test]
+fn asking_a_villager_puts_their_answer_in_the_feed() {
+    use super::super::world::{FeatureKind, VILLAGERS, features_at};
+
+    // The bug: a villager's dialogue was logged as `LogKind::Room`, the kind
+    // that means "a line of the room description". The field layout's Recent
+    // strip drops that kind on purpose, because the Now panel already carries
+    // the description (`collapsed_recent_entries`). So pressing Enter on a
+    // villager printed nothing whatsoever, while the room stood there saying
+    // "Press o to ask".
+    let villager = VILLAGERS.first().expect("the world has villagers");
+    let mut s = world();
+    s.join(uid(1));
+    s.choose_class(uid(1), Class::Warrior);
+    s.players.get_mut(&uid(1)).unwrap().room = villager.room;
+    let idx = features_at(villager.room)
+        .iter()
+        .position(|f| f.kind == FeatureKind::Villager)
+        .expect("the villager stands in their own room");
+
+    let before = s.players[&uid(1)].log.len();
+    s.interact(uid(1), idx);
+    let spoken: Vec<_> = s.players[&uid(1)].log[before..].to_vec();
+
+    assert!(
+        spoken.iter().any(|l| l.text.contains(villager.desc)),
+        "asking a villager should say their line back: {spoken:?}"
+    );
+    // And it has to survive the feed that actually renders it. Room-kind lines
+    // are dropped there, so tagging speech as room description is the same as
+    // not logging it at all.
+    assert!(
+        spoken
+            .iter()
+            .any(|l| l.kind != LogKind::Room && l.text.contains(villager.desc)),
+        "a villager's answer is an event, not room description: {spoken:?}"
     );
 }

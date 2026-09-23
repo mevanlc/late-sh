@@ -127,14 +127,26 @@ impl Notification {
         }
     }
 
+    /// Someone paid chips to mark your message. Reuses `Mentions` rather
+    /// than adding a dedicated `Kind`/settings row: it is the same "a person
+    /// in chat singled you out" bucket, and a user who mutes mentions is not
+    /// asking to be pinged about gilds either.
+    pub(crate) fn gilded(buyer: &str, tier: &str, chips: i64) -> Self {
+        Self {
+            kind: Kind::Mentions,
+            title: format!("{tier} gild received"),
+            body: format!("@{buyer} gilded your message (+{chips} chips)"),
+        }
+    }
+
     /// Reuses `GameEvents` rather than adding a dedicated `Kind`/settings row:
     /// this is the same "something you started needs your attention" bucket
     /// as the daily/house your-turn alerts.
-    pub(crate) fn pomodoro_done(label: &str) -> Self {
+    pub(crate) fn status_done(word: &str) -> Self {
         Self {
             kind: Kind::GameEvents,
-            title: format!("{label} done"),
-            body: "your /pomodoro timer finished".to_string(),
+            title: format!("{word} done"),
+            body: "your /status countdown finished".to_string(),
         }
     }
 }

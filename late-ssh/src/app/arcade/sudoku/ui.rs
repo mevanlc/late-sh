@@ -43,18 +43,25 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, show_bottom_bar: 
             ),
             ("pencil", pencil_label.to_string(), pencil_color),
         ]),
-        keys: keys_line(vec![
-            ("h/j/k/l", "move"),
-            ("1-9", "place"),
-            ("m", "pencil"),
-            ("u", "undo"),
-            ("0", "clear"),
-            ("d/p/n", "daily/pers/new"),
-            ("[ ]", "diff"),
-            ("r", "reset"),
-            ("`", "dashboard"),
-            ("Esc", "exit"),
-        ]),
+        keys: keys_line(
+            vec![
+                ("h/j/k/l", "move"),
+                ("1-9", "place"),
+                ("m", "pencil"),
+                ("u", "undo"),
+                ("0", "clear"),
+                ("d/p/n", "daily/pers/new"),
+                ("[ ]", "diff"),
+                ("r", "reset"),
+                ("`", "dashboard"),
+                ("Esc", "exit"),
+            ]
+            .into_iter()
+            .chain(crate::app::arcade::ui::share_hints(super::share::is_ready(
+                state,
+            )))
+            .collect(),
+        ),
         tip: state
             .reset_pending
             .map(|kind| crate::app::arcade::ui::tip_line(kind.confirm_tip())),
@@ -237,9 +244,11 @@ fn board_row(state: &State, row: usize) -> Line<'static> {
 /// The nine digit colours — a distinct hue per number, colored-pencil style, so
 /// the board reads at a glance. Fixed clues use a calmer shade of the same hue
 /// (see `cell_span`) so you can still tell givens from your own entries.
+/// No digit is red: red is the conflict colour (`theme::ERROR`), and a red
+/// digit read as a mistake at a glance.
 fn digit_color(value: u8) -> Color {
     match value {
-        1 => Color::Rgb(239, 83, 80),   // red
+        1 => Color::Rgb(0, 150, 136),   // teal
         2 => Color::Rgb(255, 152, 0),   // orange
         3 => Color::Rgb(255, 213, 79),  // amber
         4 => Color::Rgb(102, 187, 106), // green

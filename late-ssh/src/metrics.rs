@@ -4,12 +4,18 @@ use late_core::models::leaderboard::DoorGame;
 use late_core::models::media_queue_item::SongQueueReward;
 
 use crate::app::activity::event::ActivityGame;
+use crate::app::arcade::share::ShareCardKind;
+use crate::app::arcade::sliding_puzzle::svc::SlidingPuzzleArtLoad;
+use crate::app::bonsai::state::BonsaiAction;
+use crate::app::bonsai::svc::BonsaiActionResult;
+use crate::app::chat::news::svc::XMediaLookup;
 use crate::app::chat::svc::GildRefusal;
+use crate::app::clubhouse::nightcap::svc::{NightcapHouseFailure, NightcapOrderResult};
 use crate::app::crown::svc::CrownRefusal;
 use crate::app::deadchannel::haunt::state::GateVerdict;
 use crate::app::games::chips::svc::RoundRefusal;
-use crate::app::lobby::daily::svc::DailyWinPayout;
-use crate::app::pot::svc::PotRefusal;
+use crate::app::lobby::daily::svc::{DailyWinPayout, PoolShotOutcome};
+use crate::app::pot::svc::{PotRefusal, PotReminderOutcome};
 
 /// Why the render loop drew a frame. The loop can only distinguish its two
 /// wake sources; event-driven renders currently ride the world tick, so they
@@ -80,6 +86,47 @@ pub enum PaperOpenResult {
     Failed,
 }
 
+/// How one source's fetch in the nightly job press (`app/jobs`) went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobsFetchResult {
+    Fetched,
+    Failed,
+    /// One item of a source (an HN comment, a Jobicy tag) that failed and
+    /// was skipped; the rest of the source still lands.
+    ItemSkipped,
+}
+
+/// How one posting's model read ended. Every variant but `Failed` settles
+/// the row; `Failed` keeps it pending for the next night.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobsReadResult {
+    Queued,
+    Active,
+    Dropped,
+    Dead,
+    Failed,
+}
+
+/// How a replica's check of the day's press run ended. `Ran` is the one
+/// that spent the calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobsPressResult {
+    Ran,
+    /// Another replica holds or held the day's claim; nothing spent.
+    Lost,
+    Failed,
+}
+
+/// How a person's own write on the Jobs shelf ended: a posting saved, one
+/// taken down, refused at the per-person cap, or failed in the database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobsPostResult {
+    Posted,
+    Retracted,
+    AtCap,
+    Failed,
+}
+
 /// How a hang attempt on the Artboard gallery ended. `Hung` is the row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GalleryHangResult {
@@ -128,9 +175,21 @@ pub enum FirstContactBeat {
     GlitchBurst,
     NameFlicker,
     WhisperDelivered,
-    InvitationRequested,
+    /// The breakthrough played on a won invitation claim; the DM follows.
+    Breakthrough,
     /// The invitation accepted: `/join #deadchannel` created the runner.
     RunnerCreated,
+}
+
+/// A runner going through the door after the ladder is done. Leaving keeps
+/// the character (the row stays, `left_at` is stamped), so the two sides
+/// are one counter: the gap between them is how many runners are standing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerDoor {
+    /// `/leave #deadchannel`: the gate closed on every replica.
+    Left,
+    /// An invited rejoin brought a runner who had left back, same look.
+    Returned,
 }
 
 /// How one bio screen (the first-contact eligibility gate's AI leg)
@@ -167,22 +226,37 @@ pub enum SshRejectReason {
     GlobalLimit,
 }
 
+/// The band count a paired CLI's `viz` frame arrived with. CLIs from before
+/// the 16-band analyzer send 8, which the pair socket stretches to 16.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VizWireBands {
+    Eight,
+    Sixteen,
+}
+
 #[cfg(feature = "otel")]
 mod inner {
     use std::sync::OnceLock;
 
     use opentelemetry::{
         KeyValue, global,
-        metrics::{Counter, UpDownCounter},
+        metrics::{Counter, Gauge, UpDownCounter},
     };
 
+    use super::ShareCardKind;
+    use super::SlidingPuzzleArtLoad;
+    use super::XMediaLookup;
     use super::{
         ActivityGame, BioScreenOutcome, CrownRefusal, DailyWinPayout, DoorGame, FirstContactBeat,
         GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult, GateVerdict, GildRefusal,
-        GildTier, NewsShareReward, OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult,
-        PotRefusal, RenderReason, RoundRefusal, SongQueueReward, SshRejectReason, SummaryResult,
-        TranslationResult,
+        GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OnlineTimeFlushResult,
+        PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal, PotReminderOutcome,
+        RenderReason, RoundRefusal, RunnerDoor, SongQueueReward, SshRejectReason, SummaryResult,
+        TranslationResult, VizWireBands,
     };
+    use super::{BonsaiAction, BonsaiActionResult};
+    use crate::app::bonsai::state::BranchAction;
 
     fn meter() -> opentelemetry::metrics::Meter {
         global::meter("late-ssh")
@@ -263,6 +337,16 @@ mod inner {
                 .with_description(
                     "Websocket pair attempts rejected because no live session owned the token",
                 )
+                .build()
+        })
+    }
+
+    fn pair_viz_frames_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pair_viz_frames_total")
+                .with_description("Spectrum frames accepted from paired CLIs, by wire band count")
                 .build()
         })
     }
@@ -395,6 +479,34 @@ mod inner {
         }
     }
 
+    fn bonsai_action_label(action: BonsaiAction) -> &'static str {
+        match action {
+            BonsaiAction::Water => "water",
+            BonsaiAction::Branch(BranchAction::Bend { .. }) => "bend",
+            BonsaiAction::Branch(BranchAction::Prune) => "prune",
+            BonsaiAction::Branch(BranchAction::Split) => "split",
+            BonsaiAction::Branch(BranchAction::Pinch) => "pinch",
+        }
+    }
+
+    fn bonsai_action_result_label(result: BonsaiActionResult) -> &'static str {
+        match result {
+            BonsaiActionResult::Stored => "stored",
+            BonsaiActionResult::Refused => "refused",
+            BonsaiActionResult::Failed => "failed",
+        }
+    }
+
+    fn bonsai_actions_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_bonsai_actions_total")
+                .with_description("Bonsai care actions, by action and how they settled")
+                .build()
+        })
+    }
+
     fn crown_takes_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -485,6 +597,44 @@ mod inner {
         })
     }
 
+    fn nightcap_order_label(result: NightcapOrderResult) -> &'static str {
+        match result {
+            NightcapOrderResult::Poured => "poured",
+            NightcapOrderResult::Comped => "comped",
+            NightcapOrderResult::Bounced => "bounced",
+            NightcapOrderResult::Failed => "failed",
+        }
+    }
+
+    fn nightcap_orders_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_nightcap_orders_total")
+                .with_description("Single-drink orders at the Nightcap bar, by how they settled")
+                .build()
+        })
+    }
+
+    fn nightcap_house_failure_label(failure: NightcapHouseFailure) -> &'static str {
+        match failure {
+            NightcapHouseFailure::CreditCount => "credit_count",
+            NightcapHouseFailure::HouseLine => "house_line",
+        }
+    }
+
+    fn nightcap_house_failures_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_nightcap_house_failures_total")
+                .with_description(
+                    "Nightcap off-thread work that failed (a stale free-drink count, a house line never posted), by which",
+                )
+                .build()
+        })
+    }
+
     fn pot_refusal_label(refusal: PotRefusal) -> &'static str {
         match refusal {
             PotRefusal::Closed => "closed",
@@ -553,6 +703,25 @@ mod inner {
         })
     }
 
+    fn pot_reminder_label(outcome: PotReminderOutcome) -> &'static str {
+        match outcome {
+            PotReminderOutcome::Posted => "posted",
+            PotReminderOutcome::Failed => "failed",
+        }
+    }
+
+    fn pot_reminders_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pot_reminders_total")
+                .with_description(
+                    "The pot's last call in #lounge, by outcome; a quiet week with no posted line is a reminder that never fired",
+                )
+                .build()
+        })
+    }
+
     fn chat_gilds_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -585,12 +754,36 @@ mod inner {
         })
     }
 
+    fn pool_shots_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_pool_shots_total")
+                .with_description(
+                    "Daily pool shots by how they ended. `truncated` is a physics bug reaching production: the simulator gave up at its guard rails and the half-played rack was still written as the match",
+                )
+                .build()
+        })
+    }
+
     fn news_shares_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
             meter()
                 .u64_counter("late_ssh_news_shares_total")
                 .with_description("News articles published, from the composer or an RSS share")
+                .build()
+        })
+    }
+
+    fn news_x_media_lookups_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_news_x_media_lookups_total")
+                .with_description(
+                    "fxtwitter lookups behind X shares, the only NSFW gate on that path",
+                )
                 .build()
         })
     }
@@ -645,6 +838,16 @@ mod inner {
         })
     }
 
+    fn runner_door_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_runner_door_total")
+                .with_description("Runners leaving and returning to #deadchannel, by direction")
+                .build()
+        })
+    }
+
     fn first_contact_bio_screens_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -685,8 +888,15 @@ mod inner {
             FirstContactBeat::GlitchBurst => "glitch_burst",
             FirstContactBeat::NameFlicker => "name_flicker",
             FirstContactBeat::WhisperDelivered => "whisper_delivered",
-            FirstContactBeat::InvitationRequested => "invitation_requested",
+            FirstContactBeat::Breakthrough => "breakthrough",
             FirstContactBeat::RunnerCreated => "runner_created",
+        }
+    }
+
+    fn runner_door_label(door: RunnerDoor) -> &'static str {
+        match door {
+            RunnerDoor::Left => "left",
+            RunnerDoor::Returned => "returned",
         }
     }
 
@@ -704,6 +914,10 @@ mod inner {
     pub fn record_first_contact_beat(beat: FirstContactBeat) {
         first_contact_beats_total()
             .add(1, &[KeyValue::new("beat", first_contact_beat_label(beat))]);
+    }
+
+    pub fn record_runner_door(door: RunnerDoor) {
+        runner_door_total().add(1, &[KeyValue::new("direction", runner_door_label(door))]);
     }
 
     pub fn record_first_contact_bio_screen(outcome: BioScreenOutcome) {
@@ -770,6 +984,17 @@ mod inner {
         ws_pair_rejected_unknown_token_total().add(1, &[]);
     }
 
+    fn viz_wire_bands_label(bands: VizWireBands) -> &'static str {
+        match bands {
+            VizWireBands::Eight => "8",
+            VizWireBands::Sixteen => "16",
+        }
+    }
+
+    pub fn record_pair_viz_frame(bands: VizWireBands) {
+        pair_viz_frames_total().add(1, &[KeyValue::new("bands", viz_wire_bands_label(bands))]);
+    }
+
     pub fn record_cli_pair_usage(ssh_mode: &str, platform: &str) {
         cli_pair_usage_total().add(
             1,
@@ -822,6 +1047,65 @@ mod inner {
         game_wins_total().add(1, &[KeyValue::new("game", game_label(game))]);
     }
 
+    fn share_cards_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_share_cards_total")
+                .with_description("Share cards copied to the clipboard")
+                .build()
+        })
+    }
+
+    fn share_card_kind_label(kind: ShareCardKind) -> &'static str {
+        match kind {
+            ShareCardKind::LeWord => "le_word",
+            ShareCardKind::Nonogram => "nonogram",
+            ShareCardKind::Sudoku => "sudoku",
+            ShareCardKind::Minesweeper => "minesweeper",
+            ShareCardKind::Solitaire => "solitaire",
+            ShareCardKind::RubiksCube => "rubiks_cube",
+            ShareCardKind::SlidingPuzzle => "sliding_puzzle",
+            ShareCardKind::Day => "day",
+        }
+    }
+
+    /// One share card copied.
+    pub fn record_share_card(kind: ShareCardKind) {
+        share_cards_total().add(1, &[KeyValue::new("card", share_card_kind_label(kind))]);
+    }
+
+    fn sliding_puzzle_art_load_label(load: SlidingPuzzleArtLoad) -> &'static str {
+        match load {
+            SlidingPuzzleArtLoad::Featured => "featured",
+            SlidingPuzzleArtLoad::Empty => "empty",
+            SlidingPuzzleArtLoad::Failed => "failed",
+        }
+    }
+
+    fn sliding_puzzle_art_loads_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_sliding_puzzle_art_loads_total")
+                .with_description(
+                    "Sliding Puzzle daily art loads: a gallery piece featured, an empty backlog, or a failure",
+                )
+                .build()
+        })
+    }
+
+    /// One session asked for the day's Sliding Puzzle art.
+    pub fn record_sliding_puzzle_art(load: SlidingPuzzleArtLoad) {
+        sliding_puzzle_art_loads_total().add(
+            1,
+            &[KeyValue::new(
+                "outcome",
+                sliding_puzzle_art_load_label(load),
+            )],
+        );
+    }
+
     fn daily_win_payout_label(payout: DailyWinPayout) -> &'static str {
         match payout {
             DailyWinPayout::Paid => "paid",
@@ -835,6 +1119,25 @@ mod inner {
         daily_win_payouts_total().add(
             1,
             &[KeyValue::new("outcome", daily_win_payout_label(payout))],
+        );
+    }
+
+    fn pool_shot_outcome_label(outcome: PoolShotOutcome) -> &'static str {
+        match outcome {
+            PoolShotOutcome::Settled => "settled",
+            PoolShotOutcome::Truncated => "truncated",
+            PoolShotOutcome::Rejected => "rejected",
+        }
+    }
+
+    /// One daily pool shot reached the end of the only path it has. `settled`
+    /// is the denominator the other two are read against: a little `rejected`
+    /// is players and clients disagreeing, a rising `rejected` is a desync,
+    /// and any `truncated` at all is the physics.
+    pub fn record_pool_shot(outcome: PoolShotOutcome) {
+        pool_shots_total().add(
+            1,
+            &[KeyValue::new("outcome", pool_shot_outcome_label(outcome))],
         );
     }
 
@@ -855,6 +1158,23 @@ mod inner {
             &[KeyValue::new("reward", news_share_reward_label(reward))],
         );
         news_share_chips_paid_total().add(reward.chips() as u64, &[]);
+    }
+
+    /// `unavailable` is a share the gate rejected without a verdict; a run of
+    /// them is an fxtwitter outage.
+    fn news_x_media_lookup_label(lookup: XMediaLookup) -> &'static str {
+        match lookup {
+            XMediaLookup::Clean => "clean",
+            XMediaLookup::Sensitive => "sensitive",
+            XMediaLookup::Unavailable => "unavailable",
+        }
+    }
+
+    pub fn record_news_x_media_lookup(lookup: XMediaLookup) {
+        news_x_media_lookups_total().add(
+            1,
+            &[KeyValue::new("outcome", news_x_media_lookup_label(lookup))],
+        );
     }
 
     /// Same shape as the News share: one counter for the submissions and one
@@ -883,6 +1203,16 @@ mod inner {
         chat_gilds_refused_total().add(1, &[KeyValue::new("reason", gild_refusal_label(refusal))]);
     }
 
+    pub fn record_bonsai_action(action: BonsaiAction, result: BonsaiActionResult) {
+        bonsai_actions_total().add(
+            1,
+            &[
+                KeyValue::new("action", bonsai_action_label(action)),
+                KeyValue::new("result", bonsai_action_result_label(result)),
+            ],
+        );
+    }
+
     /// The price is burned whole, so one counter tracks the takeovers and
     /// another the chips they removed from the supply.
     pub fn record_crown_taken(price: i64) {
@@ -908,9 +1238,25 @@ mod inner {
         rounds_refused_total().add(1, &[KeyValue::new("reason", round_refusal_label(refusal))]);
     }
 
+    /// A pour ordered off the Nightcap menu (rounds count under
+    /// `record_round_bought`, whichever bar they were bought at).
+    pub fn record_nightcap_order(result: NightcapOrderResult) {
+        nightcap_orders_total().add(1, &[KeyValue::new("result", nightcap_order_label(result))]);
+    }
+
     /// A patron walked up and drank a credit somebody else paid for.
     pub fn record_round_drink_cashed() {
         round_drinks_cashed_total().add(1, &[]);
+    }
+
+    /// The house's off-thread work at the Nightcap failed. Orders are counted
+    /// under `record_nightcap_order`; this is what a healthy order counter
+    /// cannot see: a quiet bar or a stale menu.
+    pub fn record_nightcap_house_failure(failure: NightcapHouseFailure) {
+        nightcap_house_failures_total().add(
+            1,
+            &[KeyValue::new("work", nightcap_house_failure_label(failure))],
+        );
     }
 
     /// A settled buy. Two counters, because the burn is only visible as the
@@ -931,6 +1277,12 @@ mod inner {
         pot_draws_total().add(1, &[]);
         pot_tickets_drawn_total().add(tickets.max(0) as u64, &[]);
         pot_chips_out_total().add(payout.max(0) as u64, &[]);
+    }
+
+    /// The sweep's reminder arm. Only the claims that happened or errored
+    /// count; a sweep with no pot in its window is silence, not an outcome.
+    pub fn record_pot_reminder(outcome: PotReminderOutcome) {
+        pot_reminders_total().add(1, &[KeyValue::new("outcome", pot_reminder_label(outcome))]);
     }
 
     fn translation_result_label(result: TranslationResult) -> &'static str {
@@ -1041,6 +1393,129 @@ mod inner {
         );
     }
 
+    fn jobs_fetch_result_label(result: JobsFetchResult) -> &'static str {
+        match result {
+            JobsFetchResult::Fetched => "fetched",
+            JobsFetchResult::Failed => "failed",
+            JobsFetchResult::ItemSkipped => "item_skipped",
+        }
+    }
+
+    fn jobs_fetches_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_jobs_fetches_total")
+                .with_description("Job feed source fetches by source and result")
+                .build()
+        })
+    }
+
+    pub fn record_jobs_fetch(
+        source: late_core::models::job_posting::JobSource,
+        result: JobsFetchResult,
+    ) {
+        jobs_fetches_total().add(
+            1,
+            &[
+                KeyValue::new("source", source.as_str()),
+                KeyValue::new("result", jobs_fetch_result_label(result)),
+            ],
+        );
+    }
+
+    fn jobs_read_result_label(result: JobsReadResult) -> &'static str {
+        match result {
+            JobsReadResult::Queued => "queued",
+            JobsReadResult::Active => "active",
+            JobsReadResult::Dropped => "dropped",
+            JobsReadResult::Dead => "dead",
+            JobsReadResult::Failed => "failed",
+        }
+    }
+
+    fn jobs_reads_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_jobs_reads_total")
+                .with_description("Job postings read by the model, by how the row settled")
+                .build()
+        })
+    }
+
+    pub fn record_jobs_read(result: JobsReadResult) {
+        jobs_reads_total().add(
+            1,
+            &[KeyValue::new("result", jobs_read_result_label(result))],
+        );
+    }
+
+    fn jobs_press_result_label(result: JobsPressResult) -> &'static str {
+        match result {
+            JobsPressResult::Ran => "ran",
+            JobsPressResult::Lost => "lost",
+            JobsPressResult::Failed => "failed",
+        }
+    }
+
+    fn jobs_press_runs_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_jobs_press_runs_total")
+                .with_description("Nightly job press runs by result")
+                .build()
+        })
+    }
+
+    pub fn record_jobs_press(result: JobsPressResult) {
+        jobs_press_runs_total().add(
+            1,
+            &[KeyValue::new("result", jobs_press_result_label(result))],
+        );
+    }
+
+    fn jobs_released_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_jobs_released_total")
+                .with_description("HN job postings released onto the shelf by the drip")
+                .build()
+        })
+    }
+
+    pub fn record_jobs_released(count: usize) {
+        jobs_released_total().add(count as u64, &[]);
+    }
+
+    fn jobs_post_result_label(result: JobsPostResult) -> &'static str {
+        match result {
+            JobsPostResult::Posted => "posted",
+            JobsPostResult::Retracted => "retracted",
+            JobsPostResult::AtCap => "at_cap",
+            JobsPostResult::Failed => "failed",
+        }
+    }
+
+    fn jobs_posts_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_jobs_posts_total")
+                .with_description("Job postings written or taken down on the shelf by result")
+                .build()
+        })
+    }
+
+    pub fn record_jobs_post(result: JobsPostResult) {
+        jobs_posts_total().add(
+            1,
+            &[KeyValue::new("result", jobs_post_result_label(result))],
+        );
+    }
+
     fn gallery_hang_result_label(result: GalleryHangResult) -> &'static str {
         match result {
             GalleryHangResult::Hung => "hung",
@@ -1106,6 +1581,22 @@ mod inner {
                 gallery_take_down_result_label(result),
             )],
         );
+    }
+
+    fn gallery_splash_queue_depth() -> &'static Gauge<u64> {
+        static METRIC: OnceLock<Gauge<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_gauge("late_ssh_artboard_gallery_splash_queue_depth")
+                .with_description(
+                    "Artboard gallery pieces still waiting for a day on the splash wall",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_gallery_splash_queue_depth(depth: i64) {
+        gallery_splash_queue_depth().record(depth as u64, &[]);
     }
 
     fn gallery_applause_total() -> &'static Counter<u64> {
@@ -1193,17 +1684,24 @@ mod inner {
 
 #[cfg(not(feature = "otel"))]
 mod inner {
+    use super::ShareCardKind;
+    use super::SlidingPuzzleArtLoad;
+    use super::XMediaLookup;
     use super::{
         ActivityGame, BioScreenOutcome, CrownRefusal, DailyWinPayout, DoorGame, FirstContactBeat,
         GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult, GateVerdict, GildRefusal,
-        GildTier, NewsShareReward, OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult,
-        PotRefusal, RenderReason, RoundRefusal, SongQueueReward, SshRejectReason, SummaryResult,
-        TranslationResult,
+        GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OnlineTimeFlushResult,
+        PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal, PotReminderOutcome,
+        RenderReason, RoundRefusal, RunnerDoor, SongQueueReward, SshRejectReason, SummaryResult,
+        TranslationResult, VizWireBands,
     };
+    use super::{BonsaiAction, BonsaiActionResult};
 
     pub fn record_ssh_connection() {}
     pub fn record_ssh_connection_rejected(_reason: SshRejectReason) {}
     pub fn record_first_contact_beat(_beat: FirstContactBeat) {}
+    pub fn record_runner_door(_door: RunnerDoor) {}
     pub fn record_first_contact_bio_screen(_outcome: BioScreenOutcome) {}
     pub fn record_first_contact_gate(_verdict: GateVerdict, _staff: bool) {}
     pub fn record_render(_reason: RenderReason) {}
@@ -1211,6 +1709,7 @@ mod inner {
     pub fn add_ssh_session(_delta: i64) {}
     pub fn record_ws_pair_success() {}
     pub fn record_ws_pair_rejected_unknown_token() {}
+    pub fn record_pair_viz_frame(_bands: VizWireBands) {}
     pub fn record_cli_pair_usage(_ssh_mode: &str, _platform: &str) {}
     pub fn add_cli_pair_active(_delta: i64, _ssh_mode: &str, _platform: &str) {}
     pub fn record_render_frame_drop() {}
@@ -1219,26 +1718,44 @@ mod inner {
     pub fn record_chat_message_sent() {}
     pub fn record_chat_message_edited() {}
     pub fn record_game_win(_game: ActivityGame) {}
+    pub fn record_share_card(_kind: ShareCardKind) {}
+    pub fn record_sliding_puzzle_art(_load: SlidingPuzzleArtLoad) {}
     pub fn record_daily_win_payout(_payout: DailyWinPayout) {}
+    pub fn record_pool_shot(_outcome: PoolShotOutcome) {}
     pub fn record_news_shared(_reward: NewsShareReward) {}
+    pub fn record_news_x_media_lookup(_lookup: XMediaLookup) {}
     pub fn record_song_queued(_reward: SongQueueReward) {}
     pub fn record_gild_bought(_tier: GildTier) {}
     pub fn record_gild_refused(_refusal: GildRefusal) {}
+    pub fn record_bonsai_action(_action: BonsaiAction, _result: BonsaiActionResult) {}
     pub fn record_crown_taken(_price: i64) {}
     pub fn record_crown_take_refused(_refusal: CrownRefusal) {}
     pub fn record_round_bought(_patrons: i64, _chips: i64) {}
     pub fn record_round_refused(_refusal: RoundRefusal) {}
+    pub fn record_nightcap_order(_result: NightcapOrderResult) {}
+    pub fn record_nightcap_house_failure(_failure: NightcapHouseFailure) {}
     pub fn record_round_drink_cashed() {}
     pub fn record_pot_tickets_bought(_tickets: i64, _chips: i64) {}
     pub fn record_pot_buy_refused(_refusal: PotRefusal) {}
     pub fn record_pot_drawn(_payout: i64, _tickets: i64) {}
+    pub fn record_pot_reminder(_outcome: PotReminderOutcome) {}
     pub fn record_chat_translation(_result: TranslationResult) {}
     pub fn record_chat_summary(_result: SummaryResult) {}
     pub fn record_paper_print(_result: PaperPrintResult) {}
     pub fn record_paper_open(_result: PaperOpenResult) {}
+    pub fn record_jobs_fetch(
+        _source: late_core::models::job_posting::JobSource,
+        _result: JobsFetchResult,
+    ) {
+    }
+    pub fn record_jobs_read(_result: JobsReadResult) {}
+    pub fn record_jobs_press(_result: JobsPressResult) {}
+    pub fn record_jobs_released(_count: usize) {}
+    pub fn record_jobs_post(_result: JobsPostResult) {}
     pub fn record_gallery_hang(_result: GalleryHangResult) {}
     pub fn record_gallery_applause(_result: GalleryApplauseResult) {}
     pub fn record_gallery_take_down(_result: GalleryTakeDownResult) {}
+    pub fn record_gallery_splash_queue_depth(_depth: i64) {}
     pub fn record_door_ingest_line(_game: DoorGame) {}
     pub fn record_door_ingest_session_failure(_game: DoorGame) {}
     pub fn record_online_time_flush(_result: OnlineTimeFlushResult) {}

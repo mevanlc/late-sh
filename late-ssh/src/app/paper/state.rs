@@ -5,29 +5,24 @@
 
 use std::collections::HashSet;
 
-use dartboard_core::RgbColor;
+use chrono::{DateTime, Utc};
 use late_core::models::app_flag::AppFlag;
+use late_core::models::job_posting::JobPosting;
 use late_core::models::paper::{PaperEdition, PaperRoomPage, PaperSectionKind, PaperStatus};
+use late_core::models::work_profile::WorkStatus;
 use tokio::sync::{broadcast, oneshot};
 use uuid::Uuid;
 
 use super::svc::{PaperEvent, PaperService, PaperTrigger};
-use crate::app::artboard::gallery::ui::PaintRun;
+use crate::app::jobs::state::{PAPER_MATCHES, match_tail, posting_count_label};
 
 /// Rooms the reader is not in that make the paper: the top few by
 /// activity, bumped rooms first. A cap, so the paper stays a paper and
 /// not the whole site.
 pub(crate) const PAPER_ELSEWHERE_LIMIT: usize = 3;
-/// How many of yesterday's pieces ON THE WALL prints, most applauded
-/// first. The lead piece prints whatever its count; the runners-up need
-/// at least one hand on them (`svc.rs` applies that), so a quiet day
-/// never pads the column.
-pub(crate) const PAPER_WALL_PIECES: i64 = 3;
-/// Lines the wall may spend on pieces (each costs its height plus two).
-/// The lead piece always prints; a runner-up that would push the column
-/// past this is left to page 4, so one tall piece does not bury the rest
-/// of the edition.
-pub(crate) const PAPER_WALL_LINE_BUDGET: usize = 60;
+/// How many of yesterday's `#announcements` posts the paper prints, the
+/// newest ones. A day with more than this is not a day anyone has had.
+pub(crate) const PAPER_ANNOUNCEMENTS_LIMIT: i64 = 50;
 
 /// The paper's per-session state, owned by `App`.
 pub(crate) struct PaperState {
@@ -40,7 +35,7 @@ pub(crate) struct PaperState {
     /// The trigger whose result this session still wants. Closing the
     /// "at the press" modal clears it, so a late answer is dropped.
     pub(super) awaiting: Option<PaperTrigger>,
-    /// A ready paper that arrived while the login announcements were up.
+    /// A ready paper that arrived while a newcomer's tour held the keys.
     pub(super) pending_modal: Option<PaperModal>,
     pub(super) pending_flag_writes: Vec<PendingFlagWrite>,
 }
@@ -170,24 +165,43 @@ impl PaperModal {
     }
 }
 
-/// Everything the layout needs from the session: the edition's rows and
-/// how this reader's rail is ordered (favorites first, as the rail draws
-/// them), which rooms they are in, and which rooms carry a shop bump.
-/// One piece on the wall: yesterday's most applauded, printed in its own
-/// colours, glyph for glyph.
+/// One of yesterday's `#announcements` posts, printed word for word: the
+/// operator's own text, never rewritten by the press.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PaperWall {
-    pub title: String,
-    pub username: String,
-    pub applause: i64,
-    pub lines: Vec<Vec<PaintRun>>,
+pub struct PaperAnnouncement {
+    pub author: String,
+    pub posted_at: DateTime<Utc>,
+    pub body: String,
 }
 
+/// NEW WORK as read for one reader: what went active on the covered day,
+/// and this reader's card and matches. The one per-reader selection in
+/// the paper; the rows it selects from were released once for everyone.
+/// A paper with no NEW WORK section (the job feed off, a preview) carries
+/// no `PaperWork` at all.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PaperWork {
+    /// Postings released on the covered day, on the shelf now; zero on a
+    /// day nothing landed, which still prints the section.
+    pub released: usize,
+    /// The reader's card status, or none without a card.
+    pub card: Option<WorkStatus>,
+    /// The reader's best matches among them, up to `PAPER_MATCHES`.
+    pub matches: Vec<JobPosting>,
+}
+
+/// Everything the layout needs from the session: the edition's rows, the
+/// pages read at open time (announcements, new work), and how this
+/// reader's rail is ordered (favorites first, as the rail draws them),
+/// which rooms they are in, and which rooms carry a shop bump.
 pub(crate) struct PaperLayout<'a> {
     pub edition: &'a PaperEdition,
-    /// The pieces on the wall, most applauded first; empty when yesterday
-    /// hung nothing.
-    pub wall: &'a [PaperWall],
+    /// Yesterday's announcements, oldest first; empty on a day the
+    /// operator said nothing.
+    pub announcements: &'a [PaperAnnouncement],
+    /// Yesterday's job releases as they concern this reader; `None`
+    /// prints no NEW WORK section (the job feed off, a preview).
+    pub work: Option<&'a PaperWork>,
     /// Member rooms in rail order; rooms the edition has no page for are
     /// skipped, rooms missing from the rail follow by activity.
     pub rail_order: &'a [Uuid],
@@ -206,7 +220,7 @@ pub(crate) struct PaperLayout<'a> {
 pub(crate) enum PaperInk {
     /// A section heading: AMBER ON THE PAGE.
     Heading,
-    /// A room's name, or the wall piece's title.
+    /// A room's name.
     Title,
     /// The counts beside a title.
     Meta,
@@ -218,8 +232,6 @@ pub(crate) enum PaperInk {
     Body,
     /// The byline and the footer.
     Faint,
-    /// A painted glyph on the wall, in the colour it was painted.
-    Paint(RgbColor),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -288,13 +300,73 @@ fn labels(pages: &[&PaperRoomPage]) -> String {
         .join(", ")
 }
 
-/// The whole paper, top to bottom: byline, your rooms in rail order,
-/// elsewhere, what we were reading, outside, and a footer naming the
-/// rooms that were quiet or still at the press.
+/// The whole paper, top to bottom: byline, yesterday's announcements
+/// verbatim, your rooms in rail order, elsewhere, what we were reading,
+/// outside, and a footer naming the rooms that were quiet or still at
+/// the press.
+/// The NEW WORK section's body for one reader, one arm per card.
+fn work_lines(work: &PaperWork) -> Vec<PaperLine> {
+    let count = posting_count_label(work.released);
+    let quiet_day = work.released == 0;
+    match work.card {
+        None if quiet_day => vec![vec![PaperSpan::new(
+            "No new postings yesterday. Create a work card on page 5 to see matches here.",
+            PaperInk::Faint,
+        )]],
+        None => vec![vec![PaperSpan::new(
+            format!(
+                "{count} yesterday, all remote. Create a work card on page 5 to see matches here."
+            ),
+            PaperInk::Body,
+        )]],
+        Some(WorkStatus::NotLooking) if quiet_day => vec![vec![PaperSpan::new(
+            "No new postings yesterday. Your work card is set to not looking (page 5).",
+            PaperInk::Faint,
+        )]],
+        Some(WorkStatus::NotLooking) => vec![vec![PaperSpan::new(
+            format!("{count} yesterday. Your work card is set to not looking (page 5)."),
+            PaperInk::Faint,
+        )]],
+        Some(WorkStatus::Open | WorkStatus::Casual) if quiet_day => vec![vec![PaperSpan::new(
+            "No new postings yesterday. All postings are on page 5.",
+            PaperInk::Faint,
+        )]],
+        Some(WorkStatus::Open | WorkStatus::Casual) if work.matches.is_empty() => {
+            vec![vec![PaperSpan::new(
+                format!("{count} yesterday, none matching your tags. All postings are on page 5."),
+                PaperInk::Body,
+            )]]
+        }
+        Some(WorkStatus::Open | WorkStatus::Casual) => {
+            let mut lines: Vec<PaperLine> = work
+                .matches
+                .iter()
+                .map(|posting| {
+                    vec![
+                        PaperSpan::new(posting.company.clone(), PaperInk::Title),
+                        PaperSpan::new(
+                            format!(" · {}", match_tail(posting, PAPER_MATCHES)),
+                            PaperInk::Meta,
+                        ),
+                    ]
+                })
+                .collect();
+            lines.push(vec![PaperSpan::new(
+                format!(
+                    "    {count} yesterday. All postings are on page 5, / filters to your tags."
+                ),
+                PaperInk::Faint,
+            )]);
+            lines
+        }
+    }
+}
+
 pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
     let PaperLayout {
         edition,
-        wall,
+        announcements,
+        work,
         rail_order,
         member_room_ids,
         bumped_labels,
@@ -307,6 +379,35 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
         ),
         PaperInk::Faint,
     )]];
+
+    // The operator's word comes first and comes whole: every post from
+    // #announcements in the window, as written, no column and no jab.
+    if !announcements.is_empty() {
+        lines.push(PaperLine::new());
+        lines.push(heading("ANNOUNCEMENTS"));
+        for announcement in announcements {
+            lines.push(PaperLine::new());
+            lines.push(vec![
+                PaperSpan::new(format!("@{}", announcement.author), PaperInk::Title),
+                PaperSpan::new(
+                    format!(" · {}", announcement.posted_at.format("%H:%M")),
+                    PaperInk::Meta,
+                ),
+            ]);
+            lines.extend(column_lines(&announcement.body));
+        }
+    }
+
+    // NEW WORK: yesterday's releases, as they concern this reader. It
+    // prints whenever the job feed is on. No card gets the one line that
+    // is the whole incentive to fill one; an open or casual card gets its
+    // matches, or a pointer at the shelf when none carried its tags; a
+    // not-looking card and a day with no release get a faint hint.
+    if let Some(work) = work {
+        lines.push(PaperLine::new());
+        lines.push(heading("NEW WORK"));
+        lines.extend(work_lines(work));
+    }
 
     // Member rooms in rail order, then any the rail does not list.
     let mut member_pages: Vec<&PaperRoomPage> = Vec::new();
@@ -395,45 +496,6 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
         lines.push(PaperLine::new());
         lines.push(heading(title));
         lines.extend(column_lines(text));
-    }
-
-    if !wall.is_empty() {
-        lines.push(PaperLine::new());
-        lines.push(heading("ON THE WALL"));
-        let mut spent = 0;
-        for (slot, piece) in wall.iter().enumerate() {
-            let cost = piece.lines.len() + 2;
-            if slot > 0 && spent + cost > PAPER_WALL_LINE_BUDGET {
-                break;
-            }
-            spent += cost;
-            lines.push(vec![
-                PaperSpan::new(format!("\"{}\"", piece.title), PaperInk::Title),
-                PaperSpan::new(
-                    format!(
-                        " by @{}, hung yesterday, {} applause so far.",
-                        piece.username, piece.applause
-                    ),
-                    PaperInk::Meta,
-                ),
-            ]);
-            lines.push(PaperLine::new());
-            for line in &piece.lines {
-                let mut spans = vec![PaperSpan::new("    ", PaperInk::Body)];
-                for run in line {
-                    let ink = match run.fg {
-                        Some(color) => PaperInk::Paint(color),
-                        None => PaperInk::Body,
-                    };
-                    spans.push(PaperSpan::new(run.text.clone(), ink));
-                }
-                lines.push(spans);
-            }
-        }
-        lines.push(vec![PaperSpan::new(
-            "    the whole wall hangs on page 4, the Artboard gallery",
-            PaperInk::Faint,
-        )]);
     }
 
     if !quiet.is_empty() || !at_the_press.is_empty() || !missed.is_empty() {

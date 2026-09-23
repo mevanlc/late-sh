@@ -1,6 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    future::poll_fn,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -9,23 +8,23 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use late_core::{
     MutexRecover,
-    db::{Db, DbConfig},
+    db::Db,
     models::{
+        aquarium_shield::AquariumShield,
         bonsai_decay_protection::BonsaiDecayProtection,
         chat_room::ChatRoom,
-        chips::{CHIP_USER_CHANGED_CHANNEL, UserChips, listen_for_chip_changes},
+        chips::UserChips,
         marketplace::{
-            AQUARIUM_FISH_ITEM_KIND, AQUARIUM_MAX_FISH, AQUARIUM_SKU, BONSAI_CONSUMABLE_ITEM_KIND,
-            BONSAI_DECAY_SHIELD_SKU, BONSAI_VARIANT_SLOT, CHAT_BADGE_SLOT,
-            CHAT_CONSUMABLE_ITEM_KIND, CHAT_FLAG_SLOT, COMPANION_CONSUMABLE_ITEM_KIND,
-            ConsumableUseStatus, DYNAMIC_BONSAI_SKU, EquipStatus, FishActiveStatus,
-            MarketplaceItem, PET_COMPANION_SKU, PurchaseResult, PurchaseStatus,
-            PurchaseWithEffectResult, SHOP_CATALOG_CHANGED_CHANNEL, SHOP_USER_CHANGED_CHANNEL,
-            ULTIMATE_SPELL_KIND, USERNAME_EFFECT_ITEM_KIND, UserPurchase,
-            adjust_aquarium_fish_active_by_sku, aquarium_is_hungry, consume_aquarium_food_pinch,
-            equip_owned_item_by_sku, listen_for_shop_changes,
+            AQUARIUM_CONSUMABLE_ITEM_KIND, AQUARIUM_FISH_ITEM_KIND, AQUARIUM_MAX_FISH,
+            AQUARIUM_MAX_PLANTS, AQUARIUM_PLANT_ITEM_KIND, AQUARIUM_SHIELD_SKU, AQUARIUM_SKU,
+            BAR_CONSUMABLE_ITEM_KIND, BONSAI_CONSUMABLE_ITEM_KIND, BONSAI_DECAY_SHIELD_SKU,
+            CHAT_BADGE_SLOT, CHAT_CONSUMABLE_ITEM_KIND, CHAT_FLAG_SLOT,
+            COMPANION_CONSUMABLE_ITEM_KIND, HANGOVER_PILL_SKU, MarketplaceItem, PET_COMPANION_SKU,
+            PurchaseResult, PurchaseStatus, PurchaseWithEffectResult, TankActiveStatus,
+            TankStockKind, ULTIMATE_SPELL_KIND, USERNAME_EFFECT_ITEM_KIND, UserPurchase,
+            adjust_aquarium_active_by_sku, is_sprout_row, is_welcome_fish,
             purchase_item_by_sku_with_chat_effect, purchase_item_by_sku_with_custom_title,
-            purchase_item_by_sku_with_username_effect, rental_duration_secs, unequip_slot,
+            purchase_item_by_sku_with_username_effect, rental_duration_secs,
         },
         milestone::{MILESTONE_BADGE_ITEM_KIND, MilestoneBadge},
         rental::{
@@ -37,13 +36,15 @@ use late_core::{
         username_effect::{USERNAME_EFFECT_KIND, UsernameEffect},
     },
 };
-use tokio::sync::{broadcast, watch};
-use tokio_postgres::{AsyncMessage, NoTls};
+use tokio::sync::{broadcast, mpsc, watch};
 use uuid::Uuid;
+
+use crate::pg_listener::{Channel, Signal, read_until_ok};
 
 use super::entitlements::ShopEntitlements;
 use crate::app::ai::screen::{TitleScreen, screen_custom_title};
 use crate::app::ai::svc::AiService;
+use crate::app::clubhouse::lobby::SharedLobby;
 use crate::app::common::username_effect::{FlairEffect, FlairTitle, NameFlair, NameFlairDirectory};
 
 #[derive(Clone, Debug, Default)]
@@ -53,13 +54,15 @@ pub struct ShopSnapshot {
     pub items: Vec<ShopCatalogItem>,
     pub entitlements: ShopEntitlements,
     pub active_room_effects: HashMap<Uuid, Vec<ActiveChatRoomEffect>>,
-    pub aquarium_hungry: bool,
     /// The user's live username effect, if any (detail pane shows the style
     /// and remaining time).
     pub active_username_effect: Option<ActiveUsernameEffect>,
     /// The user's live Bonsai Decay Shield window, if any (detail pane shows
     /// the remaining time).
     pub active_bonsai_decay_protection: Option<BonsaiDecayProtection>,
+    /// The user's live Aquarium Shield window, if any (detail pane shows the
+    /// remaining time; the tank reads it for its care clocks).
+    pub active_aquarium_shield: Option<AquariumShield>,
     /// The user's live chat badge rental, flag rental, and title, if any.
     /// The detail panes show what is running and how long is left.
     pub active_badge_rental: Option<ActiveRental>,
@@ -141,6 +144,12 @@ pub struct ShopCatalogItem {
     /// Whether this title rental sells a text the buyer writes rather than one
     /// the catalog carries.
     pub custom_title: bool,
+    /// The fish the tank comes with (`payload.welcome`): listed with its
+    /// art and its count, never sold.
+    pub welcome_fish: bool,
+    /// The sprout row (`payload.sprout`): the bud on the tank floor, read
+    /// off the care state, never a purchase.
+    pub sprout: bool,
 }
 
 impl ShopCatalogItem {
@@ -148,12 +157,12 @@ impl ShopCatalogItem {
         self.sku == PET_COMPANION_SKU
     }
 
-    pub fn is_dynamic_bonsai(&self) -> bool {
-        self.sku == DYNAMIC_BONSAI_SKU
-    }
-
     pub fn is_bonsai_decay_shield(&self) -> bool {
         self.sku == BONSAI_DECAY_SHIELD_SKU
+    }
+
+    pub fn is_aquarium_shield(&self) -> bool {
+        self.sku == AQUARIUM_SHIELD_SKU
     }
 
     pub fn is_aquarium(&self) -> bool {
@@ -162,6 +171,30 @@ impl ShopCatalogItem {
 
     pub fn is_aquarium_fish(&self) -> bool {
         self.item_kind == AQUARIUM_FISH_ITEM_KIND
+    }
+
+    pub fn is_aquarium_plant(&self) -> bool {
+        self.item_kind == AQUARIUM_PLANT_ITEM_KIND
+    }
+
+    /// A fish or a plant: bought for the tank, moved in and out of the
+    /// water with `+` and `-`, each kind against its own cap.
+    pub fn is_tank_stock(&self) -> bool {
+        self.tank_stock_kind().is_some()
+    }
+
+    pub fn tank_stock_kind(&self) -> Option<TankStockKind> {
+        TankStockKind::of(&self.item_kind)
+    }
+
+    /// The fry: the one fish the shop shows but never sells.
+    pub fn is_welcome_fish(&self) -> bool {
+        self.welcome_fish
+    }
+
+    /// The sprout row: shown with the floor's state, cut with `-`.
+    pub fn is_sprout(&self) -> bool {
+        self.sprout
     }
 
     pub fn is_chat_badge(&self) -> bool {
@@ -187,12 +220,19 @@ impl ShopCatalogItem {
         self.is_username_effect() || self.is_badge_rental() || self.is_title_rental()
     }
 
+    /// Taken the moment it is bought, so it never sits in an inventory.
+    pub fn is_hangover_pill(&self) -> bool {
+        self.sku == HANGOVER_PILL_SKU
+    }
+
     pub fn is_consumable(&self) -> bool {
         matches!(
             self.item_kind.as_str(),
             CHAT_CONSUMABLE_ITEM_KIND
                 | COMPANION_CONSUMABLE_ITEM_KIND
                 | BONSAI_CONSUMABLE_ITEM_KIND
+                | AQUARIUM_CONSUMABLE_ITEM_KIND
+                | BAR_CONSUMABLE_ITEM_KIND
         )
     }
 
@@ -258,7 +298,9 @@ fn purchase_story(
         PurchaseStatus::AlreadyOwned
         | PurchaseStatus::InsufficientFunds
         | PurchaseStatus::RequiresAquarium
-        | PurchaseStatus::DailyLimitReached => return None,
+        | PurchaseStatus::DailyLimitReached
+        | PurchaseStatus::OwnedCapReached
+        | PurchaseStatus::AlreadySober => return None,
     }
     let duration = rental_duration_secs(&result.item);
     match result.item.item_kind.as_str() {
@@ -325,7 +367,9 @@ fn custom_title_outcome(settled: SettledPurchase) -> CustomTitleOutcome {
             PurchaseStatus::AlreadyOwned
             | PurchaseStatus::InsufficientFunds
             | PurchaseStatus::RequiresAquarium
-            | PurchaseStatus::DailyLimitReached,
+            | PurchaseStatus::DailyLimitReached
+            | PurchaseStatus::OwnedCapReached
+            | PurchaseStatus::AlreadySober,
         )
         | None => CustomTitleOutcome::Refused(settled.message),
     }
@@ -392,6 +436,9 @@ pub struct ShopService {
     /// cooldown: a session lives on one replica, and this meters API spend,
     /// not game state.
     screen_cooldowns: Arc<Mutex<HashMap<Uuid, Instant>>>,
+    /// The shared clubhouse lobby, so a hangover pill clears the buyer's
+    /// drunk tint at once on this replica.
+    clubhouse_lobby: Option<SharedLobby>,
 }
 
 impl ShopService {
@@ -405,7 +452,13 @@ impl ShopService {
             activity: None,
             ai_service: None,
             screen_cooldowns: Arc::new(Mutex::new(HashMap::new())),
+            clubhouse_lobby: None,
         }
+    }
+
+    pub fn with_clubhouse_lobby(mut self, lobby: SharedLobby) -> Self {
+        self.clubhouse_lobby = Some(lobby);
+        self
     }
 
     pub fn with_ai_service(mut self, ai_service: AiService) -> Self {
@@ -645,78 +698,16 @@ impl ShopService {
         });
     }
 
-    pub fn equip_item_task(&self, user_id: Uuid, sku: String) {
+    pub fn adjust_aquarium_active_task(&self, user_id: Uuid, sku: String, delta: i32) {
         let svc = self.clone();
         tokio::spawn(async move {
-            match svc.equip_item(user_id, &sku).await {
-                Ok(message) => svc.publish_event(ShopEvent::ActionCompleted { user_id, message }),
-                Err(error) => {
-                    tracing::warn!(error = ?error, user_id = %user_id, sku, "shop equip failed");
-                    svc.publish_event(ShopEvent::ActionFailed {
-                        user_id,
-                        message: "Could not equip item".to_string(),
-                    });
-                }
-            }
-        });
-    }
-
-    pub fn unequip_slot_task(&self, user_id: Uuid, slot: String) {
-        let svc = self.clone();
-        tokio::spawn(async move {
-            match svc.unequip_slot(user_id, &slot).await {
-                Ok(message) => svc.publish_event(ShopEvent::ActionCompleted { user_id, message }),
-                Err(error) => {
-                    tracing::warn!(error = ?error, user_id = %user_id, slot, "shop unequip failed");
-                    svc.publish_event(ShopEvent::ActionFailed {
-                        user_id,
-                        message: "Could not clear displayed badge".to_string(),
-                    });
-                }
-            }
-        });
-    }
-
-    pub fn adjust_aquarium_fish_task(&self, user_id: Uuid, sku: String, delta: i32) {
-        let svc = self.clone();
-        tokio::spawn(async move {
-            match svc.adjust_aquarium_fish(user_id, &sku, delta).await {
+            match svc.adjust_aquarium_active(user_id, &sku, delta).await {
                 Ok(message) => svc.publish_event(ShopEvent::ActionCompleted { user_id, message }),
                 Err(error) => {
                     tracing::warn!(error = ?error, user_id = %user_id, sku, delta, "aquarium fish adjust failed");
                     svc.publish_event(ShopEvent::ActionFailed {
                         user_id,
                         message: "Could not update aquarium".to_string(),
-                    });
-                }
-            }
-        });
-    }
-
-    pub fn use_aquarium_food_task(&self, user_id: Uuid) {
-        let svc = self.clone();
-        tokio::spawn(async move {
-            match svc.use_aquarium_food(user_id).await {
-                Ok(ConsumableUseStatus::Used) => svc.publish_event(ShopEvent::ActionCompleted {
-                    user_id,
-                    message: "Fed the aquarium".to_string(),
-                }),
-                Ok(ConsumableUseStatus::OutOfStock) => svc.publish_event(ShopEvent::ActionFailed {
-                    user_id,
-                    message: "Buy Aquarium Food first".to_string(),
-                }),
-                Ok(status) => {
-                    tracing::warn!(?status, user_id = %user_id, "aquarium food was not consumed");
-                    svc.publish_event(ShopEvent::ActionFailed {
-                        user_id,
-                        message: "Could not feed aquarium".to_string(),
-                    });
-                }
-                Err(error) => {
-                    tracing::warn!(error = ?error, user_id = %user_id, "aquarium food use failed");
-                    svc.publish_event(ShopEvent::ActionFailed {
-                        user_id,
-                        message: "Could not feed aquarium".to_string(),
                     });
                 }
             }
@@ -907,8 +898,25 @@ impl ShopService {
                         None => format!("Bought {}", result.item.name),
                     }
                 }
-                PurchaseStatus::Purchased if result.item.item_kind == AQUARIUM_FISH_ITEM_KIND => {
+                PurchaseStatus::Purchased | PurchaseStatus::QuantityAdded
+                    if result.item.item_kind == AQUARIUM_CONSUMABLE_ITEM_KIND =>
+                {
+                    match &purchase.aquarium_shield {
+                        Some(effect) => {
+                            format!("Tank minded until {} (UTC)", effect.ends_at.date_naive())
+                        }
+                        None => format!("Bought {}", result.item.name),
+                    }
+                }
+                PurchaseStatus::Purchased
+                    if TankStockKind::of(&result.item.item_kind).is_some() =>
+                {
                     format!("Bought {} (owned {})", result.item.name, result.quantity)
+                }
+                PurchaseStatus::Purchased | PurchaseStatus::QuantityAdded
+                    if result.item.sku == HANGOVER_PILL_SKU =>
+                {
+                    "Sobered up: your typing is straight again".to_string()
                 }
                 PurchaseStatus::Purchased if result.item.item_kind == CHAT_CONSUMABLE_ITEM_KIND => {
                     format!("Activated {}", result.item.name)
@@ -936,14 +944,43 @@ impl ShopService {
                     )
                 }
                 PurchaseStatus::RequiresAquarium => "Unlock Aquarium first".to_string(),
+                PurchaseStatus::OwnedCapReached => {
+                    match TankStockKind::of(&result.item.item_kind) {
+                        Some(TankStockKind::Plant) => {
+                            format!(
+                                "You already own {AQUARIUM_MAX_PLANTS} plants, in the tank or parked"
+                            )
+                        }
+                        Some(TankStockKind::Fish) | None => {
+                            format!(
+                                "You already own {AQUARIUM_MAX_FISH} fish, in the tank or parked"
+                            )
+                        }
+                    }
+                }
                 PurchaseStatus::DailyLimitReached => {
                     format!("{} is limited to once per day", result.item.name)
+                }
+                PurchaseStatus::AlreadySober => {
+                    "You're already sober, nothing was charged".to_string()
                 }
             },
         };
 
         if flair_changed {
             self.refresh_user_flair(user_id).await?;
+        }
+        // The pill zeroed the buzz in the DB; this replica's lobby drops the
+        // tint now rather than on the next drunk seed pass (a minute at most,
+        // which is how every other replica catches up).
+        if let (Some(lobby), Some(result)) = (&self.clubhouse_lobby, &purchase.purchase)
+            && result.item.sku == HANGOVER_PILL_SKU
+            && matches!(
+                result.status,
+                PurchaseStatus::Purchased | PurchaseStatus::QuantityAdded
+            )
+        {
+            lobby.record_drink(user_id, 0, Utc::now());
         }
         if purchase.refresh_all_active_users {
             self.refresh_catalog_for_active_users().await?;
@@ -953,86 +990,41 @@ impl ShopService {
         Ok(SettledPurchase { status, message })
     }
 
-    async fn adjust_aquarium_fish(&self, user_id: Uuid, sku: &str, delta: i32) -> Result<String> {
+    async fn adjust_aquarium_active(&self, user_id: Uuid, sku: &str, delta: i32) -> Result<String> {
         let mut client = self.db.get().await?;
-        let result = adjust_aquarium_fish_active_by_sku(&mut client, user_id, sku, delta).await?;
+        let result = adjust_aquarium_active_by_sku(&mut client, user_id, sku, delta).await?;
         drop(client);
 
         let message = match result {
-            None => "Fish is not available".to_string(),
+            None => "That is not in the catalog".to_string(),
             Some(result) => match result.status {
-                FishActiveStatus::Changed => {
+                TankActiveStatus::Changed => {
                     format!(
                         "{} active {}/{}",
                         result.item.name, result.active_quantity, result.quantity
                     )
                 }
-                FishActiveStatus::NotOwned => format!("Buy {} first", result.item.name),
-                FishActiveStatus::NotFish => "That item is not a fish".to_string(),
-                FishActiveStatus::AtZero => format!("No active {} to remove", result.item.name),
-                FishActiveStatus::AtOwnedQuantity => {
+                TankActiveStatus::NotOwned => format!("Buy {} first", result.item.name),
+                TankActiveStatus::NotTankStock => {
+                    "That item is neither a fish nor a plant".to_string()
+                }
+                TankActiveStatus::AtZero => format!("No active {} to remove", result.item.name),
+                TankActiveStatus::AtOwnedQuantity => {
                     format!("All owned {} are active", result.item.name)
                 }
-                FishActiveStatus::TankFull => {
-                    format!("Aquarium has {AQUARIUM_MAX_FISH} active fish")
-                }
+                TankActiveStatus::TankFull => match TankStockKind::of(&result.item.item_kind) {
+                    Some(TankStockKind::Plant) => {
+                        format!("Aquarium has {AQUARIUM_MAX_PLANTS} active plants")
+                    }
+                    Some(TankStockKind::Fish) | None => {
+                        format!("Aquarium has {AQUARIUM_MAX_FISH} active fish")
+                    }
+                },
             },
         };
 
         self.refresh_user(user_id).await?;
         Ok(message)
-    }
-
-    async fn use_aquarium_food(&self, user_id: Uuid) -> Result<ConsumableUseStatus> {
-        let mut client = self.db.get().await?;
-        let result = consume_aquarium_food_pinch(&mut client, user_id).await?;
-        drop(client);
-        self.refresh_user(user_id).await?;
-        Ok(result.status)
-    }
-
-    async fn equip_item(&self, user_id: Uuid, sku: &str) -> Result<String> {
-        let mut client = self.db.get().await?;
-        let result = equip_owned_item_by_sku(&mut client, user_id, sku).await?;
-        drop(client);
-
-        let message = match result {
-            None => "Item is not available".to_string(),
-            Some(result) => match result.status {
-                EquipStatus::Equipped if result.item.sku == DYNAMIC_BONSAI_SKU => {
-                    "Using Dynamic Bonsai".to_string()
-                }
-                EquipStatus::Equipped => format!("Displaying {}", result.item.name),
-                EquipStatus::AlreadyEquipped if result.item.sku == DYNAMIC_BONSAI_SKU => {
-                    "Dynamic Bonsai already active".to_string()
-                }
-                EquipStatus::AlreadyEquipped => format!("{} already displayed", result.item.name),
-                EquipStatus::NotOwned => format!("You do not own {}", result.item.name),
-                EquipStatus::NotEquippable => format!("{} cannot be displayed", result.item.name),
-            },
-        };
-
-        self.refresh_user(user_id).await?;
-        Ok(message)
-    }
-
-    async fn unequip_slot(&self, user_id: Uuid, slot: &str) -> Result<String> {
-        let mut client = self.db.get().await?;
-        let changed = unequip_slot(&mut client, user_id, slot).await?;
-        drop(client);
-
-        self.refresh_user(user_id).await?;
-        if changed {
-            if slot == BONSAI_VARIANT_SLOT {
-                Ok("Using classic Bonsai".to_string())
-            } else {
-                Ok("Cleared displayed badge".to_string())
-            }
-        } else if slot == BONSAI_VARIANT_SLOT {
-            Ok("Classic Bonsai already active".to_string())
-        } else {
-            Ok("No badge is displayed".to_string())
-        }
     }
 
     async fn load_snapshot(&self, user_id: Uuid) -> Result<ShopSnapshot> {
@@ -1075,7 +1067,6 @@ impl ShopService {
                     ends_at: effect.ends_at,
                 });
         }
-        let aquarium_hungry = aquarium_is_hungry(&client, user_id).await?;
 
         // One query for every user-scoped rental the Shop shows. Rows arrive
         // ordered `ends_at DESC` inside each kind, so the first row of a kind
@@ -1138,6 +1129,7 @@ impl ShopService {
 
         let active_bonsai_decay_protection =
             BonsaiDecayProtection::for_user(&client, user_id).await?;
+        let active_aquarium_shield = AquariumShield::for_user(&client, user_id).await?;
 
         let mut purchases_by_item = HashMap::with_capacity(purchases.len());
         for purchase in purchases {
@@ -1227,6 +1219,9 @@ impl ShopService {
                 };
                 let custom_title =
                     item_kind == TITLE_RENTAL_ITEM_KIND && is_custom_title(&item.payload);
+                let welcome_fish =
+                    item_kind == AQUARIUM_FISH_ITEM_KIND && is_welcome_fish(&item.payload);
+                let sprout = item_kind == AQUARIUM_PLANT_ITEM_KIND && is_sprout_row(&item.payload);
                 ShopCatalogItem {
                     sku: item.sku,
                     item_kind,
@@ -1253,6 +1248,8 @@ impl ShopService {
                     rental_duration_secs,
                     badge_slot,
                     custom_title,
+                    welcome_fish,
+                    sprout,
                 }
             })
             .collect();
@@ -1263,9 +1260,9 @@ impl ShopService {
             items: catalog,
             entitlements: ShopEntitlements::from_owned_skus(owned_skus),
             active_room_effects,
-            aquarium_hungry,
             active_username_effect,
             active_bonsai_decay_protection,
+            active_aquarium_shield,
             active_badge_rental,
             active_flag_rental,
             active_title,
@@ -1282,90 +1279,65 @@ impl ShopService {
         self.ai_service.as_ref().is_some_and(AiService::is_enabled)
     }
 
-    pub fn start_listener_task(&self, db_config: DbConfig) -> tokio::task::JoinHandle<()> {
+    /// What the notify worker subscribes to.
+    pub const CHANNELS: &'static [Channel] = &[
+        Channel::ShopUserChanged,
+        Channel::ChipUserChanged,
+        Channel::ShopCatalogChanged,
+    ];
+
+    /// Keep this replica's flair and open shop panels in step with
+    /// `shop_user_changed`, `chip_user_changed`, and `shop_catalog_changed`.
+    /// A resync reconciles the whole flair directory, and so does any
+    /// failed signal, retrying until it lands: the update is recovered by
+    /// the full read instead of dropped.
+    pub fn start_notify_worker(
+        &self,
+        mut signals: mpsc::UnboundedReceiver<Signal>,
+    ) -> tokio::task::JoinHandle<()> {
         let svc = self.clone();
         tokio::spawn(async move {
-            loop {
-                if let Err(error) = svc.listen_once(&db_config).await {
-                    tracing::warn!(error = ?error, "shop postgres listener stopped");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
+            while let Some(signal) = signals.recv().await {
+                let Err(error) = svc.apply_signal(signal).await else {
+                    continue;
+                };
+                tracing::warn!(error = ?error, "shop notify failed, reconciling flair directory");
+                read_until_ok("shop flair directory", || svc.reconcile_flair_directory()).await;
             }
         })
     }
 
-    async fn listen_once(&self, db_config: &DbConfig) -> Result<()> {
-        let mut config = tokio_postgres::Config::new();
-        config.host(&db_config.host);
-        config.port(db_config.port);
-        config.user(&db_config.user);
-        config.password(&db_config.password);
-        config.dbname(&db_config.dbname);
-
-        let (client, mut connection) = config.connect(NoTls).await?;
-        let listen = async {
-            listen_for_shop_changes(&client).await?;
-            listen_for_chip_changes(&client).await
-        };
-        tokio::pin!(listen);
-        loop {
-            tokio::select! {
-                result = &mut listen => {
-                    result?;
-                    break;
-                }
-                message = poll_fn(|cx| connection.poll_message(cx)) => {
-                    let Some(message) = message else {
-                        return Ok(());
-                    };
-                    self.handle_async_message(message?).await?;
+    async fn apply_signal(&self, signal: Signal) -> Result<()> {
+        match signal {
+            Signal::Resync => self.reconcile_flair_directory().await?,
+            Signal::Notify {
+                channel: Channel::ShopUserChanged,
+                payload,
+            } => {
+                if let Ok(user_id) = payload.parse::<Uuid>() {
+                    // Flair refreshes unconditionally: an effect is visible
+                    // to every session, not only shop viewers. Chip notifies
+                    // stay out of this path on purpose; they fire far too
+                    // often for a per-notify query.
+                    self.refresh_user_flair(user_id).await?;
+                    self.refresh_user_if_active(user_id).await?;
                 }
             }
-        }
-
-        // LISTEN is registered; notifications now buffer on the connection,
-        // so a full snapshot here cannot race a concurrent purchase. On error
-        // the caller reconnects and reconciles again.
-        self.reconcile_flair_directory().await?;
-
-        loop {
-            let Some(message) = poll_fn(|cx| connection.poll_message(cx)).await else {
-                return Ok(());
-            };
-
-            self.handle_async_message(message?).await?;
-        }
-    }
-
-    async fn handle_async_message(&self, message: AsyncMessage) -> Result<()> {
-        match message {
-            AsyncMessage::Notification(notification) => match notification.channel() {
-                SHOP_USER_CHANGED_CHANNEL => {
-                    if let Ok(user_id) = notification.payload().parse::<Uuid>() {
-                        // Flair refreshes unconditionally: an effect is
-                        // visible to every session, not only shop viewers.
-                        // Chip notifies stay out of this path on purpose;
-                        // they fire far too often for a per-notify query.
-                        // Errors propagate so the listener reconnects and
-                        // reconciles instead of dropping the update.
-                        self.refresh_user_flair(user_id).await?;
-                        self.refresh_user_if_active(user_id).await?;
-                    }
+            Signal::Notify {
+                channel: Channel::ChipUserChanged,
+                payload,
+            } => {
+                if let Ok(user_id) = payload.parse::<Uuid>() {
+                    self.refresh_user_if_active(user_id).await?;
                 }
-                CHIP_USER_CHANGED_CHANNEL => {
-                    if let Ok(user_id) = notification.payload().parse::<Uuid>() {
-                        self.refresh_user_if_active(user_id).await?;
-                    }
-                }
-                SHOP_CATALOG_CHANGED_CHANNEL => {
-                    self.refresh_catalog_for_active_users().await?;
-                }
-                _ => {}
-            },
-            AsyncMessage::Notice(notice) => {
-                tracing::debug!(notice = ?notice, "postgres shop listener notice");
             }
-            _ => {}
+            Signal::Notify {
+                channel: Channel::ShopCatalogChanged,
+                ..
+            } => self.refresh_catalog_for_active_users().await?,
+            Signal::Notify { channel, .. } => {
+                unreachable!("shop subscribed only to shop and chip channels, got {channel:?}")
+            }
         }
         Ok(())
     }
@@ -1387,7 +1359,11 @@ fn rental_from_effect_row(
 fn is_consumable_kind(item_kind: &str) -> bool {
     matches!(
         item_kind,
-        CHAT_CONSUMABLE_ITEM_KIND | COMPANION_CONSUMABLE_ITEM_KIND | BONSAI_CONSUMABLE_ITEM_KIND
+        CHAT_CONSUMABLE_ITEM_KIND
+            | COMPANION_CONSUMABLE_ITEM_KIND
+            | BONSAI_CONSUMABLE_ITEM_KIND
+            | AQUARIUM_CONSUMABLE_ITEM_KIND
+            | BAR_CONSUMABLE_ITEM_KIND
     )
 }
 

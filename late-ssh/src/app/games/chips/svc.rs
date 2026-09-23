@@ -3,8 +3,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use late_core::db::Db;
 use late_core::models::chips::{ChipMove, UserChips};
 use late_core::models::drink_round::{
-    DrinkCredit, DrinkRound, MAX_OPEN_CREDITS, OpenCredit, ROUND_CREDIT_TTL_HOURS,
-    ROUND_DRINK_POINTS,
+    Bar, DrinkCredit, DrinkRound, MAX_OPEN_CREDITS, OpenCredit, ROUND_CREDIT_TTL_HOURS,
 };
 use late_core::models::drinks::UserDrinks;
 use late_core::models::game_payout::{
@@ -171,12 +170,6 @@ impl ChipService {
         Ok(())
     }
 
-    pub async fn debit_bet(&self, user_id: Uuid, amount: i64) -> anyhow::Result<Option<i64>> {
-        let client = self.db.get().await?;
-        let chips = UserChips::apply(&**client, user_id, ChipMove::Bet, amount, None).await?;
-        Ok(chips.map(|c| c.balance))
-    }
-
     /// Charge a bartender drink (floor-guarded) and record the buzz in one
     /// transaction, so a crash can't charge without pouring. Returns None
     /// when the user can't cover the drink and keep the chip floor.
@@ -189,7 +182,7 @@ impl ChipService {
         let mut client = self.db.get().await?;
         let tx = client.transaction().await?;
         let Some(chips) =
-            UserChips::apply(&*tx, user_id, ChipMove::DrinkPurchase, price, Some(drink)).await?
+            UserChips::apply(&*tx, user_id, ChipMove::DrinkPurchase, price, drink).await?
         else {
             return Ok(None);
         };
@@ -210,9 +203,10 @@ impl ChipService {
     /// promised nor promise drinks nobody paid for.
     ///
     /// The buyer is the one person a round can pour into without asking: they
-    /// typed the order. Their drink is the same flat
-    /// [`ROUND_DRINK_POINTS`] every patron's credit cashes for, and it rides
-    /// on the round's price rather than adding a head to it.
+    /// typed the order. Their drink is worth the same as every patron's
+    /// credit off this round ([`Bar::drink_points`], which is why the bar is
+    /// named here), and it rides on the round's price rather than adding a
+    /// head to it.
     ///
     /// `candidates` is the buyer's own presence read, minus the buyer: this
     /// takes the roster it is given and never asks who is online, so the
@@ -224,6 +218,7 @@ impl ChipService {
         &self,
         buyer_id: Uuid,
         price_per_patron: i64,
+        bar: Bar,
         candidates: &[Uuid],
     ) -> Result<RoundPurchase, RoundError> {
         if candidates.is_empty() {
@@ -239,6 +234,7 @@ impl ChipService {
             &tx,
             buyer_id,
             price_per_patron,
+            bar,
             candidates,
             ROUND_CREDIT_TTL_HOURS,
             MAX_OPEN_CREDITS,
@@ -251,21 +247,15 @@ impl ChipService {
 
         let total = grant.total_chips();
         let source_ref = grant.round.id.to_string();
-        let Some(chips) = UserChips::apply(
-            &*tx,
-            buyer_id,
-            ChipMove::RoundPurchase,
-            total,
-            Some(&source_ref),
-        )
-        .await?
+        let Some(chips) =
+            UserChips::apply(&*tx, buyer_id, ChipMove::RoundPurchase, total, &source_ref).await?
         else {
             return Err(RoundError::Refused(RoundRefusal::InsufficientChips {
                 patrons,
                 total,
             }));
         };
-        let drinks = UserDrinks::record_comped_pour(&tx, buyer_id, ROUND_DRINK_POINTS).await?;
+        let drinks = UserDrinks::record_comped_pour(&tx, buyer_id, bar.drink_points()).await?;
         tx.commit().await.context("committing the round")?;
 
         Ok(RoundPurchase {
@@ -287,18 +277,26 @@ impl ChipService {
         DrinkCredit::find_open(&client, user_id).await
     }
 
+    /// How many drinks the patron is holding: the count the Nightcap menu
+    /// prints beside the house beer, the one pour a credit pays for.
+    pub async fn open_round_credits(&self, user_id: Uuid) -> anyhow::Result<i64> {
+        let client = self.db.get().await?;
+        DrinkCredit::count_open(&client, user_id).await
+    }
+
     /// Pour against a round's credit: spend the one closest to expiring and
-    /// record a flat [`ROUND_DRINK_POINTS`] of buzz, with no chip debit
-    /// anywhere. One transaction, so the credit cannot be spent without the
-    /// drink landing. `None` means there was nothing to spend, and the caller
-    /// charges for the pour as usual.
+    /// record the buzz the bar that bought it pours ([`Bar::drink_points`]),
+    /// with no chip debit anywhere. One transaction, so the credit cannot be
+    /// spent without the drink landing. `None` means there was nothing to
+    /// spend, and the caller charges for the pour as usual.
     pub async fn cash_round_drink(&self, user_id: Uuid) -> anyhow::Result<Option<CompedDrink>> {
         let mut client = self.db.get().await?;
         let tx = client.transaction().await?;
         let Some(credit) = DrinkCredit::cash(&tx, user_id).await? else {
             return Ok(None);
         };
-        let drinks = UserDrinks::record_comped_pour(&tx, user_id, ROUND_DRINK_POINTS).await?;
+        let drinks =
+            UserDrinks::record_comped_pour(&tx, user_id, credit.bar.drink_points()).await?;
         tx.commit().await?;
         Ok(Some(CompedDrink {
             round_id: credit.round_id,
@@ -323,27 +321,44 @@ impl ChipService {
         UserDrinks::record_welcome_pour(&client, user_id, points).await
     }
 
-    pub async fn credit_payout(&self, user_id: Uuid, amount: i64) -> anyhow::Result<i64> {
+    /// A house-table payout (a blackjack settlement, a poker pot). Credits
+    /// never decline, so a missing row is an error rather than a `None`.
+    pub async fn credit_payout(
+        &self,
+        user_id: Uuid,
+        chip_move: ChipMove,
+        amount: i64,
+        source_ref: &str,
+    ) -> anyhow::Result<i64> {
         let client = self.db.get().await?;
-        match UserChips::apply(&**client, user_id, ChipMove::Credit, amount, None).await? {
+        match UserChips::apply(&**client, user_id, chip_move, amount, source_ref).await? {
             Some(chips) => Ok(chips.balance),
             None => anyhow::bail!("chip credit returned no row"),
         }
     }
 
     /// One ledger move for a named [`ChipMove`], with no reward template and
-    /// no cooldown behind it: the perpetual Super Snake arena settles every
-    /// food, arena clear, and crash the instant it happens. `None` means a
-    /// debit the balance could not cover.
+    /// no cooldown behind it: house-table bets, and the perpetual Super
+    /// Snake arena banking a visit. `None` means a debit the balance could
+    /// not cover.
     pub async fn apply_move(
         &self,
         user_id: Uuid,
         chip_move: ChipMove,
         amount: i64,
+        source_ref: &str,
     ) -> anyhow::Result<Option<i64>> {
         let client = self.db.get().await?;
-        let chips = UserChips::apply(&**client, user_id, chip_move, amount, None).await?;
+        let chips = UserChips::apply(&**client, user_id, chip_move, amount, source_ref).await?;
         Ok(chips.map(|chips| chips.balance))
+    }
+
+    /// An admin minting chips for a player with `/grant`. Leaves no ledger
+    /// row by decision; see [`UserChips::admin_grant`].
+    pub async fn grant_chips(&self, recipient_id: Uuid, amount: i64) -> anyhow::Result<i64> {
+        let client = self.db.get().await?;
+        let chips = UserChips::admin_grant(&**client, recipient_id, amount).await?;
+        Ok(chips.balance)
     }
 
     pub async fn transfer_chips(
@@ -577,9 +592,11 @@ impl ChipService {
         Ok(reward_grant(template.reward_chips, claim))
     }
 
-    pub async fn restore_floor(&self, user_id: Uuid) -> anyhow::Result<i64> {
+    /// Top a losing house-table seat back up to the floor. `source_ref` is
+    /// the round or hand that emptied it.
+    pub async fn restore_floor(&self, user_id: Uuid, source_ref: &str) -> anyhow::Result<i64> {
         let client = self.db.get().await?;
-        let chips = UserChips::restore_floor(&client, user_id).await?;
+        let chips = UserChips::restore_floor(&client, user_id, source_ref).await?;
         Ok(chips.balance)
     }
 }

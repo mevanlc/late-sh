@@ -6,11 +6,11 @@
 //     > or . down (also shown as a hint in-game when a room has a vertical exit).
 //   - Combat: space/x attack; 1-9 use the ability in that action-bar slot (0 is
 //     slot 10; deeper rosters cast from the Abilities panel); Q quaffs the best
-//     healing potion without leaving the view; z flee.
-//   - Mounts: G mounts/dismounts a rideable companion (one step then strides
-//     several rooms; the best beasts skip 5). Combat puts you back on foot.
-//   - Companion care: ~ feeds and tends your companion from anywhere, no
-//     stable needed - reviving one that went down mid-fight. If a wild
+//     healing potion without leaving the view; C coats your weapon with the
+//     coat the foe in front of you likes least; z flee.
+//   - Companion care: G feeds and tends your own companion from anywhere
+//     (20g; four loyalty-raising meals a UTC day, and past them it still
+//     mends). ~ does the same, except that if a wild
 //     adoptable creature shares the room and your own pet doesn't need
 //     tending, ~ feeds it instead (Genesys) - five days running wins it
 //     over as a stray, kept on top of any pet you already have.
@@ -33,7 +33,8 @@
 //   - ! opens the Leaderboard: top adventurers currently online by level,
 //     pvp kills, and gold (read-only). Not `?`, which late.sh reserves
 //     globally for a cross-door help overlay.
-//   - Panels: c character, v abilities, o look, b shop, t inventory ("things"),
+//   - Panels: c character (lowercase only - C coats a weapon), v abilities,
+//     o look, b shop, t inventory ("things"),
 //     p the Stable (companion vendor) where one stands. In the Stable, Enter
 //     buys the selected beast and x feeds/tends the one you have. q opens the
 //     Animal Taming panel where a tameable wild beast roams (Enter attempts the
@@ -307,8 +308,15 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
 
     match byte {
         // Panels.
-        b'c' | b'C' => {
+        b'c' => {
             state.toggle_panel(Panel::Character);
+            InputAction::Handled
+        }
+        b'C' => {
+            // Coat the weapon in one keystroke, the sibling of `Q`. Shift-c no
+            // longer opens the character sheet; plain `c` still does, and the
+            // game already splits three other pairs this way (q/Q, g/G, m/M).
+            state.coat();
             InputAction::Handled
         }
         b'v' | b'V' => {
@@ -353,6 +361,12 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
             // just to drink. Works anywhere; a beast-taming room still tames on
             // lowercase `q`.
             state.quaff();
+            InputAction::Handled
+        }
+        b'G' => {
+            // Your own companion, always, wherever you stand. `~` is the
+            // feed-whatever-matters key that courts strays.
+            state.feed_companion();
             InputAction::Handled
         }
         b'~' => {
@@ -441,11 +455,6 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
             state.resurrect();
             InputAction::Handled
         }
-        b'G' => {
-            // Giddy-up: mount or dismount a rideable companion (Wildbound).
-            state.toggle_mount();
-            InputAction::Handled
-        }
         b'e' | b'E' => {
             // Open the appearance / bio builder.
             state.open_appearance();
@@ -515,9 +524,6 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
         b'x' | b'X' => {
             if panel == Panel::Follow {
                 state.stop_follow();
-            } else if panel == Panel::Stable {
-                // At the Stable, the secondary action tends (feeds) your beast.
-                state.feed_pet();
             } else if panel == Panel::Appearance {
                 // The secondary action cycles the trait the other way.
                 state.cycle_appearance(-1);
@@ -537,14 +543,14 @@ pub fn handle_key(state: &mut State, byte: u8) -> InputAction {
             state.flee();
             InputAction::Handled
         }
-        // Manual scroll for cursor-less text panels (character/leaderboard).
-        // List panels auto-follow their cursor, so these are no-ops there.
+        // Scroll the side panel, in every panel, always: a cursor-less one
+        // shifts its offset, a list walks its cursor (which drags the view).
         b'[' => {
-            state.scroll_text_up();
+            state.scroll_up();
             InputAction::Handled
         }
         b']' => {
-            state.scroll_text_down();
+            state.scroll_down();
             InputAction::Handled
         }
         _ => InputAction::Ignored,

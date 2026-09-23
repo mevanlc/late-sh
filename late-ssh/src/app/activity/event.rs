@@ -10,6 +10,8 @@ pub enum ActivityCategory {
     Session,
     Game,
     Bonsai,
+    /// The pet and the aquarium: private daily care, like the bonsai.
+    Companion,
     Quest,
 }
 
@@ -26,10 +28,17 @@ pub enum ActivityKind {
         score: i32,
         level: Option<i32>,
     },
-    /// A notable in-game moment that is neither a win nor a score: started a
-    /// session, descended a level, died. `detail` is the full action phrase.
-    /// Shown in the dashboard feed (category `Game`).
+    /// A notable in-game moment that is neither a win nor a loss: started a
+    /// session, descended a level, found the orb. `detail` is the full
+    /// action phrase. Shown in the dashboard feed (category `Game`).
     GameEvent {
+        game: ActivityGame,
+        detail: String,
+    },
+    /// A death in a door game, told the same way as a `GameEvent` (the
+    /// `detail` is the full death phrase) but its own kind, so the owner's
+    /// session can read it as a loss without parsing the sentence.
+    GameLost {
         game: ActivityGame,
         detail: String,
     },
@@ -126,6 +135,17 @@ pub enum ActivityKind {
         winner_tickets: i64,
         total_tickets: i64,
     },
+    /// The open pot draws soon: one reminder per pot, claimed in the table
+    /// so one replica posts it. Nobody did anything, so there is no user;
+    /// the ticker line reads "pot draws in 30m ...". `pot_id` keys the
+    /// #lounge repeat throttle.
+    PotClosing {
+        pot_id: Uuid,
+        size: i64,
+        total_tickets: i64,
+        ticket_price: i64,
+        draws_in_secs: i64,
+    },
     /// A linked user published an entry on cyberspace.online from late.sh.
     /// Announces our user's own action, never cyberspace content.
     CyberspacePosted {
@@ -135,8 +155,10 @@ pub enum ActivityKind {
     /// stream room is on. Fired on the pending -> live transition only,
     /// never at `/golive` command time, so no line ever points at a black
     /// screen. There is no matching "stream ended" event (noise).
+    /// `watch_url` is the stream's watch page, for the #lounge headline.
     WentLive {
         title: Option<String>,
+        watch_url: String,
     },
     /// A named late.sh user arrived at someone's live stream, through
     /// `/watch @user` or by opening the stream room. `streamer` is the
@@ -151,6 +173,36 @@ pub enum ActivityKind {
     BonsaiLost {
         survived_days: i32,
     },
+    /// The first aquarium feeding of the UTC day cleared the DB chip gate.
+    AquariumFed,
+    /// Fourteen straight fed days hatched a fry of `creature`, swimming
+    /// from the start.
+    AquariumFryHatched {
+        creature: String,
+    },
+    /// Fourteen straight fed days hatched nothing: the owner already owns
+    /// the cap of fish, in the water and parked together.
+    AquariumFryNoRoom,
+    /// Fourteen unfed days starved one `creature`, settled at login.
+    AquariumFishLost {
+        creature: String,
+    },
+    /// A sprout came up on the tank floor on `born`, settled at login.
+    AquariumSprouted {
+        born: chrono::NaiveDate,
+    },
+    /// A sprout left a week rooted as the plant `creature`, in the water,
+    /// settled at login or on the day edge.
+    AquariumSproutRooted {
+        creature: String,
+    },
+    /// The owner cut the sprout.
+    AquariumSproutCut,
+    /// A sprout left a week withered: the owner already owns the cap of
+    /// plants, so nothing grew. Settled at login or on the day edge.
+    AquariumSproutWithered,
+    /// The first pet of the UTC day cleared the DB chip gate.
+    PetPetted,
 }
 
 impl ActivityKind {
@@ -165,17 +217,28 @@ impl ActivityKind {
             | Self::CrownTaken { .. }
             | Self::RoundBought { .. }
             | Self::PotDrawn { .. }
+            | Self::PotClosing { .. }
             | Self::CyberspacePosted { .. }
             | Self::WentLive { .. }
             | Self::WatchingStream { .. } => ActivityCategory::Session,
             Self::GameWon { .. }
             | Self::GameEvent { .. }
+            | Self::GameLost { .. }
             | Self::GameStarted { .. }
             | Self::BossSlain { .. }
             | Self::SatDown { .. }
             | Self::DailyResult { .. } => ActivityCategory::Game,
             Self::GameScored { .. } => ActivityCategory::Quest,
             Self::BonsaiWatered | Self::BonsaiLost { .. } => ActivityCategory::Bonsai,
+            Self::AquariumFed
+            | Self::AquariumFryHatched { .. }
+            | Self::AquariumFryNoRoom
+            | Self::AquariumFishLost { .. }
+            | Self::AquariumSprouted { .. }
+            | Self::AquariumSproutRooted { .. }
+            | Self::AquariumSproutCut
+            | Self::AquariumSproutWithered
+            | Self::PetPetted => ActivityCategory::Companion,
         }
     }
 }
@@ -373,6 +436,24 @@ impl ActivityEvent {
             Some(user_id),
             username,
             ActivityKind::GameEvent {
+                game,
+                detail: action.clone(),
+            },
+            action,
+        )
+    }
+
+    /// A death in a door game; `action` is the full death phrase.
+    pub fn game_lost(
+        user_id: Uuid,
+        username: impl Into<String>,
+        game: ActivityGame,
+        action: String,
+    ) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::GameLost {
                 game,
                 detail: action.clone(),
             },
@@ -650,6 +731,37 @@ impl ActivityEvent {
         )
     }
 
+    /// The open pot is about to draw. Authored by nobody: the ticker line
+    /// names the pot itself, so it reads "pot draws in 30m: ...".
+    pub fn pot_closing(
+        pot_id: Uuid,
+        size: i64,
+        total_tickets: i64,
+        ticket_price: i64,
+        draws_in_secs: i64,
+    ) -> Self {
+        use crate::app::common::primitives::thousands;
+        use crate::app::pot::state::short_duration;
+        let action = format!(
+            "draws in {}: {} chips on {} tickets",
+            short_duration(draws_in_secs),
+            thousands(size),
+            thousands(total_tickets)
+        );
+        Self::new(
+            None,
+            "pot",
+            ActivityKind::PotClosing {
+                pot_id,
+                size,
+                total_tickets,
+                ticket_price,
+                draws_in_secs,
+            },
+            action,
+        )
+    }
+
     /// A finished daily match with a winner. The line names only the winner and
     /// the game — "{winner} won a game of {game}" — never the loser: a friendly
     /// clubhouse feed, not a scoreboard that shames whoever lost. `match_id`
@@ -714,7 +826,13 @@ impl ActivityEvent {
 
     /// A stream went on air: "mat is live: refactoring the render loop".
     /// The line is the invitation; the room row is where the party moves.
-    pub fn went_live(user_id: Uuid, username: impl Into<String>, title: Option<String>) -> Self {
+    /// `watch_url` rides along for the headline (`lounge_headline`).
+    pub fn went_live(
+        user_id: Uuid,
+        username: impl Into<String>,
+        title: Option<String>,
+        watch_url: String,
+    ) -> Self {
         let action = match feed_safe_title(title.as_deref()) {
             Some(title) => format!("is live: {title}"),
             None => "is live".to_string(),
@@ -722,7 +840,7 @@ impl ActivityEvent {
         Self::new(
             Some(user_id),
             username,
-            ActivityKind::WentLive { title },
+            ActivityKind::WentLive { title, watch_url },
             action,
         )
     }
@@ -766,6 +884,105 @@ impl ActivityEvent {
             username,
             ActivityKind::BonsaiWatered,
             "watered their bonsai".to_string(),
+        )
+    }
+
+    pub fn aquarium_fed(user_id: Uuid, username: impl Into<String>) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumFed,
+            "fed their aquarium".to_string(),
+        )
+    }
+
+    pub fn pet_petted(user_id: Uuid, username: impl Into<String>) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::PetPetted,
+            "petted their pet".to_string(),
+        )
+    }
+
+    pub fn aquarium_fry_hatched(
+        user_id: Uuid,
+        username: impl Into<String>,
+        creature: String,
+    ) -> Self {
+        let text = format!("hatched a {creature} fry in their tank");
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumFryHatched { creature },
+            text,
+        )
+    }
+
+    pub fn aquarium_fry_no_room(user_id: Uuid, username: impl Into<String>) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumFryNoRoom,
+            "kept a streak going with no room for a fry".to_string(),
+        )
+    }
+
+    pub fn aquarium_fish_lost(
+        user_id: Uuid,
+        username: impl Into<String>,
+        creature: String,
+    ) -> Self {
+        let text = format!("lost a {creature} to a hungry tank");
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumFishLost { creature },
+            text,
+        )
+    }
+
+    pub fn aquarium_sprouted(
+        user_id: Uuid,
+        username: impl Into<String>,
+        born: chrono::NaiveDate,
+    ) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumSprouted { born },
+            "has a sprout in their tank".to_string(),
+        )
+    }
+
+    pub fn aquarium_sprout_rooted(
+        user_id: Uuid,
+        username: impl Into<String>,
+        creature: String,
+    ) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumSproutRooted { creature },
+            "let a sprout root in their tank".to_string(),
+        )
+    }
+
+    pub fn aquarium_sprout_cut(user_id: Uuid, username: impl Into<String>) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumSproutCut,
+            "cut a sprout in their tank".to_string(),
+        )
+    }
+
+    pub fn aquarium_sprout_withered(user_id: Uuid, username: impl Into<String>) -> Self {
+        Self::new(
+            Some(user_id),
+            username,
+            ActivityKind::AquariumSproutWithered,
+            "let a sprout wither in their full tank".to_string(),
         )
     }
 

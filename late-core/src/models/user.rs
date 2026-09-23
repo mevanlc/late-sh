@@ -7,9 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
-use super::marketplace::{
-    BONSAI_VARIANT_SLOT, CHAT_BADGE_SLOT, CHAT_FLAG_SLOT, DYNAMIC_BONSAI_SKU,
-};
+use super::marketplace::{CHAT_BADGE_SLOT, CHAT_FLAG_SLOT};
 use super::profile_award::{
     MILESTONE_AWARD_CATEGORIES, PROFILE_AWARD_RANK_LIMIT, top_badge_per_game,
 };
@@ -213,6 +211,86 @@ impl RightSidebarMode {
     }
 }
 
+/// The page a session starts on (Settings, Tweaks, Startup). Brand-new users
+/// always start in the Clubhouse regardless, so the first-visit tour runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LandingPage {
+    Clubhouse,
+    Home,
+    Zen,
+}
+
+impl LandingPage {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Clubhouse => "clubhouse",
+            Self::Home => "home",
+            Self::Zen => "zen",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim() {
+            "clubhouse" => Some(Self::Clubhouse),
+            "home" => Some(Self::Home),
+            "zen" => Some(Self::Zen),
+            _ => None,
+        }
+    }
+
+    pub fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Clubhouse, true) => Self::Home,
+            (Self::Home, true) => Self::Zen,
+            (Self::Zen, true) => Self::Clubhouse,
+            (Self::Clubhouse, false) => Self::Zen,
+            (Self::Home, false) => Self::Clubhouse,
+            (Self::Zen, false) => Self::Home,
+        }
+    }
+}
+
+/// Inline terminal image previews (Settings, Tweaks, Display). `Auto` trusts
+/// what the terminal reports. The other two override it for terminals that
+/// report wrong: tmux can pass on sixel support its host terminal lacks, and
+/// some terminals draw sixel without ever advertising it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalImagesMode {
+    Auto,
+    Off,
+    Sixel,
+}
+
+impl TerminalImagesMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::Sixel => "sixel",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim() {
+            "auto" => Some(Self::Auto),
+            "off" => Some(Self::Off),
+            "sixel" => Some(Self::Sixel),
+            _ => None,
+        }
+    }
+
+    pub fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::Auto, true) => Self::Off,
+            (Self::Off, true) => Self::Sixel,
+            (Self::Sixel, true) => Self::Auto,
+            (Self::Auto, false) => Self::Sixel,
+            (Self::Off, false) => Self::Auto,
+            (Self::Sixel, false) => Self::Off,
+        }
+    }
+}
+
 /// Master on/off for the Home room-list rail, the left column. Mirrors
 /// [`RightSidebarMode`], including `Auto`: the rail folds away on terminals too
 /// narrow to carry three columns.
@@ -371,20 +449,21 @@ const SHOW_RIGHT_SIDEBAR_KEY: &str = "show_right_sidebar";
 const RIGHT_SIDEBAR_MODE_KEY: &str = "right_sidebar_mode";
 const RIGHT_SIDEBAR_COMPONENTS_KEY: &str = "right_sidebar_components";
 const STATUSLINE_COMPONENTS_KEY: &str = "statusline_components";
-const SHOW_AQUARIUM_TRAY_KEY: &str = "show_aquarium_tray";
-const SHOW_PET_STRIP_KEY: &str = "show_pet_strip";
+/// The Rice page's tiling layout and look (`late-ssh/src/app/zen`), stored
+/// as the JSON the page itself serializes; absent until first edited.
+const ZEN_LAYOUT_KEY: &str = "zen_layout";
 const SHOW_ROOM_LIST_SIDEBAR_KEY: &str = "show_room_list_sidebar";
 const ROOM_LIST_MODE_KEY: &str = "room_list_mode";
 const KEEP_COMPOSER_FOCUSED_KEY: &str = "keep_composer_focused";
 const START_WITH_MUSIC_MUTED_KEY: &str = "start_with_music_muted";
-const LAND_ON_HOME_KEY: &str = "land_on_home";
+const LANDING_PAGE_KEY: &str = "landing_page";
 const PAPER_AT_LOGIN_KEY: &str = "paper_at_login";
+const TERMINAL_IMAGES_KEY: &str = "terminal_images";
+/// Award categories the user keeps off their chat label. Read by the chat
+/// label SQL straight from `users.settings`, so the key is spelled there too.
+const HIDDEN_AWARD_CATEGORIES_KEY: &str = "hidden_award_categories";
 /// The edition (UTC date, ISO) whose login pop this account has had.
 const PAPER_SHOWN_ON_KEY: &str = "paper_shown_on";
-/// `{"month": "YYYY-MM", "shown": n}`: how many of last month's podium
-/// pieces the splash has shown this account, and for which month. One
-/// key, overwritten in place; it never grows.
-const SPLASH_PODIUM_KEY: &str = "splash_podium";
 const TRANSLATE_TO_KEY: &str = "translate_to";
 const AUTO_TRANSLATE_KEY: &str = "auto_translate";
 const TRANSLATE_MINE_TO_EN_KEY: &str = "translate_mine_to_en";
@@ -595,30 +674,21 @@ impl User {
                         u.username,
                         u.is_admin,
                         u.is_moderator,
-                        t.is_alive,
-                        t.growth_points,
-                        v2.badge_glyph AS bonsai_v2_badge_glyph,
-                        EXISTS (
-                            SELECT 1
-                            FROM user_purchases dynamic_up
-                            JOIN marketplace_items dynamic_bonsai
-                              ON dynamic_bonsai.id = dynamic_up.item_id
-                            WHERE dynamic_up.user_id = u.id
-                              AND dynamic_up.equipped_slot = $3
-                              AND dynamic_bonsai.sku = $4
-                        ) AS dynamic_bonsai_selected,
+                        t.badge_glyph AS bonsai_badge_glyph,
                         flag_rental.payload->>'emoji' AS chat_flag,
                         badge_rental.payload->>'emoji' AS chat_badge,
                         award.badges AS profile_award_badges
                  FROM users u
+                 -- The bonsai badge is precomputed by the tree's owner session
+                 -- (`bonsai_trees.badge_glyph`), never derived per message.
+                 -- No row yet means no glyph: the tree is planted at login.
                  LEFT JOIN bonsai_trees t ON t.user_id = u.id
-                 LEFT JOIN bonsai_v2_trees v2 ON v2.user_id = u.id
                  -- A rental is the only thing that fills these two slots.
                  -- Expiry is read-time: once `ends_at` passes the label goes
                  -- bare, with no background job to run. Migration 165 cleared
-                 -- the last permanent equips, so `equipped_slot` no longer
-                 -- carries a badge or a flag; $2 and $5 are effect kinds here,
-                 -- and `bonsai_variant` above is the only equip slot left.
+                 -- the last permanent equips (and migration 177 the bonsai
+                 -- variant, the last equip of any kind), so `equipped_slot`
+                 -- carries nothing; $2 and $3 are effect kinds here.
                  LEFT JOIN LATERAL (
                     SELECT e.payload
                     FROM shop_consumable_effects e
@@ -635,7 +705,7 @@ impl User {
                     FROM shop_consumable_effects e
                     WHERE e.user_id = u.id
                       AND e.room_id IS NULL
-                      AND e.effect_kind = $5
+                      AND e.effect_kind = $3
                       AND e.active = true
                       AND e.ends_at > current_timestamp
                     ORDER BY e.ends_at DESC
@@ -661,6 +731,7 @@ impl User {
                           -- milestones above: one holder, so no rank digit
                           -- (`profile_award::is_rankless_award`).
                           WHEN 'crown' THEN 'CRWN'
+                          WHEN 'late_time' THEN 'LATE'
                           ELSE (
                             CASE category
                               WHEN 'top_chips' THEN 'CHIP'
@@ -668,6 +739,7 @@ impl User {
                               WHEN 'tetris' THEN 'LA'
                               WHEN 'twenty_forty_eight' THEN '24#'
                               WHEN 'snake' THEN 'SN'
+                              WHEN 'artboard' THEN 'ART'
                               ELSE 'LB'
                             END
                           ) || rank::text
@@ -679,6 +751,7 @@ impl User {
                                    WHEN 'top_chips' THEN 1
                                    WHEN 'crown' THEN 5
                                    WHEN 'artboard' THEN 6
+                                   WHEN 'late_time' THEN 7
                                    WHEN 'tetris' THEN 2
                                    WHEN 'twenty_forty_eight' THEN 3
                                    WHEN 'snake' THEN 4
@@ -700,18 +773,20 @@ impl User {
                     ) AS badges
                     FROM profile_awards pa
                     WHERE pa.user_id = u.id
-                      AND pa.rank <= $6
+                      AND pa.rank <= $4
+                      -- Badges the author hid in Settings, Tweaks, Chat badges
+                      -- (`extract_hidden_award_categories`). Hiding the top
+                      -- rung of a game ladder lets the next one show.
+                      AND NOT (COALESCE(u.settings->'hidden_award_categories', '[]'::jsonb) ? pa.category)
                       AND (
                         pa.period_month = (date_trunc('month', now() AT TIME ZONE 'UTC')::date - INTERVAL '1 month')::date
-                        OR pa.category = ANY($7)
+                        OR pa.category = ANY($5)
                       )
                  ) award ON true
                  WHERE u.id = ANY($1)",
                 &[
                     &user_ids,
                     &CHAT_BADGE_SLOT,
-                    &BONSAI_VARIANT_SLOT,
-                    &DYNAMIC_BONSAI_SKU,
                     &CHAT_FLAG_SLOT,
                     &PROFILE_AWARD_RANK_LIMIT,
                     &milestone_categories,
@@ -728,10 +803,7 @@ impl User {
                     username: row.get("username"),
                     is_admin: row.get("is_admin"),
                     is_moderator: row.get("is_moderator"),
-                    bonsai_is_alive: row.get("is_alive"),
-                    bonsai_growth_points: row.get("growth_points"),
-                    bonsai_v2_badge_glyph: row.get("bonsai_v2_badge_glyph"),
-                    dynamic_bonsai_selected: row.get("dynamic_bonsai_selected"),
+                    bonsai_badge_glyph: row.get("bonsai_badge_glyph"),
                     chat_flag: row.get("chat_flag"),
                     chat_badge: row.get("chat_badge"),
                     profile_award_badges: chat_profile_award_badges(profile_award_badges),
@@ -901,15 +973,15 @@ impl User {
         Ok(())
     }
 
-    /// Persist whether the aquarium tray is open so it survives reconnects.
-    pub async fn set_show_aquarium_tray(client: &Client, user_id: Uuid, shown: bool) -> Result<()> {
+    /// Store the Rice page's layout JSON in the settings blob.
+    pub async fn set_zen_layout(client: &Client, user_id: Uuid, layout: &Value) -> Result<()> {
         let updated = client
             .execute(
                 "UPDATE users
-                 SET settings = settings || jsonb_build_object($1::text, $2::bool),
+                 SET settings = settings || jsonb_build_object($1::text, $2::jsonb),
                      updated = current_timestamp
                  WHERE id = $3",
-                &[&SHOW_AQUARIUM_TRAY_KEY, &shown, &user_id],
+                &[&ZEN_LAYOUT_KEY, layout, &user_id],
             )
             .await?;
         if updated == 0 {
@@ -1490,46 +1562,6 @@ impl User {
         Ok(updated == 1)
     }
 
-    /// Claim the next of `podium_size` splash slots for `month` (the podium's
-    /// `period_month`): the first login of a month gets slot 1, the next
-    /// slot 2, and so on up to the podium's size, after which the door
-    /// shows the coffee cup and this returns `None` without writing. Wins
-    /// once per login across every device and replica, the way the paper's
-    /// stamp does: the row is the only judge. A stored month past `month`
-    /// (a replica behind the calendar) never resets and never counts.
-    pub async fn claim_splash_podium_slot(
-        client: &Client,
-        user_id: Uuid,
-        month: chrono::NaiveDate,
-        podium_size: i64,
-    ) -> Result<Option<i64>> {
-        let value = month.format("%Y-%m").to_string();
-        let row = client
-            .query_opt(
-                "UPDATE users
-                 SET settings = settings || jsonb_build_object(
-                         $1::text,
-                         jsonb_build_object(
-                             'month', $2::text,
-                             'shown', CASE
-                                 WHEN settings->$1->>'month' = $2
-                                 THEN (settings->$1->>'shown')::bigint + 1
-                                 ELSE 1::bigint
-                             END
-                         )
-                     ),
-                     updated = current_timestamp
-                 WHERE id = $3
-                   AND (COALESCE(settings->$1->>'month', '') < $2
-                        OR (settings->$1->>'month' = $2
-                            AND (settings->$1->>'shown')::bigint < $4))
-                 RETURNING (settings->$1->>'shown')::bigint AS slot",
-                &[&SPLASH_PODIUM_KEY, &value, &user_id, &podium_size],
-            )
-            .await?;
-        Ok(row.map(|row| row.get("slot")))
-    }
-
     /// Take the paper's login stamp off (the admin `/paper reset` hook), so
     /// the next session pops the paper again whatever edition is printed.
     pub async fn clear_paper_shown(client: &Client, user_id: Uuid) -> Result<()> {
@@ -1570,10 +1602,9 @@ pub struct ChatAuthorMetadata {
     pub username: String,
     pub is_admin: bool,
     pub is_moderator: bool,
-    pub bonsai_is_alive: Option<bool>,
-    pub bonsai_growth_points: Option<i32>,
-    pub bonsai_v2_badge_glyph: Option<String>,
-    pub dynamic_bonsai_selected: bool,
+    /// The precomputed chat glyph from `bonsai_trees.badge_glyph`; `None`
+    /// until the user's first login plants a tree, empty while it is dead.
+    pub bonsai_badge_glyph: Option<String>,
     pub chat_flag: Option<String>,
     pub chat_badge: Option<String>,
     pub profile_award_badges: Option<String>,
@@ -1874,14 +1905,39 @@ pub fn extract_translate_mine_to_en(settings: &Value) -> bool {
         .unwrap_or(false)
 }
 
-/// Tweak: land on Home (Dashboard, page 1) instead of the Clubhouse (page 0)
-/// when a session starts. Opt-in; defaults to false so sessions land in the
-/// clubhouse tavern like today.
-pub fn extract_land_on_home(settings: &Value) -> bool {
-    settings
-        .get(LAND_ON_HOME_KEY)
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
+/// Tweak: where a session starts. Absent or unreadable values land in the
+/// Clubhouse, the front door.
+pub fn extract_landing_page(settings: &Value) -> LandingPage {
+    match settings.get(LANDING_PAGE_KEY).and_then(Value::as_str) {
+        Some(key) => LandingPage::from_key(key).unwrap_or(LandingPage::Clubhouse),
+        None => LandingPage::Clubhouse,
+    }
+}
+
+/// Tweak: the award badges hidden from the user's chat label. Unknown
+/// categories are dropped, so the stored list only ever names real badges.
+pub fn extract_hidden_award_categories(settings: &Value) -> Vec<String> {
+    let Some(entries) = settings
+        .get(HIDDEN_AWARD_CATEGORIES_KEY)
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let known = super::profile_award::all_award_categories();
+    known
+        .into_iter()
+        .filter(|category| entries.iter().any(|entry| entry.as_str() == Some(category)))
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Tweak: how inline images reach the terminal. Absent or unreadable means
+/// `Auto`, the detected protocol.
+pub fn extract_terminal_images(settings: &Value) -> TerminalImagesMode {
+    match settings.get(TERMINAL_IMAGES_KEY).and_then(Value::as_str) {
+        Some(key) => TerminalImagesMode::from_key(key).unwrap_or(TerminalImagesMode::Auto),
+        None => TerminalImagesMode::Auto,
+    }
 }
 
 /// Tweak: open The Late Edition (the daily paper) once a day at login.
@@ -1893,24 +1949,10 @@ pub fn extract_paper_at_login(settings: &Value) -> bool {
         .unwrap_or(true)
 }
 
-/// Whether the aquarium tray was open when the user last toggled it; defaults
-/// to true so the tray appears as soon as the Aquarium is unlocked, the same
-/// way `show_pet_strip` reveals the companion. Rendering is gated on the
-/// entitlement, so this stays inert for everyone who does not own one.
-pub fn extract_show_aquarium_tray(settings: &Value) -> bool {
-    settings
-        .get(SHOW_AQUARIUM_TRAY_KEY)
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-}
-
-/// Tweak: show the pet strip above the chat composer (pet owners only);
-/// defaults to true so the companion appears as soon as it is unlocked.
-pub fn extract_show_pet_strip(settings: &Value) -> bool {
-    settings
-        .get(SHOW_PET_STRIP_KEY)
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
+/// The stored Rice layout, if the account ever edited one. Parsed by the
+/// page, which falls back to its default on anything unreadable.
+pub fn extract_zen_layout(settings: &Value) -> Option<Value> {
+    settings.get(ZEN_LAYOUT_KEY).cloned()
 }
 
 /// True once the user has finished (or skipped) the clubhouse first-visit
@@ -2191,7 +2233,7 @@ pub fn extract_langs(settings: &Value) -> Vec<String> {
         Vec::new()
     };
 
-    normalize_profile_tags(raw_tags.iter().map(String::as_str))
+    crate::vocab::normalize_langs(raw_tags.iter().map(String::as_str))
 }
 
 fn extract_trimmed_profile_text(settings: &Value, key: &str) -> Option<String> {
@@ -2201,30 +2243,6 @@ fn extract_trimmed_profile_text(settings: &Value, key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-}
-
-fn normalize_profile_tags<'a>(values: impl IntoIterator<Item = &'a str>) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for value in values {
-        for raw in value.split(|c: char| c == ',' || c.is_whitespace()) {
-            let tag: String = raw
-                .trim()
-                .trim_matches('#')
-                .to_ascii_lowercase()
-                .chars()
-                .filter(|c| c.is_ascii_alphanumeric() || matches!(*c, '-' | '_' | '.'))
-                .collect();
-            if tag.is_empty() || tag.len() > 24 || !seen.insert(tag.clone()) {
-                continue;
-            }
-            out.push(tag);
-            if out.len() >= 8 {
-                return out;
-            }
-        }
-    }
-    out
 }
 
 pub fn sanitize_username_input(username: &str) -> String {

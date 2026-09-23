@@ -99,7 +99,7 @@ pub(crate) struct StatusBar {
 /// policy configurable.
 pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 5] {
     [
-        StatusComponent::Pomodoro,
+        StatusComponent::Status,
         StatusComponent::Voice,
         StatusComponent::Mentions,
         StatusComponent::Pot,
@@ -107,6 +107,11 @@ pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 5] {
     ]
     .map(|component| StatusComponentSetting {
         enabled: true,
+        label: if component == StatusComponent::Status {
+            LabelMode::None
+        } else {
+            component.default_label_mode()
+        },
         low_priority: component == StatusComponent::Pot,
         ..StatusComponentSetting::new(component)
     })
@@ -137,6 +142,7 @@ fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
     let hints = [
         ("Settings", ctrl_hint("O", use_caret)),
         ("Lobby", ctrl_hint("G", use_caret)),
+        ("Zen", ctrl_hint("F", use_caret)),
         ("Shop", "/shop"),
         ("Guide", "?"),
         ("Exit", "qq"),
@@ -160,8 +166,10 @@ fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
     match (use_caret, key) {
         (true, "O") => "^O",
         (true, "G") => "^G",
+        (true, "F") => "^F",
         (false, "O") => "Ctrl+O",
         (false, "G") => "Ctrl+G",
+        (false, "F") => "Ctrl+F",
         _ => key,
     }
 }
@@ -253,7 +261,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
 fn resting_value(component: StatusComponent) -> String {
     match component {
         StatusComponent::Shortcuts => String::new(),
-        StatusComponent::Pomodoro | StatusComponent::Voice | StatusComponent::Station => {
+        StatusComponent::Status | StatusComponent::Voice | StatusComponent::Station => {
             "-".to_string()
         }
         StatusComponent::Pot => "closed".to_string(),
@@ -312,7 +320,7 @@ fn accent(component: StatusComponent) -> ratatui::style::Color {
         StatusComponent::Voice => theme::SUCCESS(),
         StatusComponent::Turns | StatusComponent::Quests => theme::AMBER_GLOW(),
         StatusComponent::Users | StatusComponent::Station => theme::TEXT(),
-        StatusComponent::Time | StatusComponent::Pomodoro => theme::TEXT_BRIGHT(),
+        StatusComponent::Time | StatusComponent::Status => theme::TEXT_BRIGHT(),
     }
 }
 
@@ -487,10 +495,10 @@ pub(crate) fn click_action(component: StatusComponent) -> Option<StatusClick> {
         StatusComponent::Station => Some(StatusClick::Booth),
         StatusComponent::Quests => Some(StatusClick::Arcade),
         StatusComponent::Users => Some(StatusClick::Profiles),
-        // The clock, the countdown and the mic badge are readouts: there is no
+        // The clock, presence and the mic badge are readouts: there is no
         // screen a click on them obviously means.
         StatusComponent::Time
-        | StatusComponent::Pomodoro
+        | StatusComponent::Status
         | StatusComponent::Voice
         | StatusComponent::Pot => None,
     }

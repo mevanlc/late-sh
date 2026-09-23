@@ -16,7 +16,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use deadpool_postgres::GenericClient;
-use tokio_postgres::{Client, Row, Transaction};
+use tokio_postgres::{Row, Transaction};
 use uuid::Uuid;
 
 /// Cross-process repaint channel. A gild lands on whichever replica the
@@ -24,13 +24,6 @@ use uuid::Uuid;
 /// payload is `<message id>:<room id>`, so a listener repaints without first
 /// having to look the message up.
 pub const CHAT_MESSAGE_GILDED_CHANNEL: &str = "chat_message_gilded";
-
-pub async fn listen_for_gild_changes(client: &Client) -> Result<()> {
-    client
-        .batch_execute(&format!("LISTEN {CHAT_MESSAGE_GILDED_CHANNEL};"))
-        .await?;
-    Ok(())
-}
 
 /// The gilded message and the room it is in, as parsed from a
 /// [`CHAT_MESSAGE_GILDED_CHANNEL`] payload. `None` for anything that is not
@@ -46,7 +39,7 @@ pub fn parse_gilded_payload(payload: &str) -> Option<(Uuid, Uuid)> {
 pub const GILD_FEED_THRESHOLD: i64 = 3;
 
 /// The three prices a gild can be bought at. Closed on purpose: the tier is
-/// the whole product (a whale spends 100x on the same visible act), and a
+/// the whole product (a whale spends 10x on the same visible act), and a
 /// fourth price would have to answer for its marker, its color, and its split
 /// right here rather than in a config row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -81,14 +74,15 @@ impl GildTier {
         }
     }
 
-    /// What the buyer pays. Decided 2026-08-25: an
-    /// hour, a day, a week of completionist arcade play (~2,000 a day), in
-    /// the 4x-5x steps the rest of the Shop ladder uses.
+    /// What the buyer pays. Decided 2026-08-25, top tier cut 2026-09-08: an
+    /// hour, a day, and two and a half days of completionist arcade play
+    /// (~2,000 a day). Gold is priced to be reachable by a regular player
+    /// within a week rather than to be a whale-only marker.
     pub const fn price(self) -> i64 {
         match self {
             Self::Bronze => 500,
             Self::Silver => 2_000,
-            Self::Gold => 10_000,
+            Self::Gold => 5_000,
         }
     }
 
@@ -181,6 +175,16 @@ impl TryFrom<Row> for ChatMessageGild {
 pub struct ChatMessageGildSummary {
     pub top_tier: GildTier,
     pub count: i64,
+}
+
+/// Who was on either side of a gild. Looked up by the ledger row's
+/// `source_ref`: for a gild row id that is one author and one buyer; for a
+/// message id (rows written before the ref became the gild id) it is the
+/// author and every buyer of that message, oldest first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GildParties {
+    pub author_user_id: Uuid,
+    pub buyer_user_ids: Vec<Uuid>,
 }
 
 /// Gilds received, per tier, for one author. Fixed shape rather than a map,
@@ -378,6 +382,60 @@ impl ChatMessageGild {
             );
         }
         Ok(summaries)
+    }
+
+    /// The parties behind a batch of ledger refs, in one query. Each ref is
+    /// matched as a gild row id (the primary key) or as a message id (the
+    /// leading column of the buyer index), so both index scans are cheap and
+    /// the caller need not know which kind of ref a row carries. The result
+    /// is keyed by whichever matched: a gild id maps to its one buyer, a
+    /// message id to every buyer of that message. Refs matching nothing are
+    /// absent.
+    pub async fn parties_for_refs(
+        client: &impl GenericClient,
+        refs: &[Uuid],
+    ) -> Result<HashMap<Uuid, GildParties>> {
+        if refs.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        let rows = client
+            .query(
+                "SELECT id, message_id, author_user_id, user_id
+                 FROM chat_message_gilds
+                 WHERE id = ANY($1) OR message_id = ANY($1)
+                 ORDER BY created, id",
+                &[&refs],
+            )
+            .await?;
+
+        let mut parties: HashMap<Uuid, GildParties> = HashMap::new();
+        for row in rows {
+            let gild_id: Uuid = row.get("id");
+            let message_id: Uuid = row.get("message_id");
+            let author_user_id: Uuid = row.get("author_user_id");
+            let buyer_user_id: Uuid = row.get("user_id");
+            parties.insert(
+                gild_id,
+                GildParties {
+                    author_user_id,
+                    buyer_user_ids: vec![buyer_user_id],
+                },
+            );
+            match parties.get_mut(&message_id) {
+                Some(message) => message.buyer_user_ids.push(buyer_user_id),
+                None => {
+                    parties.insert(
+                        message_id,
+                        GildParties {
+                            author_user_id,
+                            buyer_user_ids: vec![buyer_user_id],
+                        },
+                    );
+                }
+            }
+        }
+        Ok(parties)
     }
 
     /// The marker for one message, after it just changed.

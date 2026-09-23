@@ -71,6 +71,9 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     if state.statusline_open() {
         draw_statusline_dialog(frame, popup, state);
     }
+    if state.chat_badges_open() {
+        draw_chat_badges_dialog(frame, popup, state);
+    }
     if state.link_account_dialog().open() {
         draw_link_account_dialog(frame, popup, state);
     }
@@ -605,11 +608,11 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
             Row::Langs,
             width,
             "Langs",
-            system_field_value(
-                state,
-                Row::Langs,
-                (!state.draft().langs.is_empty()).then(|| format_lang_tags(&state.draft().langs)),
-            ),
+            if state.draft().langs.is_empty() {
+                value_span("pick from the list…", theme::TEXT_FAINT())
+            } else {
+                value_with_picker_hint(format_lang_tags(&state.draft().langs))
+            },
         )),
         sections[10],
     );
@@ -776,7 +779,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     const GEM_STRIP_HEIGHT: u16 = 7;
     /// Fixed rows above the gem. The gem shrinks to fit rather than pushing a
     /// control off the bottom: it is an easter egg, the rows are settings.
-    const ROWS_ABOVE_GEM: u16 = 21;
+    const ROWS_ABOVE_GEM: u16 = 22;
     let gem_strip_height = GEM_STRIP_HEIGHT.min(area.height.saturating_sub(ROWS_ABOVE_GEM));
 
     let sections = Layout::vertical([
@@ -785,13 +788,14 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // text brightness row
         Constraint::Length(1),                // right sidebar row
         Constraint::Length(1),                // room list row
-        Constraint::Length(1),                // pet strip row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Compose subsection heading
         Constraint::Length(1),                // composer keep-focused row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Display subsection heading
         Constraint::Length(1),                // flag fallback row
+        Constraint::Length(1),                // terminal images row
+        Constraint::Length(1),                // chat badges row
         Constraint::Length(1),                // breathing
         Constraint::Length(1),                // Startup subsection heading
         Constraint::Length(1),                // land on home row
@@ -849,17 +853,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         )),
         sections[4],
     );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::PetStrip,
-            width,
-            "Pet companion strip",
-            toggle_span(state.draft().show_pet_strip),
-        )),
-        sections[5],
-    );
-    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[7]);
+    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[6]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -868,10 +862,10 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Send and keep open on Enter",
             toggle_span(state.draft().keep_composer_focused),
         )),
-        sections[8],
+        sections[7],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Display")), sections[10]);
+    frame.render_widget(Paragraph::new(section_heading("Display")), sections[9]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -880,19 +874,39 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Chat flag text fallback",
             toggle_span(state.draft().show_flag_fallback),
         )),
-        sections[11],
+        sections[10],
     );
-
-    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[13]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
-            TweakRow::LandOnHome,
+            TweakRow::TerminalImages,
             width,
-            "Land on Home page",
-            toggle_span(state.draft().land_on_home),
+            "Terminal images",
+            terminal_images_span(state.draft().terminal_images),
         )),
-        sections[14],
+        sections[11],
+    );
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::ChatBadges,
+            width,
+            "Chat badges",
+            chat_badges_span(state),
+        )),
+        sections[12],
+    );
+
+    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[14]);
+    frame.render_widget(
+        Paragraph::new(tweak_row_line(
+            state,
+            TweakRow::LandingPage,
+            width,
+            "Land on",
+            landing_page_span(state.draft().landing_page),
+        )),
+        sections[15],
     );
     frame.render_widget(
         Paragraph::new(tweak_row_line(
@@ -902,10 +916,10 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Daily paper at login",
             toggle_span(state.draft().paper_at_login),
         )),
-        sections[15],
+        sections[16],
     );
 
-    frame.render_widget(Paragraph::new(section_heading("Input")), sections[17]);
+    frame.render_widget(Paragraph::new(section_heading("Input")), sections[18]);
     frame.render_widget(
         Paragraph::new(tweak_row_line(
             state,
@@ -914,7 +928,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Interaction mode",
             interaction_mode_span(state.interaction_mode()),
         )),
-        sections[18],
+        sections[19],
     );
 
     frame.render_widget(
@@ -925,7 +939,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Bottom status bar",
             value_span("⏎ segments", theme::AMBER()),
         )),
-        sections[20],
+        sections[21],
     );
 
     if gem_strip_height > 0 {
@@ -933,7 +947,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         // border so it doesn't crowd the dialog frame.
         const PAD_X: u16 = 2;
         const PAD_BOTTOM: u16 = 1;
-        let strip = sections[22];
+        let strip = sections[23];
         let pad_x = PAD_X.min(strip.width / 2);
         let pad_bottom = PAD_BOTTOM.min(strip.height);
         let gem_area = Rect::new(
@@ -1063,7 +1077,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
-        sections[6],
+        sections[5],
     );
     frame.render_widget(
         Paragraph::new(account_row_line(
@@ -1073,7 +1087,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Delete Account",
             true,
         )),
-        sections[8],
+        sections[7],
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1083,7 +1097,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
-        sections[9],
+        sections[8],
     );
 }
 
@@ -1969,6 +1983,93 @@ fn statusline_row_style(selected: bool, focused: bool, enabled: bool) -> Style {
     }
 }
 
+/// Every badge a chat label can carry, one row each (a game's ladder is one
+/// row showing only its top rung), with a show/hide switch. The list scrolls
+/// to keep the cursor visible on short terminals.
+fn draw_chat_badges_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    let rows = late_core::models::profile_award::chat_badge_rows();
+    // rows + heading + blank + 2 footer lines + borders.
+    let popup = centered_rect(58, rows.len() as u16 + 7, area);
+    frame.render_widget(Clear, popup);
+
+    let block = Block::default()
+        .title(" Chat badges ")
+        .title_style(
+            Style::default()
+                .fg(theme::AMBER_GLOW())
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // heading
+        Constraint::Length(1), // blank
+        Constraint::Min(1),    // rows
+        Constraint::Length(1), // footer line 1
+        Constraint::Length(1), // footer line 2
+    ])
+    .split(inner);
+
+    let width = inner.width as usize;
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                "If you can earn it, you can hide it. Games show their top badge.",
+                Style::default().fg(theme::TEXT_DIM()),
+            ),
+        ])),
+        layout[0],
+    );
+
+    let visible = layout[2].height as usize;
+    let selected_index = state.chat_badges_index();
+    let offset = (selected_index + 1).saturating_sub(visible);
+    let lines: Vec<Line> = rows
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .take(visible)
+        .map(|(idx, row)| {
+            let selected = selected_index == idx;
+            let shown = state.chat_badge_row_shown(row);
+            let marker = if selected { ">" } else { " " };
+            let checkbox = if shown { "[x]" } else { "[ ]" };
+            let text = format!(" {marker} {checkbox} {:<22} {}", row.label, row.codes);
+            let style = if selected {
+                Style::default()
+                    .fg(theme::TEXT_BRIGHT())
+                    .patch(theme::selection_style())
+                    .add_modifier(Modifier::BOLD)
+            } else if shown {
+                Style::default().fg(theme::TEXT())
+            } else {
+                Style::default().fg(theme::TEXT_FAINT())
+            };
+            Line::from(Span::styled(pad_to_width(&text, width, selected), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), layout[2]);
+
+    let footer_top = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("↑↓", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" select  ", Style::default().fg(theme::TEXT_DIM())),
+        Span::styled("↵", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" show / hide", Style::default().fg(theme::TEXT_DIM())),
+    ]);
+    let footer_bottom = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("Esc", Style::default().fg(theme::AMBER_DIM())),
+        Span::styled(" close", Style::default().fg(theme::TEXT_DIM())),
+    ]);
+    frame.render_widget(Paragraph::new(footer_top), layout[3]);
+    frame.render_widget(Paragraph::new(footer_bottom), layout[4]);
+}
+
 fn draw_link_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let popup = centered_rect(76, 22, area);
     frame.render_widget(Clear, popup);
@@ -2785,7 +2886,6 @@ fn system_field_value(state: &SettingsModalState, row: Row, value: Option<String
             .filter(|value| !value.is_empty())
         {
             Some(value) => value_span(value.to_string(), theme::TEXT_BRIGHT()),
-            None if row == Row::Langs => value_span("comma sep…", theme::TEXT_FAINT()),
             None => value_span("not set", theme::TEXT_FAINT()),
         }
     }
@@ -2862,6 +2962,57 @@ fn translate_to_span(lang: late_core::models::message_translation::TranslateLang
         text: lang.label().to_string(),
         style: Style::default()
             .fg(theme::SUCCESS())
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// The "Chat badges" row: how many badge rows are hidden, Enter to edit.
+fn chat_badges_span(state: &SettingsModalState) -> ValueSpan {
+    let rows = late_core::models::profile_award::chat_badge_rows();
+    let hidden = rows
+        .iter()
+        .filter(|row| !state.chat_badge_row_shown(row))
+        .count();
+    let text = match hidden {
+        0 => "all shown ↵".to_string(),
+        hidden => format!("{hidden} hidden ↵"),
+    };
+    ValueSpan {
+        text,
+        style: Style::default()
+            .fg(theme::AMBER())
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// The "Terminal images" row: auto-detect, or force previews off or to sixel.
+fn terminal_images_span(mode: late_core::models::user::TerminalImagesMode) -> ValueSpan {
+    use late_core::models::user::TerminalImagesMode;
+    let text = match mode {
+        TerminalImagesMode::Auto => "◂ Auto ▸",
+        TerminalImagesMode::Off => "◂ Off ▸",
+        TerminalImagesMode::Sixel => "◂ Sixel ▸",
+    };
+    ValueSpan {
+        text: text.to_string(),
+        style: Style::default()
+            .fg(theme::AMBER())
+            .add_modifier(Modifier::BOLD),
+    }
+}
+
+/// The "Land on" row: the page a session opens on, cycled with the arrows.
+fn landing_page_span(page: late_core::models::user::LandingPage) -> ValueSpan {
+    use late_core::models::user::LandingPage;
+    let text = match page {
+        LandingPage::Clubhouse => "◂ Clubhouse ▸",
+        LandingPage::Home => "◂ Home ▸",
+        LandingPage::Zen => "◂ Zen ▸",
+    };
+    ValueSpan {
+        text: text.to_string(),
+        style: Style::default()
+            .fg(theme::AMBER())
             .add_modifier(Modifier::BOLD),
     }
 }

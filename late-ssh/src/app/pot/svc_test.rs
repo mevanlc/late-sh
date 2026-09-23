@@ -12,7 +12,9 @@ use late_core::models::{
 use late_core::test_utils::create_test_user;
 use uuid::Uuid;
 
-use crate::app::pot::svc::{PotError, PotRefusal, PotService, PotSettlement, PotStatus as Status};
+use crate::app::pot::svc::{
+    PotError, PotRefusal, PotReminder, PotService, PotSettlement, PotStatus as Status,
+};
 use crate::test_helpers::new_test_db;
 
 /// Every pot ledger row this user has, most recent first.
@@ -141,7 +143,7 @@ async fn a_buy_debits_once_and_grows_the_pot() {
     let client = test_db.db.get().await.expect("db client");
     let service = PotService::new(test_db.db.clone());
     let buyer = create_test_user(&test_db.db, "pot-buyer").await;
-    UserChips::apply(&**client, buyer.id, ChipMove::Credit, 10_000, None)
+    UserChips::admin_grant(&**client, buyer.id, 10_000)
         .await
         .expect("stake the buyer");
     let before = balance(&client, buyer.id).await;
@@ -175,7 +177,7 @@ async fn a_buy_past_the_daily_cap_is_refused_uncharged() {
     let client = test_db.db.get().await.expect("db client");
     let service = PotService::new(test_db.db.clone());
     let buyer = create_test_user(&test_db.db, "pot-cap").await;
-    UserChips::apply(&**client, buyer.id, ChipMove::Credit, 100_000, None)
+    UserChips::admin_grant(&**client, buyer.id, 100_000)
         .await
         .expect("stake the buyer");
 
@@ -212,9 +214,9 @@ async fn a_buy_the_player_cannot_afford_changes_nothing() {
     UserChips::apply(
         &**client,
         pauper.id,
-        ChipMove::Bet,
+        ChipMove::BlackjackBet,
         INITIAL_CHIP_BALANCE - CHIP_FLOOR,
-        None,
+        "test-round",
     )
     .await
     .expect("lose the stake");
@@ -251,7 +253,7 @@ async fn the_draw_pays_four_fifths_and_burns_the_rest() {
     let mut buyers = Vec::new();
     for index in 0..3 {
         let buyer = create_test_user(&test_db.db, &format!("pot-draw-{index}")).await;
-        UserChips::apply(&**client, buyer.id, ChipMove::Credit, 10_000, None)
+        UserChips::admin_grant(&**client, buyer.id, 10_000)
             .await
             .expect("stake");
         buyers.push(buyer);
@@ -321,7 +323,7 @@ async fn two_sweepers_produce_one_payout() {
     let first = PotService::new(test_db.db.clone());
     let second = PotService::new(test_db.db.clone());
     let buyer = create_test_user(&test_db.db, "pot-race-buyer").await;
-    UserChips::apply(&**client, buyer.id, ChipMove::Credit, 10_000, None)
+    UserChips::admin_grant(&**client, buyer.id, 10_000)
         .await
         .expect("stake");
 
@@ -415,7 +417,7 @@ async fn a_session_only_reads_its_own_holding() {
     let mine = create_test_user(&test_db.db, "pot-mine").await;
     let theirs = create_test_user(&test_db.db, "pot-theirs").await;
     for user in [&mine, &theirs] {
-        UserChips::apply(&**client, user.id, ChipMove::Credit, 10_000, None)
+        UserChips::admin_grant(&**client, user.id, 10_000)
             .await
             .expect("stake");
     }
@@ -440,4 +442,64 @@ async fn a_session_only_reads_its_own_holding() {
     // per-player breakdown is.
     assert_eq!(service.status_for(mine.id).ticket_count, 9);
     assert_eq!(service.status_for(theirs.id).ticket_count, 9);
+}
+
+/// Half an hour out, one sweeper claims the reminder with the pot's numbers
+/// and every sweeper after it, on any replica, gets nothing.
+#[tokio::test]
+async fn the_reminder_fires_once_half_an_hour_before_the_draw() {
+    let test_db = new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let first = PotService::new(test_db.db.clone());
+    let second = PotService::new(test_db.db.clone());
+    let buyer = create_test_user(&test_db.db, "pot-reminder-buyer").await;
+    UserChips::admin_grant(&**client, buyer.id, 10_000)
+        .await
+        .expect("stake");
+
+    first.settle_due().await.expect("open the first pot");
+    first.buy(buyer.id, 3).await.expect("buy");
+    client
+        .execute(
+            "UPDATE pots SET draws_at = current_timestamp + interval '2 hours'
+             WHERE status = 'open'",
+            &[],
+        )
+        .await
+        .expect("set the draw two hours out");
+    assert_eq!(
+        first.claim_reminder().await.expect("early sweep"),
+        None,
+        "a pot two hours from its draw gets no reminder"
+    );
+
+    client
+        .execute(
+            "UPDATE pots SET draws_at = current_timestamp + interval '29 minutes 30 seconds'
+             WHERE status = 'open'",
+            &[],
+        )
+        .await
+        .expect("bring the draw close");
+    let pot_id = Pot::find_open(&**client)
+        .await
+        .expect("find")
+        .expect("open pot")
+        .id;
+
+    let (a, b) = tokio::join!(first.claim_reminder(), second.claim_reminder());
+    let claimed: Vec<PotReminder> = [a.expect("first sweep"), b.expect("second sweep")]
+        .into_iter()
+        .flatten()
+        .collect();
+    assert_eq!(
+        claimed,
+        vec![PotReminder {
+            pot_id,
+            size: 3 * POT_TICKET_PRICE,
+            total_tickets: 3,
+            ticket_price: POT_TICKET_PRICE,
+            draws_in_secs: 30 * 60,
+        }]
+    );
 }

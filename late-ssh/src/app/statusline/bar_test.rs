@@ -19,7 +19,7 @@ fn data() -> StatusData<'static> {
         pot_draws_in: Some("3h12m"),
         online_count: 12,
         turns_waiting: 2,
-        pomodoro: Some("12:04 deep work"),
+        presence: Some("12:04 deep work"),
         station_name: Some("chillsynth"),
         station_track: Some("Artist - A Very Long Track Title"),
         quests_open_daily: 1,
@@ -91,7 +91,7 @@ fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
     assert_eq!(
         topbar.map(|setting| setting.component),
         [
-            StatusComponent::Pomodoro,
+            StatusComponent::Status,
             StatusComponent::Voice,
             StatusComponent::Mentions,
             StatusComponent::Pot,
@@ -104,13 +104,45 @@ fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
             .iter()
             .all(|setting| { setting.low_priority == (setting.component == StatusComponent::Pot) })
     );
-    assert!(!StatusComponentSetting::new(StatusComponent::Pomodoro).enabled);
+    assert!(!StatusComponentSetting::new(StatusComponent::Status).enabled);
+}
+
+#[test]
+fn presence_badges_keep_timed_and_open_ended_readings_when_compacted() {
+    use crate::app::common::status::{SessionStatus, Status};
+    let now = chrono::Utc::now();
+    for ends_at in [None, Some(now + chrono::Duration::minutes(25))] {
+        let badge = SessionStatus {
+            status: Status::Building,
+            ends_at,
+        }
+        .hud_badge(now);
+        let data = StatusData {
+            presence: Some(&badge),
+            ..StatusData::default()
+        };
+        let components = [on(StatusComponent::Status, LabelMode::None)];
+        let compact = badge.split_once(' ').unwrap().0;
+        for value in [badge.as_str(), compact] {
+            let expected = format!(" {value} ─");
+            let width = Span::raw(&expected).width() as u16 + 2;
+            let bar = build_status_bar(
+                &components,
+                &data,
+                Placement::TopRight,
+                Rect::new(0, 0, width, 24),
+                0,
+            )
+            .expect("presence fits");
+            assert_eq!(bar.line.to_string(), expected);
+        }
+    }
 }
 
 #[test]
 fn keyboard_shortcuts_keep_their_styled_bottom_left_copy_and_both_compactions() {
     let components = [StatusComponentSetting::new(StatusComponent::Shortcuts)];
-    let area_for = |text: &str| Rect::new(0, 0, text.chars().count() as u16 + 2, 24);
+    let area_for = |text: &str| Rect::new(0, 0, Span::raw(text).width() as u16 + 2, 24);
     let render_in = |area| {
         build_status_bar(&components, &data(), Placement::BottomLeft, area, 0)
             .expect("shortcut bar")
@@ -120,9 +152,9 @@ fn keyboard_shortcuts_keep_their_styled_bottom_left_copy_and_both_compactions() 
             .map(|span| span.content.as_ref())
             .collect::<String>()
     };
-    let full = "─ Settings Ctrl+O · Lobby Ctrl+G · Shop /shop · Guide ? · Exit qq ";
-    let spaced = "─ Settings Ctrl+O  Lobby Ctrl+G  Shop /shop  Guide ?  Exit qq ";
-    let caret = "─ Settings ^O  Lobby ^G  Shop /shop  Guide ?  Exit qq ";
+    let full = "─ Settings Ctrl+O · Lobby Ctrl+G · Zen Ctrl+F · Shop /shop · Guide ? · Exit qq ";
+    let spaced = "─ Settings Ctrl+O  Lobby Ctrl+G  Zen Ctrl+F  Shop /shop  Guide ?  Exit qq ";
+    let caret = "─ Settings ^O  Lobby ^G  Zen ^F  Shop /shop  Guide ?  Exit qq ";
 
     assert_eq!(render_in(area_for(full)), full);
     assert_eq!(render_in(area_for(spaced)), spaced);
@@ -586,7 +618,7 @@ fn click_actions_cover_exactly_the_actionable_components() {
     );
     assert_eq!(click_action(StatusComponent::Time), None);
     assert_eq!(click_action(StatusComponent::Shortcuts), None);
-    assert_eq!(click_action(StatusComponent::Pomodoro), None);
+    assert_eq!(click_action(StatusComponent::Status), None);
     assert_eq!(click_action(StatusComponent::Voice), None);
     assert_eq!(click_action(StatusComponent::Pot), None);
 }

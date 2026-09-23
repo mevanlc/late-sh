@@ -2,13 +2,24 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use late_core::models::account_link;
 use late_core::models::artboard_piece::{ArtboardPiece, GalleryCounts};
-use late_core::models::bonsai::{BonsaiV2Tree, Tree};
+use late_core::models::bonsai::Tree;
 use late_core::models::bonsai_decay_protection::BonsaiDecayProtection;
 use late_core::models::chat_message_gild::{ChatMessageGild, GildCounts};
+use late_core::models::chips::{MonthChips, PROFILE_LEDGER_ROWS, UserChips};
+use late_core::models::crown::CrownReign;
+use late_core::models::drink_round::DrinkRound;
+use late_core::models::game_payout::GamePayout;
 use late_core::models::irc_token::IrcToken;
 use late_core::models::marketplace;
+use late_core::models::media_queue_item::MediaQueueItem;
+use late_core::models::pet::{PetCompanion, PetMood, PetSpecies};
+use late_core::models::pot::Pot;
 use late_core::models::profile::{Profile, ProfileParams};
-use late_core::models::profile_award::{ProfileAward, list_profile_awards_for_user};
+use late_core::models::profile_award::{
+    ProfileAward, find_profile_awards_by_ids, list_profile_awards_for_user,
+};
+use late_core::models::quest;
+use late_core::models::showcase::Showcase;
 use late_core::models::user::{
     FirstContactHitCaps, FirstContactHitClaim, User, sanitize_username_input,
 };
@@ -23,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, oneshot, watch};
 use tracing::{Instrument, info_span};
 
+use crate::app::profile::ledger::{self, LedgerRow, LedgerSources};
 use crate::ircd::registry::IrcRegistry;
 use crate::session::{SessionMessage, SessionRegistry};
 use crate::state::ActiveUsers;
@@ -39,22 +51,38 @@ pub struct ProfileService {
     irc_registry: Option<IrcRegistry>,
 }
 
+/// What a profile shows of a pet: enough to draw it and caption it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfilePet {
+    pub species: PetSpecies,
+    pub mood: PetMood,
+    pub name: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct ProfileSnapshot {
     pub user_id: Option<Uuid>,
     pub profile: Option<Profile>,
     pub chip_balance: Option<i64>,
     pub bonsai: Option<Tree>,
-    pub bonsai_v2: Option<BonsaiV2Tree>,
     pub bonsai_decay_protection: Option<BonsaiDecayProtection>,
-    pub dynamic_bonsai_selected: bool,
     pub aquarium_fish: Vec<(String, usize)>,
+    /// The Pet Companion, for owners only, in the mood its owner's session
+    /// last left it in.
+    pub pet: Option<ProfilePet>,
     pub profile_awards: Vec<ProfileAward>,
     /// Gilds this profile's owner has received, per tier.
     pub gild_counts: GildCounts,
     /// Pieces this profile's owner has hung in the Artboard gallery, and
     /// the applause they gathered.
     pub gallery_counts: GalleryCounts,
+    /// The newest ledger rows, newest first, each with its ref resolved to
+    /// what a reader can use: the public chip audit.
+    pub chip_ledger: Vec<LedgerRow>,
+    /// This UTC month's earned (the board's own figure) and net.
+    pub chips_month: MonthChips,
+    /// Every showcase this profile's owner has posted, newest first.
+    pub showcases: Vec<Showcase>,
 }
 
 #[derive(Clone, Debug)]
@@ -219,14 +247,54 @@ impl ProfileService {
         let client = self.db.get().await?;
         let profile = Profile::load_with_chip_balance(&client, user_id).await?;
         let bonsai = Tree::find_by_user_id(&client, user_id).await?;
-        let bonsai_v2 = BonsaiV2Tree::find_by_user_id(&client, user_id).await?;
         let bonsai_decay_protection = BonsaiDecayProtection::for_user(&client, user_id).await?;
-        let dynamic_bonsai_selected =
-            marketplace::is_dynamic_bonsai_selected(&client, user_id).await?;
-        let aquarium_fish = marketplace::active_aquarium_fish_for_user(&client, user_id).await?;
+        let aquarium_fish =
+            marketplace::active_aquarium_creatures_for_user(&client, user_id).await?;
+        let pet = if marketplace::user_owns_pet_companion(&**client, user_id).await? {
+            PetCompanion::find_by_user_id(&client, user_id)
+                .await?
+                .map(|row| ProfilePet {
+                    species: row.species(),
+                    mood: row.mood(),
+                    name: row.name.clone(),
+                })
+        } else {
+            None
+        };
         let profile_awards = list_profile_awards_for_user(&client, user_id).await?;
         let gild_counts = ChatMessageGild::counts_for_author(&client, user_id).await?;
         let gallery_counts = ArtboardPiece::counts_for_user(&client, user_id).await?;
+        let chip_ledger = UserChips::recent_ledger(&client, user_id, PROFILE_LEDGER_ROWS).await?;
+        let chips_month = UserChips::month_figures(&client, user_id).await?;
+        let showcases = Showcase::list_by_user_id(&client, user_id).await?;
+        // One batched lookup per table the ledger's refs point at, each a
+        // primary-key or unique-index scan over at most PROFILE_LEDGER_ROWS
+        // ids, and only when a profile is opened.
+        let refs = ledger::refs(&chip_ledger);
+        let gilds = ChatMessageGild::parties_for_refs(&client, &refs.gilds).await?;
+        let payouts = GamePayout::sources_for_ids(&client, &refs.payouts).await?;
+        let deposed = CrownReign::deposed_for_reigns(&client, &refs.reigns).await?;
+        let pots = Pot::find_by_ids(&**client, &refs.pots).await?;
+        let quests = quest::assignment_titles(&**client, &refs.quests).await?;
+        let awards = find_profile_awards_by_ids(&client, &refs.awards).await?;
+        let rounds = DrinkRound::find_by_ids(&client, &refs.rounds).await?;
+        let songs = MediaQueueItem::titles_for_video_ids(&client, &refs.videos).await?;
+        let named_ids = ledger::named_user_ids(&refs, &gilds, &deposed);
+        let usernames = User::list_usernames_by_ids(&client, &named_ids).await?;
+        let chip_ledger = ledger::resolve(
+            chip_ledger,
+            &LedgerSources {
+                gilds,
+                payouts,
+                deposed,
+                pots,
+                quests,
+                awards,
+                rounds,
+                songs,
+                usernames,
+            },
+        );
         self.publish_snapshot(
             user_id,
             ProfileSnapshot {
@@ -234,13 +302,15 @@ impl ProfileService {
                 profile: Some(profile.profile),
                 chip_balance: Some(profile.chip_balance),
                 bonsai,
-                bonsai_v2,
                 bonsai_decay_protection,
-                dynamic_bonsai_selected,
                 aquarium_fish,
+                pet,
                 profile_awards,
                 gild_counts,
                 gallery_counts,
+                chip_ledger,
+                chips_month,
+                showcases,
             },
         )?;
         Ok(())
@@ -534,23 +604,23 @@ impl ProfileService {
         );
     }
 
-    /// Fire-and-forget: persist whether the aquarium tray is open so the
-    /// next session starts in the same state. No event on success; a failure
-    /// is only logged (the tray would simply start closed next session).
-    pub fn set_show_aquarium_tray(&self, user_id: Uuid, shown: bool) {
+    /// Fire-and-forget: persist the Zen page's layout JSON. A failure is
+    /// only logged (the page would start from its last stored layout next
+    /// session).
+    pub fn set_zen_layout(&self, user_id: Uuid, layout: serde_json::Value) {
         let service = self.clone();
         tokio::spawn(
             async move {
                 let result = async {
                     let client = service.db.get().await?;
-                    User::set_show_aquarium_tray(&client, user_id, shown).await
+                    User::set_zen_layout(&client, user_id, &layout).await
                 }
                 .await;
                 if let Err(e) = result {
-                    tracing::warn!(error = ?e, "failed to persist aquarium tray state");
+                    tracing::warn!(error = ?e, "failed to persist zen layout");
                 }
             }
-            .instrument(info_span!("profile.show_aquarium_tray_task", user_id = %user_id)),
+            .in_current_span(),
         );
     }
 

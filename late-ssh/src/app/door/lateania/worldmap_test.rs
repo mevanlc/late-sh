@@ -1,6 +1,6 @@
 use super::{
-    Coord, MAX_VIEWPORT_COLS, MapCamera, PAN_LIMIT, collisions, derive_bounds, derive_coords,
-    dump_level, visible, zone_interleaves,
+    Climb, Coord, MAX_VIEWPORT_COLS, MapCamera, PAN_LIMIT, TrackAim, collisions, derive_bounds,
+    derive_coords, dump_level, visible, zone_interleaves,
 };
 use crate::app::door::lateania::world::{RoomId, region_atlas_entry, seed_world};
 
@@ -961,9 +961,8 @@ fn a_room_with_a_way_down_shows_a_stair_on_the_map() {
         .collect();
     assert_eq!(
         stairs,
-        vec!['\u{25be}'],
-        "a room with both ways reads as one ▾: down is the way onward, and the \
-         exits line carries the up"
+        vec!['\u{21d5}'],
+        "a room with both ways reads as one two-headed ⇕ in its corner cell"
     );
 }
 
@@ -1127,7 +1126,8 @@ fn quest_arrows_stay_honest_across_reserved_blocks() {
         "test premise: the Frontier target lies beyond the pan range"
     );
 
-    let (arrows, beyond) = super::quest_arrows(&coords, center, cols, rows, &[near, far]);
+    let visited = std::collections::HashSet::from([world.start_room]);
+    let (arrows, beyond) = super::quest_arrows(&coords, center, cols, rows, &[near, far], &visited);
     assert_eq!(beyond, 1, "the cross-block target is counted, not drawn");
     for a in &arrows {
         assert!(a.row < rows as usize && a.col < cols as usize);
@@ -1176,4 +1176,175 @@ fn the_land_graph_is_read_off_the_room_graph_and_covers_every_region() {
     assert_eq!(links["Aelunor, the Faewood"], vec!["Silvael"]);
     assert!(links["Silvael"].contains(&"The Overworld & Capitals"));
     assert!(!links["The Overworld & Capitals"].contains(&"Aelunor, the Faewood"));
+}
+
+// A target on another floor has no flat direction of its own, so the tracked
+// arrow aims at the stair that actually leads there. From the Sunken Citadel's
+// Orrery Vault the Archdemon's throne is one cell away in the plane but a
+// floor down, and the way there is the Obsidian Descent, two rooms north.
+#[test]
+fn track_aim_names_the_stair_on_the_shortest_path() {
+    let world = seed_world();
+    let throne = world
+        .spawns
+        .iter()
+        .find(|s| s.name == "the Archdemon Mal'gareth")
+        .expect("the archdemon spawns")
+        .home;
+    let (vault, descent, threshold) = (102, 105, 106);
+    assert!(world.rooms[&vault].name.contains("Orrery Vault"));
+    assert!(world.rooms[&descent].name.contains("Obsidian Descent"));
+    let stair = Some(TrackAim::Stair {
+        room: descent,
+        climb: Climb::Down,
+    });
+
+    assert_eq!(super::track_aim(vault, throne), stair);
+    assert_eq!(
+        super::track_aim(descent, throne),
+        stair,
+        "standing on the stair names the room underfoot"
+    );
+    assert_eq!(
+        super::track_aim(threshold, throne),
+        Some(TrackAim::Target),
+        "a walk that stays on this floor aims at the target itself"
+    );
+}
+
+// A flat exit into another reserved block leaves the land just as a stair
+// leaves the floor, so the arrow stops at the room it leaves from.
+#[test]
+fn track_aim_stops_at_a_flat_crossing_into_another_land() {
+    let world = seed_world();
+    let coords = derive_coords(&world);
+    let mut ids: Vec<RoomId> = world.rooms.keys().copied().collect();
+    ids.sort_unstable();
+    let (from, into) = ids
+        .iter()
+        .flat_map(|id| {
+            world.rooms[id]
+                .exits
+                .iter()
+                .map(move |(dir, to)| (*id, *dir, *to))
+        })
+        .find(|(id, dir, to)| {
+            let (a, b) = (coords[id], coords[to]);
+            dir.delta_2d().is_some()
+                && ((a.x - b.x).abs() > super::PAN_LIMIT || (a.y - b.y).abs() > super::PAN_LIMIT)
+        })
+        .map(|(id, _, to)| (id, to))
+        .expect("test premise: some flat exit crosses into another land");
+
+    assert_eq!(
+        super::track_aim(from, into),
+        Some(TrackAim::Crossing { room: from })
+    );
+}
+
+// Any destination can be tracked, however far: wherever the walk goes, the
+// arrow's aim lies on the player's floor and within the pan range, the only
+// place a direction means anything.
+#[test]
+fn track_aim_always_aims_inside_the_players_land() {
+    let world = seed_world();
+    let coords = derive_coords(&world);
+    let start = world.start_room;
+    let here = coords[&start];
+    let mut homes: Vec<RoomId> = world.spawns.iter().map(|s| s.home).collect();
+    homes.sort_unstable();
+    homes.dedup();
+    let mut far = 0;
+    for dest in homes.into_iter().step_by(25) {
+        let aim = match super::track_aim(start, dest) {
+            None => continue, // a waystone-only land
+            Some(TrackAim::Target) => dest,
+            Some(TrackAim::Stair { room, .. }) | Some(TrackAim::Crossing { room }) => {
+                far += 1;
+                room
+            }
+        };
+        let c = coords[&aim];
+        assert!(
+            c.z == here.z
+                && (c.x - here.x).abs() <= super::PAN_LIMIT
+                && (c.y - here.y).abs() <= super::PAN_LIMIT,
+            "aim {aim} for {dest} is outside the start's land: {c:?} vs {here:?}"
+        );
+    }
+    assert!(
+        far > 0,
+        "test premise: some destinations lie beyond the start's land"
+    );
+}
+
+// A tracked destination inside the viewport but never walked gets an arrow:
+// the canvas leaves an unvisited room in fog, so nothing else would mark it.
+// The whole Sunken Catacombs is one flat 12x8 grid, always on screen, which
+// is exactly where a player tracking the Bonewright Lich needs it.
+#[test]
+fn a_tracked_room_still_in_fog_gets_an_arrow_even_on_screen() {
+    use std::collections::HashSet;
+    let world = seed_world();
+    let coords = derive_coords(&world);
+    let lich = world
+        .spawns
+        .iter()
+        .find(|s| s.name == "The Bonewright Lich")
+        .expect("the lich spawns")
+        .home;
+    let mouth: RoomId = 5000;
+    assert!(world.rooms[&mouth].name.contains("Mouth of the Crypt"));
+
+    // A roomy terminal: the whole maze fits with cells to spare.
+    let (cols, rows) = (150, 50);
+    let center = coords[&mouth];
+    let c = coords[&lich];
+    assert!(
+        (0..cols).contains(&(cols / 2 + 2 * (c.x - center.x)))
+            && (0..rows).contains(&(rows / 2 + 2 * (c.y - center.y))),
+        "test premise: the lich's room lies inside the viewport"
+    );
+
+    // Standing at the mouth, with nothing below it walked yet.
+    let visited: HashSet<RoomId> = HashSet::from([mouth]);
+    let (arrows, beyond) = super::quest_arrows(&coords, center, cols, rows, &[lich], &visited);
+    assert_eq!(beyond, 0, "the lich lies in the player's own land");
+    assert_eq!(
+        arrows.len(),
+        1,
+        "a tracked room still in fog gets a direction arrow"
+    );
+    assert!(
+        "\u{2190}\u{2191}\u{2192}\u{2193}\u{2196}\u{2197}\u{2198}\u{2199}"
+            .contains(arrows[0].glyph)
+    );
+
+    // Once it is walked the canvas draws the flag itself, so the arrow stops.
+    let visited: HashSet<RoomId> = HashSet::from([mouth, lich]);
+    let (arrows, _) = super::quest_arrows(&coords, center, cols, rows, &[lich], &visited);
+    assert!(
+        arrows.is_empty(),
+        "a walked room on screen is the canvas's own job"
+    );
+}
+
+// Panning the crosshair onto a fogged tracked room (e.g. right after marking
+// it with `x`) leaves no direction to point: the crosshair already marks the
+// cell, so no arrow is drawn there.
+#[test]
+fn a_tracked_room_under_the_crosshair_gets_no_arrow() {
+    use std::collections::HashSet;
+    let world = seed_world();
+    let coords = derive_coords(&world);
+    let lich = world
+        .spawns
+        .iter()
+        .find(|s| s.name == "The Bonewright Lich")
+        .expect("the lich spawns")
+        .home;
+    let visited: HashSet<RoomId> = HashSet::from([5000]);
+    let (arrows, beyond) = super::quest_arrows(&coords, coords[&lich], 150, 50, &[lich], &visited);
+    assert_eq!(beyond, 0);
+    assert!(arrows.is_empty(), "got {arrows:?}");
 }

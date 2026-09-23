@@ -324,40 +324,27 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         initial_solitaire_games,
         initial_minesweeper_games,
     } = load_arcade_session_preloads(state, user_id).await;
-    let (initial_bonsai_tree, initial_bonsai_care, initial_bonsai_decay_protection) =
-        match state.bonsai_service.ensure_tree_with_care(user_id).await {
-            Ok((tree, care, protection)) => (Some(tree), Some(care), protection),
-            Err(e) => {
-                tracing::warn!(error = ?e, "failed to load/create bonsai tree");
-                (None, None, None)
-            }
-        };
-    let shop_snapshot_rx = state.shop_service.subscribe_snapshot(user_id);
-    let shop_snapshot = match state.shop_service.refresh_user(user_id).await {
-        Ok(snapshot) => Some(snapshot),
+    let initial_bonsai_tree = match state.bonsai_service.ensure_tree(user_id).await {
+        Ok(tree) => Some(tree),
         Err(e) => {
-            tracing::warn!(error = ?e, "failed to refresh shop snapshot");
+            tracing::warn!(error = ?e, "failed to load/create bonsai tree");
             None
         }
     };
-    let initial_bonsai_v2_tree = if shop_snapshot
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.entitlements.has_dynamic_bonsai())
+    let initial_bonsai_decay_protection = match state.bonsai_service.decay_protection(user_id).await
     {
-        match state
-            .bonsai_service
-            .ensure_v2_tree(user_id, initial_bonsai_tree.as_ref())
-            .await
-        {
-            Ok(tree) => Some(tree),
-            Err(e) => {
-                tracing::warn!(error = ?e, "failed to load/create bonsai v2 tree");
-                None
-            }
+        Ok(protection) => protection,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to load bonsai decay protection");
+            None
         }
-    } else {
-        None
     };
+    let shop_snapshot_rx = state.shop_service.subscribe_snapshot(user_id);
+    // Primes the per-user snapshot channel subscribed above; the session
+    // reads everything it needs from that channel.
+    if let Err(e) = state.shop_service.refresh_user(user_id).await {
+        tracing::warn!(error = ?e, "failed to refresh shop snapshot");
+    }
     let initial_chip_balance = match state.chip_service.ensure_chips(user_id).await {
         Ok(chips) => chips.balance,
         Err(e) => {
@@ -365,11 +352,18 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
             0
         }
     };
-    let initial_pet = match state.pet_service.ensure_cat(user_id).await {
-        Ok(cat) => Some(cat),
+    let initial_pet = match state.pet_service.ensure_pet(user_id).await {
+        Ok(pet) => Some(pet),
         Err(e) => {
-            tracing::warn!(error = ?e, "failed to load/create cat companion");
+            tracing::warn!(error = ?e, "failed to load/create pet companion");
             None
+        }
+    };
+    let initial_aquarium_care = match state.aquarium_service.bootstrap(user_id).await {
+        Ok(care) => care,
+        Err(e) => {
+            tracing::warn!(error = ?e, "failed to load aquarium care");
+            Default::default()
         }
     };
     let quest_snapshot_rx = state.quest_service.subscribe_snapshot(user_id);
@@ -396,26 +390,8 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
             None
         }
     };
-    // The door: the next of last month's podium pieces this account has
-    // not seen, or the cup. One claim per login, the gallery logs its
-    // own failures.
-    let splash_piece = state.gallery_service.claim_splash_piece(user_id).await;
-    let initial_announcements = match state.db.get().await {
-        Ok(client) => {
-            match crate::app::announcements::load_login_announcements(&client, user_id).await {
-                Ok(announcements) => announcements,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "failed to load login announcements");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = ?e, "failed to get db client for login announcements");
-            None
-        }
-    };
-
+    // The door: the day's wall piece, or the cup.
+    let splash_piece = state.gallery_service.splash_piece();
     let initial_door_rcs = match state.door_rc_service.list(user_id).await {
         Ok(rcs) => rcs,
         Err(e) => {
@@ -446,6 +422,7 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         translation_service: state.translation_service.clone(),
         summary_service: state.summary_service.clone(),
         paper_service: state.paper_service.clone(),
+        jobs_service: state.jobs_service.clone(),
         notification_service: state.notification_service.clone(),
         article_service: state.article_service.clone(),
         feed_service: state.feed_service.clone(),
@@ -496,11 +473,11 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         username: user.username.clone(),
         bonsai_service: state.bonsai_service.clone(),
         initial_bonsai_tree,
-        initial_bonsai_care,
-        initial_bonsai_v2_tree,
         initial_bonsai_decay_protection,
         pet_service: state.pet_service.clone(),
         initial_pet,
+        aquarium_service: state.aquarium_service.clone(),
+        initial_aquarium_care,
         quest_service: state.quest_service.clone(),
         quest_snapshot_rx,
         shop_service: state.shop_service.clone(),
@@ -561,6 +538,8 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         radio_meta_rx: Some(state.radio_meta_rx.clone()),
         active_users: Some(state.active_users.clone()),
         clubhouse_lobby: Some(state.clubhouse_lobby.clone()),
+        nightcap_lobby: Some(state.nightcap_lobby.clone()),
+        nightcap_house: Some(state.nightcap_house.clone()),
         mention_ladders: state.mention_ladders.clone(),
         files: state.config.files.clone(),
         scratchpad_registry: Some(state.scratchpad_registry.clone()),
@@ -574,22 +553,20 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         app_flags_rx: state.app_flags.subscribe(),
         app_flags: Some(state.app_flags.clone()),
         runner_looks_rx: state.runner_looks.subscribe(),
-        show_aquarium_tray: late_core::models::user::extract_show_aquarium_tray(&user.settings),
-        afk_users: state.afk_users.clone(),
+        zen_layout: late_core::models::user::extract_zen_layout(&user.settings),
         username_directory: Some(state.username_directory.clone()),
         flair_directory: Some(state.flair_directory.clone()),
-        pomodoro_directory: Some(state.pomodoro_directory.clone()),
+        status_directory: Some(state.status_directory.clone()),
         crown_service: Some(state.crown_service.clone()),
         pot_service: Some(state.pot_service.clone()),
         activity_feed_rx,
-        initial_announcements,
         user_id,
         permissions,
         artboard_banned: artboard_ban.is_some(),
         artboard_ban_expires_at: artboard_ban.and_then(|ban| ban.expires_at),
         leaderboard_rx: Some(state.leaderboard_service.subscribe()),
         is_new_user,
-        land_on_home: late_core::models::user::extract_land_on_home(&user.settings),
+        landing_page: late_core::models::user::extract_landing_page(&user.settings),
         paper_at_login: late_core::models::user::extract_paper_at_login(&user.settings),
         initial_theme_id: late_core::models::user::extract_theme_id(&user.settings)
             .unwrap_or_else(|| theme::DEFAULT_ID.to_string()),

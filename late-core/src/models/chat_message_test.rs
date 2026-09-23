@@ -2,12 +2,12 @@ use uuid::Uuid;
 
 use crate::{
     models::{
-        chat_message::{ChatMessage, ChatMessageParams, escape_like_pattern},
+        chat_message::{ChatMessage, ChatMessageParams, HistoryDirection, escape_like_pattern},
         chat_message_reaction::{ChatMessageReaction, ChatMessageReactionAction},
         chat_room::ChatRoom,
         user::{User, UserParams},
     },
-    test_utils::test_db,
+    test_utils::{create_test_user, test_db},
 };
 
 #[test]
@@ -330,7 +330,6 @@ async fn search_and_context_exclude_replies_to_ignored_users() {
 /// back empty rather than with content.
 #[tokio::test]
 async fn history_pages_admit_public_rooms_but_not_private_ones_to_non_members() {
-    use crate::models::chat_message::HistoryDirection;
     use crate::models::chat_room_member::ChatRoomMember;
 
     let test_db = test_db().await;
@@ -404,7 +403,6 @@ async fn history_pages_admit_public_rooms_but_not_private_ones_to_non_members() 
 /// a `created`-only cursor gets wrong.
 #[tokio::test]
 async fn history_pages_walk_the_room_without_gaps_or_repeats() {
-    use crate::models::chat_message::HistoryDirection;
     use crate::models::chat_room_member::ChatRoomMember;
 
     let test_db = test_db().await;
@@ -718,4 +716,157 @@ async fn first_unread_after_finds_the_oldest_foreign_message_past_the_cutoff() {
             .await
             .unwrap();
     assert!(none.is_none());
+}
+
+#[tokio::test]
+async fn list_public_room_between_with_author_reads_the_window_oldest_first_for_everyone() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+
+    let room = ChatRoom::find_non_dm_by_slug(&client, "announcements")
+        .await
+        .expect("find announcements")
+        .expect("announcements room");
+    let admin = User::create(
+        &client,
+        UserParams {
+            fingerprint: "between-admin".to_string(),
+            username: "betweenadmin".to_string(),
+            settings: serde_json::json!({}),
+        },
+    )
+    .await
+    .unwrap();
+    let floor = chrono::Utc::now() - chrono::Duration::days(1);
+    let ceiling = chrono::Utc::now() + chrono::Duration::minutes(1);
+    let base = chrono::Utc::now() - chrono::Duration::hours(2);
+    for (index, body) in ["before the window", "first", "second"]
+        .into_iter()
+        .enumerate()
+    {
+        let message = ChatMessage::create(
+            &client,
+            ChatMessageParams {
+                room_id: room.id,
+                user_id: admin.id,
+                body: body.to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let created = if index == 0 {
+            floor - chrono::Duration::hours(1)
+        } else {
+            base + chrono::Duration::seconds(index as i64)
+        };
+        client
+            .execute(
+                "UPDATE chat_messages SET created = $2 WHERE id = $1",
+                &[&message.id, &created],
+            )
+            .await
+            .unwrap();
+    }
+
+    // No viewer: the author's own posts come back too, and the message
+    // before the window does not.
+    let page =
+        ChatMessage::list_public_room_between_with_author(&client, room.id, floor, ceiling, 10)
+            .await
+            .unwrap();
+    assert_eq!(
+        page.iter()
+            .map(|message| (message.author.as_str(), message.body.as_str()))
+            .collect::<Vec<_>>(),
+        vec![("betweenadmin", "first"), ("betweenadmin", "second")]
+    );
+
+    // The cap keeps the newest, still handed back oldest first.
+    let capped =
+        ChatMessage::list_public_room_between_with_author(&client, room.id, floor, ceiling, 1)
+            .await
+            .unwrap();
+    assert_eq!(capped.len(), 1);
+    assert_eq!(capped[0].body, "second");
+
+    // A private room never comes back, whatever the window.
+    let private = ChatRoom::create_private_room(&client, "between-secret", admin.id)
+        .await
+        .unwrap();
+    ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: private.id,
+            user_id: admin.id,
+            body: "secret".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+    let hidden =
+        ChatMessage::list_public_room_between_with_author(&client, private.id, floor, ceiling, 10)
+            .await
+            .unwrap();
+    assert!(hidden.is_empty());
+}
+
+/// The bar out back (`chat_room::HIDDEN_ROOM_KINDS`) seats every account,
+/// so membership is no gate there. Neither the cross-room search nor the
+/// history pager may read it: what is said at the bar is only ever seen
+/// from its own screen.
+#[tokio::test]
+async fn search_and_history_never_read_a_hidden_room() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    // Accounts first, then the ensure: its backfill seats both of them,
+    // so the viewer is a member and membership alone would let them read.
+    let patron = create_test_user(&test_db.db, "hidden-patron").await;
+    let viewer = create_test_user(&test_db.db, "hidden-viewer").await;
+    let bar = ChatRoom::ensure_nightcap(&client)
+        .await
+        .expect("ensure nightcap");
+
+    let said = ChatMessage::create(
+        &client,
+        ChatMessageParams {
+            room_id: bar.id,
+            user_id: patron.id,
+            body: "nightcap secret handshake".to_string(),
+        },
+    )
+    .await
+    .expect("say it at the bar");
+
+    let hits = ChatMessage::search_for_user(&client, viewer.id, "secret handshake", None, &[], 50)
+        .await
+        .expect("search");
+    assert!(hits.is_empty(), "search surfaced the bar: {hits:?}");
+
+    let page = ChatMessage::list_page_for_viewer(
+        &client,
+        bar.id,
+        viewer.id,
+        None,
+        HistoryDirection::Older,
+        &[],
+        10,
+    )
+    .await
+    .expect("page");
+    assert!(page.is_empty(), "history paged the bar: {page:?}");
+    assert!(
+        ChatMessage::list_page_for_viewer(
+            &client,
+            bar.id,
+            patron.id,
+            Some((said.created, said.id)),
+            HistoryDirection::Newer,
+            &[],
+            10,
+        )
+        .await
+        .expect("page newer")
+        .is_empty(),
+        "the speaker gets no scrollback either"
+    );
 }

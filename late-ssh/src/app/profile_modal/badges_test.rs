@@ -5,16 +5,16 @@
 //! what happened when A Dark Room's second ending was added.
 
 use late_core::models::profile_award::{
-    CROWN_AWARD_CATEGORY, MILESTONE_AWARD_CATEGORIES, award_badge,
+    MILESTONE_AWARD_CATEGORIES, SINGLE_HOLDER_AWARD_CATEGORIES, award_badge,
 };
 
 /// Every badge granted outside the ranked monthly boards. The milestones are
-/// one list already; the crown is monthly but rankless, and it is documented
-/// in the same two places, so it is checked alongside them.
+/// one list already; the single-holder monthly awards (the crown, Late Time)
+/// are documented in the same two places, so they are checked alongside them.
 fn undocumentable_badges() -> Vec<String> {
     MILESTONE_AWARD_CATEGORIES
         .iter()
-        .chain(std::iter::once(&CROWN_AWARD_CATEGORY))
+        .chain(SINGLE_HOLDER_AWARD_CATEGORIES.iter())
         .map(|category| award_badge(category, 1))
         .collect()
 }
@@ -94,7 +94,7 @@ fn every_award_is_listed() {
         })
         .collect();
 
-    let rendered: String = badges::badge_lines(&awards)
+    let rendered: String = badges::badge_lines(&awards, 200)
         .iter()
         .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
         .collect();
@@ -110,4 +110,51 @@ fn every_award_is_listed() {
         !rendered.contains("more"),
         "badges were truncated: {rendered}"
     );
+}
+
+/// Every badge is listed however many there are: the rows wrap to the
+/// width, and nothing is folded into a "+N more".
+#[test]
+fn badge_lines_wrap_to_the_width_and_keep_every_badge() {
+    use chrono::{NaiveDate, Utc};
+    use late_core::models::profile_award::ProfileAward;
+    use uuid::Uuid;
+
+    let awards: Vec<ProfileAward> = (0..12)
+        .map(|index| ProfileAward {
+            id: Uuid::now_v7(),
+            user_id: Uuid::now_v7(),
+            category: "artboard".to_string(),
+            period_month: NaiveDate::from_ymd_opt(2025, 1 + (index % 12) as u32, 1)
+                .expect("valid month"),
+            rank: 1,
+            score_value: 0,
+            awarded_at: Utc::now(),
+        })
+        .collect();
+    let width = 40;
+    let lines = badges::badge_lines(&awards, width);
+    assert!(
+        lines.len() > 1,
+        "twelve badges do not fit one 40-column row"
+    );
+    for line in &lines {
+        let text: String = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect();
+        assert!(
+            text.chars().count() <= width,
+            "a badge row overflows the width: {text:?}"
+        );
+    }
+    let rendered: String = lines
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect();
+    for award in &awards {
+        let badge = format!("[{} {}]", award.badge(), award.month_label());
+        assert!(rendered.contains(&badge), "{badge} was folded away");
+    }
 }

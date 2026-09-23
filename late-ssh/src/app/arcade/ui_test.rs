@@ -41,7 +41,7 @@ fn sliding_puzzle_uses_its_user_facing_title() {
 async fn sliding_puzzle_card_renders_rewards_and_launches() {
     use crate::{
         app::common::primitives::Screen,
-        test_helpers::{make_app, new_test_db, render_plain},
+        test_helpers::{make_app, new_test_db, render_plain, strip_ansi},
     };
     use late_core::{
         models::{user::RightSidebarMode, user_ssh_key::KeyLayout},
@@ -61,16 +61,20 @@ async fn sliding_puzzle_card_renders_rewards_and_launches() {
 
     let lobby = render_plain(&mut app);
     assert!(lobby.contains("Sliding Puzzle"));
-    assert!(lobby.contains("Slide numbered tiles into order."));
+    assert!(lobby.contains("Slide tiles into order by number or image."));
     assert!(lobby.contains("✗100✗250✗500"));
 
     app.handle_input(b"\r");
     assert!(app.is_playing_game);
+    // The art view is the default; an empty gallery backlog says so and
+    // keeps the numbered tiles playable.
+    app.sliding_puzzle_state
+        .set_art_for_test(crate::app::arcade::sliding_puzzle::svc::ArtLoad::Empty);
     let launched = render_plain(&mut app);
-    assert!(
-        launched.contains("Slide a tile into the gap: direction key or click."),
-        "{launched}"
-    );
+    assert!(launched.contains("No gallery art yet"), "{launched}");
+    app.handle_input(b"i");
+    let numbered = render_plain(&mut app);
+    assert!(numbered.contains("Numbered tiles."), "{numbered}");
 
     app.handle_input(b"]");
     app.resize(120, 30).expect("resize wide game terminal");
@@ -80,6 +84,7 @@ async fn sliding_puzzle_card_renders_rewards_and_launches() {
     assert!(game.contains("500 chips"));
     assert!(game.contains("hjkl"), "{game}");
     assert!(game.contains("[]change diff"), "{game}");
+    assert!(game.contains("iart"), "{game}");
     assert!(game.contains("n/rnew/reset"), "{game}");
     assert!(game.contains("d/pdaily/personal"), "{game}");
     assert!(game.contains("qexit"));
@@ -89,7 +94,8 @@ async fn sliding_puzzle_card_renders_rewards_and_launches() {
     app.resize(80, 24).expect("resize narrow game terminal");
     let narrow = render_plain(&mut app);
     assert!(narrow.contains("hjkl"), "{narrow}");
-    assert!(narrow.contains("[]change diff"), "{narrow}");
+    assert!(narrow.contains("[]diff"), "{narrow}");
+    assert!(narrow.contains("iart"), "{narrow}");
     assert!(narrow.contains("rreset"), "{narrow}");
     assert!(narrow.contains("d/pmode"), "{narrow}");
     assert!(narrow.contains("qexit"), "{narrow}");
@@ -97,6 +103,68 @@ async fn sliding_puzzle_card_renders_rewards_and_launches() {
     // too-small fallback would satisfy every key hint above it.
     assert!(narrow.contains("│24│"), "{narrow}");
     assert!(!narrow.contains("Terminal too small"), "{narrow}");
+
+    // Back to the art view: a failed load keeps the numbered tiles and says
+    // how to retry; a landed piece replaces them, credited under the grid.
+    app.handle_input(b"i");
+    app.sliding_puzzle_state
+        .set_art_for_test(crate::app::arcade::sliding_puzzle::svc::ArtLoad::Failed);
+    app.reset_render();
+    let failed_art = strip_ansi(&String::from_utf8_lossy(
+        &app.render().expect("render failed art view"),
+    ));
+    assert!(
+        failed_art.contains("Art unavailable; i twice to retry."),
+        "{failed_art}"
+    );
+    assert!(failed_art.contains("│24│"), "{failed_art}");
+
+    let mut canvas = dartboard_core::Canvas::with_size(12, 4);
+    for y in 0..4 {
+        for x in 0..12 {
+            canvas.set(dartboard_core::Pos { x, y }, '#');
+        }
+    }
+    app.sliding_puzzle_state.set_art_for_test(
+        crate::app::arcade::sliding_puzzle::svc::ArtLoad::Featured(
+            crate::app::arcade::sliding_puzzle::art::PuzzleArt {
+                title: "sunset".to_string(),
+                username: "painter".to_string(),
+                canvas,
+                width: 12,
+                height: 4,
+            },
+        ),
+    );
+    let mut unsolved = (1..=24).chain(std::iter::once(0)).collect::<Vec<_>>();
+    unsolved.swap(0, 1);
+    app.sliding_puzzle_state.set_board_for_test(
+        late_core::models::chips::Difficulty::Hard,
+        unsolved,
+        1,
+    );
+    app.reset_render();
+    let ready_art = strip_ansi(&String::from_utf8_lossy(
+        &app.render().expect("render ready art view"),
+    ));
+    assert!(ready_art.contains("############"), "{ready_art}");
+    assert!(ready_art.contains("sunset by @painter"), "{ready_art}");
+    assert!(!ready_art.contains("│24│"), "{ready_art}");
+
+    let solved = (1..=24).chain(std::iter::once(0)).collect();
+    app.sliding_puzzle_state.set_board_for_test(
+        late_core::models::chips::Difficulty::Hard,
+        solved,
+        2,
+    );
+    app.reset_render();
+    let solved_art = strip_ansi(&String::from_utf8_lossy(
+        &app.render().expect("render solved art view"),
+    ));
+    assert!(solved_art.contains("SOLVED"), "{solved_art}");
+
+    app.handle_input(b"I");
+    assert!(render_plain(&mut app).contains("Numbered tiles."));
 
     app.handle_input(b"p");
     let personal = render_plain(&mut app);

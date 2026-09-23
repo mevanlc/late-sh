@@ -17,6 +17,24 @@ fn find(
 }
 
 #[test]
+fn saved_pomodoro_options_follow_the_unified_status_component() {
+    let components = parse_statusline_components(&[json!({
+        "key": "pomodoro", "enabled": true, "label": "icon", "auto_hide": false, "low_priority": false
+    })]);
+    let status = find(&components, StatusComponent::Status);
+    assert!(status.enabled);
+    assert_eq!(status.label, LabelMode::Icon);
+    assert!(!status.auto_hide);
+    assert!(!status.low_priority);
+    let stored = statusline_components_json(&components);
+    assert_eq!(stored[1]["key"], "status");
+    assert_eq!(
+        parse_statusline_components(stored.as_array().unwrap()),
+        components
+    );
+}
+
+#[test]
 fn default_list_covers_every_component_exactly_once() {
     let defaults = default_statusline_components();
     assert_eq!(defaults.len(), STATUS_COMPONENT_COUNT);

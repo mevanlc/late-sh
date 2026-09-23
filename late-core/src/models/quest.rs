@@ -1,5 +1,5 @@
 use std::{
-    collections::hash_map::DefaultHasher,
+    collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
 };
 
@@ -172,16 +172,6 @@ pub struct QuestProgressOutcome {
 pub struct DailyQuestStreakReward {
     pub bonus_level: i32,
     pub reward_chips: i64,
-}
-
-pub async fn listen_for_quest_changes(client: &Client) -> Result<()> {
-    client
-        .batch_execute(&format!(
-            "LISTEN {QUEST_USER_CHANGED_CHANNEL};
-             LISTEN {QUEST_ASSIGNMENTS_CHANGED_CHANNEL};"
-        ))
-        .await?;
-    Ok(())
 }
 
 pub fn daily_period(date: NaiveDate) -> (NaiveDate, NaiveDate) {
@@ -401,6 +391,30 @@ fn weighted_pick<'a>(
         roll -= weight;
     }
     pool.first().copied()
+}
+
+/// The title of the quest behind each assignment id, keyed by id: one
+/// primary-key scan joined to its template. Ids matching nothing are absent.
+pub async fn assignment_titles(
+    client: &impl GenericClient,
+    ids: &[Uuid],
+) -> Result<HashMap<Uuid, String>> {
+    if ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = client
+        .query(
+            "SELECT a.id, t.title
+             FROM quest_assignments a
+             JOIN reward_templates t ON t.id = a.template_id
+             WHERE a.id = ANY($1)",
+            &[&ids],
+        )
+        .await?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.get("id"), row.get("title")))
+        .collect())
 }
 
 pub async fn list_active_snapshot_rows(
@@ -755,7 +769,7 @@ async fn credit_chip_reward(
     chip_move: ChipMove,
     source_ref: &str,
 ) -> Result<()> {
-    match UserChips::apply(client, user_id, chip_move, amount, Some(source_ref)).await? {
+    match UserChips::apply(client, user_id, chip_move, amount, source_ref).await? {
         Some(_) => Ok(()),
         None => anyhow::bail!("quest chip credit returned no row"),
     }

@@ -1,16 +1,15 @@
 use std::collections::HashSet;
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone, Utc};
 use late_core::models::paper::{
     PaperEdition, PaperRoomPage, PaperSection, PaperSectionKind, PaperStatus,
 };
 use uuid::Uuid;
 
 use super::{
-    PAPER_ELSEWHERE_LIMIT, PaperCommand, PaperInk, PaperLayout, PaperLine, PaperWall, lay_out,
-    parse_paper_command,
+    PAPER_ELSEWHERE_LIMIT, PaperAnnouncement, PaperCommand, PaperLayout, PaperLine, PaperWork,
+    lay_out, parse_paper_command,
 };
-use crate::app::artboard::gallery::ui::PaintRun;
 
 fn page(
     id: u128,
@@ -99,9 +98,24 @@ fn the_paper_follows_the_rail_then_elsewhere_then_the_back_pages() {
         Uuid::from_u128(10),
     ];
     let bumped = vec!["dnd".to_string()];
+    // The operator posted twice on the covered day; both print whole,
+    // oldest first, before anything graybeard wrote.
+    let announcements = [
+        PaperAnnouncement {
+            author: "mat".to_string(),
+            posted_at: Utc.with_ymd_and_hms(2026, 9, 2, 9, 5, 0).unwrap(),
+            body: "maintenance tonight at 22:00 UTC\nexpect ten minutes down".to_string(),
+        },
+        PaperAnnouncement {
+            author: "mat".to_string(),
+            posted_at: Utc.with_ymd_and_hms(2026, 9, 2, 23, 40, 0).unwrap(),
+            body: "back up, thanks for waiting".to_string(),
+        },
+    ];
 
     let lines = plain(&lay_out(PaperLayout {
-        wall: &[],
+        announcements: &announcements,
+        work: None,
         edition: &edition,
         rail_order: &rail_order,
         member_room_ids: &member_room_ids,
@@ -112,6 +126,15 @@ fn the_paper_follows_the_rail_then_elsewhere_then_the_back_pages() {
         lines,
         vec![
             "by @graybeard · covers Wed Sep 2 (UTC) · he read it all so you would not have to",
+            "",
+            "ANNOUNCEMENTS",
+            "",
+            "@mat · 09:05",
+            "maintenance tonight at 22:00 UTC",
+            "expect ten minutes down",
+            "",
+            "@mat · 23:40",
+            "back up, thanks for waiting",
             "",
             "YOUR ROOMS",
             "",
@@ -156,7 +179,8 @@ fn a_member_room_missing_from_the_rail_still_gets_its_column() {
     };
     let member_room_ids: HashSet<Uuid> = [Uuid::from_u128(1)].into_iter().collect();
     let lines = plain(&lay_out(PaperLayout {
-        wall: &[],
+        announcements: &[],
+        work: None,
         edition: &edition,
         rail_order: &[],
         member_room_ids: &member_room_ids,
@@ -223,104 +247,117 @@ fn paper_commands_parse_and_everything_else_falls_through() {
     assert!(PaperCommand::Preview.admin_only());
 }
 
-/// A wall piece `height` lines tall, its first line painted red and the
-/// rest plain.
-fn wall_piece(title: &str, applause: i64, height: usize) -> PaperWall {
-    let red = dartboard_core::RgbColor::new(255, 0, 0);
-    let lines = (0..height)
-        .map(|row| {
-            vec![PaintRun {
-                text: format!("row {row}"),
-                fg: if row == 0 { Some(red) } else { None },
-            }]
-        })
-        .collect();
-    PaperWall {
-        title: title.to_string(),
-        username: "painter".to_string(),
-        applause,
-        lines,
-    }
-}
-
 #[test]
-fn the_wall_prints_the_pieces_in_colour_within_its_line_budget() {
+fn new_work_speaks_to_the_card_the_reader_has() {
+    use late_core::models::work_profile::WorkStatus;
+
+    use crate::app::jobs::state_test::posting;
+
     let edition = PaperEdition {
         edition: NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
         rooms: Vec::new(),
         sections: Vec::new(),
     };
-    // 40 + 2 and 10 + 2 lines fit the budget of 60; the third piece's 10
-    // + 2 would pass it and stays on page 4.
-    let wall = [
-        wall_piece("tall", 5, 40),
-        wall_piece("small", 2, 10),
-        wall_piece("late", 1, 10),
-    ];
-    let laid = lay_out(PaperLayout {
-        wall: &wall,
-        edition: &edition,
-        rail_order: &[],
-        member_room_ids: &HashSet::new(),
-        bumped_labels: &[],
-    });
-    let lines = plain(&laid);
-    let start = lines
-        .iter()
-        .position(|line| line == "ON THE WALL")
-        .expect("the wall heading");
-    let titles: Vec<&String> = lines[start..]
-        .iter()
-        .filter(|line| line.starts_with('"'))
-        .collect();
-    assert_eq!(
-        titles,
-        vec![
-            "\"tall\" by @painter, hung yesterday, 5 applause so far.",
-            "\"small\" by @painter, hung yesterday, 2 applause so far."
-        ]
-    );
-    assert_eq!(
-        lines.last().map(String::as_str),
-        Some("    the whole wall hangs on page 4, the Artboard gallery")
-    );
-    // The painted glyphs keep their colour; the rest print as body text.
-    let first_row = &laid[start + 3];
-    assert_eq!(
-        first_row
-            .iter()
-            .map(|span| (span.text.as_str(), span.ink))
-            .collect::<Vec<_>>(),
-        vec![
-            ("    ", PaperInk::Body),
-            (
-                "row 0",
-                PaperInk::Paint(dartboard_core::RgbColor::new(255, 0, 0))
-            )
-        ]
-    );
-    assert_eq!(
-        laid[start + 4]
-            .iter()
-            .map(|span| (span.text.as_str(), span.ink))
-            .collect::<Vec<_>>(),
-        vec![("    ", PaperInk::Body), ("row 1", PaperInk::Body)]
-    );
-}
-
-#[test]
-fn an_empty_wall_prints_no_column() {
-    let edition = PaperEdition {
-        edition: NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
-        rooms: Vec::new(),
-        sections: Vec::new(),
+    let lay = |work: Option<&PaperWork>| {
+        plain(&lay_out(PaperLayout {
+            announcements: &[],
+            work,
+            edition: &edition,
+            rail_order: &[],
+            member_room_ids: &HashSet::new(),
+            bumped_labels: &[],
+        }))
     };
-    let lines = plain(&lay_out(PaperLayout {
-        wall: &[],
-        edition: &edition,
-        rail_order: &[],
-        member_room_ids: &HashSet::new(),
-        bumped_labels: &[],
-    }));
-    assert!(!lines.iter().any(|line| line == "ON THE WALL"));
+    let section = |line: &str| {
+        vec![
+            "by @graybeard · covers Wed Sep 2 (UTC) · he read it all so you would not have to"
+                .to_string(),
+            String::new(),
+            "NEW WORK".to_string(),
+            line.to_string(),
+        ]
+    };
+
+    // No card: the one line that sells the card, on a quiet day too.
+    let nobody = PaperWork {
+        released: 11,
+        card: None,
+        matches: Vec::new(),
+    };
+    assert_eq!(
+        lay(Some(&nobody)),
+        section(
+            "11 postings yesterday, all remote. Create a work card on page 5 to see matches here."
+        )
+    );
+    let nobody_quiet = PaperWork {
+        released: 0,
+        ..nobody.clone()
+    };
+    assert_eq!(
+        lay(Some(&nobody_quiet)),
+        section("No new postings yesterday. Create a work card on page 5 to see matches here.")
+    );
+
+    // An open card with matches: the matches, then the count.
+    let matched = PaperWork {
+        released: 11,
+        card: Some(WorkStatus::Open),
+        matches: vec![
+            posting("Acme", &["rust", "postgres"]),
+            posting("Fastly", &["go"]),
+        ],
+    };
+    let mut expected = section("Acme · Backend Engineer · remote · EU · rust, postgres · €80k");
+    expected.push("Fastly · Backend Engineer · remote · EU · go · €80k".to_string());
+    expected.push(
+        "    11 postings yesterday. All postings are on page 5, / filters to your tags."
+            .to_string(),
+    );
+    assert_eq!(lay(Some(&matched)), expected);
+
+    // A casual card with nothing on its tags still hears the count, and
+    // on a day with no release hears that too.
+    let unmatched = PaperWork {
+        released: 1,
+        card: Some(WorkStatus::Casual),
+        matches: Vec::new(),
+    };
+    assert_eq!(
+        lay(Some(&unmatched)),
+        section("1 posting yesterday, none matching your tags. All postings are on page 5.")
+    );
+    let casual_quiet = PaperWork {
+        released: 0,
+        ..unmatched
+    };
+    assert_eq!(
+        lay(Some(&casual_quiet)),
+        section("No new postings yesterday. All postings are on page 5.")
+    );
+
+    // Not looking gets a small hint, with the count when there is one.
+    let not_looking = PaperWork {
+        released: 11,
+        card: Some(WorkStatus::NotLooking),
+        matches: Vec::new(),
+    };
+    assert_eq!(
+        lay(Some(&not_looking)),
+        section("11 postings yesterday. Your work card is set to not looking (page 5).")
+    );
+    let not_looking_quiet = PaperWork {
+        released: 0,
+        ..not_looking
+    };
+    assert_eq!(
+        lay(Some(&not_looking_quiet)),
+        section("No new postings yesterday. Your work card is set to not looking (page 5).")
+    );
+
+    // The job feed switched off (or a preview): no section at all.
+    assert_eq!(
+        lay(None),
+        vec!["by @graybeard · covers Wed Sep 2 (UTC) · he read it all so you would not have to"]
+    );
 }

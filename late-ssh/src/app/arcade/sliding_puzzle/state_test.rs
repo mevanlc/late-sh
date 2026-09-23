@@ -1,4 +1,5 @@
 use chrono::{Duration, NaiveDate, Utc};
+use dartboard_core::Canvas;
 use late_core::db::{Db, DbConfig};
 use late_core::models::{
     chips::Difficulty,
@@ -9,11 +10,12 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::{
+    art::PuzzleArt,
     state::{
-        Direction, State, apply_blank_move, board_dimension, board_len, generate_scramble,
-        solved_board,
+        ArtStatus, Direction, State, apply_blank_move, board_dimension, board_len,
+        generate_scramble, solved_board,
     },
-    svc::SlidingPuzzleService,
+    svc::{ArtLoad, SlidingPuzzleService},
 };
 use crate::{
     app::activity::event::{ActivityEvent, ActivityGame, ActivityKind},
@@ -542,4 +544,52 @@ fn stale_saved_rows_regenerate_today_deterministically() {
     assert_eq!(state.board(), expected.tiles);
     assert_eq!(state.moves(), 0);
     assert!(!state.is_solved());
+}
+
+/// The board line reads the same whichever key produced it: changing the
+/// difficulty and then pressing `d` must not flip "daily" to "Daily".
+#[test]
+fn the_board_message_is_cased_the_same_from_every_key() {
+    let user_id = Uuid::now_v7();
+    let date = NaiveDate::from_ymd_opt(2026, 8, 21).unwrap();
+    let mut state = State::new_for_date(user_id, service(), date, Vec::new());
+    state.open_daily(0);
+
+    state.next_difficulty();
+    let after_difficulty = state.message().to_string();
+    state.show_daily();
+
+    assert_eq!(after_difficulty, "Daily medium 4×4 board.");
+    assert_eq!(state.message(), after_difficulty);
+
+    state.prev_difficulty();
+    assert_eq!(state.message(), "Daily easy 3×3 board.");
+}
+
+/// Opening the board from the lobby re-asks for the day's art so a mod's
+/// pin shows, but the piece already on the board stays up while the answer
+/// is in flight: no numbered flash and no lost "which board" message.
+#[test]
+fn opening_from_the_lobby_keeps_the_current_art_while_it_re_asks() {
+    let mut state = State::new_for_date(
+        Uuid::now_v7(),
+        service(),
+        NaiveDate::from_ymd_opt(2026, 9, 21).expect("date"),
+        Vec::new(),
+    );
+    let canvas = Canvas::with_size(12, 4);
+    state.set_art_for_test(ArtLoad::Featured(PuzzleArt {
+        title: "sunset".to_string(),
+        username: "painter".to_string(),
+        canvas,
+        width: 12,
+        height: 4,
+    }));
+
+    state.open_daily(0);
+
+    assert_eq!(state.art_status(), ArtStatus::Ready);
+    assert!(state.art_grid().is_some());
+    assert_eq!(state.art_credit().as_deref(), Some("sunset by @painter"));
+    assert_eq!(state.message(), "Daily easy 3×3 board.");
 }

@@ -33,7 +33,8 @@ fn build(edition: &PaperEdition) -> PaperModal {
     let members: HashSet<Uuid> = rail.iter().copied().collect();
     PaperModal::edition(PaperLayout {
         edition,
-        wall: &[],
+        announcements: &[],
+        work: None,
         rail_order: &rail,
         member_room_ids: &members,
         bumped_labels: &[],

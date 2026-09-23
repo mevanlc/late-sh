@@ -4,12 +4,14 @@ use crate::models::artboard_piece::{ApplauseOutcome, ArtboardPiece, HangOutcome,
 use crate::models::artboard_piece_test::hang_params;
 use crate::models::chips::{ChipMove, Difficulty, UserChips};
 use crate::models::crown::CrownReign;
+use crate::models::leaderboard::{OnlineTimeIncrement, apply_online_time_batch};
 use crate::models::profile_award::{
     CROWN_AWARD_CATEGORY, DARKROOM_BEACON_AWARD_CATEGORY, GALLERY_AWARD_CATEGORY,
-    LATEANIA_ARCHDEMON_AWARD_CATEGORY, LATEANIA_FRONTIER_KING_AWARD_CATEGORY,
-    LATEANIA_KAETHYR_ASCENDANT_AWARD_CATEGORY, LATEANIA_SUNDERING_DEEP_AWARD_CATEGORY,
-    NETHACK_AMULET_AWARD_CATEGORY, NETHACK_ASCENSION_AWARD_CATEGORY, award_badge,
-    award_category_label, format_score_value, is_milestone_award, is_rankless_award,
+    LATE_TIME_AWARD_CATEGORY, LATEANIA_ARCHDEMON_AWARD_CATEGORY,
+    LATEANIA_FRONTIER_KING_AWARD_CATEGORY, LATEANIA_KAETHYR_ASCENDANT_AWARD_CATEGORY,
+    LATEANIA_SUNDERING_DEEP_AWARD_CATEGORY, NETHACK_AMULET_AWARD_CATEGORY,
+    NETHACK_ASCENSION_AWARD_CATEGORY, award_badge, award_category_label,
+    find_profile_awards_by_ids, format_score_value, is_milestone_award, is_rankless_award,
     list_profile_awards_for_user, snapshot_previous_month_profile_awards, top_badge_per_game,
 };
 use crate::models::rubiks_cube::DailyWin as RubiksCubeDailyWin;
@@ -180,6 +182,99 @@ async fn the_months_last_crown_holder_gets_the_badge_once() {
     );
 }
 
+#[test]
+fn the_late_time_badge_carries_no_rank_digit_and_is_not_a_milestone() {
+    assert_eq!(award_badge(LATE_TIME_AWARD_CATEGORY, 1), "LATE");
+    assert_eq!(award_category_label(LATE_TIME_AWARD_CATEGORY), "Late Time");
+    // 37h 12m 59s: minutes are floored, never rounded up.
+    assert_eq!(
+        format_score_value(LATE_TIME_AWARD_CATEGORY, 133_979_000),
+        "37h 12m online"
+    );
+    assert!(is_rankless_award(LATE_TIME_AWARD_CATEGORY));
+    assert!(!is_milestone_award(LATE_TIME_AWARD_CATEGORY));
+}
+
+/// Only last month's first place gets the badge, and the month settles on
+/// the first pass: time that spills into last month after the rollover
+/// cannot crown a second player on a later pass.
+#[tokio::test]
+async fn late_time_first_place_gets_the_badge_once_per_month() {
+    let test_db = test_db().await;
+    let mut client = test_db.db.get().await.expect("db client");
+    let leader = create_test_user(&test_db.db, "late-time-leader").await;
+    let runner_up = create_test_user(&test_db.db, "late-time-runner-up").await;
+
+    let this_month = Utc::now().date_naive().with_day(1).expect("first of month");
+    let last_month = this_month
+        .checked_sub_months(Months::new(1))
+        .expect("previous month");
+    let hours = |count: i64| count * 3_600_000;
+    apply_online_time_batch(
+        &client,
+        uuid::Uuid::now_v7(),
+        &[
+            OnlineTimeIncrement {
+                user_id: leader.id,
+                month_start: last_month,
+                milliseconds: hours(40),
+            },
+            OnlineTimeIncrement {
+                user_id: runner_up.id,
+                month_start: last_month,
+                milliseconds: hours(30),
+            },
+            // This month's time is not last month's standings.
+            OnlineTimeIncrement {
+                user_id: runner_up.id,
+                month_start: this_month,
+                milliseconds: hours(100),
+            },
+        ],
+    )
+    .await
+    .expect("online time");
+
+    snapshot_previous_month_profile_awards(&mut client)
+        .await
+        .expect("snapshot");
+    // The runner-up overtakes in last month's post-rollover spill.
+    apply_online_time_batch(
+        &client,
+        uuid::Uuid::now_v7(),
+        &[OnlineTimeIncrement {
+            user_id: runner_up.id,
+            month_start: last_month,
+            milliseconds: hours(20),
+        }],
+    )
+    .await
+    .expect("spill");
+    snapshot_previous_month_profile_awards(&mut client)
+        .await
+        .expect("snapshot again");
+
+    let won: Vec<_> = list_profile_awards_for_user(&client, leader.id)
+        .await
+        .expect("awards")
+        .into_iter()
+        .filter(|award| award.category == LATE_TIME_AWARD_CATEGORY)
+        .collect();
+    assert_eq!(won.len(), 1, "the daily snapshot must grant once");
+    assert_eq!(won[0].rank, 1);
+    assert_eq!(won[0].period_month, last_month);
+    assert_eq!(won[0].score_value, hours(40));
+    assert_eq!(won[0].badge(), "LATE");
+
+    let lost: Vec<_> = list_profile_awards_for_user(&client, runner_up.id)
+        .await
+        .expect("awards")
+        .into_iter()
+        .filter(|award| award.category == LATE_TIME_AWARD_CATEGORY)
+        .collect();
+    assert!(lost.is_empty(), "only first place gets the badge: {lost:?}");
+}
+
 /// The persisted Arcade Wins award must score the same roster as the live
 /// board: every `DailyPuzzle`, at `Difficulty::points` weights. A player
 /// whose month came from Sliding Puzzle and Rubik's Cube outranks one easy
@@ -296,7 +391,7 @@ async fn the_gallery_award_ranks_best_pieces_and_pays_once() {
         .expect("snapshot");
     assert_eq!(
         first_pass.gallery_prizes_paid,
-        vec![(winner.id, 1, 10_000), (runner_up.id, 2, 5_000)]
+        vec![(winner.id, 1, 40_000), (runner_up.id, 2, 15_000)]
     );
 
     // The month is closed at the rollover: late applause is refused, and
@@ -343,27 +438,123 @@ async fn the_gallery_award_ranks_best_pieces_and_pays_once() {
         .await
         .expect("chips")
         .expect("the prize opened a balance");
-    assert_eq!(balance.balance, 10_000);
+    assert_eq!(balance.balance, 40_000);
     let ledger = client
         .query(
-            "SELECT delta FROM chip_ledger WHERE user_id = $1 AND reason = $2",
+            "SELECT delta, source_ref FROM chip_ledger WHERE user_id = $1 AND reason = $2",
             &[&winner.id, &ChipMove::ArtboardPrize.reason()],
         )
         .await
         .expect("ledger");
     assert_eq!(ledger.len(), 1, "one prize row, however many passes ran");
-
-    // Last month's podium is what the splash and the hall of fame show,
-    // the winner first.
-    let podium = ArtboardPiece::previous_month_podium(&client)
+    // The prize row points at its award, so a ledger reader can say which
+    // month and which place it was for.
+    let award_id: uuid::Uuid = ledger[0]
+        .get::<_, String>("source_ref")
+        .parse()
+        .expect("the ref is the award id");
+    let awards = find_profile_awards_by_ids(&client, &[award_id])
         .await
-        .expect("podium");
+        .expect("awards by id");
+    let award = awards.get(&award_id).expect("the award behind the prize");
     assert_eq!(
-        podium.first().map(|entry| (entry.place, entry.piece.id)),
-        Some((1, best.id))
+        (award.category.as_str(), award.rank),
+        (GALLERY_AWARD_CATEGORY, 1)
     );
+
+    // The hall of fame shows the winner first.
     let hall = ArtboardPiece::list(&client, winner.id, PieceListing::HallOfFame)
         .await
         .expect("hall of fame");
     assert_eq!(hall.first().map(|piece| piece.id), Some(best.id));
+}
+
+/// The Settings badge picker covers every badge a label can show, each
+/// category exactly once, with every game ladder folded into a single row.
+#[test]
+fn chat_badge_rows_cover_every_category_once_with_one_row_per_ladder() {
+    use crate::models::profile_award::{BADGE_LADDERS, all_award_categories, chat_badge_rows};
+
+    let rows = chat_badge_rows();
+    let mut covered: Vec<&str> = rows
+        .iter()
+        .flat_map(|row| row.categories.iter().copied())
+        .collect();
+    covered.sort_unstable();
+    let mut all = all_award_categories();
+    all.sort_unstable();
+    assert_eq!(covered, all);
+
+    for ladder in BADGE_LADDERS {
+        let owning: Vec<_> = rows
+            .iter()
+            .filter(|row| ladder.iter().any(|rung| row.categories.contains(rung)))
+            .collect();
+        assert_eq!(owning.len(), 1, "one row per ladder");
+        assert_eq!(owning[0].categories, ladder.to_vec());
+    }
+    let lateania = rows
+        .iter()
+        .find(|row| row.label == "Lateania bosses")
+        .expect("lateania row");
+    assert_eq!(lateania.codes, "LMG LKN LYS LKA");
+}
+
+/// Hiding a game's row hides every rung of it on the chat label, and the
+/// filter lives in the label query itself, not in app code afterwards.
+#[tokio::test]
+async fn hidden_award_categories_leave_the_chat_label() {
+    use crate::models::profile_award::{
+        CROWN_AWARD_CATEGORY, LATEANIA_ARCHDEMON_AWARD_CATEGORY,
+        LATEANIA_FRONTIER_KING_AWARD_CATEGORY, NETHACK_AMULET_AWARD_CATEGORY,
+        grant_unique_milestone_award,
+    };
+    use crate::models::user::User;
+
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let user = create_test_user(&test_db.db, "hide-badges").await;
+    for category in [
+        LATEANIA_ARCHDEMON_AWARD_CATEGORY,
+        LATEANIA_FRONTIER_KING_AWARD_CATEGORY,
+        NETHACK_AMULET_AWARD_CATEGORY,
+    ] {
+        grant_unique_milestone_award(&client, user.id, category, 1)
+            .await
+            .expect("grant");
+    }
+    let label = |rows: Vec<crate::models::user::ChatAuthorMetadata>| {
+        rows.into_iter()
+            .next()
+            .expect("author row")
+            .profile_award_badges
+    };
+
+    let shown = User::list_chat_author_metadata(&client, &[user.id])
+        .await
+        .expect("metadata");
+    assert_eq!(label(shown).as_deref(), Some("LKN NHA"), "top rung only");
+
+    client
+        .execute(
+            "UPDATE users SET settings = settings || jsonb_build_object(
+                 'hidden_award_categories', $2::jsonb)
+             WHERE id = $1",
+            &[
+                &user.id,
+                &serde_json::json!([
+                    LATEANIA_ARCHDEMON_AWARD_CATEGORY,
+                    LATEANIA_FRONTIER_KING_AWARD_CATEGORY,
+                    "lateania_sundering_deep",
+                    "lateania_kaethyr_ascendant",
+                    CROWN_AWARD_CATEGORY,
+                ]),
+            ],
+        )
+        .await
+        .expect("hide lateania");
+    let hidden = User::list_chat_author_metadata(&client, &[user.id])
+        .await
+        .expect("metadata");
+    assert_eq!(label(hidden).as_deref(), Some("NHA"));
 }
