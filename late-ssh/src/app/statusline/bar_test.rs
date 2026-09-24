@@ -140,7 +140,7 @@ fn presence_badges_keep_timed_and_open_ended_readings_when_compacted() {
 }
 
 #[test]
-fn keyboard_shortcuts_keep_their_styled_bottom_left_copy_and_both_compactions() {
+fn keyhints_keeps_its_styled_bottom_left_copy_and_both_compactions() {
     let components = [StatusComponentSetting::new(StatusComponent::Shortcuts)];
     let area_for = |text: &str| Rect::new(0, 0, Span::raw(text).width() as u16 + 2, 24);
     let render_in = |area| {

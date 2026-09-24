@@ -96,7 +96,7 @@ impl StatusComponent {
     /// Name shown in the customizer's component list.
     pub fn label(self) -> &'static str {
         match self {
-            Self::Shortcuts => "Keyboard shortcuts",
+            Self::Shortcuts => "Keyhints",
             Self::Time => "Time",
             Self::Chips => "Chips",
             Self::Mentions => "Mentions",

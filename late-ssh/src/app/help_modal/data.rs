@@ -1589,7 +1589,7 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "  Segments paint left to right in the order the list shows them top to bottom."
             .to_string(),
-        "  Available segments: keyboard shortcuts, status, voice, mentions, pot, chips, your move, invites, quests, station, users online, time"
+        "  Available segments: Keyhints, status, voice, mentions, pot, chips, your move, invites, quests, station, users online, time"
             .to_string(),
         "  Status segments with a destination are clickable and jump to what they count."
             .to_string(),
@@ -1602,7 +1602,7 @@ fn settings_help_lines() -> Vec<String> {
         "    Left / Right or Space   change the focused option".to_string(),
         "    Esc                     back out of the options, then close".to_string(),
         "  Per-segment options".to_string(),
-        "    Keyboard shortcuts have no options beyond the list's on/off switch.".to_string(),
+        "    Keyhints has no options beyond the list's on/off switch.".to_string(),
         "    Label          Text, Icon, or None beside the value".to_string(),
         "    Auto-hide      drop the segment while it reads zero or idle".to_string(),
         "    Low priority   yields first when the bar runs out of room; every low-priority"

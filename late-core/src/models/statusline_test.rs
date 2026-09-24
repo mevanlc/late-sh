@@ -52,7 +52,7 @@ fn default_list_covers_every_component_exactly_once() {
 /// hint. Status readings are opt-in because the fixed top bar already carries
 /// the upstream HUD.
 #[test]
-fn default_bottom_bar_is_the_keyboard_shortcuts() {
+fn default_bottom_bar_is_keyhints() {
     let enabled: Vec<StatusComponent> = default_statusline_components()
         .into_iter()
         .filter(|s| s.enabled)

@@ -2314,7 +2314,7 @@ async fn the_lounge_renders_its_own_topic_header() {
 }
 
 #[tokio::test]
-async fn keyboard_shortcuts_are_the_default_bottom_left_component() {
+async fn keyhints_is_the_default_bottom_left_component() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "bottom-status-default").await;
     let mut app = make_app(test_db.db.clone(), viewer.id, "bottom-status-default-it");
@@ -2334,7 +2334,7 @@ async fn keyboard_shortcuts_are_the_default_bottom_left_component() {
         frame.contains("Settings Ctrl+O")
             && frame.contains("Zen Ctrl+F")
             && frame.contains("Exit qq"),
-        "keyboard shortcuts should render from the default component: {frame:?}"
+        "Keyhints should render from the default component: {frame:?}"
     );
 }
 
@@ -4089,6 +4089,6 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     // The new badge picker and the fork's statusline customizer both remain
     // reachable from Tweaks; neither consumes the other's input or rows.
     app.handle_input(b"jjjj\r");
-    wait_for_render_contains(&mut app, "Keyboard shortcuts").await;
+    wait_for_render_contains(&mut app, "Keyhints").await;
     assert!(app.settings_modal_state.statusline_open());
 }
