@@ -2018,7 +2018,7 @@ fn draw_chat_badges_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalS
         Paragraph::new(Line::from(vec![
             Span::raw("  "),
             Span::styled(
-                "If you can earn it, you can hide it. Games show their top badge.",
+                "Earn it, hide it. Games show their top badge.",
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
