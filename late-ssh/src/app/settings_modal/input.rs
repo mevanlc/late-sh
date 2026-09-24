@@ -494,7 +494,7 @@ fn handle_statusline_input(app: &mut App, event: ParsedInput) {
             }
         }
         // Space is the list's on/off switch, and the dials' "change this one".
-        ParsedInput::Byte(b' ') => {
+        ParsedInput::Byte(b' ') | ParsedInput::Char(' ') => {
             if detail {
                 state.cycle_statusline_dial(true);
             } else {

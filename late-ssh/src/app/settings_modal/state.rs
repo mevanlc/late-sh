@@ -2517,7 +2517,10 @@ fn cycle_notify_format(current: Option<&str>, forward: bool) -> &'static str {
 /// status component with no inactive reading gets no auto-hide switch, and one
 /// with no variants gets no mode row, so the pane never shows a dead control.
 fn statusline_dials_for(component: StatusComponent) -> Vec<StatuslineDial> {
-    if component == StatusComponent::Shortcuts {
+    if matches!(
+        component,
+        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief
+    ) {
         return Vec::new();
     }
     let mut dials = vec![StatuslineDial::Label];

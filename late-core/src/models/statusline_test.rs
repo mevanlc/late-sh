@@ -77,7 +77,7 @@ fn opt_in_status_components_start_low_priority() {
 
 /// `Time` supplies its icon at render time and the keyboard shortcuts are a
 /// pre-styled hint rather than an icon/value pair, so every status component
-/// other than those two must carry an icon. The two-cells-wide invariant is
+/// other than those must carry an icon. The two-cells-wide invariant is
 /// locked in `late-ssh` against ratatui's own measuring function.
 #[test]
 fn every_value_component_but_time_carries_an_icon() {
@@ -86,7 +86,7 @@ fn every_value_component_but_time_carries_an_icon() {
             component.icon().is_empty(),
             matches!(
                 component,
-                StatusComponent::Shortcuts | StatusComponent::Time
+                StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief | StatusComponent::Time
             ),
             "{} icon",
             component.as_str()
@@ -214,6 +214,11 @@ fn json_round_trips_through_parse() {
         .find(|s| s.component == StatusComponent::Time)
         .expect("time present");
     time.variant = Some(StatusVariant::ClockAmPm);
+    components
+        .iter_mut()
+        .find(|s| s.component == StatusComponent::KeyhintsBrief)
+        .expect("brief hints present")
+        .enabled = true;
 
     let json = statusline_components_json(&components);
     let values = json.as_array().expect("array").clone();

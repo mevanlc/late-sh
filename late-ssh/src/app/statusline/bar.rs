@@ -122,6 +122,7 @@ enum ShortcutStyle {
     DottedCtrl,
     SpacedCtrl,
     SpacedCaret,
+    Brief,
 }
 
 /// The keyboard hint was the original bottom-left frame title. It stays a
@@ -135,21 +136,25 @@ fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
         .add_modifier(Modifier::BOLD);
     let sep_style = Style::default().fg(theme::TEXT_FAINT());
     let separator = match style {
-        ShortcutStyle::DottedCtrl => " · ",
+        ShortcutStyle::DottedCtrl | ShortcutStyle::Brief => " · ",
         ShortcutStyle::SpacedCtrl | ShortcutStyle::SpacedCaret => "  ",
     };
     let use_caret = matches!(style, ShortcutStyle::SpacedCaret);
-    let hints = [
-        ("Settings", ctrl_hint("O", use_caret)),
-        ("Lobby", ctrl_hint("G", use_caret)),
-        ("Zen", ctrl_hint("F", use_caret)),
-        ("Shop", "/shop"),
-        ("Guide", "?"),
-        ("Exit", "qq"),
-    ];
+    let hints: &[_] = if matches!(style, ShortcutStyle::Brief) {
+        &[("⚙", "^o"), ("⚄", "^g"), ("◉", "^s")]
+    } else {
+        &[
+            ("Settings", ctrl_hint("O", use_caret)),
+            ("Lobby", ctrl_hint("G", use_caret)),
+            ("Zen", ctrl_hint("F", use_caret)),
+            ("Shop", ctrl_hint("S", use_caret)),
+            ("Guide", "?"),
+            ("Exit", "qq"),
+        ]
+    };
 
     let mut spans = Vec::new();
-    for (idx, (label, key_text)) in hints.into_iter().enumerate() {
+    for (idx, &(label, key_text)) in hints.iter().enumerate() {
         if idx == 0 {
             spans.push(Span::styled(" ", dim));
         } else {
@@ -167,9 +172,11 @@ fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
         (true, "O") => "^O",
         (true, "G") => "^G",
         (true, "F") => "^F",
+        (true, "S") => "^S",
         (false, "O") => "Ctrl+O",
         (false, "G") => "Ctrl+G",
         (false, "F") => "Ctrl+F",
+        (false, "S") => "Ctrl+S",
         _ => key,
     }
 }
@@ -218,6 +225,14 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
             low_priority: setting.low_priority,
         });
     }
+    if component == StatusComponent::KeyhintsBrief {
+        return Some(Segment {
+            component,
+            spans: shortcut_spans(ShortcutStyle::Brief),
+            compacts: Vec::new(),
+            low_priority: setting.low_priority,
+        });
+    }
     let value = match data.value(component, setting.variant) {
         Some(value) => value,
         // Inactive: hide the segment, or show the resting reading.
@@ -260,7 +275,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
 /// count at all.
 fn resting_value(component: StatusComponent) -> String {
     match component {
-        StatusComponent::Shortcuts => String::new(),
+        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief => String::new(),
         StatusComponent::Status | StatusComponent::Voice | StatusComponent::Station => {
             "-".to_string()
         }
@@ -314,7 +329,7 @@ fn segment_spans(
 
 fn accent(component: StatusComponent) -> ratatui::style::Color {
     match component {
-        StatusComponent::Shortcuts => theme::TEXT_DIM(),
+        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief => theme::TEXT_DIM(),
         StatusComponent::Mentions | StatusComponent::Invites => theme::MENTION(),
         StatusComponent::Chips | StatusComponent::Pot => theme::AMBER(),
         StatusComponent::Voice => theme::SUCCESS(),
@@ -488,7 +503,7 @@ pub(crate) enum StatusClick {
 
 pub(crate) fn click_action(component: StatusComponent) -> Option<StatusClick> {
     match component {
-        StatusComponent::Shortcuts => None,
+        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief => None,
         StatusComponent::Mentions => Some(StatusClick::Mentions),
         StatusComponent::Chips => Some(StatusClick::Shop),
         StatusComponent::Turns | StatusComponent::Invites => Some(StatusClick::Lobby),

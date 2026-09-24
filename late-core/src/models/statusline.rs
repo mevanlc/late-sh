@@ -14,13 +14,14 @@
 
 use serde_json::Value;
 
-pub const STATUS_COMPONENT_COUNT: usize = 12;
+pub const STATUS_COMPONENT_COUNT: usize = 13;
 
 /// A segment the user can place on the status bar. Order in the stored list is
 /// the paint order, left to right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusComponent {
     Shortcuts,
+    KeyhintsBrief,
     Time,
     Chips,
     Mentions,
@@ -44,6 +45,7 @@ impl StatusComponent {
     /// they want along the bottom border.
     pub const ALL: [StatusComponent; STATUS_COMPONENT_COUNT] = [
         Self::Shortcuts,
+        Self::KeyhintsBrief,
         Self::Status,
         Self::Voice,
         Self::Mentions,
@@ -60,6 +62,7 @@ impl StatusComponent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Shortcuts => "shortcuts",
+            Self::KeyhintsBrief => "keyhints_brief",
             Self::Time => "time",
             Self::Chips => "chips",
             Self::Mentions => "mentions",
@@ -77,6 +80,7 @@ impl StatusComponent {
     pub fn from_key(key: &str) -> Option<Self> {
         match key.trim() {
             "shortcuts" => Some(Self::Shortcuts),
+            "keyhints_brief" => Some(Self::KeyhintsBrief),
             "time" => Some(Self::Time),
             "chips" => Some(Self::Chips),
             "mentions" => Some(Self::Mentions),
@@ -97,6 +101,7 @@ impl StatusComponent {
     pub fn label(self) -> &'static str {
         match self {
             Self::Shortcuts => "Keyhints",
+            Self::KeyhintsBrief => "Keyhints (brief)",
             Self::Time => "Time",
             Self::Chips => "Chips",
             Self::Mentions => "Mentions",
@@ -115,7 +120,7 @@ impl StatusComponent {
     /// `label()`, which only has to be legible in the editor's list.
     pub fn text_label(self) -> &'static str {
         match self {
-            Self::Shortcuts => "",
+            Self::Shortcuts | Self::KeyhintsBrief => "",
             Self::Time => "",
             Self::Chips => "chips",
             Self::Mentions => "unread",
@@ -139,11 +144,11 @@ impl StatusComponent {
     /// both slides every hit rect and lets the bar overrun the page tabs.
     /// Text-default glyphs that only become emoji via VS16 (♟️, ✉️, ☎️) must
     /// not be used here. `Time` returns the empty string because its icon is
-    /// hour-dependent and comes from `clock_icon`; `Shortcuts` is a pre-styled
-    /// frame hint rather than an icon/value pair and also returns empty.
+    /// hour-dependent and comes from `clock_icon`; the Keyhints components are
+    /// pre-styled frame hints rather than icon/value pairs and also return empty.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Shortcuts => "",
+            Self::Shortcuts | Self::KeyhintsBrief => "",
             Self::Time => "",
             Self::Chips => "🪙",
             Self::Mentions => "📩",
@@ -159,10 +164,13 @@ impl StatusComponent {
     }
 
     /// Whether this component has an "inactive" reading at all, and so whether
-    /// the customizer offers it an auto-hide switch. Shortcuts, Time, and Users
+    /// the customizer offers it an auto-hide switch. Keyhints, Time, and Users
     /// always have something to say; the rest can read zero/idle.
     pub fn can_auto_hide(self) -> bool {
-        !matches!(self, Self::Shortcuts | Self::Time | Self::Users)
+        !matches!(
+            self,
+            Self::Shortcuts | Self::KeyhintsBrief | Self::Time | Self::Users
+        )
     }
 
     /// Whether the component starts enabled for a user with no stored list.
@@ -177,7 +185,7 @@ impl StatusComponent {
     pub fn default_label_mode(self) -> LabelMode {
         match self {
             // The clock reads as a clock; a label would only cost columns.
-            Self::Shortcuts | Self::Time => LabelMode::None,
+            Self::Shortcuts | Self::KeyhintsBrief | Self::Time => LabelMode::None,
             _ => LabelMode::Text,
         }
     }
