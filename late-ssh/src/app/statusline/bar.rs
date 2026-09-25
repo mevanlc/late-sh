@@ -141,13 +141,13 @@ fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
     };
     let use_caret = matches!(style, ShortcutStyle::SpacedCaret);
     let hints: &[_] = if matches!(style, ShortcutStyle::Brief) {
-        &[("⚙", "^o"), ("⚄", "^g"), ("◉", "^s")]
+        &[("⚙", "^o"), ("⚄", "^g"), ("◉", "/shop")]
     } else {
         &[
             ("Settings", ctrl_hint("O", use_caret)),
             ("Lobby", ctrl_hint("G", use_caret)),
             ("Zen", ctrl_hint("F", use_caret)),
-            ("Shop", ctrl_hint("S", use_caret)),
+            ("Shop", "/shop"),
             ("Guide", "?"),
             ("Exit", "qq"),
         ]
@@ -172,11 +172,9 @@ fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
         (true, "O") => "^O",
         (true, "G") => "^G",
         (true, "F") => "^F",
-        (true, "S") => "^S",
         (false, "O") => "Ctrl+O",
         (false, "G") => "Ctrl+G",
         (false, "F") => "Ctrl+F",
-        (false, "S") => "Ctrl+S",
         _ => key,
     }
 }

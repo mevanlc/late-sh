@@ -28,7 +28,6 @@ const PENDING_ESCAPE_FLUSH_DELAY: Duration = Duration::from_millis(40);
 const CTRL_G: u8 = 0x07;
 const CTRL_L: u8 = 0x0C;
 const CTRL_O: u8 = 0x0F;
-const CTRL_S: u8 = 0x13;
 const CTRL_T: u8 = 0x14;
 const CTRL_V: u8 = 0x16;
 /// Zen: the one page that is a chord, not a tab, so it is reachable from
@@ -3287,7 +3286,7 @@ fn open_settings_modal_globally(app: &mut App) {
     app.show_settings = true;
 }
 
-/// Shared Shop entry point for Ctrl+S, `/shop`, and locked-feature nudges.
+/// Shared Shop entry point for `/shop` and locked-feature nudges.
 pub(crate) fn open_shop_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
     app.show_help = false;
@@ -3487,16 +3486,6 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
         }
         CTRL_F => {
             toggle_zen_globally(app);
-            true
-        }
-        // These editors already own Ctrl+S for save/post. Their tag picker
-        // also keeps input until it closes, leaving the draft underneath.
-        CTRL_S
-            if !app.directory_editor.is_open()
-                && !app.jobs.post.is_open()
-                && !app.tag_picker.is_open() =>
-        {
-            open_shop_modal_globally(app);
             true
         }
         _ => false,
