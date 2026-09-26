@@ -1948,6 +1948,7 @@ fn statusline_dial_value(
     setting: &late_core::models::statusline::StatusComponentSetting,
 ) -> String {
     match dial {
+        StatuslineDial::Brief => on_off(setting.brief),
         StatuslineDial::Label => setting.label.label().to_string(),
         StatuslineDial::AutoHide => on_off(setting.auto_hide),
         StatuslineDial::LowPriority => on_off(setting.low_priority),

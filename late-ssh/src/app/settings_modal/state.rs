@@ -157,9 +157,10 @@ pub(crate) enum StatuslinePane {
 ///
 /// Which of these a segment actually offers depends on the component, so the
 /// pane asks [`SettingsModalState::statusline_dials`] per selection instead of
-/// assuming all four are present.
+/// assuming every dial is present.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StatuslineDial {
+    Brief,
     Label,
     AutoHide,
     LowPriority,
@@ -171,6 +172,7 @@ pub(crate) enum StatuslineDial {
 impl StatuslineDial {
     pub(crate) fn title(self, setting: &StatusComponentSetting) -> &'static str {
         match self {
+            Self::Brief => "Brief",
             Self::Label => "Label",
             Self::AutoHide => "Auto-hide",
             Self::LowPriority => "Low priority",
@@ -1006,8 +1008,7 @@ impl SettingsModalState {
     }
 
     pub(crate) fn focus_statusline_pane(&mut self, pane: StatuslinePane) {
-        // Nothing to focus on a segment with no dials at all. Keyboard
-        // shortcuts deliberately have only the list's on/off switch.
+        // Nothing to focus on a segment with no dials at all.
         if pane == StatuslinePane::Detail && self.statusline_dials().is_empty() {
             return;
         }
@@ -1039,6 +1040,7 @@ impl SettingsModalState {
             return;
         };
         match dial {
+            StatuslineDial::Brief => setting.brief ^= true,
             StatuslineDial::Label => {
                 setting.label = next_label_mode(setting.label, setting.component, forward);
             }
@@ -2512,16 +2514,13 @@ fn cycle_notify_format(current: Option<&str>, forward: bool) -> &'static str {
     OPTIONS[next]
 }
 
-/// The dials a bottom status bar segment offers, in display order. Keyboard
-/// shortcuts are fixed copy and therefore only use the list's enable switch. A
+/// The dials a bottom status bar segment offers, in display order. Keyhints
+/// offers a brief display switch in addition to the list's enable switch. A
 /// status component with no inactive reading gets no auto-hide switch, and one
 /// with no variants gets no mode row, so the pane never shows a dead control.
 fn statusline_dials_for(component: StatusComponent) -> Vec<StatuslineDial> {
-    if matches!(
-        component,
-        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief
-    ) {
-        return Vec::new();
+    if component == StatusComponent::Shortcuts {
+        return vec![StatuslineDial::Brief];
     }
     let mut dials = vec![StatuslineDial::Label];
     if component.can_auto_hide() {

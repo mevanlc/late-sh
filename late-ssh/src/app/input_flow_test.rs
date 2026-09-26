@@ -889,7 +889,7 @@ async fn global_ctrl_o_opens_settings_on_dashboard() {
 }
 
 #[tokio::test]
-async fn global_ctrl_g_toggles_lobby_and_slash_shop_opens_shop() {
+async fn global_ctrl_g_toggles_lobby_and_ctrl_s_or_slash_shop_opens_shop() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "ctrl-g-it").await;
     let client = test_db.db.get().await.expect("db client");
@@ -913,6 +913,24 @@ async fn global_ctrl_g_toggles_lobby_and_slash_shop_opens_shop() {
         !frame.contains("house tables"),
         "expected Ctrl+G to close the lobby; frame={frame:?}"
     );
+
+    app.handle_input(b"\x13");
+    wait_for_render_contains(&mut app, "-- Shop --").await;
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "-- Shop --").await;
+    assert!(!app.show_hub_modal);
+
+    // Ctrl+S also opens Shop while composing and preserves the draft.
+    wait_for_render_contains(&mut app, "lounge").await;
+    app.handle_input(b"iunfinished draft");
+    app.handle_input(b"\x13");
+    wait_for_render_contains(&mut app, "-- Shop --").await;
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "-- Shop --").await;
+    wait_for_render_contains(&mut app, "unfinished draft").await;
+    app.handle_input(b"\x15");
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "Compose (press i)").await;
 
     // /shop in the composer opens the same modal, Esc closes.
     // Composing needs a selected room, so wait for the lounge row first.
@@ -2364,14 +2382,14 @@ async fn keyhints_is_the_default_bottom_left_component() {
     assert!(
         frame.contains("Settings Ctrl+O")
             && frame.contains("Zen Ctrl+F")
-            && frame.contains("Shop /shop")
+            && frame.contains("Shop Ctrl+S")
             && frame.contains("Exit qq"),
         "Keyhints should render from the default component: {frame:?}"
     );
 }
 
 #[tokio::test]
-async fn brief_keyhints_can_replace_the_full_component_in_settings() {
+async fn keyhints_brief_property_toggles_and_persists_in_settings() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "brief-keyhints-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "brief-keyhints-flow-it");
@@ -2381,50 +2399,54 @@ async fn brief_keyhints_can_replace_the_full_component_in_settings() {
     app.handle_input(b"\x0f");
     wait_for_render_contains(&mut app, "brief-keyhints-it").await;
     app.handle_input(b"\t\t\tjjjjjjjjjjj\r");
-    wait_for_render_contains(&mut app, "Keyhints (brief)").await;
-    app.handle_input(b" "); // Disable full hints.
-    // Settings autosave asynchronously; let this save finish before the next
-    // edit so the test exercises each persisted choice independently.
-    let db = test_db.db.clone();
-    wait_until(
-        || {
-            let db = db.clone();
-            async move {
-                let client = db.get().await.expect("db client");
-                let stored = User::get(&client, user.id)
-                    .await
-                    .expect("load user")
-                    .expect("user exists");
-                stored.settings["statusline_components"]
-                    .as_array()
-                    .is_some_and(|entries| {
-                        entries
-                            .iter()
-                            .any(|entry| entry["key"] == "shortcuts" && entry["enabled"] == false)
-                    })
-            }
-        },
-        "full Keyhints disabled in the saved profile",
-    )
-    .await;
-    app.handle_input(b"j "); // Enable brief hints.
-    app.handle_input(b"qq");
-    wait_for_render_contains(&mut app, "⚙ ^o · ⚄ ^g · ◉ /shop").await;
-    assert!(!render_plain(&mut app).contains("Settings Ctrl+O"));
+    wait_for_render_contains(&mut app, "Brief").await;
+    app.handle_input(b"\x1b[C"); // Open Keyhints' detail pane.
 
-    let client = test_db.db.get().await.expect("db client");
-    let stored = User::get(&client, user.id)
-        .await
-        .expect("load user")
-        .expect("user exists");
-    let enabled: Vec<_> = stored.settings["statusline_components"]
-        .as_array()
-        .expect("saved statusline")
-        .iter()
-        .filter(|entry| entry["enabled"] == true)
-        .map(|entry| entry["key"].as_str().unwrap())
-        .collect();
-    assert_eq!(enabled, vec!["keyhints_brief"]);
+    for brief in [true, false] {
+        app.handle_input(b" "); // Toggle Brief without disabling Keyhints.
+        // Let each asynchronous save finish before the next edit.
+        let db = test_db.db.clone();
+        wait_until(
+            || {
+                let db = db.clone();
+                async move {
+                    let client = db.get().await.expect("db client");
+                    let stored = User::get(&client, user.id)
+                        .await
+                        .expect("load user")
+                        .expect("user exists");
+                    stored.settings["statusline_components"]
+                        .as_array()
+                        .is_some_and(|entries| {
+                            let enabled: Vec<_> = entries
+                                .iter()
+                                .filter(|entry| entry["enabled"] == true)
+                                .collect();
+                            enabled.len() == 1
+                                && enabled[0]["key"] == "shortcuts"
+                                && enabled[0]["brief"] == brief
+                        })
+                }
+            },
+            "Keyhints Brief property saved",
+        )
+        .await;
+
+        let hint = if brief {
+            "⚙ ^o · ⚄ ^g · ◉ ^s"
+        } else {
+            "Settings Ctrl+O"
+        };
+        wait_for_render_contains(&mut app, hint).await;
+        let mut reloaded = make_app(test_db.db.clone(), user.id, "keyhints-reloaded-it");
+        wait_for_render_contains(&mut reloaded, hint).await;
+        assert_eq!(
+            reloaded.profile_state.profile().statusline_components[0].brief,
+            brief
+        );
+    }
+    app.handle_input(b"qqq"); // Detail pane, customizer, settings.
+    wait_for_render_contains(&mut app, "Settings Ctrl+O").await;
 }
 
 #[tokio::test]

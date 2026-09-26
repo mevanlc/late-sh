@@ -141,13 +141,13 @@ fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
     };
     let use_caret = matches!(style, ShortcutStyle::SpacedCaret);
     let hints: &[_] = if matches!(style, ShortcutStyle::Brief) {
-        &[("⚙", "^o"), ("⚄", "^g"), ("◉", "/shop")]
+        &[("⚙", "^o"), ("⚄", "^g"), ("◉", "^s")]
     } else {
         &[
             ("Settings", ctrl_hint("O", use_caret)),
             ("Lobby", ctrl_hint("G", use_caret)),
             ("Zen", ctrl_hint("F", use_caret)),
-            ("Shop", "/shop"),
+            ("Shop", ctrl_hint("S", use_caret)),
             ("Guide", "?"),
             ("Exit", "qq"),
         ]
@@ -172,9 +172,11 @@ fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
         (true, "O") => "^O",
         (true, "G") => "^G",
         (true, "F") => "^F",
+        (true, "S") => "^S",
         (false, "O") => "Ctrl+O",
         (false, "G") => "Ctrl+G",
         (false, "F") => "Ctrl+F",
+        (false, "S") => "Ctrl+S",
         _ => key,
     }
 }
@@ -215,19 +217,19 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
     if component == StatusComponent::Shortcuts {
         return Some(Segment {
             component,
-            spans: shortcut_spans(ShortcutStyle::DottedCtrl),
-            compacts: vec![
-                shortcut_spans(ShortcutStyle::SpacedCtrl),
-                shortcut_spans(ShortcutStyle::SpacedCaret),
-            ],
-            low_priority: setting.low_priority,
-        });
-    }
-    if component == StatusComponent::KeyhintsBrief {
-        return Some(Segment {
-            component,
-            spans: shortcut_spans(ShortcutStyle::Brief),
-            compacts: Vec::new(),
+            spans: shortcut_spans(if setting.brief {
+                ShortcutStyle::Brief
+            } else {
+                ShortcutStyle::DottedCtrl
+            }),
+            compacts: if setting.brief {
+                Vec::new()
+            } else {
+                vec![
+                    shortcut_spans(ShortcutStyle::SpacedCtrl),
+                    shortcut_spans(ShortcutStyle::SpacedCaret),
+                ]
+            },
             low_priority: setting.low_priority,
         });
     }
@@ -273,7 +275,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
 /// count at all.
 fn resting_value(component: StatusComponent) -> String {
     match component {
-        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief => String::new(),
+        StatusComponent::Shortcuts => String::new(),
         StatusComponent::Status | StatusComponent::Voice | StatusComponent::Station => {
             "-".to_string()
         }
@@ -327,7 +329,7 @@ fn segment_spans(
 
 fn accent(component: StatusComponent) -> ratatui::style::Color {
     match component {
-        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief => theme::TEXT_DIM(),
+        StatusComponent::Shortcuts => theme::TEXT_DIM(),
         StatusComponent::Mentions | StatusComponent::Invites => theme::MENTION(),
         StatusComponent::Chips | StatusComponent::Pot => theme::AMBER(),
         StatusComponent::Voice => theme::SUCCESS(),
@@ -501,7 +503,7 @@ pub(crate) enum StatusClick {
 
 pub(crate) fn click_action(component: StatusComponent) -> Option<StatusClick> {
     match component {
-        StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief => None,
+        StatusComponent::Shortcuts => None,
         StatusComponent::Mentions => Some(StatusClick::Mentions),
         StatusComponent::Chips => Some(StatusClick::Shop),
         StatusComponent::Turns | StatusComponent::Invites => Some(StatusClick::Lobby),

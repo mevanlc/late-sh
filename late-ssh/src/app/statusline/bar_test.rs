@@ -70,7 +70,7 @@ fn every_icon_measures_two_cells() {
     for component in StatusComponent::ALL {
         let icon = if matches!(
             component,
-            StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief | StatusComponent::Time
+            StatusComponent::Shortcuts | StatusComponent::Time
         ) {
             continue;
         } else {
@@ -152,9 +152,9 @@ fn keyhints_keeps_its_styled_bottom_left_copy_and_both_compactions() {
             .map(|span| span.content.as_ref())
             .collect::<String>()
     };
-    let full = "─ Settings Ctrl+O · Lobby Ctrl+G · Zen Ctrl+F · Shop /shop · Guide ? · Exit qq ";
-    let spaced = "─ Settings Ctrl+O  Lobby Ctrl+G  Zen Ctrl+F  Shop /shop  Guide ?  Exit qq ";
-    let caret = "─ Settings ^O  Lobby ^G  Zen ^F  Shop /shop  Guide ?  Exit qq ";
+    let full = "─ Settings Ctrl+O · Lobby Ctrl+G · Zen Ctrl+F · Shop Ctrl+S · Guide ? · Exit qq ";
+    let spaced = "─ Settings Ctrl+O  Lobby Ctrl+G  Zen Ctrl+F  Shop Ctrl+S  Guide ?  Exit qq ";
+    let caret = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ";
 
     assert_eq!(render_in(area_for(full)), full);
     assert_eq!(render_in(area_for(spaced)), spaced);
@@ -164,10 +164,13 @@ fn keyhints_keeps_its_styled_bottom_left_copy_and_both_compactions() {
 #[test]
 fn brief_keyhints_fits_its_exact_glyphs_and_keeps_adjacent_click_targets_aligned() {
     let components = [
-        on(StatusComponent::KeyhintsBrief, LabelMode::None),
+        StatusComponentSetting {
+            brief: true,
+            ..StatusComponentSetting::new(StatusComponent::Shortcuts)
+        },
         on(StatusComponent::Chips, LabelMode::Text),
     ];
-    let expected = "─ ⚙ ^o · ⚄ ^g · ◉ /shop ─ 1204 chips ";
+    let expected = "─ ⚙ ^o · ⚄ ^g · ◉ ^s ─ 1204 chips ";
     let width = Line::raw(expected).width() as u16;
     let area = Rect::new(7, 2, width + 2, 24);
     let bar = build_status_bar(&components, &data(), Placement::BottomLeft, area, 0)
@@ -178,7 +181,7 @@ fn brief_keyhints_fits_its_exact_glyphs_and_keeps_adjacent_click_targets_aligned
         vec![(
             StatusComponent::Chips,
             Rect::new(
-                8 + Line::raw("─ ⚙ ^o · ⚄ ^g · ◉ /shop ─").width() as u16,
+                8 + Line::raw("─ ⚙ ^o · ⚄ ^g · ◉ ^s ─").width() as u16,
                 25,
                 12,
                 1
@@ -186,7 +189,7 @@ fn brief_keyhints_fits_its_exact_glyphs_and_keeps_adjacent_click_targets_aligned
         )]
     );
     let brief_only = &components[..1];
-    let brief_width = Line::raw("─ ⚙ ^o · ⚄ ^g · ◉ /shop ").width() as u16;
+    let brief_width = Line::raw("─ ⚙ ^o · ⚄ ^g · ◉ ^s ").width() as u16;
     assert!(
         build_status_bar(
             brief_only,

@@ -54,9 +54,11 @@ fn move_bio_cursor_to_end_goes_to_last_line_end() {
 /// can move onto and change with no effect.
 #[test]
 fn statusline_dials_omit_controls_the_component_cannot_use() {
-    // The keyboard hint is fixed copy: only the list's checkbox applies.
-    assert!(statusline_dials_for(StatusComponent::Shortcuts).is_empty());
-    assert!(statusline_dials_for(StatusComponent::KeyhintsBrief).is_empty());
+    // Keyhints has a brief display switch; its text is otherwise pre-styled.
+    assert_eq!(
+        statusline_dials_for(StatusComponent::Shortcuts),
+        vec![StatuslineDial::Brief]
+    );
     // Always on, no dial of its own: label and drop tier, nothing else.
     assert_eq!(
         statusline_dials_for(StatusComponent::Users),

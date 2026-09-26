@@ -86,7 +86,7 @@ fn every_value_component_but_time_carries_an_icon() {
             component.icon().is_empty(),
             matches!(
                 component,
-                StatusComponent::Shortcuts | StatusComponent::KeyhintsBrief | StatusComponent::Time
+                StatusComponent::Shortcuts | StatusComponent::Time
             ),
             "{} icon",
             component.as_str()
@@ -216,9 +216,9 @@ fn json_round_trips_through_parse() {
     time.variant = Some(StatusVariant::ClockAmPm);
     components
         .iter_mut()
-        .find(|s| s.component == StatusComponent::KeyhintsBrief)
-        .expect("brief hints present")
-        .enabled = true;
+        .find(|s| s.component == StatusComponent::Shortcuts)
+        .expect("keyhints present")
+        .brief = true;
 
     let json = statusline_components_json(&components);
     let values = json.as_array().expect("array").clone();
@@ -239,6 +239,58 @@ fn parse_of_an_empty_array_yields_the_full_default_list() {
             .all(|setting| !setting.enabled),
         "optional backfilled entries stay off"
     );
+}
+
+#[test]
+fn brief_defaults_off_and_only_applies_to_keyhints() {
+    assert!(!StatusComponentSetting::new(StatusComponent::Shortcuts).brief);
+    let parsed = parse_statusline_components(&[
+        json!({"key": "shortcuts"}),
+        json!({"key": "chips", "brief": true}),
+    ]);
+    assert!(!find(&parsed, StatusComponent::Shortcuts).brief);
+    assert!(!find(&parsed, StatusComponent::Chips).brief);
+}
+
+#[test]
+fn saved_brief_selection_becomes_a_keyhints_property_in_place() {
+    let parsed = parse_statusline_components(&[
+        json!({"key": "shortcuts", "enabled": false}),
+        json!({"key": "chips", "enabled": true}),
+        json!({"key": "keyhints_brief", "enabled": true, "low_priority": true}),
+    ]);
+    assert_eq!(parsed[0].component, StatusComponent::Chips);
+    assert_eq!(parsed[1].component, StatusComponent::Shortcuts);
+    assert!(parsed[1].enabled);
+    assert!(parsed[1].brief);
+    assert!(parsed[1].low_priority);
+    let stored = statusline_components_json(&parsed);
+    assert_eq!(stored[1]["key"], "shortcuts");
+    assert_eq!(stored[1]["brief"], true);
+    assert_eq!(
+        parse_statusline_components(stored.as_array().unwrap()),
+        parsed
+    );
+}
+
+#[test]
+fn merging_saved_keyhints_uses_full_when_enabled_and_preserves_disabled_state() {
+    for full_enabled in [false, true] {
+        for brief_enabled in [false, true] {
+            let parsed = parse_statusline_components(&[
+                json!({"key": "keyhints_brief", "enabled": brief_enabled}),
+                json!({"key": "shortcuts", "enabled": full_enabled}),
+            ]);
+            let hints = find(&parsed, StatusComponent::Shortcuts);
+            assert_eq!(hints.enabled, full_enabled || brief_enabled);
+            assert_eq!(hints.brief, !full_enabled && brief_enabled);
+            assert_eq!(parsed.len(), STATUS_COMPONENT_COUNT);
+        }
+    }
+    let parsed = parse_statusline_components(&[json!({"key": "keyhints_brief"})]);
+    let hints = find(&parsed, StatusComponent::Shortcuts);
+    assert!(!hints.enabled);
+    assert!(hints.brief);
 }
 
 #[test]

@@ -14,14 +14,13 @@
 
 use serde_json::Value;
 
-pub const STATUS_COMPONENT_COUNT: usize = 13;
+pub const STATUS_COMPONENT_COUNT: usize = 12;
 
 /// A segment the user can place on the status bar. Order in the stored list is
 /// the paint order, left to right.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StatusComponent {
     Shortcuts,
-    KeyhintsBrief,
     Time,
     Chips,
     Mentions,
@@ -45,7 +44,6 @@ impl StatusComponent {
     /// they want along the bottom border.
     pub const ALL: [StatusComponent; STATUS_COMPONENT_COUNT] = [
         Self::Shortcuts,
-        Self::KeyhintsBrief,
         Self::Status,
         Self::Voice,
         Self::Mentions,
@@ -62,7 +60,6 @@ impl StatusComponent {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Shortcuts => "shortcuts",
-            Self::KeyhintsBrief => "keyhints_brief",
             Self::Time => "time",
             Self::Chips => "chips",
             Self::Mentions => "mentions",
@@ -80,7 +77,6 @@ impl StatusComponent {
     pub fn from_key(key: &str) -> Option<Self> {
         match key.trim() {
             "shortcuts" => Some(Self::Shortcuts),
-            "keyhints_brief" => Some(Self::KeyhintsBrief),
             "time" => Some(Self::Time),
             "chips" => Some(Self::Chips),
             "mentions" => Some(Self::Mentions),
@@ -101,7 +97,6 @@ impl StatusComponent {
     pub fn label(self) -> &'static str {
         match self {
             Self::Shortcuts => "Keyhints",
-            Self::KeyhintsBrief => "Keyhints (brief)",
             Self::Time => "Time",
             Self::Chips => "Chips",
             Self::Mentions => "Mentions",
@@ -120,7 +115,7 @@ impl StatusComponent {
     /// `label()`, which only has to be legible in the editor's list.
     pub fn text_label(self) -> &'static str {
         match self {
-            Self::Shortcuts | Self::KeyhintsBrief => "",
+            Self::Shortcuts => "",
             Self::Time => "",
             Self::Chips => "chips",
             Self::Mentions => "unread",
@@ -144,11 +139,11 @@ impl StatusComponent {
     /// both slides every hit rect and lets the bar overrun the page tabs.
     /// Text-default glyphs that only become emoji via VS16 (♟️, ✉️, ☎️) must
     /// not be used here. `Time` returns the empty string because its icon is
-    /// hour-dependent and comes from `clock_icon`; the Keyhints components are
-    /// pre-styled frame hints rather than icon/value pairs and also return empty.
+    /// hour-dependent and comes from `clock_icon`; Keyhints is a pre-styled
+    /// frame hint rather than an icon/value pair and also returns empty.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Shortcuts | Self::KeyhintsBrief => "",
+            Self::Shortcuts => "",
             Self::Time => "",
             Self::Chips => "🪙",
             Self::Mentions => "📩",
@@ -167,10 +162,7 @@ impl StatusComponent {
     /// the customizer offers it an auto-hide switch. Keyhints, Time, and Users
     /// always have something to say; the rest can read zero/idle.
     pub fn can_auto_hide(self) -> bool {
-        !matches!(
-            self,
-            Self::Shortcuts | Self::KeyhintsBrief | Self::Time | Self::Users
-        )
+        !matches!(self, Self::Shortcuts | Self::Time | Self::Users)
     }
 
     /// Whether the component starts enabled for a user with no stored list.
@@ -185,7 +177,7 @@ impl StatusComponent {
     pub fn default_label_mode(self) -> LabelMode {
         match self {
             // The clock reads as a clock; a label would only cost columns.
-            Self::Shortcuts | Self::KeyhintsBrief | Self::Time => LabelMode::None,
+            Self::Shortcuts | Self::Time => LabelMode::None,
             _ => LabelMode::Text,
         }
     }
@@ -360,6 +352,8 @@ impl StatusVariant {
 pub struct StatusComponentSetting {
     pub component: StatusComponent,
     pub enabled: bool,
+    /// Use the compact glyph hints. Only offered for Keyhints.
+    pub brief: bool,
     pub label: LabelMode,
     /// Drop the segment entirely while the component reads inactive/zero.
     /// Meaningless, and not offered, when `!component.can_auto_hide()`.
@@ -381,6 +375,7 @@ impl StatusComponentSetting {
         Self {
             component,
             enabled: component.default_enabled(),
+            brief: false,
             label: component.default_label_mode(),
             auto_hide: component.default_auto_hide(),
             low_priority: component.default_low_priority(),
@@ -435,6 +430,7 @@ pub fn normalize_statusline_components(
         result.push(StatusComponentSetting {
             component,
             enabled: setting.enabled,
+            brief: setting.brief && component == StatusComponent::Shortcuts,
             label: setting.label,
             auto_hide: setting.auto_hide && component.can_auto_hide(),
             low_priority: setting.low_priority,
@@ -457,21 +453,47 @@ pub fn normalize_statusline_components(
 /// Parse the stored `statusline_components` array. Unknown keys are skipped,
 /// then `normalize_statusline_components` fills the gaps.
 pub fn parse_statusline_components(values: &[Value]) -> Vec<StatusComponentSetting> {
+    // Fold the former brief component into Keyhints, keeping the active entry's
+    // position and options. If both were enabled, the full Keyhints entry wins.
+    fn key(value: &Value) -> Option<&str> {
+        value.get("key").and_then(Value::as_str).map(str::trim)
+    }
+    let full = values
+        .iter()
+        .position(|value| key(value) == Some("shortcuts"));
+    let brief = values
+        .iter()
+        .position(|value| key(value) == Some("keyhints_brief"));
+    let selected_keyhints = brief
+        .filter(|&index| {
+            values[index].get("enabled").and_then(Value::as_bool) == Some(true)
+                && full.is_none_or(|index| {
+                    values[index].get("enabled").and_then(Value::as_bool) == Some(false)
+                })
+        })
+        .or(full)
+        .or(brief);
     let mut parsed: Vec<StatusComponentSetting> = Vec::new();
-    for value in values {
-        let Some(component) = value
-            .get("key")
-            .and_then(Value::as_str)
-            .and_then(StatusComponent::from_key)
-        else {
+    for (index, value) in values.iter().enumerate() {
+        let legacy_brief = key(value) == Some("keyhints_brief");
+        let component = if legacy_brief {
+            Some(StatusComponent::Shortcuts)
+        } else {
+            key(value).and_then(StatusComponent::from_key)
+        };
+        let Some(component) = component else {
             continue;
         };
+        if component == StatusComponent::Shortcuts && Some(index) != selected_keyhints {
+            continue;
+        }
         parsed.push(StatusComponentSetting {
             component,
             enabled: value
                 .get("enabled")
                 .and_then(Value::as_bool)
-                .unwrap_or_else(|| component.default_enabled()),
+                .unwrap_or_else(|| !legacy_brief && component.default_enabled()),
+            brief: legacy_brief || value.get("brief").and_then(Value::as_bool).unwrap_or(false),
             label: value
                 .get("label")
                 .and_then(Value::as_str)
@@ -503,6 +525,7 @@ pub fn statusline_components_json(components: &[StatusComponentSetting]) -> Valu
                 serde_json::json!({
                     "key": setting.component.as_str(),
                     "enabled": setting.enabled,
+                    "brief": setting.brief,
                     "label": setting.label.as_str(),
                     "auto_hide": setting.auto_hide,
                     "low_priority": setting.low_priority,
