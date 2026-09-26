@@ -102,6 +102,11 @@ async fn backtick_detaches_a_running_roguelike_and_hops_back_in() {
     app.handle_input(b"j");
     assert_eq!(app.screen, Screen::Nethack);
 
+    // Ctrl+S belongs to the running door too, not the global Shop shortcut.
+    app.handle_input(b"\x13");
+    assert_eq!(app.screen, Screen::Nethack);
+    assert!(!app.show_hub_modal);
+
     // Backtick detaches: with no other workspace stops the cycle wraps to
     // Home chat, and the running state survives for resume.
     app.handle_input(b"`");
@@ -972,6 +977,92 @@ async fn global_ctrl_g_toggles_lobby_and_ctrl_s_or_slash_shop_opens_shop() {
         !frame.contains("-- Shop --"),
         "expected Esc to close the shop; frame={frame:?}"
     );
+}
+
+#[tokio::test]
+async fn ctrl_s_stays_in_arcade_games_but_opens_shop_from_the_menu() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-arcade-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-arcade-flow-it");
+    app.set_screen(Screen::Arcade);
+    app.game_selection = crate::app::state::GAME_SELECTION_2048;
+    app.handle_input(b"\r");
+    assert!(app.is_playing_game);
+
+    app.handle_input(b"\x13");
+    assert!(!app.show_hub_modal);
+    assert!(app.is_playing_game);
+    assert_eq!(app.screen, Screen::Arcade);
+
+    // Leaving the board restores the Shop shortcut on the game menu.
+    app.handle_input(b"q");
+    assert!(!app.is_playing_game);
+    app.handle_input(b"\x13");
+    assert!(app.show_hub_modal);
+}
+
+#[tokio::test]
+async fn ctrl_s_stays_in_native_games() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::lobby::house::tables::HouseTable;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-native-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-native-flow-it");
+
+    for screen in [
+        Screen::Lateania,
+        Screen::GreenDragon,
+        Screen::Darkroom,
+        Screen::DailyMatch,
+        Screen::HouseTable,
+        Screen::City,
+    ] {
+        app.set_screen(screen);
+        match screen {
+            Screen::Lateania => app.enter_lateania(),
+            Screen::GreenDragon => app.enter_greendragon(),
+            Screen::Darkroom => app.enter_darkroom(),
+            Screen::HouseTable => assert!(app.house.enter(
+                HouseTable::Blackjack,
+                Screen::Dashboard,
+                app.chip_balance
+            )),
+            _ => {}
+        }
+        app.handle_input(b"\x13");
+        assert!(!app.show_hub_modal, "Ctrl+S must stay in {screen:?}");
+        assert_eq!(app.screen, screen);
+    }
+
+    // Live sessions left behind must not swallow Ctrl+S on other pages.
+    app.set_screen(Screen::Games);
+    app.handle_input(b"\x13");
+    assert!(app.show_hub_modal);
+}
+
+#[tokio::test]
+async fn ctrl_s_opens_shop_from_door_launchers() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-launchers-it").await;
+    for screen in [
+        Screen::Lateania,
+        Screen::GreenDragon,
+        Screen::Darkroom,
+        Screen::Nethack,
+    ] {
+        let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-launchers-flow-it");
+        app.set_screen(screen);
+        app.handle_input(b"\x13");
+        assert!(
+            app.show_hub_modal,
+            "Shop is available on the {screen:?} launcher"
+        );
+    }
 }
 
 #[tokio::test]

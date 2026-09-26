@@ -3462,6 +3462,20 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
     true
 }
 
+/// Live games own Ctrl+S even when they currently leave it unbound. Running
+/// terminal doors receive raw bytes in App::handle_input before this router;
+/// their launchers and the Arcade/Games menus still offer the Shop shortcut.
+fn game_owns_ctrl_s(app: &App) -> bool {
+    match app.screen {
+        Screen::Arcade => app.is_playing_game,
+        Screen::Lateania => app.lateania_state.is_some(),
+        Screen::GreenDragon => app.greendragon_state.is_some(),
+        Screen::Darkroom => app.darkroom_state.is_some(),
+        Screen::DailyMatch | Screen::HouseTable | Screen::City => true,
+        _ => false,
+    }
+}
+
 fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
     let ParsedInput::Byte(byte) = event else {
         return false;
@@ -3497,10 +3511,12 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
             toggle_zen_globally(app);
             true
         }
-        // These editors already own Ctrl+S for save/post. Their tag picker
-        // also keeps input until it closes, leaving the draft underneath.
+        // Games keep their controls; these editors own Ctrl+S for save/post.
+        // Their tag picker also keeps input until it closes, leaving the draft
+        // underneath.
         CTRL_S
-            if !app.directory_editor.is_open()
+            if !game_owns_ctrl_s(app)
+                && !app.directory_editor.is_open()
                 && !app.jobs.post.is_open()
                 && !app.tag_picker.is_open() =>
         {
