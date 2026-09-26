@@ -1789,7 +1789,7 @@ fn draw_right_sidebar_components_dialog(frame: &mut Frame, area: Rect, state: &S
 }
 
 /// Bottom status bar customizer: the ordered segment list on the left, the
-/// selected segment's dials on the right.
+/// selected segment's description and dials on the right.
 ///
 /// The list is ordered top-to-bottom the way the bar reads left-to-right, so
 /// "move up" and "move left" are the same gesture and the user never has to
@@ -1887,8 +1887,8 @@ fn draw_statusline_list(frame: &mut Frame, area: Rect, state: &SettingsModalStat
     }
 }
 
-/// The dials for the selected segment. Renders nothing when the list is empty,
-/// which only happens if the roster itself is empty.
+/// The description and dials for the selected segment. Renders nothing when
+/// the list is empty, which only happens if the roster itself is empty.
 fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let Some(setting) = state
         .statusline_components()
@@ -1899,6 +1899,18 @@ fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalSta
     };
     let focused = state.statusline_pane() == StatuslinePane::Detail;
     let width = area.width as usize;
+    let description = Paragraph::new(setting.component.description())
+        .style(Style::default().fg(theme::TEXT_DIM()))
+        .wrap(Wrap { trim: true });
+    let description_height = description.line_count(area.width) as u16;
+    let layout = Layout::vertical([
+        Constraint::Length(1), // component name
+        Constraint::Length(1), // blank
+        Constraint::Length(description_height),
+        Constraint::Length(1), // blank
+        Constraint::Min(0),    // dials
+    ])
+    .split(area);
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
@@ -1907,9 +1919,11 @@ fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalSta
                 .fg(theme::AMBER())
                 .add_modifier(Modifier::BOLD),
         ))),
-        Rect::new(area.x, area.y, area.width, 1),
+        layout[0],
     );
+    frame.render_widget(description, layout[2]);
 
+    let area = layout[4];
     let dials = state.statusline_dials();
     if dials.is_empty() {
         frame.render_widget(
@@ -1917,14 +1931,13 @@ fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalSta
                 "Toggle this component from the list.",
                 Style::default().fg(theme::TEXT_DIM()),
             ))),
-            Rect::new(area.x, area.y + 2, area.width, 1),
+            area,
         );
         return;
     }
 
     for (idx, dial) in dials.into_iter().enumerate() {
-        // +2 leaves the component name a blank line of its own.
-        let y = idx as u16 + 2;
+        let y = idx as u16;
         if y >= area.height {
             break;
         }

@@ -1606,7 +1606,7 @@ fn settings_help_lines() -> Vec<String> {
         "  Per-segment options".to_string(),
         "    Brief          Keyhints only: show ⚙ ^o · ⚄ ^g · ◉ ^s (Settings, Lobby, Shop)."
             .to_string(),
-        "    Label          Text, Icon, or None beside the value".to_string(),
+        "    Label          Text or Icon before the value, or None".to_string(),
         "    Auto-hide      drop the segment while it reads zero or idle".to_string(),
         "    Low priority   yields first when the bar runs out of room; every low-priority"
             .to_string(),

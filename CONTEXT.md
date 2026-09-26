@@ -1201,7 +1201,7 @@ Every published GitHub Release lands in `release.yml`, which parses the tag suff
 ### Layout
 
 ```
-┌─ late.sh | 0 1 2 3 4 5 6 | Home ──────── 2 unread ─ 25:00 ─ 1204 ────┐
+┌─ late.sh | 0 1 2 3 4 5 6 | Home ──────── unread 2 ─ 25:00 ─ 1204 ────┐
 │ ┌ room rail ┐ │                                      │ 14:37       │
 │ │ favorites │ │ Home center:                         │ ─────────── │
 │ │ core      │ │ - #lounge dashboard surface          │ visualizer  │
@@ -1221,10 +1221,11 @@ Toast notification is hidden by default (0 rows). When active, it appears as a 3
 Framed pages use the same component renderer on both horizontal borders; Zen stays frameless and clears the status-bar click targets. The top-right bar is fixed UI policy — status, voice, mentions, pot, chips — and shares its row with the page tabs. The bottom-left bar is user-arranged and shares its row with the optional sponsor title. Its persisted model lives in `late-core/src/models/statusline.rs` (`StatusComponent` roster — Keyhints, status, voice, mentions, pot, chips, your move, invites, quests, station, users online, time — plus `LabelMode`, `StatusVariant`, and the `parse_/normalize_/*_json` trio); rendering and hit-testing live in `late-ssh/src/app/statusline/`. The bottom arrangement is stored account-wide in `users.settings.statusline_components`; per-device scoping is not designed yet.
 
 - **Three passes, and no segment knows its own x.** `build_segments` turns component settings + this frame's `StatusData` into spans, `fit` degrades then drops until the bar clears the other title, and `lay_out` joins the survivors with `─` separators and converts accumulated widths into click rects. Widths are measured with ratatui's own `Span::width`, the same function that decides which cells a span occupies, so a hit rect can never disagree with what the user sees — that is what lets segments be reordered, resized, and dropped freely.
+- Text labels precede their values (for example, `chips 1204` and `unread 3`), as do icon labels.
 - **Icons must be Emoji_Presentation** (unambiguously two cells). Text-default glyphs that only become emoji via VS16 (`♟️`, `✉️`, `☎️`) slide every rect and can overrun the title on the opposite end. Time's hour-dependent icon and the pre-styled Keyhints component do not carry a static icon. Brief Keyhints uses the literal text glyphs `⚙`, `⚄`, and `◉`; its span widths still come from ratatui.
 - **Yield order** is two-tier: every `low_priority` segment sheds its text label and then drops before any normal-priority one yields, and within a tier the row's constrained end goes first. `Placement::TopRight` yields from the left toward the page tabs; `Placement::BottomLeft` yields from the right edge. The bottom bar gets first claim on the row, and the optional sponsor picks the richest form that fits in the remaining space.
 - **Top and bottom policy are independent.** `fixed_topbar_components()` reproduces the upstream HUD and is not persisted. The bottom bar defaults to the Keyhints component alone; every status reading is opt-in and starts low-priority. The full Keyhints component retains its dotted, spaced, and caret-control compactions and may be disabled to free the row. Its Brief property defaults off and paints `⚙ ^o · ⚄ ^g · ◉ ^s` with no further compaction when enabled. It is stored as `brief` on the `shortcuts` entry; saved selections of the former brief component fold into Keyhints, preferring full hints if both were enabled. A component added to the roster later backfills at its own `backfill_existing()`; Keyhints is forced on and inserted at the front when missing, while optional status components append disabled.
-- Customizer: Settings > Tweaks > Bottom status bar (last row, `Enter`). `late-ssh/src/app/settings_modal/` — `StatuslinePane`/`StatuslineDial` in `state.rs`, `draw_statusline_dialog` in `ui.rs`.
+- Customizer: Settings > Tweaks > Bottom status bar (last row, `Enter`). The selected component has a concise, wrapped description above its options. `late-ssh/src/app/settings_modal/` — `StatuslinePane`/`StatuslineDial` in `state.rs`, `draw_statusline_dialog` in `ui.rs`.
 
 ### Global guide (`?`) [STABLE]
 

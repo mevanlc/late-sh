@@ -170,7 +170,7 @@ fn brief_keyhints_fits_its_exact_glyphs_and_keeps_adjacent_click_targets_aligned
         },
         on(StatusComponent::Chips, LabelMode::Text),
     ];
-    let expected = "─ ⚙ ^o · ⚄ ^g · ◉ ^s ─ 1204 chips ";
+    let expected = "─ ⚙ ^o · ⚄ ^g · ◉ ^s ─ chips 1204 ";
     let width = Line::raw(expected).width() as u16;
     let area = Rect::new(7, 2, width + 2, 24);
     let bar = build_status_bar(&components, &data(), Placement::BottomLeft, area, 0)
@@ -223,7 +223,7 @@ fn clock_face_follows_the_hour_and_wraps_at_noon() {
 fn label_modes_pick_what_sits_beside_the_value() {
     assert_eq!(
         roomy(&[on(StatusComponent::Chips, LabelMode::Text)]),
-        " 1204 chips ─"
+        " chips 1204 ─"
     );
     assert_eq!(
         roomy(&[on(StatusComponent::Chips, LabelMode::Icon)]),
@@ -243,9 +243,9 @@ fn pot_keeps_upstream_wording_and_compacts_before_it_drops() {
     };
     let chips = on(StatusComponent::Chips, LabelMode::Text);
     let components = [pot, chips];
-    let full = " pot 84,200 · 3h12m ─ 1204 chips ─";
-    let compact = " pot 84,200 ─ 1204 chips ─";
-    let without_pot = " 1204 chips ─";
+    let full = " pot 84,200 · 3h12m ─ chips 1204 ─";
+    let compact = " pot 84,200 ─ chips 1204 ─";
+    let without_pot = " chips 1204 ─";
     let width_for = |text: &str| 18 + 2 + text.chars().count() as u16;
 
     assert_eq!(render(&components, width_for(full)), full);
@@ -448,7 +448,7 @@ fn a_squeezed_bar_sheds_labels_before_segments() {
         on(StatusComponent::Mentions, LabelMode::Text),
         on(StatusComponent::Chips, LabelMode::Text),
     ];
-    // " 3 unread | 1204 chips " is 23 cells; give it 18.
+    // " unread 3 ─ chips 1204 " is 23 cells; give it 18.
     let squeezed = render(&components, 18 + 18 + 2);
     assert!(squeezed.contains('3'), "mentions survived: {squeezed:?}");
     assert!(squeezed.contains("1204"), "chips survived: {squeezed:?}");

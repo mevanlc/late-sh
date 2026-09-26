@@ -2507,9 +2507,9 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
         Uuid::now_v7(),
         false,
     );
-    wait_for_render_contains(&mut app, "1 unread").await;
+    wait_for_render_contains(&mut app, "unread 1").await;
 
-    // The fixed bar sits on the top border row as `1 unread ─ N chips`. Border
+    // The fixed bar sits on the top border row as `unread 1 ─ chips N`. Border
     // glyphs are multi-byte, so translate byte offsets into display columns by
     // char count (every glyph on this row is single-width).
     let frame = render_plain(&mut app);

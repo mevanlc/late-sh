@@ -285,10 +285,9 @@ fn resting_value(component: StatusComponent) -> String {
 }
 
 /// Assemble one segment: the value always paints, and `LabelMode` picks what
-/// sits beside it. Text labels usually trail the value (`3 unread`) because
-/// that is how the count reads aloud; the pot keeps upstream's `pot 84,200`
-/// phrasing. Icons lead values (`📩 3`), which also keeps the glyph off the
-/// segment's right edge, where a terminal painting it a cell narrower than
+/// sits before it. Text labels lead values (`unread 3`), as do icons (`📩 3`).
+/// Leading icons also keep the glyph off the segment's right edge, where a
+/// terminal painting it a cell narrower than
 /// measured would drag the following divider with it.
 fn segment_spans(
     setting: &StatusComponentSetting,
@@ -302,13 +301,9 @@ fn segment_spans(
     let label_style = Style::default().fg(theme::TEXT_MUTED());
 
     match setting.label {
-        LabelMode::Text if component == StatusComponent::Pot => vec![
+        LabelMode::Text if !component.text_label().is_empty() => vec![
             Span::styled(format!(" {} ", component.text_label()), label_style),
             Span::styled(format!("{value} "), value_style),
-        ],
-        LabelMode::Text if !component.text_label().is_empty() => vec![
-            Span::styled(format!(" {value}"), value_style),
-            Span::styled(format!(" {} ", component.text_label()), label_style),
         ],
         LabelMode::Icon => {
             let icon = if component == StatusComponent::Time {

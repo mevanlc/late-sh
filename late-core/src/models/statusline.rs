@@ -111,6 +111,24 @@ impl StatusComponent {
         }
     }
 
+    /// Short explanation shown beside the selected component in the customizer.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Shortcuts => "Keyboard shortcuts for navigation and common actions.",
+            Self::Time => "Current time in your chosen timezone.",
+            Self::Chips => "Your chip balance.",
+            Self::Mentions => "Unread mentions, optionally including direct messages.",
+            Self::Pot => "Raffle pot size and time until the next draw.",
+            Self::Users => "People online, excluding bots.",
+            Self::Turns => "Correspondence games waiting for your move.",
+            Self::Status => "Your /status activity and any countdown.",
+            Self::Station => "Your selected audio source or its current track.",
+            Self::Quests => "Unfinished daily quests, optionally including weekly quests.",
+            Self::Invites => "Game challenges awaiting your response.",
+            Self::Voice => "Your voice channel: speaking, listening, muted or deafened.",
+        }
+    }
+
     /// The word painted on the bar under `LabelMode::Text`. Shorter than
     /// `label()`, which only has to be legible in the editor's list.
     pub fn text_label(self) -> &'static str {
