@@ -32,9 +32,15 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 
+use crate::app::deadchannel::fight::data::TRADE_IN_PERCENT;
+use crate::app::deadchannel::fight::session::Scene as FightScene;
+use crate::app::deadchannel::fight::state::{Sheet, Slot as GearSlot, gear_name};
+use crate::app::deadchannel::fight::ui as fight_ui;
 use crate::app::deadchannel::glyphs::GLYPH_ALPHABET;
-use crate::app::deadchannel::runner::state::Tint;
-use crate::app::deadchannel::runner::state::{Look, Slot, pieces_for};
+use crate::app::deadchannel::guide::state::State as GuideState;
+use crate::app::deadchannel::guide::ui as guide_ui;
+use crate::app::deadchannel::runner::state::{Look, Tint};
+use crate::app::deadchannel::tailor::ui as tailor_ui;
 
 use super::data;
 use super::ledge;
@@ -119,6 +125,17 @@ pub(crate) struct CityView<'a> {
     /// The runner's look, for the mark and the tailor's mirror. `None` for
     /// a session without a runner row: the mark falls back to `@`.
     pub look: Option<&'a Look>,
+    /// The runner's sheet mirror (`fight/session.rs`), for the strip and
+    /// the scene's header; `None` until the descent's reload lands.
+    pub sheet: Option<&'a Sheet>,
+    /// The fight scene, when one is open over the street.
+    pub scene: Option<&'a FightScene>,
+    /// The armorer's last word (`fight/session.rs`), for its panel.
+    pub till: Option<&'a str>,
+    /// The tailor's mirror (`tailor/session.rs`), for its panel.
+    pub tailor: tailor_ui::MirrorView<'a>,
+    /// The guide (`guide/state.rs`): drawn over everything when open.
+    pub guide: &'a GuideState,
 }
 
 type Cells = Vec<Vec<(char, Style)>>;
@@ -188,6 +205,25 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, view: CityView<'_>) {
     draw_street_line(frame, area, &view);
     draw_popover(frame, area, &view);
     draw_panel(frame, area, &view);
+    // The sheet strip and the fight scene (`fight/ui.rs`): the runner's
+    // budget while walking, the scene over everything when one is open.
+    match (view.sheet, view.scene) {
+        (Some(sheet), None) => fight_ui::draw_strip(frame, area, sheet),
+        (sheet, Some(scene)) => fight_ui::draw_scene(
+            frame,
+            area,
+            fight_ui::SceneView {
+                sheet,
+                scene,
+                look: view.look,
+                own_username: view.own_username,
+            },
+        ),
+        (None, None) => {}
+    }
+    if view.guide.is_open() {
+        guide_ui::draw(frame, area, view.guide);
+    }
 }
 
 fn camera_origin(player: usize, viewport: usize, map_len: usize) -> usize {
@@ -227,10 +263,10 @@ const FRAME: Rgb = [0.30, 0.27, 0.25];
 /// so the terminal's canvas never shows through.
 pub(super) const NIGHT: Rgb = [0.03, 0.03, 0.05];
 /// The overlays' text, rain-grey on the night, bright to muted.
-pub(super) const INK_BRIGHT: Rgb = [0.92, 0.93, 0.96];
-pub(super) const INK: Rgb = [0.74, 0.76, 0.82];
-pub(super) const INK_DIM: Rgb = [0.50, 0.52, 0.58];
-const INK_MUTED: Rgb = [0.34, 0.35, 0.40];
+pub(crate) const INK_BRIGHT: Rgb = [0.92, 0.93, 0.96];
+pub(crate) const INK: Rgb = [0.74, 0.76, 0.82];
+pub(crate) const INK_DIM: Rgb = [0.50, 0.52, 0.58];
+pub(crate) const INK_MUTED: Rgb = [0.34, 0.35, 0.40];
 
 pub(super) fn rgb_color(c: Rgb) -> Color {
     let q = |v: f32| ((v.clamp(0.0, 1.0) * LEVELS).round() / LEVELS * 255.0) as u8;
@@ -242,18 +278,20 @@ pub(super) fn night() -> Color {
 }
 
 /// A foreground on the night sky: every cell and every overlay span.
-pub(super) fn ink(c: Rgb) -> Style {
+pub(crate) fn ink(c: Rgb) -> Style {
     Style::default().fg(rgb_color(c)).bg(night())
 }
 
 /// A tint of the tailor's rack in the city's own palette.
-fn tint_rgb(tint: Tint) -> Rgb {
+pub(crate) fn tint_rgb(tint: Tint) -> Rgb {
     match tint {
         Tint::Static => INK_DIM,
         Tint::Amber => neon_rgb(Neon::Amber),
         Tint::Phosphor => neon_rgb(Neon::Green),
-        Tint::White => INK_BRIGHT,
+        Tint::Cyan => neon_rgb(Neon::Cyan),
+        Tint::Magenta => neon_rgb(Neon::Magenta),
         Tint::Red => neon_rgb(Neon::Red),
+        Tint::White => INK_BRIGHT,
     }
 }
 
@@ -267,15 +305,15 @@ fn luma(c: Rgb) -> f32 {
 }
 
 /// A neon at full burn, for the overlays and the runner's mark.
-pub(super) fn lit(neon: Neon) -> Style {
+pub(crate) fn lit(neon: Neon) -> Style {
     ink(neon_rgb(neon)).add_modifier(Modifier::BOLD)
 }
 
-fn glow(neon: Neon) -> Style {
+pub(crate) fn glow(neon: Neon) -> Style {
     ink(neon_rgb(neon))
 }
 
-fn dim(neon: Neon) -> Style {
+pub(crate) fn dim(neon: Neon) -> Style {
     ink(scale(neon_rgb(neon), 0.55))
 }
 
@@ -1424,7 +1462,7 @@ fn draw_street_line(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
 
 /// What you can do where you stand, bottom-right.
 fn draw_popover(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
-    if view.state.panel().is_some() {
+    if view.state.panel().is_some() || view.scene.is_some() {
         return;
     }
     let Some(landmark) = view.state.nearby() else {
@@ -1438,6 +1476,7 @@ fn draw_popover(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
         Enter::Line(_) => "look closer",
         Enter::Leave => "back up the wire",
         Enter::Ledge => "look over",
+        Enter::Fight => "step into the static",
     };
     let title = format!(" {} ", data::title(landmark));
     let lines = vec![
@@ -1474,8 +1513,8 @@ fn draw_popover(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
     );
 }
 
-/// A shop's panel, centered over the street. Content only: the catalogs
-/// are on the counter, the tills are not open.
+/// A shop's panel, centered over the street. The armorer trades; the
+/// other catalogs are on the counter with their tills shut.
 fn draw_panel(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
     let Some(landmark) = view.state.panel() else {
         return;
@@ -1516,97 +1555,8 @@ fn panel_lines(landmark: Landmark, view: &CityView<'_>) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let blank = || Line::default();
     match landmark {
-        Landmark::Armorer => {
-            lines.push(Line::from(vec![Span::styled(
-                format!(
-                    "{:>4}  {:<20}{:<21}{:>7}",
-                    "tier", "weapon", "armor", "bits"
-                ),
-                head,
-            )]));
-            for tier in 0..15usize {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("{:>4}  ", tier + 1), dim_text),
-                    Span::styled(format!("{:<20}", data::WEAPONS[tier]), text),
-                    Span::styled(format!("{:<21}", data::ARMOR[tier]), text),
-                    Span::styled(format!("{:>7}", data::COST_LADDER[tier]), number),
-                ]));
-            }
-            lines.push(blank());
-            lines.push(Line::from(Span::styled(
-                "bare hands and street clothes are tier 0. power equals tier; 75% back on what you trade in.",
-                dim_text,
-            )));
-            lines.push(Line::from(Span::styled(
-                "you carry nothing. the armorer does not extend credit, and the shutters are half down.",
-                muted_text,
-            )));
-        }
-        Landmark::Tailor => {
-            lines.push(Line::from(Span::styled("the mirror", head)));
-            match view.look {
-                Some(look) => {
-                    for worn in look.rows() {
-                        lines.push(Line::from(vec![
-                            Span::styled("   ", text),
-                            Span::styled(worn.piece.row, ink(tint_rgb(worn.tint))),
-                        ]));
-                    }
-                    lines.push(Line::from(vec![
-                        Span::styled("   ", text),
-                        Span::styled("mark ", dim_text),
-                        Span::styled(look.mark.to_string(), lit(Neon::Amber)),
-                    ]));
-                }
-                None => lines.push(Line::from(Span::styled(
-                    "   nothing looks back. you have no runner yet.",
-                    muted_text,
-                ))),
-            }
-            lines.push(blank());
-            lines.push(Line::from(Span::styled(
-                "the rack (starter set, free)",
-                head,
-            )));
-            for (label, slot) in [
-                ("hoods ", Slot::Hood),
-                ("eyes  ", Slot::Eyes),
-                ("coats ", Slot::Coat),
-            ] {
-                let mut spans = vec![Span::styled(label, dim_text)];
-                for (i, piece) in pieces_for(slot).enumerate() {
-                    let tint = TINT_CYCLE[i % TINT_CYCLE.len()];
-                    spans.push(Span::styled(piece.row, ink(tint_rgb(tint))));
-                    spans.push(Span::styled(" ", text));
-                }
-                lines.push(Line::from(spans));
-            }
-            let mut marks = vec![Span::styled("marks ", dim_text)];
-            for glyph in GLYPH_ALPHABET {
-                marks.push(Span::styled(format!("  {glyph}   "), glow(Neon::Amber)));
-            }
-            lines.push(Line::from(marks));
-            let mut tints = vec![Span::styled("tints ", dim_text)];
-            for tint in TINT_CYCLE {
-                tints.push(Span::styled(
-                    format!("{:?} ", tint).to_lowercase(),
-                    ink(tint_rgb(tint)),
-                ));
-            }
-            lines.push(Line::from(tints));
-            lines.push(blank());
-            lines.push(Line::from(Span::styled("coming to the rack", head)));
-            for (what, price) in data::TAILOR_PRICES {
-                lines.push(Line::from(vec![
-                    Span::styled(format!("  {what:<34}"), text),
-                    Span::styled(price, number),
-                ]));
-            }
-            lines.push(Line::from(Span::styled(
-                "bought pieces are permanent and leave the rack with the season. earned ones are never sold.",
-                dim_text,
-            )));
-        }
+        Landmark::Armorer => lines.extend(armorer_lines(view)),
+        Landmark::Tailor => lines.extend(tailor_ui::mirror_lines(&view.tailor)),
         Landmark::Lockers => {
             lines.push(Line::from(vec![
                 Span::styled("on hand   ", dim_text),
@@ -1666,18 +1616,7 @@ fn panel_lines(landmark: Landmark, view: &CityView<'_>) -> Vec<Line<'static>> {
                 dim_text,
             )));
         }
-        Landmark::Repairs => {
-            lines.push(Line::from(Span::styled(
-                "nothing on you is broken. yet.",
-                text,
-            )));
-            lines.push(blank());
-            lines.push(Line::from(Span::styled(
-                "gear keeps when your signal drops. patch is for the day the static gets its hands on it.",
-                dim_text,
-            )));
-            lines.push(Line::from(Span::styled("(not open yet)", muted_text)));
-        }
+        Landmark::Repairs => lines.extend(patch_lines(view)),
         Landmark::Board => {
             lines.push(Line::from(Span::styled("standing orders", head)));
             for notice in data::NOTICES.iter() {
@@ -1711,14 +1650,6 @@ fn panel_lines(landmark: Landmark, view: &CityView<'_>) -> Vec<Line<'static>> {
     }
     lines
 }
-
-const TINT_CYCLE: [Tint; 5] = [
-    Tint::Static,
-    Tint::Amber,
-    Tint::Phosphor,
-    Tint::White,
-    Tint::Red,
-];
 
 // -------------------------------------------------------------- helpers
 
@@ -1761,11 +1692,191 @@ fn truncate_name(name: &str) -> String {
     out
 }
 
-pub(super) fn mix(mut v: u64) -> u64 {
+pub(crate) fn mix(mut v: u64) -> u64 {
     v ^= v >> 33;
     v = v.wrapping_mul(0xff51_afd7_ed55_8ccd);
     v ^= v >> 33;
     v
+}
+
+/// Patch: the signal, what bringing it back costs, and the one key. The
+/// price is `Sheet::patch_price`; the refusals the row would give are
+/// spelled out ahead of the key so nobody pays to read them.
+fn patch_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
+    let text = ink(INK);
+    let dim_text = ink(INK_DIM);
+    let muted_text = ink(INK_MUTED);
+    let number = glow(Neon::Amber);
+    let key = lit(Neon::Amber);
+    let short = dim(Neon::Red);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+
+    let Some(sheet) = view.sheet else {
+        lines.push(Line::from(Span::styled(
+            "the sheet has not come down the wire yet.",
+            muted_text,
+        )));
+        return lines;
+    };
+    lines.push(Line::from(vec![
+        Span::styled("signal ", dim_text),
+        Span::styled(
+            format!("{}/{}", sheet.signal, sheet.max_signal()),
+            match sheet.is_down() {
+                true => short,
+                false => text,
+            },
+        ),
+        Span::styled("      on hand ", dim_text),
+        Span::styled(format!("{} bits", sheet.bits), number),
+    ]));
+    lines.push(Line::default());
+    let price = sheet.patch_price();
+    if sheet.is_down() {
+        lines.push(Line::from(Span::styled(
+            "your signal is down. nothing here brings it back before the roll.",
+            text,
+        )));
+    } else if sheet.fight.is_some() {
+        lines.push(Line::from(Span::styled(
+            "not with a glyph waiting on you. finish it first.",
+            text,
+        )));
+    } else if sheet.rations_left <= 0 {
+        lines.push(Line::from(Span::styled(
+            "you are spent for today. the roll brings the signal back for nothing.",
+            text,
+        )));
+    } else if price == 0 {
+        lines.push(Line::from(Span::styled(
+            "nothing on you needs patching.",
+            text,
+        )));
+    } else {
+        let style = match price > sheet.bits {
+            true => short,
+            false => number,
+        };
+        lines.push(Line::from(vec![
+            Span::styled("[p] ", key),
+            Span::styled("patch to full for ", text),
+            Span::styled(format!("{price} bits"), style),
+        ]));
+    }
+    lines.push(Line::from(Span::styled(
+        "a bit a point, times your level. a dropped signal is the roll's to fix, not patch's.",
+        dim_text,
+    )));
+    if let Some(till) = view.till {
+        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
+    }
+    lines
+}
+
+/// The armorer's wall: the ladder with the cursor on it, what you carry
+/// lit, the two keys priced for the picked row net of the trade-in, and
+/// the last thing the armorer said.
+fn armorer_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
+    let text = ink(INK);
+    let dim_text = ink(INK_DIM);
+    let muted_text = ink(INK_MUTED);
+    let head = ink(INK_BRIGHT).add_modifier(Modifier::BOLD);
+    let number = glow(Neon::Amber);
+    let carried = lit(Neon::Amber);
+    let key = lit(Neon::Amber);
+    let short = dim(Neon::Red);
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let picked = view.state.picked_tier();
+
+    let Some(sheet) = view.sheet else {
+        lines.push(Line::from(Span::styled(
+            "the sheet has not come down the wire yet.",
+            muted_text,
+        )));
+        return lines;
+    };
+    lines.push(Line::from(vec![
+        Span::styled("on hand ", dim_text),
+        Span::styled(format!("{} bits", sheet.bits), number),
+        Span::styled("      weapon ", dim_text),
+        Span::styled(fight_ui::weapon_name(sheet).to_string(), carried),
+        Span::styled("      armor ", dim_text),
+        Span::styled(fight_ui::armor_name(sheet).to_string(), carried),
+    ]));
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  {:>4}  {:<20}{:<21}{:>7}",
+            "tier", "weapon", "armor", "bits"
+        ),
+        head,
+    )));
+    for (index, price) in data::COST_LADDER.iter().enumerate() {
+        let tier = index as i32 + 1;
+        let cell = |slot: GearSlot, name: &'static str| {
+            let style = match tier.cmp(&sheet.tier_of(slot)) {
+                std::cmp::Ordering::Less => dim_text,
+                std::cmp::Ordering::Equal => carried,
+                std::cmp::Ordering::Greater => text,
+            };
+            Span::styled(name.to_string(), style)
+        };
+        let marker = match tier == picked {
+            true => Span::styled("▸ ", key),
+            false => Span::styled("  ", text),
+        };
+        lines.push(Line::from(vec![
+            marker,
+            Span::styled(format!("{tier:>4}  "), dim_text),
+            cell(GearSlot::Weapon, data::WEAPONS[index]),
+            Span::styled(
+                " ".repeat(20usize.saturating_sub(data::WEAPONS[index].chars().count())),
+                text,
+            ),
+            cell(GearSlot::Armor, data::ARMOR[index]),
+            Span::styled(
+                " ".repeat(21usize.saturating_sub(data::ARMOR[index].chars().count())),
+                text,
+            ),
+            Span::styled(format!("{price:>7}"), number),
+        ]));
+    }
+    lines.push(Line::default());
+    let mut keys = vec![Span::styled("[↑↓] ", key), Span::styled("pick   ", text)];
+    for (label, slot) in [("[w] ", GearSlot::Weapon), ("[a] ", GearSlot::Armor)] {
+        keys.push(Span::styled(label, key));
+        match picked > sheet.tier_of(slot) {
+            true => {
+                let price = sheet.outfit_price(slot, picked);
+                keys.push(Span::styled(
+                    format!(
+                        "{} for ",
+                        gear_name(slot, picked).expect("a tier on the wall")
+                    ),
+                    text,
+                ));
+                let style = match price > sheet.bits {
+                    true => short,
+                    false => number,
+                };
+                keys.push(Span::styled(format!("{price} bits"), style));
+            }
+            false => keys.push(Span::styled("you carry that, or better", muted_text)),
+        }
+        keys.push(Span::styled("   ", text));
+    }
+    lines.push(Line::from(keys));
+    lines.push(Line::from(Span::styled(
+        format!(
+            "power equals tier. {}% back on what you hand in. bits only, no credit.",
+            TRADE_IN_PERCENT
+        ),
+        dim_text,
+    )));
+    if let Some(till) = view.till {
+        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
+    }
+    lines
 }
 
 #[cfg(test)]

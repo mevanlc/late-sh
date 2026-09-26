@@ -8,9 +8,14 @@ use uuid::Uuid;
 use super::svc::SolitaireService;
 use super::win_anim::{Viewport, WinAnimation};
 use crate::app::games::cards::{CardRank, CardSuit, PlayingCard};
+use crate::metrics::{ArcadeDifficulty, ArcadeFinish, ArcadeMode};
 use late_core::models::solitaire::{Game, GameParams};
 
 pub const DIFFICULTIES: [&str; 2] = ["draw-1", "draw-3"];
+/// The metric label of each row of `DIFFICULTIES`, in the same order.
+/// Sized by the table, so a new difficulty must be labeled to build.
+const DIFFICULTY_METRICS: [ArcadeDifficulty; DIFFICULTIES.len()] =
+    [ArcadeDifficulty::DrawOne, ArcadeDifficulty::DrawThree];
 
 /// Which destructive action a pending confirmation is armed for. Tracking the
 /// kind keeps the two reset keys distinct: pressing `n` then `r` re-arms for
@@ -151,6 +156,11 @@ pub struct State {
     /// board is dealt again. It outlives its own last frame: the heap of
     /// cards stays on screen under the `YOU WON!` card.
     pub win_anim: Option<WinAnimation>,
+    /// The board's finish has been counted (the cascade shown, the finish
+    /// metric recorded). Not part of a snapshot and not restored by undo:
+    /// a won board undone and replayed is the same win, counted once. A
+    /// snapshot applied won (a reload) starts counted.
+    finish_recorded: bool,
     /// Where the board was last drawn, written by the render pass so the
     /// cascade can aim at the same cells. A render mirror, never a rule
     /// input, which is why it can ride a `Cell` behind `&self`.
@@ -206,6 +216,7 @@ impl State {
             scroll_offset: 0,
             reset_pending: None,
             win_anim: None,
+            finish_recorded: false,
             win_view: std::cell::Cell::new(Viewport::default()),
             undo_stack: Vec::new(),
             daily_snapshots,
@@ -813,13 +824,26 @@ impl State {
         self.save_async();
     }
 
+    /// Tell the dashboard this board ended.
+    fn record_finish(&self, finish: ArcadeFinish) {
+        let mode = match self.mode {
+            Mode::Daily => ArcadeMode::Daily,
+            Mode::Personal => ArcadeMode::Personal,
+        };
+        let difficulty = DIFFICULTY_METRICS[self.selected_difficulty];
+        self.svc.record_finish(mode, difficulty, finish);
+    }
+
     fn check_for_win(&mut self) {
         if self.foundations.iter().all(|pile| pile.len() == 13) {
-            // Cards can be pulled back off a full foundation and replaced, so
-            // this fires again on an already-won board; only the first crossing
-            // gets a cascade.
-            if !self.is_game_over {
+            // Cards can be pulled back off a full foundation and replaced, and
+            // the winning move can be undone and replayed, so this fires again
+            // on an already-won board; only the first crossing gets a cascade
+            // and counts as a finish.
+            if !self.finish_recorded {
+                self.finish_recorded = true;
                 self.win_anim = Some(WinAnimation::new(&self.foundations, self.seed));
+                self.record_finish(ArcadeFinish::Won);
             }
             self.is_game_over = true;
             if self.mode == Mode::Daily {
@@ -892,6 +916,7 @@ impl State {
         self.foundations = snapshot.foundations;
         self.tableau = snapshot.tableau;
         self.is_game_over = snapshot.is_game_over;
+        self.finish_recorded = snapshot.is_game_over;
         self.cursor = Focus::Stock;
         self.selection = None;
         self.scroll_offset = 0;

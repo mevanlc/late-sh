@@ -1,3 +1,4 @@
+use late_core::MutexRecover;
 use std::time::{Duration, Instant};
 
 use super::state::{
@@ -26,6 +27,9 @@ pub(crate) const IDLE_TICK: Duration = Duration::from_millis(500);
 /// After any input, hold the hot cadence briefly so async responses to that
 /// input (menu DB loads, chat send echo) land at typing latency.
 const POST_INPUT_HOT_WINDOW: Duration = Duration::from_secs(2);
+/// A second of attention counts as `Active` when a key landed this
+/// recently; past it the terminal is only left open.
+const ATTENTION_ACTIVE_WINDOW: Duration = Duration::from_secs(300);
 
 impl App {
     /// Advance world time by one tick. Returns true when anything render-
@@ -64,6 +68,7 @@ impl App {
         // page is left), whatever the key repeat rate did to it.
         if one_hz {
             self.flush_zen_layout();
+            self.record_attention();
         }
         // Shared animation frame edges, both divisors of the one wall
         // clock. Half (132ms, ~7.5fps): pet, bonsai sway, clubhouse
@@ -123,26 +128,12 @@ impl App {
         {
             changed = true;
         }
-        // A countdown reaching zero is not urgent to the millisecond, so this
-        // rides the existing 1Hz edge rather than checking every tick. A
-        // running countdown dirties every one of those edges because the HUD
-        // badge counts down in seconds; an open-ended status has nothing to
-        // count and is cleared by a chat message instead, so it never dirties
-        // anything here and an idle session still settles.
-        if one_hz
-            && let Some(status) = self.status
-            && !status.clears_on_post()
-        {
-            if status.is_expired(chrono::Utc::now()) {
-                let word = status.status.word();
-                self.set_status(None);
-                self.banner = Some(crate::app::common::primitives::Banner::success(&format!(
-                    "{word} done!"
-                )));
-                self.notifier
-                    .push(crate::app::notify::Notification::status_done(word));
-            }
-            changed = true;
+        // Going away is not urgent to the millisecond, so this session's away
+        // flag rides the 1Hz edge. It only writes the roster on a change and
+        // paints nothing of its own: peers pick it up on their presence edge
+        // below, so an idle session still settles.
+        if one_hz {
+            self.sync_away();
         }
         // UTC midnight rolls the Arcade dailies over. This rides the 1Hz edge
         // rather than an input path so a session parked in chat overnight is
@@ -289,6 +280,9 @@ impl App {
         changed |= self.tick_stream();
         changed |= self.tick_crown();
         changed |= self.bonsai.tick();
+        changed |= self.fight.tick();
+        changed |= self.tailor.tick();
+        changed |= self.guide.tick();
         changed |= self.tick_pot();
         // News state is ticked inside chat.tick()
         let profile_tick = self.profile_state.tick();
@@ -788,8 +782,21 @@ impl App {
                 // that can notice: the gate on `0` guards the descent, not
                 // the standing there.
                 if self.screen == Screen::City && !self.is_runner() {
+                    self.fight.close();
+                    self.tailor.close();
+                    self.guide.state.close();
                     self.set_screen(Screen::Clubhouse);
                     changed = true;
+                }
+                // The sheet mirror follows the standing: a runner re-reads
+                // it (the edge fires on a level change too, per the
+                // migration 202 trigger, so the frame HUD keeps up with a
+                // fight on another session), and a leaver drops it so the
+                // HUD stops reading a row that is gone.
+                if self.is_runner() {
+                    self.fight.reload();
+                } else {
+                    self.fight.drop_sheet();
                 }
             }
             // The pot resolves on the same edge, and for the same reason:
@@ -808,37 +815,33 @@ impl App {
                     changed = true;
                 }
             }
-            // Peer statuses resolve on the same edge, and only the minute
-            // rollovers survive the comparison: a badge that reads the same
-            // must not bump the epoch, or every second would invalidate every
-            // cached chat row for the whole room.
-            if let Some(directory) = &self.status_directory {
-                let peer_statuses = crate::app::common::status::resolve_all(
-                    &crate::app::common::status::snapshot(directory),
-                    chrono::Utc::now(),
-                );
-                if self.peer_statuses != peer_statuses {
-                    self.peer_statuses = peer_statuses;
-                    self.chat_ctx_epoch += 1;
-                }
-            }
-            // Presence reads on the same cadence: renders consume these owned
-            // values instead of locking `active_users` twice per frame.
+            // Presence reads on the same cadence, under one lock: renders
+            // consume these owned values instead of locking `active_users`
+            // per frame. The away set bumps the chat row epoch only when it
+            // actually moves, or every second would invalidate every cached
+            // chat row.
             if let Some(active_users) = &self.active_users {
-                let online_count = crate::state::online_human_count(active_users);
+                let (online_count, away_user_ids, active_friends) = {
+                    let roster = active_users.lock_recover();
+                    (
+                        crate::state::online_human_count(&roster),
+                        crate::app::common::away::away_user_ids(&roster),
+                        self.chat.active_friends(&roster),
+                    )
+                };
                 if online_count != self.online_count {
                     self.online_count = online_count;
                     changed = true;
                 }
-            }
-            let active_friends = self.chat.active_friends();
-            if active_friends != self.active_friends {
-                self.active_friend_names = active_friends
-                    .iter()
-                    .map(|friend| friend.username.clone())
-                    .collect();
-                self.active_friends = active_friends;
-                changed = true;
+                if away_user_ids != self.away_user_ids {
+                    self.away_user_ids = away_user_ids;
+                    self.chat_ctx_epoch += 1;
+                    changed = true;
+                }
+                if active_friends != self.active_friends {
+                    self.active_friends = active_friends;
+                    changed = true;
+                }
             }
             // Mentions load only when asked for. An Inbox tile on the page
             // asks whenever the unread count moves, so a new mention lands.
@@ -1197,7 +1200,7 @@ impl App {
             let queue = self.audio.queue_snapshot();
             let inputs = crate::app::common::sidebar::SidebarMarqueeInputs {
                 components: &self.profile_state.profile().right_sidebar_components,
-                active_friend_names: &self.active_friend_names,
+                active_friends: &self.active_friends,
                 icecast_now_playing: icecast_now_playing.as_ref(),
                 radio_now_playing: radio_now_playing.as_deref(),
                 selected_station: selected_radio_station,
@@ -1374,6 +1377,28 @@ impl App {
             )
         };
         enabled.then(|| packed_rgb(theme::preview_for_id(theme_id).bg_canvas))
+    }
+}
+
+impl App {
+    /// Add the seconds since the last mark to the screen in front of the
+    /// user (and the Arcade game, while a board is open). Rides the 1Hz
+    /// edge; a screen switched mid-second lands on the new screen.
+    fn record_attention(&mut self) {
+        let now = Instant::now();
+        let seconds = now.duration_since(self.attention_mark).as_secs_f64();
+        self.attention_mark = now;
+        let arcade_game = match (self.screen, self.is_playing_game) {
+            (Screen::Arcade, true) => Some(crate::app::arcade::ui::game_for_selection(
+                self.game_selection,
+            )),
+            _ => None,
+        };
+        let presence = match self.last_input_at.elapsed() < ATTENTION_ACTIVE_WINDOW {
+            true => crate::metrics::Presence::Active,
+            false => crate::metrics::Presence::Idle,
+        };
+        crate::metrics::record_attention(self.screen, arcade_game, presence, seconds);
     }
 }
 

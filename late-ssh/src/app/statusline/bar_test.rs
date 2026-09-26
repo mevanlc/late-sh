@@ -4,7 +4,10 @@ use late_core::models::statusline::{
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
-use super::bar::{Placement, StatusClick, build_status_bar, click_action, fixed_topbar_components};
+use super::bar::{
+    Placement, StatusClick, build_status_bar, build_top_status_bar, click_action,
+    fixed_topbar_components,
+};
 use super::data::{StatusData, clock_icon};
 
 fn data() -> StatusData<'static> {
@@ -19,7 +22,6 @@ fn data() -> StatusData<'static> {
         pot_draws_in: Some("3h12m"),
         online_count: 12,
         turns_waiting: 2,
-        presence: Some("12:04 deep work"),
         station_name: Some("chillsynth"),
         station_track: Some("Artist - A Very Long Track Title"),
         quests_open_daily: 1,
@@ -91,7 +93,6 @@ fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
     assert_eq!(
         topbar.map(|setting| setting.component),
         [
-            StatusComponent::Status,
             StatusComponent::Voice,
             StatusComponent::Mentions,
             StatusComponent::Pot,
@@ -104,39 +105,76 @@ fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
             .iter()
             .all(|setting| { setting.low_priority == (setting.component == StatusComponent::Pot) })
     );
-    assert!(!StatusComponentSetting::new(StatusComponent::Status).enabled);
+    assert!(!StatusComponentSetting::new(StatusComponent::Voice).enabled);
 }
 
 #[test]
-fn presence_badges_keep_timed_and_open_ended_readings_when_compacted() {
-    use crate::app::common::status::{SessionStatus, Status};
-    let now = chrono::Utc::now();
-    for ends_at in [None, Some(now + chrono::Duration::minutes(25))] {
-        let badge = SessionStatus {
-            status: Status::Building,
-            ends_at,
-        }
-        .hud_badge(now);
-        let data = StatusData {
-            presence: Some(&badge),
-            ..StatusData::default()
-        };
-        let components = [on(StatusComponent::Status, LabelMode::None)];
-        let compact = badge.split_once(' ').unwrap().0;
-        for value in [badge.as_str(), compact] {
-            let expected = format!(" {value} ─");
-            let width = Span::raw(&expected).width() as u16 + 2;
-            let bar = build_status_bar(
-                &components,
-                &data,
-                Placement::TopRight,
-                Rect::new(0, 0, width, 24),
-                0,
-            )
-            .expect("presence fits");
-            assert_eq!(bar.line.to_string(), expected);
-        }
-    }
+fn fixed_topbar_reads_the_runners_rations_and_signal() {
+    use crate::app::common::theme;
+    use crate::app::deadchannel::fight::state::Sheet;
+
+    let mut sheet = Sheet::fresh(
+        uuid::Uuid::from_u128(1),
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 25).expect("date"),
+    );
+    sheet.level = 2;
+    sheet.signal = 12;
+    sheet.rations_left = 7;
+    let with_runner = |sheet: &Sheet, border_width: u16| {
+        build_top_status_bar(
+            &StatusData {
+                chip_balance: 1_500,
+                mentions_unread: 2,
+                pot_size: Some(84_200),
+                pot_draws_in: Some("3h12m"),
+                ..StatusData::default()
+            },
+            Some(sheet),
+            Rect::new(0, 0, border_width, 24),
+            0,
+        )
+    };
+    let full = " unread 2 ─ rations 7 · signal 12/20 ─ pot 84,200 · 3h12m ─ chips 1500 ─";
+    let without_pot = " unread 2 ─ rations 7 · signal 12/20 ─ chips 1500 ─";
+    let signal_only = " unread 2 ─ signal 12/20 ─ chips 1500 ─";
+    // With the readout gone the pot has room for its size again.
+    let without_runner = " unread 2 ─ pot 84,200 ─ chips 1500 ─";
+    let width = |text: &str| Span::raw(text).width() as u16 + 2;
+
+    let hud = with_runner(&sheet, 200).expect("hud");
+    assert_eq!(hud.line.to_string(), full);
+    let signal = hud
+        .line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "12/20")
+        .expect("signal span");
+    assert_eq!(signal.style.fg, Some(theme::TEXT_BRIGHT()));
+    assert_eq!(
+        with_runner(&sheet, width(without_pot)).map(|hud| hud.line.to_string()),
+        Some(without_pot.to_string()),
+        "the pot sheds before the runner's readout"
+    );
+    assert_eq!(
+        with_runner(&sheet, width(without_pot) - 1).map(|hud| hud.line.to_string()),
+        Some(signal_only.to_string()),
+        "one cell short drops the rations, not the signal"
+    );
+    assert_eq!(
+        with_runner(&sheet, width(signal_only) - 1).map(|hud| hud.line.to_string()),
+        Some(without_runner.to_string()),
+        "too tight for the signal drops the readout"
+    );
+
+    sheet.signal = 0;
+    let down = with_runner(&sheet, 200).expect("hud");
+    let signal = down
+        .line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "0/20")
+        .expect("signal span");
+    assert_eq!(signal.style.fg, Some(theme::ERROR()));
 }
 
 #[test]
@@ -660,7 +698,6 @@ fn click_actions_cover_exactly_the_actionable_components() {
     );
     assert_eq!(click_action(StatusComponent::Time), None);
     assert_eq!(click_action(StatusComponent::Shortcuts), None);
-    assert_eq!(click_action(StatusComponent::Status), None);
     assert_eq!(click_action(StatusComponent::Voice), None);
     assert_eq!(click_action(StatusComponent::Pot), None);
 }

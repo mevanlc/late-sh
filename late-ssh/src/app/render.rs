@@ -26,7 +26,6 @@ use super::{
     help_modal, icon_picker, mod_modal, profile_modal, quit_confirm, room_info_modal,
     room_search_modal, settings_modal, sheet_modal,
     state::App,
-    status_picker,
 };
 use crate::app::door::game::DoorGame;
 use crate::app::files::terminal_image::TerminalImageFrame;
@@ -271,6 +270,13 @@ struct DrawContext<'a> {
     /// The night city page: the runner's spot and its look.
     city_state: &'a crate::app::deadchannel::city::state::State,
     city_look: Option<&'a crate::app::deadchannel::runner::state::Look>,
+    /// The runner's sheet mirror (`None` for anyone not standing on the
+    /// row): the street's strip, and the frame HUD on every other page.
+    city_sheet: Option<&'a crate::app::deadchannel::fight::state::Sheet>,
+    city_scene: Option<&'a crate::app::deadchannel::fight::session::Scene>,
+    city_till: Option<&'a str>,
+    city_tailor: crate::app::deadchannel::tailor::ui::MirrorView<'a>,
+    city_guide: &'a crate::app::deadchannel::guide::state::State,
     /// A chat overlay that lands on the Lounge (a `/summary` or reaction list
     /// requested on Home); the Lounge composer itself opens none.
     clubhouse_overlay: Option<&'a crate::app::common::overlay::Overlay>,
@@ -302,6 +308,9 @@ struct DrawContext<'a> {
     mod_modal_state: &'a mod_modal::state::ModModalState,
     show_profile_modal: bool,
     profile_modal_state: &'a profile_modal::state::ProfileModalState,
+    /// `App::is_runner` for this session: the profile modal's runner
+    /// section shows only to runners until the public flip.
+    viewer_is_runner: bool,
     show_sheet_modal: bool,
     sheet_modal_state: &'a sheet_modal::state::SheetModalState,
     show_poll_modal: bool,
@@ -337,7 +346,6 @@ struct DrawContext<'a> {
     listen_url: &'a str,
     room_search_modal_open: bool,
     room_search_modal_state: &'a room_search_modal::state::RoomSearchModalState,
-    status_picker: &'a status_picker::state::StatusPickerState,
     room_info_modal_open: bool,
     room_info_modal_state: &'a room_info_modal::state::RoomInfoModalState,
     directory_editor: &'a crate::app::directory::editor::state::EditorState,
@@ -358,7 +366,6 @@ struct DrawContext<'a> {
     /// Humans currently connected (bots excluded) plus connected friends,
     /// for the sidebar's pinned presence rows.
     online_count: usize,
-    active_friend_names: &'a [String],
     marquee_tick: usize,
     chat_state: &'a chat::state::ChatState,
     user_id: uuid::Uuid,
@@ -371,9 +378,8 @@ struct DrawContext<'a> {
     /// The user's ordered bottom status bar (draft while the settings modal is
     /// open, else the saved profile). Order is paint order, left to right.
     statusline_components: Vec<StatusComponentSetting>,
-    /// Everything either status bar can show this frame. Pre-formatted — notably
-    /// the clock and the `/status` presence badge — so the bar builder stays a
-    /// pure function of its inputs with no clock read inside the draw path.
+    /// Configurable readings for either status bar, with the clock pre-formatted
+    /// so the bar builder stays a pure function of its inputs.
     status_data: crate::app::statusline::data::StatusData<'a>,
     /// Slot for where each clickable top- or bottom-bar segment landed this
     /// frame, read by the hit test in `input.rs`.
@@ -388,7 +394,6 @@ struct DrawContext<'a> {
     zen_pet_strip: Option<crate::app::pet::ui::PetView<'a>>,
     zen_active_friends: &'a [crate::app::chat::state::ActiveFriend],
     zen_care: crate::app::zen::ui::Care,
-    zen_peer_statuses: &'a std::collections::HashMap<uuid::Uuid, String>,
 }
 
 impl App {
@@ -600,7 +605,6 @@ impl App {
         let dashboard_messages = shell_active_room
             .map(|room_id| self.chat.messages_for_room(room_id))
             .unwrap_or(&[]);
-        let active_friend_names = &self.active_friend_names;
         let dashboard_selected_news_message = shell_active_room
             .is_some_and(|room_id| self.chat.selected_message_is_news_in_room(room_id));
         let dashboard_selected_image_message = shell_active_room
@@ -636,9 +640,6 @@ impl App {
                         })
                     })
             });
-        let status_badge = self
-            .status
-            .map(|status| status.hud_badge(chrono::Utc::now()));
         // Status bar inputs. Formatted here, once, so the draw path reads no
         // wall clock and a frame stays reproducible from its inputs.
         let status_local_now = crate::app::common::time::timezone_now(
@@ -714,7 +715,7 @@ impl App {
             drunk_levels: &self.drunk_levels,
             name_flair: &self.name_flair,
             runner_looks: &self.runner_looks,
-            peer_statuses: &self.peer_statuses,
+            away_user_ids: &self.away_user_ids,
             name_flicker,
             translations: &self.chat.translations,
             translation_hidden: &self.chat.translation_hidden,
@@ -865,7 +866,7 @@ impl App {
             drunk_levels: &self.drunk_levels,
             name_flair: &self.name_flair,
             runner_looks: &self.runner_looks,
-            peer_statuses: &self.peer_statuses,
+            away_user_ids: &self.away_user_ids,
             name_flicker,
             translations: &self.chat.translations,
             translation_hidden: &self.chat.translation_hidden,
@@ -949,7 +950,7 @@ impl App {
                     profile_award_badges,
                     drunk_levels: &self.drunk_levels,
                     name_flair: &self.name_flair,
-                    peer_statuses: &self.peer_statuses,
+                    away_user_ids: &self.away_user_ids,
                     name_flicker,
                     translations: &self.chat.translations,
                     translation_hidden: &self.chat.translation_hidden,
@@ -1014,7 +1015,7 @@ impl App {
                     profile_award_badges,
                     drunk_levels: &self.drunk_levels,
                     name_flair: &self.name_flair,
-                    peer_statuses: &self.peer_statuses,
+                    away_user_ids: &self.away_user_ids,
                     name_flicker,
                     translations: &self.chat.translations,
                     translation_hidden: &self.chat.translation_hidden,
@@ -1106,7 +1107,7 @@ impl App {
                     profile_award_badges,
                     drunk_levels: &self.drunk_levels,
                     name_flair: &self.name_flair,
-                    peer_statuses: &self.peer_statuses,
+                    away_user_ids: &self.away_user_ids,
                     name_flicker,
                     translations: &self.chat.translations,
                     translation_hidden: &self.chat.translation_hidden,
@@ -1240,7 +1241,6 @@ impl App {
             || news_modal.is_some()
             || self.icon_picker_open
             || self.room_search_modal_state.is_open()
-            || self.status_picker.is_open()
             || self.booth_modal_state.is_open()
             || self.stream_modal.is_some()
             || self.chat.history_modal.is_open();
@@ -1261,7 +1261,6 @@ impl App {
             || news_modal.is_some()
             || self.icon_picker_open
             || self.room_search_modal_state.is_open()
-            || self.status_picker.is_open()
             || self.booth_modal_state.is_open()
             || self.stream_modal.is_some()
             || self.chat.history_modal.is_open();
@@ -1374,7 +1373,20 @@ impl App {
                         nightcap_composer,
                         drunk_levels: &self.drunk_levels,
                         city_state: &self.city,
-                        city_look: self.runner_looks.get(&self.user_id),
+                        city_look: self
+                            .runner_looks
+                            .get(&self.user_id)
+                            .map(|entry| &entry.look),
+                        city_sheet: self.fight.sheet.as_ref(),
+                        city_scene: self.fight.scene.as_ref(),
+                        city_till: self.fight.till.as_deref(),
+                        city_tailor: crate::app::deadchannel::tailor::ui::MirrorView {
+                            draft: self.tailor.draft.as_ref(),
+                            word: self.tailor.word.as_deref(),
+                            changed: self.tailor.changed(),
+                            saving: self.tailor.saving,
+                        },
+                        city_guide: &self.guide.state,
                         clubhouse_overlay: self.chat.overlay(),
                         artboard_interacting: self.artboard_interacting,
                         leaderboard: &self.leaderboard,
@@ -1402,6 +1414,7 @@ impl App {
                         mod_modal_state: &self.mod_modal_state,
                         show_profile_modal: self.show_profile_modal,
                         profile_modal_state: &self.profile_modal_state,
+                        viewer_is_runner: self.runner_looks.contains_key(&self.user_id),
                         show_sheet_modal: self.show_sheet_modal,
                         sheet_modal_state: &self.sheet_modal_state,
                         show_poll_modal: self.show_poll_modal,
@@ -1439,7 +1452,6 @@ impl App {
                         listen_url: &listen_url,
                         room_search_modal_open: self.room_search_modal_state.is_open(),
                         room_search_modal_state: &self.room_search_modal_state,
-                        status_picker: &self.status_picker,
                         room_info_modal_open: self.room_info_modal_state.is_open(),
                         room_info_modal_state: &self.room_info_modal_state,
                         directory_editor: &self.directory_editor,
@@ -1457,7 +1469,6 @@ impl App {
                         selected_radio_station,
                         radio_now_playing: radio_now_playing.as_deref(),
                         online_count,
-                        active_friend_names,
                         marquee_tick: self.marquee_tick,
                         chat_state: &self.chat,
                         user_id: self.user_id,
@@ -1482,7 +1493,6 @@ impl App {
                                 .then_some(self.pot_view.draws_in.as_str()),
                             online_count,
                             turns_waiting: self.daily.my_turn_matches().len(),
-                            presence: status_badge.as_deref(),
                             station_name: status_station_name,
                             station_track: status_station_track,
                             quests_open_daily: status_quests_daily,
@@ -1499,7 +1509,6 @@ impl App {
                         zen_pet_strip,
                         zen_active_friends: &self.active_friends,
                         zen_care,
-                        zen_peer_statuses: &self.peer_statuses,
                     },
                     &mut terminal_image_frame,
                 );
@@ -1697,11 +1706,9 @@ impl App {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
             let mut status_hits = Vec::new();
-            let fixed_topbar_components = crate::app::statusline::bar::fixed_topbar_components();
-            if let Some(bar) = crate::app::statusline::bar::build_status_bar(
-                &fixed_topbar_components,
+            if let Some(bar) = crate::app::statusline::bar::build_top_status_bar(
                 &ctx.status_data,
-                crate::app::statusline::bar::Placement::TopRight,
+                ctx.city_sheet.filter(|_| screen != Screen::City),
                 area,
                 title_width,
             ) {
@@ -1972,6 +1979,11 @@ impl App {
                     state: ctx.city_state,
                     own_username: ctx.clubhouse_own_username,
                     look: ctx.city_look,
+                    sheet: ctx.city_sheet,
+                    scene: ctx.city_scene,
+                    till: ctx.city_till,
+                    tailor: ctx.city_tailor,
+                    guide: ctx.city_guide,
                 },
             ),
             Screen::Nightcap => crate::app::clubhouse::nightcap::ui::draw(
@@ -2010,7 +2022,6 @@ impl App {
                     lobby_glow: ctx.lobby.glow(),
                     activity: ctx.chat_state.activity_ticker(),
                     active_friends: ctx.zen_active_friends,
-                    peer_statuses: ctx.zen_peer_statuses,
                     chip_balance: ctx.status_data.chip_balance,
                     care: ctx.zen_care,
                     inbox: if ctx.zen.shows(crate::app::zen::state::TileKind::Inbox) {
@@ -2082,7 +2093,7 @@ impl App {
                     daily: ctx.daily,
                     lobby_glow: ctx.lobby.glow(),
                     online_count: ctx.online_count,
-                    active_friend_names: ctx.active_friend_names,
+                    active_friends: ctx.zen_active_friends,
                     marquee_tick: ctx.marquee_tick,
                 },
             );
@@ -2158,7 +2169,13 @@ impl App {
         }
 
         if ctx.show_profile_modal {
-            profile_modal::ui::draw(frame, inner, ctx.profile_modal_state, ctx.marquee_tick);
+            profile_modal::ui::draw(
+                frame,
+                inner,
+                ctx.profile_modal_state,
+                ctx.marquee_tick,
+                ctx.viewer_is_runner,
+            );
         }
 
         if ctx.show_sheet_modal {
@@ -2284,10 +2301,6 @@ impl App {
             );
         }
 
-        if ctx.status_picker.is_open() {
-            status_picker::ui::draw(frame, inner, ctx.status_picker);
-        }
-
         // Drawn after the search modal: a jump too old to land in the room
         // opens history over the top of whatever was showing.
         if ctx.chat_state.history_modal.is_open() {
@@ -2388,7 +2401,6 @@ fn foreground_terminal_overlay_open(ctx: &DrawContext<'_>) -> bool {
         || ctx.show_ultimate_modal
         || ctx.news_modal.is_some()
         || ctx.room_search_modal_open
-        || ctx.status_picker.is_open()
         || ctx.chat_state.history_modal.is_open()
         || ctx.booth_modal_open
         || ctx.icon_picker_open
@@ -2483,6 +2495,15 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         format!("{page_title} "),
         Style::default().fg(theme::TEXT_MUTED()),
     ));
+
+    // The street has its own guide (`app/deadchannel/guide`), on the site
+    // guide's key; the chrome says so, the way the door games do.
+    if screen == Screen::City {
+        spans.push(Span::styled(
+            "· ? guide ",
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+    }
 
     if screen == Screen::Lateania {
         spans.push(Span::styled(

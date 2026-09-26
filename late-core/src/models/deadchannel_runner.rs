@@ -7,27 +7,81 @@
 //! boundary, and this module stays a storage layer.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
-use tokio_postgres::Client;
+use chrono::{DateTime, NaiveDate, Utc};
+use tokio_postgres::{Client, GenericClient};
 use uuid::Uuid;
 
-/// Cross-process refresh channel. Any insert or update on
-/// `deadchannel_runners` fires it (migration 172 trigger); a listener
-/// re-reads every look rather than trusting the payload, which only names
-/// the user for logs.
+/// Cross-process refresh channel. An insert, or an update of `look`,
+/// `left_at`, or `level`, on `deadchannel_runners` fires it (migration 172
+/// trigger, narrowed by 199, widened to the level by 202; `peak_level` and
+/// `marks`, migration 205, only move with the level); a listener
+/// re-reads every standing runner rather than trusting the payload, which
+/// only names the user for logs. Every other sheet write (the fight loop)
+/// fires nothing.
 pub const DEADCHANNEL_RUNNER_CHANGED_CHANNEL: &str = "deadchannel_runner_changed";
 
+// `guide_seen_at` is when the undercity's guide first opened for this
+// runner (migration 203), `None` until the first descent.
 crate::model! {
     table = "deadchannel_runners";
     params = DeadchannelRunnerParams;
     struct DeadchannelRunner {
         @generated
-        pub left_at: Option<DateTime<Utc>>;
+        pub left_at: Option<DateTime<Utc>>,
+        pub guide_seen_at: Option<DateTime<Utc>>,
+        pub level: i32,
+        pub exp: i64,
+        pub signal: i32,
+        pub weapon_tier: i32,
+        pub armor_tier: i32,
+        pub bits: i64,
+        pub rations_left: i32,
+        pub day: NaiveDate,
+        pub fight: Option<serde_json::Value>,
+        pub kills: i32,
+        pub kills_today: i32,
+        pub runs_today: i32,
+        pub peak_level: i32,
+        pub marks: i32;
 
         @data
         pub user_id: Uuid,
         pub look: serde_json::Value,
     }
+}
+
+/// The sheet columns as one write (GAME.md, "The stat block"). The look
+/// and the leave stamp have their own writers; this is everything the
+/// fight loop and the day roll touch, stored whole under the row lock.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SheetWrite {
+    pub user_id: Uuid,
+    pub level: i32,
+    pub exp: i64,
+    pub signal: i32,
+    pub weapon_tier: i32,
+    pub armor_tier: i32,
+    pub bits: i64,
+    pub rations_left: i32,
+    pub day: NaiveDate,
+    pub fight: Option<serde_json::Value>,
+    pub kills: i32,
+    pub kills_today: i32,
+    pub runs_today: i32,
+    pub peak_level: i32,
+    pub marks: i32,
+}
+
+/// What the directory serves per standing runner: the look as stored, the
+/// level and the marks for the badge, and the peak level the tailor's rack
+/// is cut to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandingRunner {
+    pub user_id: Uuid,
+    pub look: serde_json::Value,
+    pub level: i32,
+    pub peak_level: i32,
+    pub marks: i32,
 }
 
 /// What `ensure_for_user` found. The statements are the only witness of it,
@@ -113,9 +167,106 @@ impl DeadchannelRunner {
         Ok(row.is_some())
     }
 
+    /// The tailor's mirror: the standing runner wears `look` from now on.
+    /// One statement, last write wins (a look is one value, never a sum,
+    /// so two devices dressing at once need no lock); the migration 172
+    /// trigger carries it to every replica's look directory. `false` when
+    /// there is no standing runner to dress: the door is shut, or was
+    /// never opened.
+    pub async fn store_look(
+        client: &Client,
+        user_id: Uuid,
+        look: &serde_json::Value,
+    ) -> Result<bool> {
+        let row = client
+            .query_opt(
+                "UPDATE deadchannel_runners
+                 SET look = $2, updated = current_timestamp
+                 WHERE user_id = $1 AND left_at IS NULL
+                 RETURNING id",
+                &[&user_id, look],
+            )
+            .await
+            .context("storing deadchannel runner look")?;
+        Ok(row.is_some())
+    }
+
+    /// The first descent's claim: stamp the guide as seen, once. Conditional
+    /// on the stamp being absent and the runner standing, so two devices
+    /// coming down at once (on any replicas) open the guide on one of them
+    /// and every later descent writes nothing. The change trigger does not
+    /// watch this column. Returns whether this call was the first descent.
+    pub async fn mark_guide_seen(client: &Client, user_id: Uuid) -> Result<bool> {
+        let row = client
+            .query_opt(
+                "UPDATE deadchannel_runners
+                 SET guide_seen_at = current_timestamp, updated = current_timestamp
+                 WHERE user_id = $1 AND left_at IS NULL AND guide_seen_at IS NULL
+                 RETURNING id",
+                &[&user_id],
+            )
+            .await
+            .context("marking deadchannel guide seen")?;
+        Ok(row.is_some())
+    }
+
+    /// The standing runner's row under `FOR UPDATE`: every fight action and
+    /// the lazy day roll run on the locked row, so two devices and any
+    /// number of replicas act one after the other on the same truth. `None`
+    /// when there is no runner, or the runner has left (the door is shut;
+    /// the character waits, untouchable).
+    pub async fn lock_standing(client: &impl GenericClient, user_id: Uuid) -> Result<Option<Self>> {
+        let row = client
+            .query_opt(
+                "SELECT * FROM deadchannel_runners
+                 WHERE user_id = $1 AND left_at IS NULL
+                 FOR UPDATE",
+                &[&user_id],
+            )
+            .await
+            .context("locking deadchannel runner")?;
+        Ok(row.map(Self::from))
+    }
+
+    /// Write the sheet back. Call it only while holding `lock_standing`.
+    /// The change trigger watches only `look` and `left_at` (migration
+    /// 199), so a sheet write wakes no look directory anywhere.
+    pub async fn store_sheet(client: &impl GenericClient, write: SheetWrite) -> Result<Self> {
+        let row = client
+            .query_one(
+                "UPDATE deadchannel_runners
+                 SET level = $2, exp = $3, signal = $4, weapon_tier = $5,
+                     armor_tier = $6, bits = $7, rations_left = $8, day = $9,
+                     fight = $10, kills = $11, kills_today = $12, runs_today = $13,
+                     peak_level = $14, marks = $15, updated = current_timestamp
+                 WHERE user_id = $1
+                 RETURNING *",
+                &[
+                    &write.user_id,
+                    &write.level,
+                    &write.exp,
+                    &write.signal,
+                    &write.weapon_tier,
+                    &write.armor_tier,
+                    &write.bits,
+                    &write.rations_left,
+                    &write.day,
+                    &write.fight,
+                    &write.kills,
+                    &write.kills_today,
+                    &write.runs_today,
+                    &write.peak_level,
+                    &write.marks,
+                ],
+            )
+            .await
+            .context("storing deadchannel runner sheet")?;
+        Ok(Self::from(row))
+    }
+
     /// The row as it stands, whether or not the runner has left; read
     /// `left_at` to tell. Storage layer: who counts as a runner is the
-    /// directory's question, and it asks `list_looks`.
+    /// directory's question, and it asks `list_standing`.
     pub async fn find_by_user(client: &Client, user_id: Uuid) -> Result<Option<Self>> {
         let row = client
             .query_opt(
@@ -127,23 +278,30 @@ impl DeadchannelRunner {
         Ok(row.map(Self::from))
     }
 
-    /// Every standing runner's look, for the process-shared directory that
-    /// paints portraits and gates the undercity. Runners are few by
-    /// construction (the invitation gate), so the whole table is one read.
-    /// A runner who left is absent here: the gate closes on every replica,
-    /// and their old messages lose their portrait, which is the point of
-    /// going dark.
-    pub async fn list_looks(client: &Client) -> Result<Vec<(Uuid, serde_json::Value)>> {
+    /// Every standing runner's look and level, for the process-shared
+    /// directory that paints portraits and badges and gates the undercity.
+    /// Runners are few by construction (the invitation gate), so the whole
+    /// table is one read. A runner who left is absent here: the gate closes
+    /// on every replica, and their old messages lose their portrait, which
+    /// is the point of going dark.
+    pub async fn list_standing(client: &Client) -> Result<Vec<StandingRunner>> {
         let rows = client
             .query(
-                "SELECT user_id, look FROM deadchannel_runners WHERE left_at IS NULL",
+                "SELECT user_id, look, level, peak_level, marks
+                 FROM deadchannel_runners WHERE left_at IS NULL",
                 &[],
             )
             .await
-            .context("listing deadchannel runner looks")?;
+            .context("listing standing deadchannel runners")?;
         Ok(rows
             .into_iter()
-            .map(|row| (row.get("user_id"), row.get("look")))
+            .map(|row| StandingRunner {
+                user_id: row.get("user_id"),
+                look: row.get("look"),
+                level: row.get("level"),
+                peak_level: row.get("peak_level"),
+                marks: row.get("marks"),
+            })
             .collect())
     }
 }

@@ -29,9 +29,6 @@ pub(crate) struct StatusData<'a> {
     pub online_count: usize,
     /// Daily correspondence matches waiting on this user's move.
     pub turns_waiting: usize,
-    /// The `/status` badge: `MM:SS word` for a countdown or `glyph word`
-    /// for an open-ended presence.
-    pub presence: Option<&'a str>,
     /// Display name of the audio source the user is listening to.
     pub station_name: Option<&'a str>,
     /// Live `Artist - Title` for that source, when the metadata feed has one.
@@ -97,7 +94,6 @@ impl<'a> StatusData<'a> {
             StatusComponent::Turns => {
                 (self.turns_waiting > 0).then(|| self.turns_waiting.to_string())
             }
-            StatusComponent::Status => self.presence.map(str::to_string),
             StatusComponent::Station => match variant {
                 // Track first, station as the fallback: a source with no live
                 // metadata still names itself rather than going blank.
@@ -130,12 +126,6 @@ impl<'a> StatusData<'a> {
     ) -> Option<String> {
         match component {
             StatusComponent::Shortcuts => None,
-            // Keep the countdown or glyph when the full presence word will not
-            // fit. Countdown expiry still banners and notifies.
-            StatusComponent::Status => self
-                .presence
-                .map(|badge| badge.split_once(' ').map_or(badge, |(time, _)| time))
-                .map(str::to_string),
             // `channel [status]` -> `channel`.
             StatusComponent::Voice => self
                 .voice

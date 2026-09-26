@@ -75,6 +75,9 @@ type HistoryPage = (Vec<ChatMessage>, HashMap<Uuid, String>);
 const MODERATORS_SLUG: &str = "moderators";
 
 const HISTORY_LIMIT: i64 = 500;
+/// Concurrent chat reads (room tails, discover) allowed at once; the rest
+/// queue on `read_permits`.
+const READ_PERMITS: usize = 8;
 const DELTA_LIMIT: i64 = 256;
 const CHAT_REFRESH_INTERVAL: Duration = Duration::from_secs(10);
 const USERNAME_DIRECTORY_TTL: Duration = Duration::from_secs(30);
@@ -1180,9 +1183,15 @@ impl ChatService {
             refresh_scheduler_started: Arc::new(AtomicBool::new(false)),
             refresh_signal_tx,
             refresh_signal_rx: Arc::new(Mutex::new(Some(refresh_signal_rx))),
-            read_permits: Arc::new(Semaphore::new(8)),
+            read_permits: Arc::new(Semaphore::new(READ_PERMITS)),
             system_user_id: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Put the read-permit semaphore on the dashboard. Called once at
+    /// startup.
+    pub fn observe_read_permits(&self) {
+        metrics::observe_chat_read_permits(self.read_permits.clone(), READ_PERMITS);
     }
 
     /// Publish the #lounge feed bot's id. Called once at startup by
@@ -3063,6 +3072,49 @@ impl ChatService {
         claim_rx
     }
 
+    /// The wire (GAME.md, "The three surfaces"): the game's log posts into
+    /// #deadchannel as real messages, from the voice for now (the
+    /// announcer's own name is a design-review question). Fire-and-forget:
+    /// nobody upstream waits on a line, so the failure is logged here. The
+    /// voice joins the room on first use; the room seeds itself the same
+    /// way the invited join seeds it.
+    pub fn post_wire_line_task(&self, body: String) {
+        let service = self.clone();
+        tokio::spawn(
+            async move {
+                let posted: anyhow::Result<()> = async {
+                    let voice = service.ensure_first_contact_voice().await?;
+                    let room_id = {
+                        let client = service.db.get().await?;
+                        let room = ChatRoom::get_or_create_deadchannel_room(&client).await?;
+                        ChatRoomMember::join(&client, room.id, voice.id).await?;
+                        room.id
+                    };
+                    service
+                        .send_message(SendMessageParams {
+                            user_id: voice.id,
+                            room_id,
+                            room_slug: None,
+                            body,
+                            reply_to_message_id: None,
+                            reply_to_user_id: None,
+                            is_admin: false,
+                        })
+                        .await
+                }
+                .await;
+                if let Err(error) = posted {
+                    late_core::error_span!(
+                        "deadchannel_wire_line_failed",
+                        error = ?error,
+                        "failed to post a line on the wire"
+                    );
+                }
+            }
+            .instrument(info_span!("chat.post_wire_line_task")),
+        );
+    }
+
     pub fn send_message_with_reply_task(&self, task: SendMessageTask) {
         let SendMessageTask {
             user_id,
@@ -4856,12 +4908,12 @@ impl ChatService {
         ChatRoomMember::join(&client, room.id, user_id).await?;
         tracing::info!(user_id = %user_id, username = %user.username, room_id = %room.id, "deadchannel joined by invitation");
         // Consent creates the character (GAME.md, Phase 2): the runner row,
-        // wearing a random starter look. A conditional insert, so a second
+        // wearing a random level-1 look. A conditional insert, so a second
         // device finds the runner already there and keeps its face, and a
         // runner who left comes back wearing the same one; only a fresh row
         // counts as the ladder's last beat, and the statements say which
         // this was.
-        let look = crate::app::deadchannel::runner::state::Look::random(&mut rand::thread_rng());
+        let look = crate::app::deadchannel::runner::state::Look::random(1, &mut rand::thread_rng());
         let (runner, origin) =
             late_core::models::deadchannel_runner::DeadchannelRunner::ensure_for_user(
                 &client,
@@ -4875,10 +4927,20 @@ impl ChatService {
                 crate::metrics::record_first_contact_beat(
                     crate::metrics::FirstContactBeat::RunnerCreated,
                 );
+                // The voice welcomes a new runner on the wire: the story,
+                // the keys, the rules, the way out. Once per person, because
+                // only the winning insert lands here; a return or a second
+                // device finds the welcome already in the room's history.
+                self.post_wire_line_task(crate::app::deadchannel::runner::data::welcome(
+                    &user.username,
+                ));
             }
             late_core::models::deadchannel_runner::RunnerOrigin::Returned => {
                 tracing::info!(user_id = %user_id, username = %user.username, runner_id = %runner.id, "runner returned");
                 crate::metrics::record_runner_door(crate::metrics::RunnerDoor::Returned);
+                // The wire hears who is around: the same conditional clear
+                // that reopened the door says this was the one join that did.
+                self.post_wire_line_task(format!("{} is back on the wire.", user.username));
             }
             late_core::models::deadchannel_runner::RunnerOrigin::Existing => {}
         }
@@ -5171,20 +5233,34 @@ impl ChatService {
             let name = room.slug.as_deref().unwrap_or("this room");
             anyhow::bail!("Cannot leave #{name} (permanent room)");
         }
+        // The name for the wire's "went dark" line, read before anything
+        // is written: a lookup that fails here fails the leave whole, never
+        // after the membership and the stamp have already landed.
+        let deadchannel_username = match room.kind == late_core::models::chat_room::DEADCHANNEL_KIND
+        {
+            true => match User::get(&client, user_id).await? {
+                Some(user) => Some(user.username),
+                None => anyhow::bail!("user not found"),
+            },
+            false => None,
+        };
         ChatRoomMember::leave(&client, room_id, user_id).await?;
         // Leaving #deadchannel closes the undercity gate, on this replica
         // and every other: the stamp fires `deadchannel_runner_changed`, so
         // the runner drops out of each replica's looks directory and out of
         // `App::is_runner` on the next tick edge. The character survives the
         // leave, so an invited rejoin gets the same face back.
-        if room.kind == late_core::models::chat_room::DEADCHANNEL_KIND {
+        if let Some(username) = deadchannel_username {
             let left = late_core::models::deadchannel_runner::DeadchannelRunner::mark_left(
                 &client, user_id,
             )
             .await?;
             if left {
-                tracing::info!(user_id = %user_id, "runner left the deadchannel");
+                tracing::info!(user_id = %user_id, username = %username, "runner left the deadchannel");
                 crate::metrics::record_runner_door(crate::metrics::RunnerDoor::Left);
+                // Going dark is news, once: the conditional stamp says this
+                // was the leave that shut the door.
+                self.post_wire_line_task(format!("{username} went dark."));
             }
         }
         Ok(())

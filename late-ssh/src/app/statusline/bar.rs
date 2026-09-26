@@ -23,6 +23,7 @@ use ratatui::text::{Line, Span};
 
 use super::data::{StatusData, clock_icon};
 use crate::app::common::theme;
+use crate::app::deadchannel::fight::state::Sheet;
 
 /// Which border row the bar is painted on, and therefore which end of it
 /// collides with the other title on that row.
@@ -50,7 +51,8 @@ impl Placement {
 /// bar cannot leave a stale hit target behind.
 #[derive(Clone, Debug)]
 pub(crate) struct Segment {
-    component: StatusComponent,
+    /// Fixed HUD-only readings have no configurable component or click action.
+    component: Option<StatusComponent>,
     spans: Vec<Span<'static>>,
     /// Successively tighter renderings, offered under width pressure before
     /// the segment is dropped. Most status readings have one; the keyboard
@@ -97,9 +99,8 @@ pub(crate) struct StatusBar {
 /// saved arrangement. Keeping it expressed as component settings lets both
 /// bars share formatting, fitting, and hit-testing without making top-bar
 /// policy configurable.
-pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 5] {
+pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 4] {
     [
-        StatusComponent::Status,
         StatusComponent::Voice,
         StatusComponent::Mentions,
         StatusComponent::Pot,
@@ -107,14 +108,68 @@ pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 5] {
     ]
     .map(|component| StatusComponentSetting {
         enabled: true,
-        label: if component == StatusComponent::Status {
-            LabelMode::None
-        } else {
-            component.default_label_mode()
-        },
+        label: component.default_label_mode(),
         low_priority: component == StatusComponent::Pot,
         ..StatusComponentSetting::new(component)
     })
+}
+
+/// Preserve the upstream HUD's priority: voice, mentions and chips get space
+/// first, then the runner's readout, then the pot. The runner and pot paint
+/// before chips, while sharing the same measured layout and click targets as
+/// configurable segments.
+pub(crate) fn build_top_status_bar(
+    data: &StatusData<'_>,
+    runner: Option<&Sheet>,
+    area: Rect,
+    title_width: u16,
+) -> Option<StatusBar> {
+    let spare_cols = area.width.saturating_sub(2).saturating_sub(title_width);
+    let components = fixed_topbar_components();
+    let mut segments = build_segments(&components, data);
+    let pot = segments
+        .iter()
+        .position(|segment| segment.component == Some(StatusComponent::Pot))
+        .map(|index| segments.remove(index));
+    let mut segments = fit(segments, spare_cols, Placement::TopRight);
+    for extra in [runner.map(runner_segment), pot].into_iter().flatten() {
+        let available = spare_cols.saturating_sub(total_width(&segments));
+        if let Some(extra) = fit(vec![extra], available, Placement::TopRight).pop() {
+            let before_chips = segments
+                .iter()
+                .position(|segment| segment.component == Some(StatusComponent::Chips))
+                .unwrap_or(segments.len());
+            segments.insert(before_chips, extra);
+        }
+    }
+    lay_out(segments, Placement::TopRight, area)
+}
+
+fn runner_segment(sheet: &Sheet) -> Segment {
+    let muted = Style::default().fg(theme::TEXT_MUTED());
+    let signal_style = Style::default()
+        .fg(if sheet.is_down() {
+            theme::ERROR()
+        } else {
+            theme::TEXT_BRIGHT()
+        })
+        .add_modifier(Modifier::BOLD);
+    let spans = |head: String| {
+        vec![
+            Span::styled(head, muted),
+            Span::styled(
+                format!("{}/{}", sheet.signal, sheet.max_signal()),
+                signal_style,
+            ),
+            Span::styled(" ", muted),
+        ]
+    };
+    Segment {
+        component: None,
+        spans: spans(format!(" rations {} · signal ", sheet.rations_left)),
+        compacts: vec![spans(" signal ".to_string())],
+        low_priority: true,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -216,7 +271,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
     let component = setting.component;
     if component == StatusComponent::Shortcuts {
         return Some(Segment {
-            component,
+            component: Some(component),
             spans: shortcut_spans(if setting.brief {
                 ShortcutStyle::Brief
             } else {
@@ -263,7 +318,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
         .collect();
 
     Some(Segment {
-        component,
+        component: Some(component),
         spans,
         compacts,
         low_priority: setting.low_priority,
@@ -276,9 +331,7 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
 fn resting_value(component: StatusComponent) -> String {
     match component {
         StatusComponent::Shortcuts => String::new(),
-        StatusComponent::Status | StatusComponent::Voice | StatusComponent::Station => {
-            "-".to_string()
-        }
+        StatusComponent::Voice | StatusComponent::Station => "-".to_string(),
         StatusComponent::Pot => "closed".to_string(),
         _ => "0".to_string(),
     }
@@ -330,7 +383,7 @@ fn accent(component: StatusComponent) -> ratatui::style::Color {
         StatusComponent::Voice => theme::SUCCESS(),
         StatusComponent::Turns | StatusComponent::Quests => theme::AMBER_GLOW(),
         StatusComponent::Users | StatusComponent::Station => theme::TEXT(),
-        StatusComponent::Time | StatusComponent::Status => theme::TEXT_BRIGHT(),
+        StatusComponent::Time => theme::TEXT_BRIGHT(),
     }
 }
 
@@ -457,9 +510,11 @@ pub(crate) fn lay_out(
             cursor = cursor.saturating_add(1);
         }
         let width = segment.width();
-        if click_action(segment.component).is_some() {
+        if let Some(component) = segment.component
+            && click_action(component).is_some()
+        {
             hits.push((
-                segment.component,
+                component,
                 Rect {
                     x: cursor,
                     y,
@@ -505,11 +560,8 @@ pub(crate) fn click_action(component: StatusComponent) -> Option<StatusClick> {
         StatusComponent::Station => Some(StatusClick::Booth),
         StatusComponent::Quests => Some(StatusClick::Arcade),
         StatusComponent::Users => Some(StatusClick::Profiles),
-        // The clock, presence and the mic badge are readouts: there is no
+        // The clock, pot and the mic badge are readouts: there is no
         // screen a click on them obviously means.
-        StatusComponent::Time
-        | StatusComponent::Status
-        | StatusComponent::Voice
-        | StatusComponent::Pot => None,
+        StatusComponent::Time | StatusComponent::Voice | StatusComponent::Pot => None,
     }
 }

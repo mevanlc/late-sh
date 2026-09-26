@@ -262,9 +262,9 @@ place at all: scarcity of place is the fiction's spine, same as the
   wallet for any sub-surface; that's two identity systems fighting for one
   presence layer.
 - Cosmetics are the proven shop category (see Why), so lean in hard:
-  top-end looks priced absurdly (a 100k-chip legendary look is the point,
-  not a bug), rotating/limited seasonal stock for scarcity and shop
-  check-ins.
+  rotating/limited seasonal stock for scarcity and shop check-ins. No
+  legendary looks: a set only a few can wear becomes the look everyone
+  chases and then everyone wears.
 
 ### Chat encounters (the onboarding funnel)
 - The Mudae/Pokécord shape: something spawns in a room, runners present
@@ -616,7 +616,7 @@ to allocate, and nothing on it another player cannot see.
 | stash | money in the city's locker | untouched by death | `bank.php` |
 | band | tuner, jammer, ghost, or none | chosen on the first descent | specialties |
 | band skill | move unlocks | +1 per level gained | specialty points |
-| marks | Old Signal kills | permanent; each resets level to 1 | dragon kills |
+| marks | Old Signal kills | permanent; each resets level, gear, and bits, adds +1 attack and defense (cap 5) | dragon kills |
 
 Vocabulary decided here, all passing the screenshot test: **signal** is
 health (the Old Signal is the deepest one; "mira's signal dropped" is a
@@ -740,9 +740,14 @@ pieces are the thing chips buy.
 **The portrait.** 5 columns by 3 rows, three slots, one row each: **hood**
 (top), **eyes** (middle), **coat** (bottom). Rows stack, so any hood
 composes with any coat and the set never needs compatibility rules. The
-starter set is three pieces per slot, free; a join assigns a random
-starter look so the mark exists from the first second, and starter
-pieces can be re-picked at the tailor for nothing, forever.
+rack is gated by level: three pieces per slot at level 1, three more
+at 4, 7, 10, and 13 (fifteen per slot), free once unlocked and
+re-picked at the tailor for nothing, forever. A join assigns a random
+level-1 look so the mark exists from the first second. There are no
+earned or legendary pieces: a piece only a few can wear becomes the
+look everyone chases and then everyone wears. Feats (the Old Signal
+kill) earn a badge, not clothes, and no piece carries the Signal's `╬`
+on the chest.
 
 **The mark.** One cell: a glyph, rendered in the chat author badge stack
 (beside the bonsai glyph, the existing precedent for a game glyph there)
@@ -750,9 +755,9 @@ followed by the level, `▚7`, and as the runner's avatar glyph on the
 clubhouse floor, where runners become the only patrons who are not the
 default glyph. Starter marks are the ten characters of `GLYPH_ALPHABET`,
 free, so a fresh runner already wears the alphabet the city's fauna is
-made of. Rarer marks are bought or earned. The mark's **tint** is earned
-only, by marks (the prestige count): a colored mark is proof of an Old
-Signal kill and can never be bought, so the room learns to read it.
+made of. Rarer marks are bought. The badge's color is the newest tint the
+level opened, and an Old Signal kill shows as `╬N` after the level
+(`▚3╬2`): proof no chip can buy, so the room learns to read it.
 
 **Pieces come in two kinds, and the look tells the story:**
 
@@ -761,14 +766,17 @@ Signal kill and can never be bought, so the room learns to read it.
   rental treadmill is what made effects a moment). The tailor's rack
   rotates by season and a piece that leaves the rack never returns, so
   a look dates you the way a jersey does.
-- **Earned** pieces: milestones only (level 15, the first mark, a season
-  placement, later the arena title), never on any rack at any price.
+- **Level** pieces: the tailor's rack opens by level, three per slot
+  every three levels, so the look says how far down you have been.
+  There are no earned pieces: a piece only a few can wear becomes the
+  look everyone chases and then everyone wears. Milestones (the Old
+  Signal kill, a season placement, later the arena title) earn badges,
+  not clothes.
 
 Because the piece set is closed, a look is legible to anyone who has
-learned it: this coat says "was here in season one", that hood says
-"has killed the Signal", and the difference between bought and earned
-is the difference between "has chips" and "did the thing". Both are
-status; both are why you look.
+learned it: this coat says "was here in season one", that tint says
+"level ten", and the badge beside the name says "did the thing". Both
+are status; both are why you look.
 
 **Signal corrupts the look.** The portrait renders with cells replaced by
 static in proportion to missing signal (the haunting's `glitched_name`
@@ -830,20 +838,12 @@ ghost       visor       static      the glyph   tuner       jammer
   ▒░▒         ▟█▙         ▟▓▙         ▟╬▙        ▟═▙         ▟▒▙
 ```
 
-Legendary looks, where the whole set is one idea (the 100k pieces):
-
-```
-test pattern   old signal    the flicker    blackout
-   ▐▌▐▌          ╬╬╬            ▘ ▝           ███
-  ▐▓░▓▌         ▐◈▬◈▌          ▐▖ ▗▌         ▐█ █▌
-   ▟▒▙           ▟╬▙            ░▒░           ███
-```
-
 What the sketches decided:
 
 - **The coat's center cell is the emblem.** `▟╬▙`, `▟═▙`, `▟▓▙` are one
   coat with a different chest; emblems are the cheapest way to grow the
-  catalog, and an earned emblem (the Signal's `╬`) reads at a glance.
+  catalog. The Signal's `╬` is kept off every chest: it belongs to the
+  boss, not to a coat.
 - **Static shades inside a piece mean "half in the city already."** The
   ghost band's pieces mix `░▒▓` into themselves, so the corruption effect
   and the fashion speak one visual language and a wound never reads as
@@ -858,8 +858,8 @@ What the sketches decided:
 ```
 
 - **One tint per piece, never per cell**, from a closed palette of about
-  eight (static grey, amber, phosphor green, cyan, magenta, red, white,
-  and gold reserved for earned tint). Two people in the same three
+  seven (static grey, amber, phosphor green, cyan, magenta, red, white),
+  opened by level. No earned tint: gold stays out of the palette. Two people in the same three
   pieces and different tints already look different, so the catalog
   multiplies without more art. The wire prints portraits in plain text
   (chat bodies carry no color and IRC would need color codes); the
@@ -880,12 +880,12 @@ What the sketches decided:
 database, the way the door keeps its ladders in `data.rs`.
 
 - **Pieces are a Rust const table**, one entry per piece: a code, its
-  slot, the five-cell row, and whether it is starter, bought, or earned.
+  slot, the five-cell row, and the level that opens it.
   The width test above runs over this table, so a bad glyph fails the
   build instead of someone's card.
 - **A shop SKU references the piece code**; a catalog migration per rack
   in the existing `ON CONFLICT (sku)` shape, ownership in
-  `user_purchases`. Earned pieces have no SKU at all, so they cannot be
+  `user_purchases`. Level pieces have no SKU at all, so they cannot be
   sold by accident.
 - **The look is one JSONB column on the runner row**, parsed at load into
   a typed struct and rejected loudly on an unknown code (the boundary
@@ -914,11 +914,9 @@ database, the way the door keeps its ladders in `data.rs`.
 | common piece | 2,000 |
 | rare piece | 10,000 |
 | rare mark | 25,000 |
-| a legendary look (matched hood, eyes, coat, and its own mark) | 100,000 |
 
 Looks are deadchannel's chip sink from day one, before the arena or a
-single bounty exists; the 100k look is the point (see "The visibility
-layer"), not an outlier.
+single bounty exists.
 
 ### The sheet (what the profile card shows)
 
@@ -958,7 +956,7 @@ that is enough.
 `deadchannel_runners`, one row per user (`user_id` unique), id UUID v7.
 Columns: level, exp, signal, weapon_tier, armor_tier, bits, stash,
 rations_left, charge_left, day (the UTC date of the last roll), band,
-band_skill, the benched band progress, alive, marks, and the look as
+band_skill, the benched band progress, alive, marks, peak_level, and the look as
 four piece codes (hood, eyes, coat, mark). All data ops in one late-core
 model, the multi-replica rule throughout: the day roll and every spend
 are conditional claims on the row (`WHERE day < $today`, `WHERE
@@ -1007,9 +1005,39 @@ on still bind every piece, band, and ration the city sells:
 Fourteen **operators** hold levels 2 to 15 (LoGD master stats: attack
 2L, defense 2L, signal 11L), each an old voice on the wire with a name
 and a line, beaten once per level to climb. Level 15 opens the **Old
-Signal** (45 / 25 / 300); putting it down resets you to level 1 with a
-mark, scales every exp threshold by marks (LoGD 1:1), and is the season
-loop's engine. Names and copy belong to the city pass.
+Signal**; putting it down leaves a mark and resets the climb (see
+"Marks: the reset"), and is the season loop's engine. Names and copy
+belong to the city pass.
+
+### Marks: the reset (decided)
+
+Classic LoGD, with Diablo's paragon feel: the climb resets, the status
+never does.
+
+- **The gate.** At level 15 with the exp to leave it (`exp_to_seek`, the
+  last rung of the curve), the next step into the screen meets the Old
+  Signal instead of a glyph. A dropped signal against it costs what any
+  drop costs, and a tenth of the exp usually puts the gate a day or two
+  of glyphs away again.
+- **The numbers.** 240 signal, 36 attack, 22 defense. LoGD's dragon
+  (300 / 45 / 25) is a one-in-fifty fight for a runner with no bands and
+  no bonus hit points; these land a first kill about two tries in five
+  at the top of the wall, pinned by a seeded simulation test. Revisit
+  when the bands ship.
+- **What the kill takes:** level back to 1, exp to 0, weapon and armor to
+  tier 0, bits to the starting 50. The climb is a real climb again.
+- **What it keeps:** the peak level (the tailor's rack stays open), the
+  look, the badges, the kill count, today's rations.
+- **What it gives:** a mark. Marks are the paragon number, shown behind
+  the Signal's glyph in the badge (`▚3╬2`); each adds +1 attack and +1
+  defense up to a cap of five (the second climb is quicker, a veteran
+  never outgrows the room), scales every exp threshold (LoGD's formula,
+  a quarter of level times a hundred per mark), and climbs the title
+  ladder (placeholder copy: heard, tuned, carrier, broadcast, old
+  voice). The first kill grants the rankless `SIG` profile badge, and no
+  chips: the wallets never convert.
+- **The stash is undecided.** It is not built; whether a mark empties it
+  is decided when it ships.
 
 ### Build order for this phase
 
@@ -1081,7 +1109,7 @@ fixed:
   nobody can read it, which is the point.
 - **No function behind anything yet, and the panels say so.** Every shop
   opens and shows its real catalog (the fifteen gear tiers at LoGD prices,
-  the whole starter rack with the runner's portrait in the mirror, the
+  the rack cut to the runner's peak level with the portrait in the mirror, the
   three bands) under a line in the voice saying the till is not open. The
   street answers Enter at a cart with a line from a small pool. Placeholder
   copy, design review pending: the draft **move names** (tuner: retune,
@@ -1096,9 +1124,282 @@ Done since: the signs smear into the wet ground, a car runs the street
 with its headlights ahead of it, the monorail crosses the sky,
 billboards cycle the glyph script, rain splashes on the puddles, and at
 the railing Enter looks over the ledge at the lower city (a half-block
-perspective picture, the showpiece). Next on this surface, in order:
-the armorer's till (bits, the day roll), the tailor's mirror as the
-editor (pick, not draw), the locker, the band choice.
+perspective picture, the showpiece). The screen is the forest (the
+fight pass, next section). The armorer's till trades and the tailor's
+mirror edits the look (pick, not draw: rows, racks, tints, the mark, the
+join's dice again; the rack gated by level, free once unlocked). Still to come on the
+street: the locker, the band choice.
+
+## The fight pass: where the ration goes (2026-09-24)
+
+Status: **built as an experiment, staff only like the rest**
+(`late-ssh/src/app/deadchannel/fight/`, `CONTEXT.md` §3c beside this
+file). The question was where the daily fights happen and how anyone
+sees them. The three surfaces already answered half of it (the ration
+ritual is the city's, the wire is the log); this pass fixed the shape:
+
+- **The forest is the static at the end of Static Row.** The screen
+  closes the street as three tiles of static, and the whisper already
+  taught that static is where glyphs come from. Enter there spends a
+  ration. A fight only happens when you ask for it, so the city rule
+  holds: nothing there can be missed. No glyphs wandering the tiles: a
+  street worth standing in is exactly the failure the door-ceiling
+  diagnosis names, and the LoGD numbers are an exchange loop, not a
+  roguelike.
+- **The fight is a panel over the street, not a place.** Two five-by-three
+  portraits facing, yours and the glyph's, the exchange line by line in
+  the announcer's voice, three keys. The ASCII drama is the two faces
+  corrupting to static as signal drops (the wound renderer from "The
+  look", pointed at both). Five exchanges, twenty seconds, ten rations in
+  five minutes.
+- **Interactive like LORD, state on the row.** Attack, run (bands and
+  their moves come with the band choice). Each key is one transaction on
+  the locked runner row with the fight as a JSON column, so a dropped
+  session or a second device finds the same fight waiting; the ration was
+  spent when it started. Auto-resolving the whole fight in one claim with
+  a standing "bail under 30%" gambit (the arena's preparation idea) was
+  the thinner alternative and was passed over: `run` as a live decision
+  is what makes a forest a forest. The door's pure resolver is imported,
+  not copied; the door stays untouched.
+- **The wire sees the news, never the play-by-play.** Ten fights times
+  ten runners times five lines drowns the room under human chat, and
+  LORD's news screen never listed forest fights either. The wire gets a
+  dropped signal and a level gained (with the face); kills, rounds, and
+  runs post nothing. This tightens "every spawn and kill" above: every
+  *result worth a story*, as messages, as they happen.
+- **The fauna is one glyph per level,** fifteen of them, from the
+  flicker (barely there) to the interference (from somewhere below), each
+  a portrait in the runner's own format so a fight is two faces in one
+  register. Names, arrival lines, and the drop lines are placeholder
+  copy at feed-template standards, design review pending with the rest.
+- **Levels climb on exp in the fight, for now.** The operators are the
+  design (beaten once per level); until they exist this is the one
+  stated deviation, so the runner is not level 1 forever.
+- **The armorer's till is open.** The first bits sink, and the LoGD one:
+  a tier above what you carry, 75% back on the piece you hand in, no
+  credit. It runs through the fight's command path on the locked row
+  (one writer per row) rather than a second service, and the answer is
+  the armorer's line in the panel, not a wire post: a purchase is the
+  runner's business, and the piece does its own talking in the hit line.
+  The wall is a cursor and two keys because a numbered list of thirty
+  items is a menu, and the city is not menus. Only up, never down: a
+  runner selling their blade for cash is a LoGD loophole, not a scene.
+
+- **The tailor's mirror is the look's editor.** One write per `wear`,
+  no lock (a look is one value, never a sum, so two devices dressing at
+  once simply race and the last one is the face), through the same
+  change trigger the join uses, so every surface that paints the look
+  follows on the directory refresh. Nothing posts to the wire: the new
+  face rides the runner's next message there, which is the be-seen fuel
+  doing its own work. The rack is a window of up to five around the worn
+  piece rather than the whole row (the whole rack, once, while it is
+  shorter), so the panel fits eighty columns and the eye stays on the
+  piece.
+
+What comes next on this surface is decided in the next section, "The
+road pass": the exchange loop above is the placeholder it replaces.
+
+## The road pass: the daily run, the hand, and being seen (2026-09-24)
+
+Status: **decided, not built.** A design conversation after the fight,
+the armorer, and the tailor landed. Three threads: what the game must
+give people (visibility, ten times what the bonsai and the arcade give),
+what to do about PvP at forty people, and what the fight itself should
+be once it stops being LoGD.
+
+### The lesson of Le Word
+
+The arcade's runaway game is Le Word, and it is not because it is the
+best puzzle. It has five things at once that nothing else here has all
+of, and every one of them maps onto the diagnosis at the top of this
+file:
+
+- **Short and bounded.** Two minutes, six guesses, over. It cannot be
+  ground and it cannot eat an evening from people who are here to vibe
+  with music on. Sudoku asks twenty minutes of attention and gets it
+  from almost nobody.
+- **Everyone plays the same object.** One global word. Two people who
+  have played have something to say that nobody else can decode until
+  they have played too. Personal boards are a fact about you; a shared
+  board is a thing for the room.
+- **The share card is a story without a legend.** The grid shows luck,
+  skill, the near miss, the panic on row five, and yours differs from
+  mine in a way that invites comparison.
+- **Failing is content.** A 6/6 or an X is a better post than a 3/6.
+  Games where failure is silent produce fewer posts than games where
+  failure is a picture.
+- **No skill floor.** Everybody knows words. Nobody feels stupid.
+
+**Rule for everything below: deadchannel is the Le Word of RPGs, never
+the Sudoku of RPGs.** Same object for everyone each day, a hard visible
+bound, a picture at the end, loud fun failure, one key for the first-day
+runner. The number that tests the theory is share rate per completion
+per daily; the gap between Le Word and the rest is the whole brief.
+
+### Detached from LoGD
+
+The forest exchange loop (attack, run, the door's resolver) was the
+placeholder that got the ritual, the row, the scene, and the wire built.
+It stays only until the round below replaces it. Kept as is, because
+none of it cares what happens inside a round: the row as truth, rations,
+signal, the lazy day roll, the fixed scene panel, the wire's news, the
+armorer, the tailor, the level colors. Replaced: the resolver and the
+attack/run commands.
+
+### The round: ten cards, three energy, two intents
+
+A card fight, in the Slay the Spire shape, cut down until the balance
+fits in one head. Balatro's scoring (poker hands, multipliers) is the
+thing to resist longest: glorious, and a balance sink; it can arrive as
+a season beat once the loop stands.
+
+- **One deck, ten cards, no builds at v0.** Five strikes, three blocks,
+  two of the band's moves (the move names already drafted under
+  "Bands"). Everyone starts with the same ten. The weapon tier adds to
+  strike numbers, the armor tier to block numbers, so gear still matters
+  and the armorer still sells; the deck itself does not change. Balance
+  is a spreadsheet with two columns, and the gear ladder, already
+  priced, carries the power curve.
+- **Draw five, three energy, end turn.** Strike costs one, block costs
+  one, a band move costs two. Unplayed cards discard; the deck
+  reshuffles when empty.
+- **The foe telegraphs two intents.** Hit for N, or charge and hit for
+  2N next turn, shown before you play. "Block or race" is the whole
+  tactical question and it reads at a glance. Fifteen glyphs, one table
+  row each, the numbers they already have.
+- **Static corrupts the deck.** When a hit lands, one static card goes
+  into your discard: costs one, does nothing. The hand fills with noise
+  as the signal drops, the portrait corrupts the same way, and a dropped
+  signal is a hand you cannot play. One metaphor for health, deck, and
+  face; ours and nobody else's, and free on top of the loop above.
+- **Auto.** One key plays the obvious policy: strike unless the foe is
+  charging, block when it is, band move when the energy is there. The
+  daily floor for the ambient runner, and later the offline policy for
+  ambush and the arena for free.
+- **Balancing is a test.** Ten cards and two intents means every
+  matchup simulates: a seeded test drives the auto policy through a
+  thousand fights per level and asserts the win rate lands in a band.
+  Retuning a number is running that test, not a playtest.
+- **On the row:** the fight JSON grows a deck, a hand, a discard pile,
+  energy, and the foe's intent. Commands: play card N, end turn, run,
+  auto. The scene gets a hand row along the bottom, five compact cards
+  in the city palette, number keys to pick.
+
+Waits: jokers and multipliers, a card shop, relics, deck building, foe
+variety past two intents. Each is data once the loop stands, and each is
+a season beat, not a launch feature.
+
+### The road: ten rations, ten steps, one road for everyone
+
+The ration is a step down a branching road, not a fight. The road is the
+lower city the ledge already looks down at; the screen is where you step
+in. This is the piece that makes a daily run, and a run is what people
+talk about.
+
+- **One road per day, seeded by the UTC date, the same for everyone.**
+  The Le Word shape. "Did you take the left at four, the elite charges
+  on turn one" is where the talk comes from, and it makes the wire a
+  spoiler channel civilians overhear.
+- **Ten nodes, a hard bound.** About four fights out of ten; the rest
+  are one-key choices. Three minutes with auto, ten with the hand. If a
+  run ever runs past that, we built a sudoku.
+- **Node kinds:** fight (the round); elite (both intents live, a card
+  drop on the kill: where jokers enter later, one at a time, as rewards
+  rather than a shop); rest (clear static from the deck, or heal
+  signal: the one decision every Spire player argues about); cache
+  (bits, which walk back up to the armorer: the road is the faucet, the
+  street is the sink); event (a line and a choice, pure copy in the
+  voice, an afternoon each: the content slot that never runs dry).
+- **The row holds the run:** position, the deck as it stands, static in
+  it, bits found. The day roll starts a new road and wipes the old one
+  the way it wipes a hanging fight now. A dropped signal ends the run
+  where you stand; back tomorrow.
+- **The end of a run is a share card:** the road as a picture, ten
+  columns, the forks lit, the node you fell on marked. The arcade's
+  proven trick pointed at the game. Dying at seven is a better card
+  than clearing it.
+- **The wire gets one line per run,** not per fight: a run is a story
+  unit, a fight is not.
+- **The map render** is the one new surface: a small branching graph
+  in the city palette above the fight panel. The road comes from a pure
+  date-seeded generator with a whole-state test, like the city map and
+  the dailies, so a bad road is a failing test and not a bad day for
+  forty people.
+
+### Being seen: your color is your level
+
+The badge (mark plus level, `▚7`, decided 2026-09-02) is where the
+game's status lives in chat, and its color is earned, never bought:
+
+- **Level bands tint the badge.** The badge wears the newest tint the
+  level unlocked: grey 1 to 3, phosphor 4 to 6, cyan 7 to 9, magenta 10
+  to 12, red 13 and 14, white at 15; the earned tint only after an Old
+  Signal kill. The room learns the ladder in a week without a legend.
+- **The badge carries the level color; the username keeps the shop
+  color.** Username gradients are the shop's one hit. Both on one line
+  would fight; side by side they read as "has chips" and "did the
+  thing", the exact distinction "The look" draws.
+- **Tints and pieces in the tailor unlock by level, not by price.** Every
+  three levels opens three pieces per slot and a tint: static and amber
+  at 1, phosphor at 4, cyan at 7, magenta at 10, red at 13, white alone
+  at 15. Bits stay internal and buy gear; chips buy pieces later. The
+  mirror names what the next unlock level opens: a reason to come back
+  at four.
+- All of it in #deadchannel only until the public flip.
+
+### PvP at forty people
+
+The ranking under "Core design" holds: ambush is the story engine, the
+arena the spectacle and the chip sink, bounties the glue. Decisions from
+this pass:
+
+- **The deck is the preparation layer.** The arena's secret stances are
+  replaced by the deck: your build plays itself offline with the auto
+  policy, bettors read decks the way they were meant to read people,
+  and live fights and offline ones share one mechanism.
+- **Ambush is the first PvP to build,** because the fight machine and
+  the row already carry it: the defender is their sheet and deck, the
+  log lands on their row as "while you were gone", and the next descent
+  plays it back as the same scene with the attacker's portrait on the
+  other side. The login news screen made concrete without the digest
+  engine. On the road, a runner you meet is a node: "you crossed tom at
+  six", never a menu.
+- **The grief model, settled** (closes the open question's in-game
+  half; the "only a bounty opens you" idea starves ambush at this
+  population): an ambush costs a ration, so it competes with the road;
+  level band of plus or minus two, no punching down; one ambush per pair
+  per day and a runner is hit at most once per day, so the worst login
+  is one thing happened; the loser's signal drops and bits on hand go
+  (the locker ships before the ambush, so carrying is a choice); the
+  victim gets a revenge token, one answer within a day that costs no
+  ration, which turns a hit into a rivalry, the renewable middle of the
+  retention model.
+- **The arena stays as designed** minus stances (parimutuel bets, the
+  nightly card, the announcer ghost) and comes after ambush proves
+  people read the news, because betting is the big build.
+- **No clans, no guilds.** Anything that needs coordination starves
+  here, and a guild is a coordination machine. Bands are the tribe: pick
+  once, wear the word, a weekly tally on the wire ("tuners took the
+  week") for faction feeling with zero coordination. If bands work as
+  tribes, clans never need to exist.
+
+### Build order
+
+1. The round as a pure state machine with the seeded simulation test, a
+   fixed starter deck, three foes with intents, the hand row on the
+   existing panel. Staff play it for a week before anything else.
+2. The road with three node kinds (fight, rest, cache), the map render,
+   the run share card, the one wire line per run. Elites and events
+   follow as data.
+3. Level badge and color bands in #deadchannel, tints gated by level in
+   the tailor.
+4. The locker, then ambush with the replay and the revenge token.
+5. Arena and bets, then bounties. Bands as tribes when the band choice
+   ships.
+
+Telemetry is the prerequisite for reading any of it: game wins must be
+exported per game and split so the dashboard says what people actually
+do, and share rate per completion per daily is the first number to pull.
 
 ## Experiment framing
 

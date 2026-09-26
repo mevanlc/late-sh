@@ -26,7 +26,7 @@ use super::{
         CraftView, InvView, LeaderboardEntry, LogKind, MobView, PetView, PlayerView, QuestKind,
         QuestView, SectionRow, ShopView,
     },
-    world::{Dir, MapCell, MiniMap, RoomId},
+    world::{Dir, RoomId},
 };
 
 const SIDE_WIDE: u16 = 34;
@@ -215,7 +215,7 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, usernames: &Usern
     // strip along the bottom, the way terminal roguelikes have always laid it:
     // log lines are sentences, and sentences want width, not a narrow rail.
     // Below this width the field folds away and the classic log + side view
-    // stands in (the minimap still rides in the side panel there).
+    // stands in; no layout draws a map in the side rail.
     if state.panel() == Panel::Room && view.rpg_mode && area.width >= 96 {
         // A tall terminal spends rows on the full-width strip; a short one
         // gives them back to the field and pushes the events into the rail.
@@ -237,14 +237,14 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, usernames: &Usern
         draw_field(frame, cols[0], &view);
         match strip {
             Some((_, log_area)) => {
-                draw_room_side(frame, cols[1], state, &view, usernames, false);
+                draw_room_side(frame, cols[1], state, &view, usernames, true);
                 draw_log_strip(frame, log_area, &view);
             }
             None => {
                 let log_h = rail_log_height(cols[1].height);
                 let rail = Layout::vertical([Constraint::Min(4), Constraint::Length(log_h)])
                     .split(cols[1]);
-                draw_room_side(frame, rail[0], state, &view, usernames, false);
+                draw_room_side(frame, rail[0], state, &view, usernames, true);
                 draw_log_strip(frame, rail[1], &view);
             }
         }
@@ -2653,7 +2653,7 @@ fn draw_side(
     usernames: &UsernameLookup<'_>,
 ) {
     if state.panel() == Panel::Room {
-        draw_room_side(frame, area, state, view, usernames, true);
+        draw_room_side(frame, area, state, view, usernames, false);
         return;
     }
 
@@ -2813,23 +2813,9 @@ fn draw_room_side(
     state: &State,
     view: &PlayerView,
     usernames: &UsernameLookup<'_>,
-    with_minimap: bool,
+    field_layout: bool,
 ) {
-    let map = if with_minimap {
-        minimap_lines(&view.minimap)
-    } else {
-        // The live field column already shows the surroundings; the little
-        // minimap would just be a redundant echo beside it.
-        Vec::new()
-    };
-    let panel_area = if map.is_empty() {
-        area
-    } else {
-        let map_h = map.len().min(area.height as usize) as u16;
-        let rows = Layout::vertical([Constraint::Min(0), Constraint::Length(map_h)]).split(area);
-        frame.render_widget(Paragraph::new(map), rows[1]);
-        rows[0]
-    };
+    let panel_area = area;
 
     // Mid-fight the field layout's side panel becomes the battle frame - the
     // classic layout keeps the room summary here, since its main column
@@ -2837,7 +2823,7 @@ fn draw_room_side(
     // actions (foes to switch the lock, ability rows to cast).
     let fighting =
         view.mobs.iter().any(|m| m.targeted) || view.occupants.iter().any(|o| o.targeted);
-    if !with_minimap && fighting {
+    if field_layout && fighting {
         let (lines, hits) = battle_side_panel(view, usernames, panel_area.width as usize);
         for (idx, action) in hits {
             if (idx as u16) < panel_area.height {
@@ -3940,6 +3926,18 @@ fn craft_status_cell(e: &super::svc::CraftEntryView) -> (String, Color) {
     (format!("{held}/{}", e.ingredients.len()), theme::AMBER())
 }
 
+/// The list's tag cell for a recipe. A stock good (a draught, an oil, a meal)
+/// has no rival on your body, so the cell says how many are already in the
+/// pack: the stock a maker is topping up. Everything else keeps the shop's
+/// upgrade tag, which is empty for materials.
+fn craft_tag_cell(e: &super::svc::CraftEntryView) -> (String, Color) {
+    match e.held {
+        Some(0) => ("\u{00d7}0".to_string(), theme::TEXT_DIM()),
+        Some(n) => (format!("\u{00d7}{n}"), theme::TEXT_BRIGHT()),
+        None => upgrade_tag(e.compare_pct),
+    }
+}
+
 /// The ingredient checklist of the detail pane: every line of the recipe with
 /// what is in the pack against what it costs. The sidebar panel collapses this
 /// to one "need materials" string, which names neither the material nor the
@@ -4084,7 +4082,7 @@ fn draw_craft_screen(
                     &e.rarity,
                     selected,
                     craft_status_cell(e),
-                    upgrade_tag(e.compare_pct),
+                    craft_tag_cell(e),
                     list_w,
                 ));
             }
@@ -4124,6 +4122,16 @@ fn draw_craft_screen(
                 },
                 detail_w,
             );
+            if let Some(n) = e.held {
+                detail.push(Line::from(Span::styled(
+                    format!("  {n} in your pack"),
+                    Style::default().fg(match n {
+                        0 => theme::TEXT_DIM(),
+                        _ => theme::TEXT_BRIGHT(),
+                    }),
+                )));
+                detail.push(Line::raw(""));
+            }
             detail.extend(craft_material_lines(e));
             detail.push(Line::raw(""));
             detail.push(craft_skill_line(e));
@@ -5055,62 +5063,6 @@ fn battle_side_panel(
     lines.push(hint("Q", "quaff a potion"));
     lines.push(hint("C", "coat your weapon"));
     (lines, hits)
-}
-
-/// The overhead minimap section: a small map of the explored neighbourhood,
-/// painted in the bottom corner of the Room panel.
-fn minimap_lines(map: &MiniMap) -> Vec<Line<'static>> {
-    if map.grid.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = vec![section("Map")];
-    for row in &map.grid {
-        let mut spans = vec![Span::raw("  ")];
-        spans.extend(row.iter().map(|cell| map_cell_span(*cell)));
-        lines.push(Line::from(spans));
-    }
-    // Vertical exits can't sit on a flat map; note them in words instead.
-    let mut stairs = Vec::new();
-    if map.up {
-        stairs.push("up");
-    }
-    if map.down {
-        stairs.push("down");
-    }
-    let stairs_text = if stairs.is_empty() {
-        String::new()
-    } else {
-        format!("stairs: {}", stairs.join(", "))
-    };
-    lines.push(Line::from(Span::styled(
-        format!("  {stairs_text:<18}"),
-        Style::default().fg(theme::TEXT_DIM()),
-    )));
-    lines.push(Line::from(Span::styled(
-        "  @=you *=last o=seen .=new",
-        Style::default().fg(theme::TEXT_FAINT()),
-    )));
-    lines
-}
-
-/// One char-cell of the minimap, styled by what it represents.
-fn map_cell_span(cell: MapCell) -> Span<'static> {
-    let (glyph, color) = match cell {
-        MapCell::Empty => (' ', theme::TEXT_FAINT()),
-        MapCell::Current => ('@', theme::AMBER_GLOW()),
-        MapCell::Previous => ('*', theme::AMBER()),
-        MapCell::Visited => ('o', theme::AMBER_DIM()),
-        MapCell::Frontier => ('.', theme::TEXT_FAINT()),
-        MapCell::ConnH => ('-', theme::BORDER()),
-        MapCell::ConnV => ('|', theme::BORDER()),
-        MapCell::TrailH => ('-', theme::AMBER_GLOW()),
-        MapCell::TrailV => ('|', theme::AMBER_GLOW()),
-    };
-    let mut style = Style::default().fg(color);
-    if matches!(cell, MapCell::Current | MapCell::Previous) {
-        style = style.add_modifier(Modifier::BOLD);
-    }
-    Span::styled(glyph.to_string(), style)
 }
 
 // ---- The character sheet -------------------------------------------------
@@ -6252,8 +6204,15 @@ fn crafting_panel(
                 } else {
                     Style::default().fg(theme::TEXT_DIM())
                 };
-                // Name row, with a gated reason when it can't be made.
+                // Name row: how many are already held (made goods only), and
+                // a gated reason when it can't be made.
                 let mut name_spans = vec![Span::styled(format!("{marker} {}", e.name), name_style)];
+                if let Some(n) = e.held {
+                    name_spans.push(Span::styled(
+                        format!("  \u{00d7}{n}"),
+                        Style::default().fg(theme::TEXT_DIM()),
+                    ));
+                }
                 if !e.craftable && !e.reason.is_empty() {
                     name_spans.push(Span::styled(
                         format!("  ({})", e.reason),

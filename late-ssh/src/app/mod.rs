@@ -47,7 +47,6 @@ mod smoke_test;
 pub mod state;
 #[cfg(test)]
 mod state_test;
-pub(crate) mod status_picker;
 pub(crate) mod statusline;
 pub mod stream;
 pub(crate) mod tag_picker;

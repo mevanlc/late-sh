@@ -2,6 +2,10 @@ use super::*;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 
+use crate::app::deadchannel::fight::state::Sheet;
+use crate::app::deadchannel::guide::state::State as GuideState;
+use crate::app::deadchannel::tailor::ui as tailor_ui;
+
 fn render(state: &State, width: u16, height: u16) -> String {
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -15,6 +19,16 @@ fn render(state: &State, width: u16, height: u16) -> String {
                     state,
                     own_username: "mira",
                     look: None,
+                    sheet: None,
+                    scene: None,
+                    till: None,
+                    tailor: tailor_ui::MirrorView {
+                        draft: None,
+                        word: None,
+                        changed: false,
+                        saving: false,
+                    },
+                    guide: &GuideState::new(),
                 },
             );
         })
@@ -47,12 +61,179 @@ fn the_runner_and_the_wire_popover_render_at_the_spawn() {
 #[test]
 fn a_shop_panel_lists_its_catalog() {
     let mut state = State::new();
+    state.open_panel(Landmark::Bar);
+    let screen = render(&state, 120, 40);
+    assert!(screen.contains("dead air"), "{screen}");
+    assert!(screen.contains("the signal is warm in here."), "{screen}");
+}
+
+#[test]
+fn the_armorer_prices_the_picked_row_against_the_sheet() {
+    let mut state = State::new();
     state.open_panel(Landmark::Armorer);
+    // Nothing to trade with until the sheet comes down the wire.
     let screen = render(&state, 120, 40);
     assert!(screen.contains("the armorer"), "{screen}");
-    assert!(screen.contains("bent antenna"), "{screen}");
+    assert!(
+        screen.contains("the sheet has not come down the wire yet."),
+        "{screen}"
+    );
+
+    let mut sheet = Sheet::fresh(
+        uuid::Uuid::nil(),
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 24).unwrap(),
+    );
+    sheet.bits = 300;
+    sheet.weapon_tier = 2;
+    state.pick_down();
+    state.pick_down();
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(
+                frame,
+                frame.area(),
+                CityView {
+                    state: &state,
+                    own_username: "mira",
+                    look: None,
+                    sheet: Some(&sheet),
+                    scene: None,
+                    till: Some("the armorer hands over the box cutter. 225 bits."),
+                    tailor: tailor_ui::MirrorView {
+                        draft: None,
+                        word: None,
+                        changed: false,
+                        saving: false,
+                    },
+                    guide: &GuideState::new(),
+                },
+            );
+        })
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let mut screen = String::new();
+    for y in 0..buffer.area.height {
+        for x in 0..buffer.area.width {
+            screen.push_str(buffer[(x, y)].symbol());
+        }
+        screen.push('\n');
+    }
+    assert!(screen.contains("on hand 300 bits"), "{screen}");
+    assert!(screen.contains("weapon box cutter"), "{screen}");
+    assert!(screen.contains("armor street clothes"), "{screen}");
+    assert!(
+        screen.contains("▸    3  tire iron"),
+        "the cursor on tier 3\n{screen}"
+    );
     assert!(screen.contains("the last broadcast"), "{screen}");
     assert!(screen.contains("10350"), "{screen}");
+    // Tier 3 weapon: 585 less 75% of 225. Tier 3 armor off street clothes: 585.
+    assert!(screen.contains("[w] tire iron for 417 bits"), "{screen}");
+    assert!(
+        screen.contains("[a] padded jacket for 585 bits"),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("the armorer hands over the box cutter. 225 bits."),
+        "the till line\n{screen}"
+    );
+}
+
+/// Patch prices the gap against the sheet and spells its refusals ahead
+/// of the key: a dropped signal is the roll's, a full one buys nothing.
+#[test]
+fn patch_prices_the_gap_and_says_when_there_is_nothing_to_buy() {
+    let mut state = State::new();
+    state.open_panel(Landmark::Repairs);
+    let render_with = |state: &State, sheet: Option<&Sheet>| {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                draw(
+                    frame,
+                    frame.area(),
+                    CityView {
+                        state,
+                        own_username: "mira",
+                        look: None,
+                        sheet,
+                        scene: None,
+                        till: Some("patch works fast. +18 signal, back to full. 54 bits."),
+                        tailor: tailor_ui::MirrorView {
+                            draft: None,
+                            word: None,
+                            changed: false,
+                            saving: false,
+                        },
+                        guide: &GuideState::new(),
+                    },
+                )
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let mut screen = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                screen.push_str(buffer[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        screen
+    };
+
+    let screen = render_with(&state, None);
+    assert!(screen.contains(" patch "), "{screen}");
+    assert!(
+        screen.contains("the sheet has not come down the wire yet."),
+        "{screen}"
+    );
+
+    let mut sheet = Sheet::fresh(
+        uuid::Uuid::nil(),
+        chrono::NaiveDate::from_ymd_opt(2026, 9, 24).unwrap(),
+    );
+    sheet.level = 3;
+    sheet.signal = 12;
+    sheet.bits = 100;
+    let screen = render_with(&state, Some(&sheet));
+    assert!(
+        screen.contains("signal 12/30      on hand 100 bits"),
+        "{screen}"
+    );
+    assert!(screen.contains("[p] patch to full for 54 bits"), "{screen}");
+    assert!(
+        screen.contains("patch works fast. +18 signal, back to full. 54 bits."),
+        "{screen}"
+    );
+
+    sheet.signal = 30;
+    let screen = render_with(&state, Some(&sheet));
+    assert!(
+        screen.contains("nothing on you needs patching."),
+        "{screen}"
+    );
+    assert!(!screen.contains("[p] patch"), "{screen}");
+
+    sheet.signal = 0;
+    let screen = render_with(&state, Some(&sheet));
+    assert!(
+        screen.contains("your signal is down. nothing here brings it back before the roll."),
+        "{screen}"
+    );
+
+    // Spent for the day: the roll refills for free, so the key is not
+    // offered.
+    sheet.signal = 12;
+    sheet.rations_left = 0;
+    let screen = render_with(&state, Some(&sheet));
+    assert!(
+        screen.contains("you are spent for today. the roll brings the signal back for nothing."),
+        "{screen}"
+    );
+    assert!(!screen.contains("[p] patch"), "{screen}");
 }
 
 #[test]
@@ -129,6 +310,16 @@ fn every_cell_sits_on_the_city_night_not_the_theme_canvas() {
                     state: &state,
                     own_username: "mira",
                     look: None,
+                    sheet: None,
+                    scene: None,
+                    till: None,
+                    tailor: tailor_ui::MirrorView {
+                        draft: None,
+                        word: None,
+                        changed: false,
+                        saving: false,
+                    },
+                    guide: &GuideState::new(),
                 },
             );
         })

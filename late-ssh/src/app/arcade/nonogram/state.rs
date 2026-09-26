@@ -7,6 +7,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::svc::NonogramService;
+use crate::metrics::{ArcadeDifficulty, ArcadeFinish, ArcadeMode};
 use late_core::models::nonogram::{Game, GameParams};
 
 /// Shared, immutable puzzle library. The packs sit behind an `Arc` so the
@@ -54,6 +55,13 @@ pub const DIFFICULTIES: [NonogramDifficulty; 3] = [
         key: "hard",
         size_key: "20x20",
     },
+];
+/// The metric label of each row of `DIFFICULTIES`, in the same order.
+/// Sized by the table, so a new difficulty must be labeled to build.
+const DIFFICULTY_METRICS: [ArcadeDifficulty; DIFFICULTIES.len()] = [
+    ArcadeDifficulty::Easy,
+    ArcadeDifficulty::Medium,
+    ArcadeDifficulty::Hard,
 ];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -488,6 +496,16 @@ impl State {
         self.save_async();
     }
 
+    /// Tell the dashboard this board ended.
+    fn record_finish(&self, finish: ArcadeFinish) {
+        let mode = match self.mode {
+            Mode::Daily => ArcadeMode::Daily,
+            Mode::Personal => ArcadeMode::Personal,
+        };
+        let difficulty = DIFFICULTY_METRICS[self.selected_difficulty];
+        self.svc.record_finish(mode, difficulty, finish);
+    }
+
     fn check_win(&mut self) {
         if self.is_game_over {
             return;
@@ -500,6 +518,7 @@ impl State {
 
         if solved {
             self.is_game_over = true;
+            self.record_finish(ArcadeFinish::Won);
             if self.mode == Mode::Daily {
                 self.svc.record_win_task(
                     self.user_id,

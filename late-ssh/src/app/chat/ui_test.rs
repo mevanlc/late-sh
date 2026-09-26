@@ -238,7 +238,7 @@ fn a_rented_title_renders_after_the_author_name_in_chat() {
             milestone: None,
         },
     )]);
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -259,7 +259,7 @@ fn a_rented_title_renders_after_the_author_name_in_chat() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -334,7 +334,7 @@ fn the_crown_glyph_renders_between_the_author_name_and_their_title() {
             milestone: None,
         },
     )]);
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -355,7 +355,7 @@ fn the_crown_glyph_renders_between_the_author_name_and_their_title() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -399,7 +399,7 @@ fn chat_rows_cache_key_changes_when_theme_changes() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -421,7 +421,7 @@ fn chat_rows_cache_key_changes_when_theme_changes() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -454,7 +454,7 @@ fn chat_rows_cache_key_changes_with_any_version_counter() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -482,7 +482,7 @@ fn chat_rows_cache_key_changes_with_any_version_counter() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -554,7 +554,7 @@ fn editing_a_grouped_message_gives_it_its_own_header() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -575,7 +575,7 @@ fn editing_a_grouped_message_gives_it_its_own_header() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -765,7 +765,7 @@ fn mentions_and_replies_paint_a_background_wash() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -786,7 +786,7 @@ fn mentions_and_replies_paint_a_background_wash() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -848,7 +848,7 @@ fn background_wash_fills_the_whole_row_width() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -869,7 +869,7 @@ fn background_wash_fills_the_whole_row_width() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -951,9 +951,10 @@ fn chat_view<'a>(
     static DRUNK_LEVELS: OnceLock<HashMap<Uuid, u8>> = OnceLock::new();
     static NAME_STYLES: OnceLock<HashMap<Uuid, crate::app::common::username_effect::ResolvedName>> =
         OnceLock::new();
-    static PEER_POMODOROS: OnceLock<HashMap<Uuid, String>> = OnceLock::new();
-    static RUNNER_LOOKS: OnceLock<HashMap<Uuid, crate::app::deadchannel::runner::state::Look>> =
-        OnceLock::new();
+    static AWAY_USER_IDS: OnceLock<HashSet<Uuid>> = OnceLock::new();
+    static RUNNER_LOOKS: OnceLock<
+        HashMap<Uuid, crate::app::deadchannel::runner::svc::RunnerEntry>,
+    > = OnceLock::new();
     static ROOM_VERSIONS: OnceLock<HashMap<Uuid, u64>> = OnceLock::new();
     static MESSAGE_GILDS: OnceLock<HashMap<Uuid, ChatMessageGildSummary>> = OnceLock::new();
 
@@ -1044,7 +1045,7 @@ fn chat_view<'a>(
         drunk_levels: DRUNK_LEVELS.get_or_init(HashMap::new),
         name_flair: NAME_STYLES.get_or_init(HashMap::new),
         runner_looks: RUNNER_LOOKS.get_or_init(HashMap::new),
-        peer_statuses: PEER_POMODOROS.get_or_init(HashMap::new),
+        away_user_ids: AWAY_USER_IDS.get_or_init(HashSet::new),
         name_flicker: None,
         translations: TRANSLATIONS.get_or_init(HashMap::new),
         translation_hidden: TRANSLATION_HIDDEN.get_or_init(HashSet::new),
@@ -2479,6 +2480,7 @@ fn header_segments_split_chat_flag_from_regular_badge() {
         author_range,
         crown_range: _,
         title_range,
+        runner_range: _,
     } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
         is_friend: false,
         author: "bob",
@@ -2490,6 +2492,7 @@ fn header_segments_split_chat_flag_from_regular_badge() {
         bonsai_glyph: None,
         profile_award_badges: None,
         presence_badges: &[],
+        runner_badge: None,
     });
     assert_eq!(prefix, "bob 🐱 US");
     assert_eq!(author_range, (0, 3));
@@ -2515,6 +2518,7 @@ fn header_segments_show_a_burn_milestone_on_top_of_a_rented_badge_and_flag() {
         author_range: _,
         crown_range: _,
         title_range: _,
+        runner_range: _,
     } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
         is_friend: false,
         author: "bob",
@@ -2526,6 +2530,7 @@ fn header_segments_show_a_burn_milestone_on_top_of_a_rented_badge_and_flag() {
         bonsai_glyph: None,
         profile_award_badges: None,
         presence_badges: &[],
+        runner_badge: None,
     });
     assert_eq!(prefix, "bob \u{1F431} US \u{1F30B}");
     assert_eq!(segs.len(), 4);
@@ -2545,6 +2550,7 @@ fn header_prefix_wears_a_milestone_with_no_rentals_at_all() {
         author_range: _,
         crown_range,
         title_range: _,
+        runner_range: _,
     } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
         is_friend: false,
         author: "bob",
@@ -2556,6 +2562,7 @@ fn header_prefix_wears_a_milestone_with_no_rentals_at_all() {
         bonsai_glyph: None,
         profile_award_badges: None,
         presence_badges: &[],
+        runner_badge: None,
     });
     assert_eq!(prefix, "bob \u{1F451}, the night clerk \u{1F9E8}");
     assert!(crown_range.is_some());
@@ -2572,6 +2579,7 @@ fn header_prefix_puts_a_rented_title_between_the_name_and_the_badges() {
         author_range,
         crown_range: _,
         title_range,
+        runner_range: _,
     } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
         is_friend: false,
         author: "bob",
@@ -2583,6 +2591,7 @@ fn header_prefix_puts_a_rented_title_between_the_name_and_the_badges() {
         bonsai_glyph: None,
         profile_award_badges: None,
         presence_badges: &[],
+        runner_badge: None,
     });
     assert_eq!(prefix, "bob, the insufferable 🐱");
     assert_eq!(author_range, (0, 3));
@@ -2612,6 +2621,7 @@ fn header_prefix_puts_a_rented_title_between_the_name_and_the_badges() {
         bonsai_glyph: None,
         profile_award_badges: None,
         presence_badges: &[],
+        runner_badge: None,
     });
     assert_eq!(prefix, "bob");
     assert_eq!(title_range, None);
@@ -2634,12 +2644,51 @@ fn header_prefix_orders_all_badge_classes() {
         bonsai_glyph: Some("bonsai"),
         profile_award_badges: Some("AW1 CHIP2"),
         presence_badges: &["brb"],
+        runner_badge: None,
     })
     .prefix;
 
     assert_eq!(
         prefix,
         "alice [AW1 CHIP2] mod developer artist bonsai badge flag brb"
+    );
+}
+
+/// On the wire the runner badge opens the badge stack, right after the
+/// name's own decorations, and its range covers the space that opens the
+/// stack so the painter finds it adjacent to the title.
+#[test]
+fn header_prefix_leads_the_badge_stack_with_the_runner_badge() {
+    let AuthorPrefix {
+        prefix,
+        segments,
+        title_range,
+        runner_range,
+        ..
+    } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
+        is_friend: false,
+        author: "mira",
+        crown: false,
+        title: Some("the night clerk"),
+        milestone: None,
+        special_badges: &["mod"],
+        chat_badges: &[],
+        bonsai_glyph: None,
+        profile_award_badges: None,
+        presence_badges: &[],
+        runner_badge: Some("▚7"),
+    });
+
+    assert_eq!(prefix, "mira, the night clerk ▚7 mod");
+    let (_, title_end) = title_range.expect("title range");
+    assert_eq!(runner_range, Some((title_end, title_end + " ▚7".len())));
+    assert_eq!(&prefix[title_end..title_end + " ▚7".len()], " ▚7");
+    // The badge is clickable like every other badge: it opens the profile.
+    assert_eq!(segments.len(), 3);
+    assert_eq!(segments[1].target, HeaderTarget::Profile);
+    assert_eq!(
+        segments[1].start_col,
+        1 + "mira, the night clerk ".len() as u16
     );
 }
 
@@ -3038,7 +3087,7 @@ fn the_you_left_rule_draws_above_the_first_message_past_the_left_app_mark() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -3064,7 +3113,7 @@ fn the_you_left_rule_draws_above_the_first_message_past_the_left_app_mark() {
             dividers,
             drunk_levels: &drunk_levels,
             name_flair: &name_flair,
-            peer_statuses: &peer_statuses,
+            away_user_ids: &away_user_ids,
             name_flicker: None,
             translations: &translations,
             translation_hidden: &translation_hidden,
@@ -3155,14 +3204,17 @@ fn the_you_left_rule_draws_above_the_first_message_past_the_left_app_mark() {
 }
 
 /// The #deadchannel portrait gutter (`app/deadchannel/runner`): a runner's
-/// face rides the blank separator above their block plus the header and
-/// first body row, the text wraps short of the gutter for every entry in
-/// the room, a continuation shares the face above it, and the first block
-/// in the list (no separator above) seats all three rows on the entry.
-/// A mention's wash covers the hood row too: the face is one block.
+/// face sits level with their header and wears what the entry has rows
+/// for (a one-liner the head only, a taller message the coat too), the
+/// blank separator above the block stays blank so two faces never touch,
+/// the text wraps short of the gutter for every entry in the room, and a
+/// continuation shares the face above it. A mention's wash covers every
+/// face row: the face is one block.
 #[test]
 fn the_wire_seats_a_runners_portrait_beside_their_message() {
     use crate::app::deadchannel::runner::state::Look;
+    use crate::app::deadchannel::runner::svc::RunnerEntry;
+    use crate::app::deadchannel::runner::ui::level_color;
     use unicode_width::UnicodeWidthStr;
 
     theme::set_current_by_id("late");
@@ -3209,7 +3261,26 @@ fn the_wire_seats_a_runners_portrait_beside_their_message() {
         "mark": {"glyph": "▚"}
     }))
     .expect("parse look");
-    let looks = HashMap::from([(runner_id, look), (elder_id, look)]);
+    let looks = HashMap::from([
+        (
+            runner_id,
+            RunnerEntry {
+                look,
+                level: 7,
+                peak_level: 7,
+                marks: 0,
+            },
+        ),
+        (
+            elder_id,
+            RunnerEntry {
+                look,
+                level: 15,
+                peak_level: 15,
+                marks: 0,
+            },
+        ),
+    ]);
     let countries = HashMap::new();
     let bonsai_glyphs = HashMap::new();
     let chat_badges = HashMap::new();
@@ -3221,7 +3292,7 @@ fn the_wire_seats_a_runners_portrait_beside_their_message() {
     let profile_award_badges = HashMap::new();
     let drunk_levels = HashMap::new();
     let name_flair = HashMap::new();
-    let peer_statuses = HashMap::new();
+    let away_user_ids = HashSet::new();
     let translations = HashMap::new();
     let translation_hidden = HashSet::new();
     let username_lookup = UsernameLookup::new(&usernames, None);
@@ -3242,7 +3313,7 @@ fn the_wire_seats_a_runners_portrait_beside_their_message() {
         dividers: ChatDividers::default(),
         drunk_levels: &drunk_levels,
         name_flair: &name_flair,
-        peer_statuses: &peer_statuses,
+        away_user_ids: &away_user_ids,
         name_flicker: None,
         translations: &translations,
         translation_hidden: &translation_hidden,
@@ -3264,22 +3335,36 @@ fn the_wire_seats_a_runners_portrait_beside_their_message() {
         })
         .collect();
 
-    // The list opens with dax's one-liner: no separator above it, so the
-    // face takes the header, the body row, and one padded row under them.
-    assert!(rendered[0].contains("dax"), "{rendered:?}");
+    // The list opens with dax's one-liner: two rows, so the head only,
+    // the hood level with his name and the eyes on the body row, and no
+    // row grown under it for a coat.
+    assert!(rendered[0].contains("dax ▚15"), "{rendered:?}");
     assert!(rendered[0].ends_with(" ╬═╬ "), "{rendered:?}");
     assert!(rendered[1].contains("o7"), "{rendered:?}");
     assert!(rendered[1].ends_with("▐◈ ◈▌"), "{rendered:?}");
-    assert_eq!(rendered[2].trim(), "▟▓▙", "{rendered:?}");
-    // Mira's block sits below the civilian: the hood rides the blank
-    // separator above her header, so the face ends level with her first
-    // body row and nothing is padded under it.
+    // Then the separator, blank all the way across: dax's face and the
+    // next block's never touch.
+    assert_eq!(rendered[2].trim(), "", "{rendered:?}");
+    assert!(rendered[3].contains("afterglow"), "{rendered:?}");
+    // Mira's message wraps, so her block wears the whole face: the
+    // separator above her header stays blank, the hood sits level with
+    // her name, the eyes and the coat on her first two body rows.
     let mira = rendered
         .iter()
         .position(|row| row.contains("mira"))
         .expect("mira's header");
-    assert_eq!(rendered[mira - 1].trim(), "╬═╬", "{rendered:?}");
-    assert!(rendered[mira].ends_with("▐◈ ◈▌"), "{rendered:?}");
+    assert_eq!(rendered[mira - 1].trim(), "", "{rendered:?}");
+    assert!(rendered[mira].ends_with(" ╬═╬ "), "{rendered:?}");
+    // Her level badge leads her header's badge stack, in her band's color.
+    assert!(rendered[mira].contains("mira ▚7"), "{rendered:?}");
+    let badge = cache.all_rows[mira]
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == " ▚7")
+        .expect("badge span");
+    assert_eq!(badge.style.fg, Some(level_color(7)));
+    // The civilian wears none: the wire only marks its own.
+    assert!(!rendered[3].contains('▚'), "{rendered:?}");
     // The mention's margin bar is the row's first cell.
     assert!(
         rendered[mira + 1]
@@ -3287,31 +3372,34 @@ fn the_wire_seats_a_runners_portrait_beside_their_message() {
             .starts_with("dax get"),
         "{rendered:?}"
     );
-    assert!(rendered[mira + 1].ends_with(" ▟▓▙ "), "{rendered:?}");
-    assert!(!rendered[mira + 2].contains('▟'), "{rendered:?}");
-    // Mira mentioned alice, so her block washes, hood row included: the
-    // face never tears between the separator and the header.
+    assert!(rendered[mira + 1].ends_with("▐◈ ◈▌"), "{rendered:?}");
+    assert!(rendered[mira + 2].ends_with(" ▟▓▙ "), "{rendered:?}");
+    // Mira mentioned alice, so her block washes, every face row included:
+    // the face never tears between rows.
     let visible = visible_chat_rows(&cache, None, None, cache.all_rows.len(), None);
-    for index in [mira - 1, mira, mira + 1] {
+    for index in [mira, mira + 1, mira + 2] {
         assert_eq!(
             visible.lines[index].spans[0].style.bg,
             Some(theme::CHAT_MENTION_BG()),
             "row {index} of mira's block is not washed: {rendered:?}"
         );
     }
-    assert_eq!(
-        visible.lines[mira - 2].spans[0].style.bg,
-        None,
+    // The separator above her is nobody's: unwashed, and a click there
+    // selects nothing.
+    assert!(
+        visible.lines[mira - 1]
+            .spans
+            .iter()
+            .all(|span| span.style.bg.is_none()),
         "{rendered:?}"
     );
     assert!(matches!(visible.hits[mira - 1].kind, ChatRowKind::None));
     for row in [
         &rendered[0],
         &rendered[1],
-        &rendered[2],
-        &rendered[mira - 1],
         &rendered[mira],
         &rendered[mira + 1],
+        &rendered[mira + 2],
     ] {
         assert_eq!(row.width(), width, "{row:?}");
     }

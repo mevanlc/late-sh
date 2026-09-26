@@ -14,7 +14,7 @@
 
 use serde_json::Value;
 
-pub const STATUS_COMPONENT_COUNT: usize = 12;
+pub const STATUS_COMPONENT_COUNT: usize = 11;
 
 /// A segment the user can place on the status bar. Order in the stored list is
 /// the paint order, left to right.
@@ -27,7 +27,6 @@ pub enum StatusComponent {
     Pot,
     Users,
     Turns,
-    Status,
     Station,
     Quests,
     Invites,
@@ -44,7 +43,6 @@ impl StatusComponent {
     /// they want along the bottom border.
     pub const ALL: [StatusComponent; STATUS_COMPONENT_COUNT] = [
         Self::Shortcuts,
-        Self::Status,
         Self::Voice,
         Self::Mentions,
         Self::Pot,
@@ -66,7 +64,6 @@ impl StatusComponent {
             Self::Pot => "pot",
             Self::Users => "users",
             Self::Turns => "turns",
-            Self::Status => "status",
             Self::Station => "station",
             Self::Quests => "quests",
             Self::Invites => "invites",
@@ -83,8 +80,6 @@ impl StatusComponent {
             "pot" => Some(Self::Pot),
             "users" => Some(Self::Users),
             "turns" => Some(Self::Turns),
-            // Preserve saved segment settings from before upstream unified presence.
-            "status" | "pomodoro" => Some(Self::Status),
             "station" => Some(Self::Station),
             "quests" => Some(Self::Quests),
             "invites" => Some(Self::Invites),
@@ -103,7 +98,6 @@ impl StatusComponent {
             Self::Pot => "Pot",
             Self::Users => "Users online",
             Self::Turns => "Your move",
-            Self::Status => "Status",
             Self::Station => "Station",
             Self::Quests => "Quests",
             Self::Invites => "Invites",
@@ -121,7 +115,6 @@ impl StatusComponent {
             Self::Pot => "Raffle pot size and time until the next draw.",
             Self::Users => "People online, excluding bots.",
             Self::Turns => "Correspondence games waiting for your move.",
-            Self::Status => "Your /status activity and any countdown.",
             Self::Station => "Your selected audio source or its current track.",
             Self::Quests => "Unfinished daily quests, optionally including weekly quests.",
             Self::Invites => "Game challenges awaiting your response.",
@@ -140,7 +133,6 @@ impl StatusComponent {
             Self::Pot => "pot",
             Self::Users => "online",
             Self::Turns => "your move",
-            Self::Status => "status",
             Self::Station => "on air",
             Self::Quests => "quests",
             Self::Invites => "invites",
@@ -168,7 +160,6 @@ impl StatusComponent {
             Self::Pot => "🍯",
             Self::Users => "🌐",
             Self::Turns => "🎲",
-            Self::Status => "💬",
             Self::Station => "🎵",
             Self::Quests => "❕",
             Self::Invites => "❔",

@@ -29,6 +29,7 @@ use crate::app::common::{
     theme,
     username_effect::{CROWN_GLYPH, ResolvedName},
 };
+use crate::app::deadchannel::runner::state::PORTRAIT_WIDTH;
 use crate::app::files::{
     inline_image::InlineImagePreview,
     terminal_image::{
@@ -39,7 +40,7 @@ use crate::app::hub::shop::svc::ActiveChatRoomEffect;
 use crate::usernames::UsernameLookup;
 
 use super::state::{
-    MentionMatch, ROOM_JUMP_KEYS, RoomSection, RoomSlot, RoomVisualOrderInput,
+    MatchPresence, MentionMatch, ROOM_JUMP_KEYS, RoomSection, RoomSlot, RoomVisualOrderInput,
     SelectedRoomSlotState, SelectionScroll, TranslationDisplay, compare_dm_rooms_for_nav,
     dm_is_promoted_unread, dm_peer_is_ignored, is_chat_list_room, is_deadchannel_room,
     is_selected_slot, synthetic_favorite_id, synthetic_slot_for_favorite_id,
@@ -135,12 +136,13 @@ pub struct DashboardChatView<'a> {
     /// Resolved 24h username-effect styles per author (see
     /// `common/username_effect.rs`); fg painted over the bare name only.
     pub name_flair: &'a HashMap<Uuid, ResolvedName>,
-    /// Every runner's look (`app/deadchannel/runner`), for the portrait
-    /// gutter beside messages; consulted only when `room` is #deadchannel.
-    pub runner_looks: &'a HashMap<Uuid, crate::app::deadchannel::runner::state::Look>,
-    /// Per-peer `/status` badges (resolved once a second in `tick.rs`);
+    /// Every standing runner's look and level (`app/deadchannel/runner`),
+    /// for the portrait gutter and the level badge beside messages;
+    /// consulted only when `room` is #deadchannel.
+    pub runner_looks: &'a HashMap<Uuid, crate::app::deadchannel::runner::svc::RunnerEntry>,
+    /// Away users (`common/away.rs`, resolved once a second in `tick.rs`);
     /// painted as the trailing presence badge.
-    pub peer_statuses: &'a HashMap<Uuid, String>,
+    pub away_user_ids: &'a HashSet<Uuid>,
     /// Stage-2 name-flicker hit this frame (first contact,
     /// `app/deadchannel/haunt`): the message whose author label is
     /// corrupted, plus its burst seed.
@@ -1221,7 +1223,7 @@ pub fn draw_dashboard_chat_card(
                 dividers: view.dividers,
                 drunk_levels: view.drunk_levels,
                 name_flair: view.name_flair,
-                peer_statuses: view.peer_statuses,
+                away_user_ids: view.away_user_ids,
                 name_flicker: view.name_flicker,
                 translations: view.translations,
                 translation_hidden: view.translation_hidden,
@@ -1318,7 +1320,7 @@ struct ChatRowsContext<'a> {
     drunk_levels: &'a HashMap<Uuid, u8>,
     /// Resolved 24h username-effect styles per author.
     name_flair: &'a HashMap<Uuid, ResolvedName>,
-    peer_statuses: &'a HashMap<Uuid, String>,
+    away_user_ids: &'a HashSet<Uuid>,
     name_flicker: Option<(Uuid, u64)>,
     translations: &'a HashMap<Uuid, TranslationDisplay>,
     translation_hidden: &'a HashSet<Uuid>,
@@ -1327,7 +1329,7 @@ struct ChatRowsContext<'a> {
     /// every entry and paints each author's face beside their block
     /// (`app/deadchannel/runner`). The gutter code below is room-agnostic;
     /// `None` leaves the rows exactly what they were.
-    runner_looks: Option<&'a HashMap<Uuid, crate::app::deadchannel::runner::state::Look>>,
+    runner_looks: Option<&'a HashMap<Uuid, crate::app::deadchannel::runner::svc::RunnerEntry>>,
 }
 
 // ── Mouse hit-test types ────────────────────────────────────
@@ -1734,23 +1736,27 @@ fn ensure_chat_rows_cache(
             .map(String::as_str)
             .filter(|s| !s.is_empty());
         // Presence badges trail every earned badge: the LIVE stream tag
-        // first (an invitation, the louder of the two), then the author's
-        // `/status`, which carries `away` as one of its variants and so is
+        // first (an invitation, the louder of the two), then the away glyph,
         // the only away marker there is.
         let mut presence_badges: Vec<&str> = Vec::new();
         if ctx.live_user_ids.contains(&msg.user_id) {
             presence_badges.push(LIVE_BADGE);
         }
-        if let Some(badge) = ctx.peer_statuses.get(&msg.user_id) {
-            presence_badges.push(badge);
+        if ctx.away_user_ids.contains(&msg.user_id) {
+            presence_badges.push(crate::app::common::away::AWAY_GLYPH);
         }
         let flair = ctx.name_flair.get(&msg.user_id);
+        // The wire only: a runner's mark and level lead their badge stack,
+        // in the band color of the level (`app/deadchannel/runner/ui.rs`).
+        let runner = ctx.runner_looks.and_then(|looks| looks.get(&msg.user_id));
+        let runner_badge = runner.map(crate::app::deadchannel::runner::ui::badge_text);
         let AuthorPrefix {
             prefix,
             segments,
             author_range,
             crown_range,
             title_range,
+            runner_range,
         } = build_author_prefix_and_segments_with_chat_badges(AuthorPrefixInput {
             is_friend,
             author: &author,
@@ -1762,20 +1768,30 @@ fn ensure_chat_rows_cache(
             bonsai_glyph: bonsai_opt,
             profile_award_badges,
             presence_badges: &presence_badges,
+            runner_badge: runner_badge.as_deref(),
         });
         let drunk_word = ctx.drunk_levels.get(&msg.user_id).and_then(|level| {
             late_core::models::drinks::drunk_label_word(*level)
                 .map(|word| (word, theme::DRUNK_WORD_FG(*level)))
         });
         let name_style = flair.and_then(|flair| flair.style);
+        let runner_tint = match (runner, runner_range) {
+            (Some(entry), Some(range)) => Some((
+                range,
+                crate::app::deadchannel::runner::ui::level_color(entry.level),
+            )),
+            (None, _) | (_, None) => None,
+        };
         let author_tint = (drunk_word.is_some()
             || name_style.is_some()
             || crown_range.is_some()
-            || title_range.is_some())
+            || title_range.is_some()
+            || runner_tint.is_some())
         .then_some(AuthorTint {
             range: author_range,
             crown_range,
             title_range,
+            runner: runner_tint,
             word: drunk_word,
             name_style,
         });
@@ -1812,14 +1828,12 @@ fn ensure_chat_rows_cache(
             .flatten();
         let is_system = system_text.is_some();
 
-        let separator_row = if first || is_continuation || is_system && prev_was_system {
-            None
-        } else {
+        let needs_separator = !(first || is_continuation || is_system && prev_was_system);
+        if needs_separator {
             all_rows.push(Line::from(""));
             row_message.push(None);
             row_kind.push(RowKindLite::Blank);
-            Some(all_rows.len() - 1)
-        };
+        }
         first = false;
 
         let left_app_here = ctx.dividers.left_app.filter(|_| {
@@ -1865,7 +1879,7 @@ fn ensure_chat_rows_cache(
             (!is_continuation && !is_system)
                 .then(|| looks.get(&msg.user_id))
                 .flatten()
-                .map(crate::app::deadchannel::runner::ui::portrait_spans)
+                .map(|entry| crate::app::deadchannel::runner::ui::portrait_spans(&entry.look))
         });
         let text_width = match ctx.runner_looks {
             Some(_) => width.saturating_sub(PORTRAIT_GUTTER).max(1),
@@ -1887,28 +1901,16 @@ fn ensure_chat_rows_cache(
             gild,
             translation,
         );
-        // Where the block's per-message treatments (the mention wash, the
-        // jump highlight) begin: the entry's first row, or the separator
-        // above it once the hood sits there.
-        let mut block_start = row_start;
         if let Some([hood, eyes, coat]) = portrait {
-            // The blank separator above the block is dead space, so the
-            // hood sits there and the face ends level with the first body
-            // row: a one-line message needs no padded row under it. Only
-            // when the separator is the row directly above (no divider in
-            // between), and only when there is one: the first block in
-            // the list seats all three rows on the entry itself.
-            match separator_row.filter(|index| index + 1 == all_rows.len()) {
-                Some(index) => {
-                    seat_portrait_row(&mut all_rows[index], hood, text_width);
-                    attach_portrait(&mut wrapped.lines, vec![eyes, coat], text_width);
-                    // The hood row is the block's now: it takes the wash
-                    // and the highlight with the rest of the face. Its kind
-                    // stays `Blank`, so a click there still selects nothing.
-                    row_message[index] = Some(msg.id);
-                    block_start = index;
-                }
-                None => attach_portrait(&mut wrapped.lines, vec![hood, eyes, coat], text_width),
+            // The face starts level with the header and wears as much as
+            // the entry has rows for: a one-liner (the header and one body
+            // row) shows the head only, anything taller the coat too, so
+            // no message grows a row for its face. The blank separator
+            // above the block stays blank on purpose: with the hood seated
+            // there, faces down the wire read as one stuck column.
+            match wrapped.lines.len() {
+                0..=2 => attach_portrait(&mut wrapped.lines, vec![hood, eyes], text_width),
+                _ => attach_portrait(&mut wrapped.lines, vec![hood, eyes, coat], text_width),
             }
         }
         let line_count = wrapped.lines.len();
@@ -1948,7 +1950,7 @@ fn ensure_chat_rows_cache(
             row_start
         };
         selected_ranges.insert(msg.id, (body_start, all_rows.len()));
-        highlighted_ranges.insert(msg.id, (block_start, all_rows.len()));
+        highlighted_ranges.insert(msg.id, (row_start, all_rows.len()));
 
         prev_user_id = Some(msg.user_id);
         prev_created = Some(msg.created);
@@ -1977,11 +1979,11 @@ fn ensure_chat_rows_cache(
 
 /// Cells the wire reserves on the right of every entry: the portrait plus
 /// one cell of air between it and the text.
-const PORTRAIT_GUTTER: usize = crate::app::deadchannel::runner::state::PORTRAIT_WIDTH + 1;
+const PORTRAIT_GUTTER: usize = PORTRAIT_WIDTH + 1;
 
 /// Seat portrait rows in the gutter beside an entry's first rows, one span
-/// per row. An entry shorter than the rows it must carry grows blank body
-/// rows so the face is never cut.
+/// per row, the first level with the header. An entry shorter than the rows
+/// it is handed grows blank body rows so no row is cut.
 fn attach_portrait(lines: &mut Vec<Line<'static>>, rows: Vec<Span<'static>>, text_width: usize) {
     while lines.len() < rows.len() {
         lines.push(Line::from(""));
@@ -2609,6 +2611,7 @@ fn build_author_prefix_and_segments(
         bonsai_glyph,
         profile_award_badges,
         presence_badges,
+        runner_badge: None,
     });
     (built.prefix, built.segments)
 }
@@ -2631,19 +2634,26 @@ struct AuthorPrefixInput<'a> {
     bonsai_glyph: Option<&'a str>,
     profile_award_badges: Option<&'a str>,
     presence_badges: &'a [&'a str],
+    /// The runner's level badge (`app/deadchannel/runner/ui.rs`), only on
+    /// the wire: the first badge of the stack, so it sits right after the
+    /// name and its decorations and the painter can tint it in its band.
+    runner_badge: Option<&'a str>,
 }
 
 /// The built author header prefix: the string, the clickable column
-/// segments, the bare username's byte range, and the byte ranges of the two
-/// decorations that trail it. The crown follows the username directly and
-/// the title follows the crown, so all three runs are adjacent and the
-/// painter can walk them in order.
+/// segments, the bare username's byte range, and the byte ranges of the
+/// decorations that trail it. The crown follows the username directly, the
+/// title follows the crown, and the runner badge opens the badge stack
+/// after the title, so all four runs are adjacent and the painter can
+/// walk them in order.
 struct AuthorPrefix {
     prefix: String,
     segments: Vec<HeaderSegment>,
     author_range: (usize, usize),
     crown_range: Option<(usize, usize)>,
     title_range: Option<(usize, usize)>,
+    /// The ` ▚7` run: the space that opens the badge stack and the badge.
+    runner_range: Option<(usize, usize)>,
 }
 
 /// Builds the author header prefix.
@@ -2659,6 +2669,7 @@ fn build_author_prefix_and_segments_with_chat_badges(input: AuthorPrefixInput<'_
         bonsai_glyph,
         profile_award_badges,
         presence_badges,
+        runner_badge,
     } = input;
     let mut prefix = String::new();
     let mut segments: Vec<HeaderSegment> = Vec::new();
@@ -2727,13 +2738,20 @@ fn build_author_prefix_and_segments_with_chat_badges(input: AuthorPrefixInput<'_
         });
 
     let mut typed_badges: Vec<(HeaderTarget, &str)> = Vec::with_capacity(
-        special_badges.len()
+        runner_badge.is_some() as usize
+            + special_badges.len()
             + chat_badges.len()
             + milestone.is_some() as usize
             + bonsai_glyph.is_some() as usize
             + profile_award_badges.is_some() as usize
             + presence_badges.len(),
     );
+    // The runner badge leads the stack: what the wire knows about a person
+    // comes before what they bought upstairs, and the painter needs it
+    // adjacent to the name's decorations to tint it.
+    if let Some(s) = runner_badge.filter(|s| !s.is_empty()) {
+        typed_badges.push((HeaderTarget::Profile, s));
+    }
     let award_group = profile_award_badges
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -2759,7 +2777,9 @@ fn build_author_prefix_and_segments_with_chat_badges(input: AuthorPrefixInput<'_
     for s in presence_badges.iter().copied().filter(|s| !s.is_empty()) {
         typed_badges.push((HeaderTarget::Profile, s));
     }
+    let mut runner_range = None;
     if !typed_badges.is_empty() {
+        let stack_start = prefix.len();
         prefix.push(' ');
         col += 1;
         let sep_w = UnicodeWidthStr::width(AUTHOR_BADGE_SEPARATOR) as u16;
@@ -2778,6 +2798,9 @@ fn build_author_prefix_and_segments_with_chat_badges(input: AuthorPrefixInput<'_
             }
             prefix.push_str(text);
             col += w;
+            if i == 0 && runner_badge.is_some_and(|badge| !badge.is_empty()) {
+                runner_range = Some((stack_start, prefix.len()));
+            }
         }
     }
 
@@ -2787,6 +2810,7 @@ fn build_author_prefix_and_segments_with_chat_badges(input: AuthorPrefixInput<'_
         author_range,
         crown_range,
         title_range,
+        runner_range,
     }
 }
 
@@ -2882,18 +2906,27 @@ pub(crate) fn draw_mention_autocomplete(
         .take(8)
         .map(|(i, m)| {
             let is_selected = i == selected;
-            let style = match (is_selected, m.online) {
+            let style = match (is_selected, m.presence) {
                 (true, _) => Style::default()
                     .fg(theme::AMBER())
                     .add_modifier(Modifier::BOLD),
-                (false, true) => Style::default().fg(theme::TEXT()),
-                (false, false) => Style::default().fg(theme::TEXT_FAINT()),
+                (false, MatchPresence::Here | MatchPresence::Away) => {
+                    Style::default().fg(theme::TEXT())
+                }
+                (false, MatchPresence::Offline) => Style::default().fg(theme::TEXT_FAINT()),
             };
             let prefix = if is_selected { " > " } else { "   " };
             let mut spans = vec![Span::styled(
                 format!("{prefix}{}{}", m.prefix, m.name),
                 style,
             )];
+            // An away user reads before you ping them.
+            if m.presence == MatchPresence::Away {
+                spans.push(Span::raw(format!(
+                    " {}",
+                    crate::app::common::away::AWAY_GLYPH
+                )));
+            }
             if let Some(description) = m.description {
                 let name_width = m.prefix.len() + m.name.len();
                 let pad = " ".repeat(16usize.saturating_sub(name_width).max(2));
@@ -2999,12 +3032,13 @@ pub struct ChatRenderInput<'a> {
     /// Resolved 24h username-effect styles per author (see
     /// `common/username_effect.rs`); fg painted over the bare name only.
     pub name_flair: &'a HashMap<Uuid, ResolvedName>,
-    /// Every runner's look (`app/deadchannel/runner`), for the portrait
-    /// gutter beside messages; consulted only when `room` is #deadchannel.
-    pub runner_looks: &'a HashMap<Uuid, crate::app::deadchannel::runner::state::Look>,
-    /// Per-peer `/status` badges (resolved once a second in `tick.rs`);
+    /// Every standing runner's look and level (`app/deadchannel/runner`),
+    /// for the portrait gutter and the level badge beside messages;
+    /// consulted only when `room` is #deadchannel.
+    pub runner_looks: &'a HashMap<Uuid, crate::app::deadchannel::runner::svc::RunnerEntry>,
+    /// Away users (`common/away.rs`, resolved once a second in `tick.rs`);
     /// painted as the trailing presence badge.
-    pub peer_statuses: &'a HashMap<Uuid, String>,
+    pub away_user_ids: &'a HashSet<Uuid>,
     /// Stage-2 name-flicker hit this frame (first contact,
     /// `app/deadchannel/haunt`): the message whose author label is
     /// corrupted, plus its burst seed.
@@ -3070,6 +3104,9 @@ type RoomEntry = (ChatRoom, Vec<ChatMessage>);
 
 pub(crate) struct ChatRoomListView<'a> {
     pub chat_rooms: &'a [RoomEntry],
+    /// Away users (`common/away.rs`): a DM row whose peer is away carries
+    /// the away glyph.
+    pub away_user_ids: &'a HashSet<Uuid>,
     /// Registered "watch me" streams driving the rail's `stream` section.
     pub live_streams: &'a [crate::app::stream::registry::LiveStreamView],
     pub usernames: &'a UsernameLookup<'a>,
@@ -3168,9 +3205,9 @@ pub struct EmbeddedRoomChatView<'a> {
     /// Resolved 24h username-effect styles per author (see
     /// `common/username_effect.rs`); fg painted over the bare name only.
     pub name_flair: &'a HashMap<Uuid, ResolvedName>,
-    /// Per-peer `/status` badges (resolved once a second in `tick.rs`);
+    /// Away users (`common/away.rs`, resolved once a second in `tick.rs`);
     /// painted as the trailing presence badge.
-    pub peer_statuses: &'a HashMap<Uuid, String>,
+    pub away_user_ids: &'a HashSet<Uuid>,
     /// Stage-2 name-flicker hit this frame (first contact,
     /// `app/deadchannel/haunt`): the message whose author label is
     /// corrupted, plus its burst seed.
@@ -3307,7 +3344,7 @@ pub fn draw_embedded_room_chat(
             dividers: view.dividers,
             drunk_levels: view.drunk_levels,
             name_flair: view.name_flair,
-            peer_statuses: view.peer_statuses,
+            away_user_ids: view.away_user_ids,
             name_flicker: view.name_flicker,
             translations: view.translations,
             translation_hidden: view.translation_hidden,
@@ -3507,6 +3544,7 @@ pub(crate) fn room_list_area(area: Rect, selection_mode: ChatSelectionMode) -> R
 fn room_list_view_from_render_input<'a>(view: &'a ChatRenderInput<'a>) -> ChatRoomListView<'a> {
     ChatRoomListView {
         chat_rooms: view.chat_rooms,
+        away_user_ids: view.away_user_ids,
         live_streams: view.live_streams,
         usernames: view.usernames,
         unread_counts: view.unread_counts,
@@ -3596,6 +3634,7 @@ pub(crate) fn home_title_room_label(view: &ChatRenderInput<'_>) -> Option<String
         room,
         view.usernames,
         view.current_user_id,
+        view.away_user_ids,
     ))
 }
 
@@ -3672,7 +3711,12 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
             push_row(
                 room_line(
                     room,
-                    room_display_label(room, view.usernames, view.current_user_id),
+                    room_display_label(
+                        room,
+                        view.usernames,
+                        view.current_user_id,
+                        view.away_user_ids,
+                    ),
                     is_selected,
                     view.room_jump_active.then(|| jump_keys.next()).flatten(),
                 ),
@@ -3691,7 +3735,12 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
         push_row(
             room_line(
                 room,
-                room_display_label(room, view.usernames, view.current_user_id),
+                room_display_label(
+                    room,
+                    view.usernames,
+                    view.current_user_id,
+                    view.away_user_ids,
+                ),
                 is_selected,
                 view.room_jump_active.then(|| jump_keys.next()).flatten(),
             ),
@@ -3786,7 +3835,12 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
         push_row(
             room_line(
                 room,
-                room_display_label(room, view.usernames, view.current_user_id),
+                room_display_label(
+                    room,
+                    view.usernames,
+                    view.current_user_id,
+                    view.away_user_ids,
+                ),
                 is_selected,
                 view.room_jump_active.then(|| jump_keys.next()).flatten(),
             ),
@@ -3907,7 +3961,12 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
             push_row(
                 room_line(
                     room,
-                    room_display_label(room, view.usernames, view.current_user_id),
+                    room_display_label(
+                        room,
+                        view.usernames,
+                        view.current_user_id,
+                        view.away_user_ids,
+                    ),
                     is_selected,
                     view.room_jump_active.then(|| jump_keys.next()).flatten(),
                 ),
@@ -3932,7 +3991,12 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
             push_row(
                 room_line(
                     room,
-                    room_display_label(room, view.usernames, view.current_user_id),
+                    room_display_label(
+                        room,
+                        view.usernames,
+                        view.current_user_id,
+                        view.away_user_ids,
+                    ),
                     is_selected,
                     view.room_jump_active.then(|| jump_keys.next()).flatten(),
                 ),
@@ -3961,7 +4025,12 @@ fn build_room_list_rows(view: &ChatRoomListView<'_>, rooms_area: Rect) -> RoomLi
             push_row(
                 room_line(
                     room,
-                    dm_display_label(room, view.usernames, view.current_user_id),
+                    dm_display_label(
+                        room,
+                        view.usernames,
+                        view.current_user_id,
+                        view.away_user_ids,
+                    ),
                     is_selected,
                     view.room_jump_active.then(|| jump_keys.next()).flatten(),
                 ),
@@ -4673,7 +4742,12 @@ fn room_slot_label_and_unread(
             else {
                 return ("room".to_string(), 0);
             };
-            let label = room_display_label(room, view.usernames, view.current_user_id);
+            let label = room_display_label(
+                room,
+                view.usernames,
+                view.current_user_id,
+                view.away_user_ids,
+            );
             let unread = view.unread_counts.get(&room.id).copied().unwrap_or(0);
             (label, unread)
         }
@@ -4793,9 +4867,10 @@ fn room_display_label(
     room: &ChatRoom,
     usernames: &UsernameLookup<'_>,
     current_user_id: Uuid,
+    away_user_ids: &HashSet<Uuid>,
 ) -> String {
     if room.kind == "dm" {
-        return dm_display_label(room, usernames, current_user_id);
+        return dm_display_label(room, usernames, current_user_id, away_user_ids);
     }
     let base_label = room
         .slug
@@ -4850,10 +4925,12 @@ fn cozy_slot_selected(view: &ChatRoomListView<'_>, slot: RoomSlot) -> bool {
     )
 }
 
+/// `@ name`, with the away glyph after it while the peer is away.
 fn dm_display_label(
     room: &ChatRoom,
     usernames: &UsernameLookup<'_>,
     current_user_id: Uuid,
+    away_user_ids: &HashSet<Uuid>,
 ) -> String {
     let other = if room.dm_user_a == Some(current_user_id) {
         room.dm_user_b
@@ -4863,7 +4940,10 @@ fn dm_display_label(
     let name = other
         .and_then(|id| usernames.get(&id).cloned())
         .unwrap_or_else(|| "?".to_string());
-    format!("@ {}", name)
+    match other.is_some_and(|id| away_user_ids.contains(&id)) {
+        true => format!("@ {name} {}", crate::app::common::away::AWAY_GLYPH),
+        false => format!("@ {name}"),
+    }
 }
 
 /// The header block above a room's messages: the voice row (when the room has a
@@ -5213,7 +5293,7 @@ fn draw_selected_content(
                     },
                     drunk_levels: view.drunk_levels,
                     name_flair: view.name_flair,
-                    peer_statuses: view.peer_statuses,
+                    away_user_ids: view.away_user_ids,
                     name_flicker: view.name_flicker,
                     translations: view.translations,
                     translation_hidden: view.translation_hidden,
