@@ -54,22 +54,20 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     match state.selected_tab() {
         Tab::Settings => draw_settings_tab(frame, layout[3], state),
         Tab::Tweaks => draw_tweaks_tab(frame, layout[3], state),
+        Tab::Statusline => draw_statusline_tab(frame, layout[3], state),
         Tab::Themes => draw_themes_tab(frame, layout[3], state),
         Tab::Bio => draw_bio_tab(frame, layout[3], state),
         Tab::Account => draw_account_tab(frame, layout[3], state),
         Tab::Feeds => draw_feeds_tab(frame, layout[3], state),
     }
 
-    draw_footer(frame, layout[4], state.selected_tab(), state.editing_bio());
+    draw_footer(frame, layout[4], state);
 
     if state.picker_open() {
         draw_picker(frame, popup, state);
     }
     if state.right_sidebar_components_open() {
         draw_right_sidebar_components_dialog(frame, popup, state);
-    }
-    if state.statusline_open() {
-        draw_statusline_dialog(frame, popup, state);
     }
     if state.chat_badges_open() {
         draw_chat_badges_dialog(frame, popup, state);
@@ -101,7 +99,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             Style::default().fg(theme::TEXT_DIM())
         };
         let label = format!(" {} ", tab.label());
-        let width = label.chars().count() as u16;
+        let width = Span::raw(&label).width() as u16;
         let cell_end = cursor_x.saturating_add(width).min(area.x + area.width);
         if let Some(slot_idx) = Tab::ALL.iter().position(|t| *t == tab) {
             rects[slot_idx] = Some(Rect::new(
@@ -119,9 +117,9 @@ fn draw_tabs(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, tab: Tab, editing_bio: bool) {
+fn draw_footer(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let mut spans = vec![Span::raw("  ")];
-    match (tab, editing_bio) {
+    match (state.selected_tab(), state.editing_bio()) {
         (Tab::Bio, true) => {
             spans.extend([
                 Span::styled("Esc", Style::default().fg(theme::AMBER_DIM())),
@@ -181,6 +179,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, tab: Tab, editing_bio: bool) {
                 Span::styled(" switch tabs  ", Style::default().fg(theme::TEXT_DIM())),
                 Span::styled("Esc/q", Style::default().fg(theme::AMBER_DIM())),
                 Span::styled(" close", Style::default().fg(theme::TEXT_DIM())),
+            ]);
+        }
+        (Tab::Statusline, _) => {
+            let close_label = if state.statusline_pane() == StatuslinePane::Detail {
+                " back to components"
+            } else {
+                " close"
+            };
+            spans.extend([
+                Span::styled("Tab/S+Tab", Style::default().fg(theme::AMBER_DIM())),
+                Span::styled(" switch tabs  ", Style::default().fg(theme::TEXT_DIM())),
+                Span::styled("Esc/q", Style::default().fg(theme::AMBER_DIM())),
+                Span::styled(close_label, Style::default().fg(theme::TEXT_DIM())),
             ]);
         }
         (Tab::Account, _) => {
@@ -779,7 +790,7 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     const GEM_STRIP_HEIGHT: u16 = 7;
     /// Fixed rows above the gem. The gem shrinks to fit rather than pushing a
     /// control off the bottom: it is an easter egg, the rows are settings.
-    const ROWS_ABOVE_GEM: u16 = 20;
+    const ROWS_ABOVE_GEM: u16 = 18;
     let gem_strip_height = GEM_STRIP_HEIGHT.min(area.height.saturating_sub(ROWS_ABOVE_GEM));
 
     let sections = Layout::vertical([
@@ -801,8 +812,6 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         Constraint::Length(1),                // Startup subsection heading
         Constraint::Length(1),                // land on home row
         Constraint::Length(1),                // daily paper row
-        Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // bottom status bar customizer row
         Constraint::Min(0),                   // flex spacer
         Constraint::Length(gem_strip_height), // gem
     ])
@@ -927,23 +936,12 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         sections[17],
     );
 
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::Statusline,
-            width,
-            "Bottom status bar",
-            value_span("⏎ segments", theme::AMBER()),
-        )),
-        sections[19],
-    );
-
     if gem_strip_height > 0 {
         // Pad 2 cols off each side and lift the gem 1 row off the bottom
         // border so it doesn't crowd the dialog frame.
         const PAD_X: u16 = 2;
         const PAD_BOTTOM: u16 = 1;
-        let strip = sections[21];
+        let strip = sections[19];
         let pad_x = PAD_X.min(strip.width / 2);
         let pad_bottom = PAD_BOTTOM.min(strip.height);
         let gem_area = Rect::new(
@@ -1790,45 +1788,22 @@ fn draw_right_sidebar_components_dialog(frame: &mut Frame, area: Rect, state: &S
 /// The list is ordered top-to-bottom the way the bar reads left-to-right, so
 /// "move up" and "move left" are the same gesture and the user never has to
 /// hold the mapping in their head.
-fn draw_statusline_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_statusline_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     /// Columns given to the segment list; the dials take what's left.
     const LIST_WIDTH: u16 = 28;
 
-    let components = state.statusline_components();
-    let count = components.len() as u16;
-    // rows + heading + blank + 2 footer lines + borders, plus one spare row.
-    let popup = centered_rect(66, count + 7, area);
-    frame.render_widget(Clear, popup);
-
-    let block = Block::default()
-        .title(" Bottom status bar ")
-        .title_style(
-            Style::default()
-                .fg(theme::AMBER_GLOW())
-                .add_modifier(Modifier::BOLD),
-        )
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
+    let inner = area.inner(Margin::new(2, 0));
     let layout = Layout::vertical([
         Constraint::Length(1), // heading
         Constraint::Length(1), // blank
         Constraint::Min(0),    // list + dials
-        Constraint::Length(1), // footer line 1
-        Constraint::Length(1), // footer line 2
+        Constraint::Length(1), // component controls
     ])
     .split(inner);
 
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "Segments paint left to right along the bottom border.",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ])),
+        Paragraph::new("Segments paint left to right along the bottom border.")
+            .style(Style::default().fg(theme::TEXT_DIM())),
         layout[0],
     );
 
@@ -1839,24 +1814,25 @@ fn draw_statusline_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalSt
 
     let dim = Style::default().fg(theme::TEXT_DIM());
     let key = Style::default().fg(theme::AMBER_DIM());
-    let footer_top = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("↑↓", key),
+    let mut controls = vec![
+        Span::styled("↑↓ j/k", key),
         Span::styled(" select  ", dim),
-        Span::styled("⇧↑↓", key),
+        Span::styled("⇧↑↓ / []", key),
         Span::styled(" reorder  ", dim),
-        Span::styled("space", key),
-        Span::styled(" toggle", dim),
-    ]);
-    let footer_bottom = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("→", key),
-        Span::styled(" options  ", dim),
-        Span::styled("Esc", key),
-        Span::styled(" back", dim),
-    ]);
-    frame.render_widget(Paragraph::new(footer_top), layout[layout.len() - 2]);
-    frame.render_widget(Paragraph::new(footer_bottom), layout[layout.len() - 1]);
+    ];
+    match state.statusline_pane() {
+        StatuslinePane::List => controls.extend([
+            Span::styled("Space", key),
+            Span::styled(" toggle  ", dim),
+            Span::styled("Enter", key),
+            Span::styled(" options", dim),
+        ]),
+        StatuslinePane::Detail => controls.extend([
+            Span::styled("←→/Space", key),
+            Span::styled(" change option", dim),
+        ]),
+    }
+    frame.render_widget(Paragraph::new(Line::from(controls)), layout[3]);
 }
 
 fn draw_statusline_list(frame: &mut Frame, area: Rect, state: &SettingsModalState) {

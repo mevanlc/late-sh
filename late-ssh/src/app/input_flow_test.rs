@@ -452,7 +452,7 @@ async fn account_delete_confirmation_rejects_wrong_username_in_dialog() {
     app.handle_input(b"\x0f");
     wait_for_render_contains(&mut app, "Account").await;
     wait_for_render_contains(&mut app, "account-delete-flow").await;
-    for _ in 0..4 {
+    for _ in 0..5 {
         app.handle_input(b"\t");
     }
     app.handle_input(b"jj");
@@ -2390,6 +2390,8 @@ async fn keyhints_is_the_default_bottom_left_component() {
 
 #[tokio::test]
 async fn keyhints_brief_property_toggles_and_persists_in_settings() {
+    use crate::app::settings_modal::state::{StatuslinePane, Tab};
+
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "brief-keyhints-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "brief-keyhints-flow-it");
@@ -2398,12 +2400,46 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
 
     app.handle_input(b"\x0f");
     wait_for_render_contains(&mut app, "brief-keyhints-it").await;
-    app.handle_input(b"\t\t\tjjjjjjjjjjj\r");
+    app.handle_input(b"\t\t\t\t");
     wait_for_render_contains(&mut app, "Brief").await;
-    app.handle_input(b"\x1b[C"); // Open Keyhints' detail pane.
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Statusline);
+    wait_for_render_contains(
+        &mut app,
+        "Keyboard shortcuts for navigation and common actions.",
+    )
+    .await;
+    // Both directions leave the list, and returning preserves its selection.
+    app.handle_input(b"\t");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Account);
+    app.handle_input(b"\x1b[Z");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Statusline);
+    app.handle_input(b"\x1b[C\x1b[D");
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::List
+    );
+    app.handle_input(b"\r"); // Open Keyhints' detail pane.
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::Detail
+    );
+    // Tab must switch tabs even while editing a component's options.
+    app.handle_input(b"\t");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Account);
+    app.handle_input(b"\x1b[Z");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Statusline);
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::Detail
+    );
 
     for brief in [true, false] {
-        app.handle_input(b" "); // Toggle Brief without disabling Keyhints.
+        // Right and Left edit Brief while staying in the properties pane.
+        app.handle_input(if brief { b"\x1b[C" } else { b"\x1b[D" });
+        assert_eq!(
+            app.settings_modal_state.statusline_pane(),
+            StatuslinePane::Detail
+        );
         // Let each asynchronous save finish before the next edit.
         let db = test_db.db.clone();
         wait_until(
@@ -2445,7 +2481,15 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
             brief
         );
     }
-    app.handle_input(b"qqq"); // Detail pane, customizer, settings.
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "Enter options").await;
+    assert!(app.show_settings);
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::List
+    );
+    app.handle_input(b"q");
+    assert!(!app.show_settings);
     wait_for_render_contains(&mut app, "Settings Ctrl+O").await;
 }
 
@@ -4163,7 +4207,6 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     app.handle_input(b"\t\t\t");
     wait_for_render_contains(&mut app, "Chat badges").await;
     wait_for_render_contains(&mut app, "all shown").await;
-    wait_for_render_contains(&mut app, "Bottom status bar").await;
     // Tweaks rows: background, brightness, right rail, room rail, composer,
     // interaction mode, flag fallback, terminal images, then Chat badges.
     app.handle_input(b"jjjjjjjj\r");
@@ -4198,9 +4241,11 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
 
     app.handle_input(b"\x1b");
     wait_for_render_contains(&mut app, "1 hidden").await;
-    // The new badge picker and the fork's statusline customizer both remain
-    // reachable from Tweaks; neither consumes the other's input or rows.
-    app.handle_input(b"jjj\r");
+    // Closing the picker restores top-level tab navigation.
+    app.handle_input(b"\t");
     wait_for_render_contains(&mut app, "Keyhints").await;
-    assert!(app.settings_modal_state.statusline_open());
+    assert_eq!(
+        app.settings_modal_state.selected_tab(),
+        crate::app::settings_modal::state::Tab::Statusline
+    );
 }

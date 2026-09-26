@@ -120,13 +120,10 @@ pub(crate) enum TweakRow {
     ChatBadges,
     LandingPage,
     PaperAtLogin,
-    /// Launcher for the bottom status bar customizer. Deliberately last and
-    /// ungrouped: it opens a dialog rather than carrying a value.
-    Statusline,
 }
 
 impl TweakRow {
-    pub(crate) const ALL: [TweakRow; 12] = [
+    pub(crate) const ALL: [TweakRow; 11] = [
         TweakRow::BackgroundColor,
         TweakRow::TextBrightness,
         TweakRow::RightSidebar,
@@ -138,7 +135,6 @@ impl TweakRow {
         TweakRow::ChatBadges,
         TweakRow::LandingPage,
         TweakRow::PaperAtLogin,
-        TweakRow::Statusline,
     ];
 }
 
@@ -232,11 +228,12 @@ impl SystemField {
 /// (identity/appearance/location/notifications); `Themes` is a fast browser
 /// for the expanded theme catalog; `Bio` is a separate full-width pane with
 /// the markdown editor + preview; `Tweaks` holds power-user toggles and the
-/// gem easter egg.
+/// gem easter egg; `Statusline` edits the bottom status bar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Tab {
     Settings,
     Tweaks,
+    Statusline,
     Bio,
     Themes,
     Account,
@@ -244,11 +241,12 @@ pub(crate) enum Tab {
 }
 
 impl Tab {
-    pub(crate) const ALL: [Tab; 6] = [
+    pub(crate) const ALL: [Tab; 7] = [
         Tab::Settings,
         Tab::Bio,
         Tab::Themes,
         Tab::Tweaks,
+        Tab::Statusline,
         Tab::Account,
         Tab::Feeds,
     ];
@@ -257,6 +255,7 @@ impl Tab {
         match self {
             Tab::Settings => "Settings",
             Tab::Tweaks => "Tweaks",
+            Tab::Statusline => "Statusline",
             Tab::Bio => "Bio",
             Tab::Themes => "Themes",
             Tab::Account => "Account",
@@ -532,7 +531,6 @@ pub(crate) struct SettingsModalState {
     irc_token: IrcTokenDialogState,
     right_sidebar_components_open: bool,
     right_sidebar_components_index: usize,
-    statusline_open: bool,
     statusline_index: usize,
     statusline_pane: StatuslinePane,
     statusline_dial_index: usize,
@@ -605,7 +603,6 @@ impl SettingsModalState {
             irc_token: IrcTokenDialogState::new(),
             right_sidebar_components_open: false,
             right_sidebar_components_index: 0,
-            statusline_open: false,
             statusline_index: 0,
             statusline_pane: StatuslinePane::List,
             statusline_dial_index: 0,
@@ -689,7 +686,9 @@ impl SettingsModalState {
         self.irc_token = IrcTokenDialogState::new();
         self.right_sidebar_components_open = false;
         self.right_sidebar_components_index = 0;
-        self.close_statusline();
+        self.statusline_index = 0;
+        self.statusline_pane = StatuslinePane::List;
+        self.statusline_dial_index = 0;
         self.chat_badges_open = false;
         self.chat_badges_index = 0;
         self.feed_service.list_task(self.user_id);
@@ -917,24 +916,6 @@ impl SettingsModalState {
         self.save();
     }
 
-    pub(crate) fn statusline_open(&self) -> bool {
-        self.statusline_open
-    }
-
-    pub(crate) fn open_statusline(&mut self) {
-        self.statusline_open = true;
-        self.statusline_index = 0;
-        self.statusline_pane = StatuslinePane::List;
-        self.statusline_dial_index = 0;
-    }
-
-    pub(crate) fn close_statusline(&mut self) {
-        self.statusline_open = false;
-        self.statusline_index = 0;
-        self.statusline_pane = StatuslinePane::List;
-        self.statusline_dial_index = 0;
-    }
-
     pub(crate) fn statusline_index(&self) -> usize {
         self.statusline_index
     }
@@ -1112,10 +1093,6 @@ impl SettingsModalState {
             TweakRow::InteractionMode => {
                 // Applied on the app (it flips the mouse live and persists on its
                 // own), so there's nothing to save through the profile draft.
-                return;
-            }
-            TweakRow::Statusline => {
-                // A launcher, not a toggle: the input layer opens the dialog.
                 return;
             }
         }

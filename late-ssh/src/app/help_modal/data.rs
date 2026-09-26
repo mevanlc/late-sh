@@ -1509,7 +1509,9 @@ fn settings_help_lines() -> Vec<String> {
         "  Bio               multiline markdown bio".to_string(),
         "  Themes            expanded theme browser; / searches it, f stars a theme into Favorites"
             .to_string(),
-        "  Tweaks            power-user toggles for appearance, compose, display, startup, input, and the bottom status bar"
+        "  Tweaks            power-user toggles for appearance, input, display, and startup"
+            .to_string(),
+        "  Statusline        arrange the bottom status bar and customize its components"
             .to_string(),
         "  Account           link SSH keys across accounts, reset/revoke your IRC access token, or delete your account"
             .to_string(),
@@ -1523,8 +1525,9 @@ fn settings_help_lines() -> Vec<String> {
         "  country via picker, with Unicode flag rendering".to_string(),
         "  timezone via picker".to_string(),
         "  IDE, terminal, OS, and languages for profile/late.fetch surfaces".to_string(),
-        "  Tweaks: terminal background sync, text brightness, right sidebar mode, room list, composer send behavior, chat flag fallback, terminal images, chat badges, landing page, input mode, bottom statusline segments"
+        "  Tweaks: terminal background sync, text brightness, right sidebar mode, room list, composer send behavior, chat flag fallback, terminal images, chat badges, landing page, input mode"
             .to_string(),
+        "  Statusline: bottom status bar components, their order, and display options".to_string(),
         "  private RSS/Atom subscriptions".to_string(),
         "  IRC access token for external IRC clients".to_string(),
         "".to_string(),
@@ -1541,7 +1544,7 @@ fn settings_help_lines() -> Vec<String> {
         "  Space quick-cycles simple toggles".to_string(),
         "  Pickers: type to filter, Enter pick, Esc cancel".to_string(),
         "  Custom sidebar: Enter on Custom opens the three-page checklist".to_string(),
-        "  Tweaks > Bottom status bar: Enter opens the bottom-left segment customizer"
+        "  Statusline: Space toggles a component; Enter opens its options"
             .to_string(),
         "  Account: Enter opens Link Accounts or Delete Account".to_string(),
         "  ? opens this guide; Esc / q closes".to_string(),
@@ -1585,10 +1588,8 @@ fn settings_help_lines() -> Vec<String> {
         "  Startup".to_string(),
         "    Land on                       where a session starts: Clubhouse (default), Home, or Zen; first sessions always start in the Clubhouse"
             .to_string(),
-        "  Bottom status bar               Enter opens the customizer for the app frame's bottom-left border"
-            .to_string(),
         "".to_string(),
-        "Bottom status bar customizer".to_string(),
+        "Statusline tab".to_string(),
         "  The bottom-left border of the app frame is a status bar you arrange yourself."
             .to_string(),
         "  Segments paint left to right in the order the list shows them top to bottom."
@@ -1602,8 +1603,9 @@ fn settings_help_lines() -> Vec<String> {
         "    Shift+Up / Shift+Down   move the selected segment along the bar ([ and ] do the same)"
             .to_string(),
         "    Space                   turn the selected segment on or off".to_string(),
-        "    Right / Tab / Enter     step into that segment's options".to_string(),
+        "    Enter                   step into that segment's options".to_string(),
         "    Left / Right or Space   change the focused option".to_string(),
+        "    Tab / Shift+Tab         switch settings tabs from either pane".to_string(),
         "    Esc                     back out of the options, then close".to_string(),
         "  Per-segment options".to_string(),
         "    Brief          Keyhints only: show ⚙ ^o · ⚄ ^g · ◉ ^s (Settings, Lobby, Shop)."
