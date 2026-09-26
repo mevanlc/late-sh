@@ -110,20 +110,18 @@ pub(crate) enum TweakRow {
     TextBrightness,
     RightSidebar,
     RoomListSidebar,
-    // Compose / Display / Startup groups. There is deliberately no music-mute
+    // Input / Display / Startup groups. There is deliberately no music-mute
     // row: mute and volume are owned by `m` and `+`/`-`, persisted per device,
     // and a second control here would be a second source of truth for them.
     ComposerKeepFocused,
+    InteractionMode,
     FlagFallback,
     TerminalImages,
     ChatBadges,
     LandingPage,
     PaperAtLogin,
-    // Input group.
-    InteractionMode,
     /// Launcher for the bottom status bar customizer. Deliberately last and
-    /// ungrouped: it opens a dialog rather than carrying a value, and the tab
-    /// has no spare row for a heading over a single entry.
+    /// ungrouped: it opens a dialog rather than carrying a value.
     Statusline,
 }
 
@@ -134,12 +132,12 @@ impl TweakRow {
         TweakRow::RightSidebar,
         TweakRow::RoomListSidebar,
         TweakRow::ComposerKeepFocused,
+        TweakRow::InteractionMode,
         TweakRow::FlagFallback,
         TweakRow::TerminalImages,
         TweakRow::ChatBadges,
         TweakRow::LandingPage,
         TweakRow::PaperAtLogin,
-        TweakRow::InteractionMode,
         TweakRow::Statusline,
     ];
 }

@@ -1574,8 +1574,10 @@ fn settings_help_lines() -> Vec<String> {
         "                            both rows apply to this device (this SSH key) only, never the"
             .to_string(),
         "                            account default; `\\` on Home cycles the same two".to_string(),
-        "  Compose".to_string(),
+        "  Input".to_string(),
         "    Send and keep open on Enter   Enter sends without closing the composer; while on, Alt+S becomes a no-op"
+            .to_string(),
+        "    Interaction mode              keyboard, mouse, or hybrid controls for this device"
             .to_string(),
         "  Display".to_string(),
         "    Chat flag text fallback       show text/boxed-letter labels instead of flag emoji in chat badges and Shop Flags"

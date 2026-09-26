@@ -4165,8 +4165,8 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     wait_for_render_contains(&mut app, "all shown").await;
     wait_for_render_contains(&mut app, "Bottom status bar").await;
     // Tweaks rows: background, brightness, right rail, room rail, composer,
-    // flag fallback, terminal images, then Chat badges.
-    app.handle_input(b"jjjjjjj\r");
+    // interaction mode, flag fallback, terminal images, then Chat badges.
+    app.handle_input(b"jjjjjjjj\r");
     // The heading fits the dialog whole, not cut at its border.
     wait_for_render_contains(&mut app, "Earn it, hide it. Games show their top badge.").await;
     wait_for_render_contains(&mut app, "LMG LKN LYS LKA").await;
@@ -4200,7 +4200,7 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     wait_for_render_contains(&mut app, "1 hidden").await;
     // The new badge picker and the fork's statusline customizer both remain
     // reachable from Tweaks; neither consumes the other's input or rows.
-    app.handle_input(b"jjjj\r");
+    app.handle_input(b"jjj\r");
     wait_for_render_contains(&mut app, "Keyhints").await;
     assert!(app.settings_modal_state.statusline_open());
 }
