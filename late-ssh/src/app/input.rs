@@ -765,6 +765,7 @@ fn overlay_input_action(event: &ParsedInput) -> Option<OverlayInputAction> {
 
 fn handle_parsed_input(app: &mut App, event: ParsedInput) {
     handle_parsed_input_inner(app, event);
+    app.chat.forget_stale_rail_scroll();
 }
 
 fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
@@ -1039,6 +1040,11 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
                 return;
             }
             if handle_status_bar_click(app, mouse) {
+                return;
+            }
+            if ctx.screen == Screen::Leaderboard
+                && crate::app::leaderboard::input::handle_mouse(&mut app.leaderboard_page, mouse)
+            {
                 return;
             }
             if let Some(delta) = mouse_scroll_delta(mouse) {
