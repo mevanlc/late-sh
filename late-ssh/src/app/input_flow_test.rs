@@ -2706,13 +2706,26 @@ async fn runner_stays_off_the_fixed_bar_and_zen_clears_bar_hits() {
     use crate::app::common::primitives::Screen;
     use crate::app::deadchannel::fight::state::Sheet;
 
+    let render_top_row = |app: &mut crate::app::state::App| {
+        app.tick();
+        app.reset_render();
+        let mut terminal = vt100::Parser::new(40, 200, 0);
+        terminal.process(&app.render().expect("render"));
+        terminal
+            .screen()
+            .contents()
+            .lines()
+            .next()
+            .expect("top border row")
+            .to_string()
+    };
+
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "status-zen-viewer").await;
     let mut app = make_app(test_db.db.clone(), viewer.id, "status-zen-flow-it");
     app.resize(200, 40).expect("resize test terminal");
     app.fight.sheet = Some(Sheet::fresh(viewer.id, chrono::Utc::now().date_naive()));
-    let frame = render_plain(&mut app);
-    let top_row = frame.lines().next().expect("top border row");
+    let top_row = render_top_row(&mut app);
     assert!(top_row.contains("chips"));
     assert!(!top_row.contains("rations"));
     assert!(!top_row.contains("signal"));
@@ -2725,8 +2738,7 @@ async fn runner_stays_off_the_fixed_bar_and_zen_clears_bar_hits() {
     assert!(app.last_status_hits.borrow().is_empty());
 
     app.handle_input(b"\x06");
-    let frame = render_plain(&mut app);
-    let top_row = frame.lines().next().expect("top border row");
+    let top_row = render_top_row(&mut app);
     assert!(top_row.contains("chips"));
     assert!(!top_row.contains("rations"));
     assert!(!top_row.contains("signal"));
