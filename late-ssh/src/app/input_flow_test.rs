@@ -2702,7 +2702,7 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
 }
 
 #[tokio::test]
-async fn runner_renders_on_the_fixed_bar_and_zen_clears_bar_hits() {
+async fn runner_stays_off_the_fixed_bar_and_zen_clears_bar_hits() {
     use crate::app::common::primitives::Screen;
     use crate::app::deadchannel::fight::state::Sheet;
 
@@ -2712,7 +2712,10 @@ async fn runner_renders_on_the_fixed_bar_and_zen_clears_bar_hits() {
     app.resize(200, 40).expect("resize test terminal");
     app.fight.sheet = Some(Sheet::fresh(viewer.id, chrono::Utc::now().date_naive()));
     let frame = render_plain(&mut app);
-    assert!(frame.lines().next().unwrap().contains("rations"));
+    let top_row = frame.lines().next().expect("top border row");
+    assert!(top_row.contains("chips"));
+    assert!(!top_row.contains("rations"));
+    assert!(!top_row.contains("signal"));
     assert!(!app.last_status_hits.borrow().is_empty());
 
     app.handle_input(b"\x06");
@@ -2723,7 +2726,10 @@ async fn runner_renders_on_the_fixed_bar_and_zen_clears_bar_hits() {
 
     app.handle_input(b"\x06");
     let frame = render_plain(&mut app);
-    assert!(frame.lines().next().unwrap().contains("rations"));
+    let top_row = frame.lines().next().expect("top border row");
+    assert!(top_row.contains("chips"));
+    assert!(!top_row.contains("rations"));
+    assert!(!top_row.contains("signal"));
     assert!(!app.last_status_hits.borrow().is_empty());
 }
 
