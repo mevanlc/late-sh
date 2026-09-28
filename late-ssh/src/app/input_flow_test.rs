@@ -818,6 +818,7 @@ async fn zero_twice_goes_under_the_clubhouse_for_runners_only() {
     // Not a runner: `0` lands on the clubhouse and stays there.
     app.handle_input(b"1");
     wait_for_render_contains(&mut app, " Home ").await;
+    wait_for_render_contains(&mut app, "lounge").await;
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, " Clubhouse ").await;
     app.handle_input(b"0");
@@ -838,6 +839,22 @@ async fn zero_twice_goes_under_the_clubhouse_for_runners_only() {
     wait_for_render_contains(&mut app, " Undercity ").await;
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, " Clubhouse ").await;
+
+    // Esc on the bare street goes up to the chat, #lounge open.
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Undercity ").await;
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, " Home ").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains(" Undercity "),
+        "expected Esc on the street to leave the city; frame={frame:?}"
+    );
+    assert_eq!(
+        app.chat.selected_room_id,
+        Some(lounge.id),
+        "expected Esc on the street to land in #lounge"
+    );
 }
 
 /// `/leave #deadchannel` on one session closes the street under every
@@ -2787,7 +2804,8 @@ async fn forced_tour_gates_input_until_each_named_key() {
     // with the walkthrough pending.
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Pending;
-    app.clubhouse.enter_screen();
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
     // The gate swallows everything but the named key: no page hopping, no
@@ -2843,7 +2861,8 @@ async fn forced_tour_zen_stop_accepts_enter_when_the_chord_is_swallowed() {
 
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Pending;
-    app.clubhouse.enter_screen();
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
     for bytes in [&b"1"[..], b"\r", b"2", b"\r", b"3", b"4", b"5", b"6"] {
         app.handle_input(bytes);
     }
@@ -2874,7 +2893,8 @@ async fn clubhouse_composer_refuses_commands() {
     wait_for_esc_effect(&mut app, |app| !app.chat.composing, "composer closed").await;
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Done;
-    app.clubhouse.enter_screen();
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
 
     app.handle_input(b"i");
     app.handle_input(b"/active");
@@ -2904,7 +2924,8 @@ async fn clubhouse_draws_a_chat_overlay_that_lands_there() {
     wait_for_esc_effect(&mut app, |app| !app.chat.composing, "composer closed").await;
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Done;
-    app.clubhouse.enter_screen();
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
 
     app.chat.open_active_users_overlay();
     wait_for_render_contains(&mut app, "Active Users").await;
@@ -4615,9 +4636,10 @@ async fn the_first_descent_opens_the_guide_and_the_question_mark_reopens_it() {
     app.handle_input(b"0");
     // The chrome names the key, and the first descent opens the guide by
     // itself once the claim answers.
-    wait_for_render_contains(&mut app, " Undercity · ? guide ").await;
+    wait_for_render_contains(&mut app, " Undercity · f fight · p patch · ? guide ").await;
     wait_for_render_contains(&mut app, "the street, explained").await;
-    wait_for_render_contains(&mut app, "arrows or hjkl walk").await;
+    // It opens at the top: the whole game in one screen.
+    wait_for_render_contains(&mut app, "the short version").await;
 
     // Esc closes it; `?` opens it again from the street; `q` closes it.
     app.handle_input(b"\x1b");
@@ -4638,4 +4660,196 @@ async fn the_first_descent_opens_the_guide_and_the_question_mark_reopens_it() {
         Duration::from_millis(300),
     )
     .await;
+}
+
+/// `p` opens patch from anywhere on the street, the same panel as Enter at
+/// the counter, so the heal is one key away from any fight. Enter closes it.
+#[tokio::test]
+async fn p_opens_patch_from_anywhere_on_the_street() {
+    use crate::app::deadchannel::runner::state::Look;
+    use crate::app::deadchannel::runner::svc::RunnerEntry;
+    use late_core::models::deadchannel_runner::DeadchannelRunner;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "undercity-patch-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut rng = StdRng::seed_from_u64(7);
+    let look = Look::random(1, &mut rng);
+    DeadchannelRunner::ensure_for_user(&client, user.id, &look.to_json())
+        .await
+        .expect("a runner");
+    // Seen before, so the guide stays shut and the street takes the key.
+    DeadchannelRunner::mark_guide_seen(&client, user.id)
+        .await
+        .expect("guide seen");
+    let mut app = make_app(test_db.db.clone(), user.id, "undercity-patch-flow");
+    app.runner_looks = Arc::new(HashMap::from([(
+        user.id,
+        RunnerEntry {
+            look,
+            level: 1,
+            peak_level: 1,
+            marks: 0,
+        },
+    )]));
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Clubhouse ").await;
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Undercity ").await;
+    // The descent lands the runner at the stairs, nowhere near the counter.
+    app.handle_input(b"p");
+    wait_for_render_contains(&mut app, " Esc closes ").await;
+    wait_for_render_contains(&mut app, "on hand ").await;
+    app.handle_input(b"\r");
+    wait_for_render_not_contains(&mut app, " Esc closes ").await;
+}
+
+/// Esc over a live fight is the run, not a way out: the exchange gets a
+/// run line (away, or caught turning) and the scene stays up either way.
+#[tokio::test]
+async fn esc_closes_a_scene_the_static_stopped_answering() {
+    use crate::app::deadchannel::fight::svc::FightOutcome;
+    use crate::app::deadchannel::runner::state::Look;
+    use crate::app::deadchannel::runner::svc::RunnerEntry;
+    use late_core::models::deadchannel_runner::DeadchannelRunner;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "undercity-esc-failed-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut rng = StdRng::seed_from_u64(7);
+    let look = Look::random(1, &mut rng);
+    DeadchannelRunner::ensure_for_user(&client, user.id, &look.to_json())
+        .await
+        .expect("a runner");
+    DeadchannelRunner::mark_guide_seen(&client, user.id)
+        .await
+        .expect("guide seen");
+    let mut app = make_app(test_db.db.clone(), user.id, "undercity-esc-failed-flow");
+    app.runner_looks = Arc::new(HashMap::from([(
+        user.id,
+        RunnerEntry {
+            look,
+            level: 1,
+            peak_level: 1,
+            marks: 0,
+        },
+    )]));
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Clubhouse ").await;
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Undercity ").await;
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "[a] attack").await;
+
+    // The service fails to answer the next command: an outage, as the
+    // session would hear it.
+    app.fight
+        .outcome_tx
+        .send(FightOutcome::ActionFailed)
+        .expect("the session is listening");
+    wait_for_render_contains(&mut app, "the static is not answering").await;
+
+    // Esc is not a run then: the scene closes and the street is back.
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, " the end of the row ").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" Undercity "),
+        "expected the street under the closed scene; frame={frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn esc_in_a_fight_is_a_run() {
+    use crate::app::deadchannel::fight::data::{RUN_FAILED_LINES, RUN_LINES};
+    use crate::app::deadchannel::runner::state::Look;
+    use crate::app::deadchannel::runner::svc::RunnerEntry;
+    use late_core::models::deadchannel_runner::DeadchannelRunner;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "undercity-esc-run-it").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let mut rng = StdRng::seed_from_u64(7);
+    let look = Look::random(1, &mut rng);
+    DeadchannelRunner::ensure_for_user(&client, user.id, &look.to_json())
+        .await
+        .expect("a runner");
+    DeadchannelRunner::mark_guide_seen(&client, user.id)
+        .await
+        .expect("guide seen");
+    let mut app = make_app(test_db.db.clone(), user.id, "undercity-esc-run-flow");
+    app.runner_looks = Arc::new(HashMap::from([(
+        user.id,
+        RunnerEntry {
+            look,
+            level: 1,
+            peak_level: 1,
+            marks: 0,
+        },
+    )]));
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Clubhouse ").await;
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Undercity ").await;
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "[a] attack").await;
+
+    // The roll goes either way; both answers are run lines, and neither
+    // closes the scene.
+    app.handle_input(b"\x1b");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let run_lines = RUN_LINES.iter().chain(RUN_FAILED_LINES.iter());
+    let frame = loop {
+        let frame = render_plain(&mut app);
+        if run_lines.clone().any(|line| frame.contains(line)) {
+            break frame;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "expected Esc to resolve as a run; frame={frame:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    };
+    assert!(
+        frame.contains(" the end of the row "),
+        "expected the scene to stay up after the run; frame={frame:?}"
+    );
+    assert!(
+        frame.contains("[Enter] back to the street") || frame.contains("[a] attack"),
+        "expected the scene over (away) or still on (caught); frame={frame:?}"
+    );
 }

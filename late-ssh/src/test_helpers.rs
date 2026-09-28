@@ -302,8 +302,7 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         conn_counts: Arc::new(Mutex::new(HashMap::<IpAddr, usize>::new())),
         pair_ws_counts: Arc::new(Mutex::new(HashMap::<IpAddr, usize>::new())),
         active_users,
-        clubhouse_lobby: crate::app::clubhouse::lobby::SharedLobby::with_seed(7),
-        nightcap_lobby: crate::app::clubhouse::nightcap::lobby::SharedSeats::new(),
+        drunk_map: crate::app::clubhouse::drunk::DrunkMap::new(),
         nightcap_house: crate::app::clubhouse::nightcap::svc::NightcapHouse::new(
             db.clone(),
             crate::app::clubhouse::nightcap::wall::SharedWall::new(),
@@ -312,6 +311,7 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         scratchpad_registry: crate::app::scratchpad::registry::SharedScratchpadRegistry::new(),
         app_flags: crate::app::flags::svc::AppFlagService::new(db.clone()),
         runner_looks: crate::app::deadchannel::runner::svc::RunnerLookService::new(db.clone()),
+        presence: crate::app::presence::svc::PresenceService::detached(Vec::new()),
         username_directory,
         flair_directory: crate::app::common::username_effect::new_directory(),
         crown_service: crate::app::crown::svc::CrownService::new(db.clone()),
@@ -612,6 +612,7 @@ fn make_app_with_chat_service_and_permissions(
         fight_service: crate::app::deadchannel::fight::svc::FightService::new(
             db.clone(),
             chat_service.clone(),
+            chip_service.clone(),
         ),
         tailor_service: crate::app::deadchannel::tailor::svc::TailorService::new(db.clone()),
         guide_service: crate::app::deadchannel::guide::svc::GuideService::new(db.clone()),
@@ -684,8 +685,7 @@ fn make_app_with_chat_service_and_permissions(
         splash_piece: None,
         artboard_ban_expires_at: None,
         active_users: world.active_users,
-        clubhouse_lobby: None,
-        nightcap_lobby: None,
+        drunk_map: crate::app::clubhouse::drunk::DrunkMap::new(),
         nightcap_house: None,
         mention_ladders: crate::app::ai::ladder::MentionLadders::new(),
         files: None,
@@ -700,6 +700,7 @@ fn make_app_with_chat_service_and_permissions(
         runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
             std::collections::HashMap::new(),
         ),
+        presence: crate::app::presence::svc::PresenceService::detached(Vec::new()),
         zen_layout: None,
         // No SSH key: test apps follow the account default and persist no
         // per-device layout, which is also what ghost bot sessions do.
@@ -878,6 +879,7 @@ pub fn make_app_with_paired_client(
         fight_service: crate::app::deadchannel::fight::svc::FightService::new(
             db.clone(),
             ChatService::new(db.clone(), notification_service.clone()),
+            chip_service.clone(),
         ),
         tailor_service: crate::app::deadchannel::tailor::svc::TailorService::new(db.clone()),
         guide_service: crate::app::deadchannel::guide::svc::GuideService::new(db.clone()),
@@ -950,8 +952,7 @@ pub fn make_app_with_paired_client(
         splash_piece: None,
         artboard_ban_expires_at: None,
         active_users: None,
-        clubhouse_lobby: None,
-        nightcap_lobby: None,
+        drunk_map: crate::app::clubhouse::drunk::DrunkMap::new(),
         nightcap_house: None,
         mention_ladders: crate::app::ai::ladder::MentionLadders::new(),
         files: None,
@@ -966,6 +967,7 @@ pub fn make_app_with_paired_client(
         runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
             std::collections::HashMap::new(),
         ),
+        presence: crate::app::presence::svc::PresenceService::detached(Vec::new()),
         zen_layout: None,
         // No SSH key: test apps follow the account default and persist no
         // per-device layout, which is also what ghost bot sessions do.
@@ -999,6 +1001,23 @@ pub fn make_app_with_paired_client(
 pub fn with_session_key(mut app: App, fingerprint: &str) -> App {
     app.key_fingerprint = Some(fingerprint.to_string());
     app
+}
+
+/// Walk every `game_payout_claims` row this account holds `days` into the
+/// past, so a test crosses a template's lockout window without sleeping.
+/// The one place the tests reach into that table: the window is read off
+/// `created`, and nothing in the app moves it.
+pub async fn age_payout_claims(db: &Db, user_id: Uuid, days: i32) {
+    let client = db.get().await.expect("db client");
+    client
+        .execute(
+            "UPDATE game_payout_claims
+             SET created = created - make_interval(days => $2)
+             WHERE user_id = $1",
+            &[&user_id, &days],
+        )
+        .await
+        .expect("age payout claims");
 }
 
 pub async fn wait_until<F, Fut>(mut predicate: F, label: &str)

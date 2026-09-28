@@ -204,6 +204,17 @@ pub enum FightBeat {
     Failed,
 }
 
+/// The Old Signal's chips after a kill (`fight/svc.rs::pay_mark`): `Paid`
+/// landed, `InsideMonth` is the 30-day gate refusing a second mark, `Failed`
+/// is the grant erroring, the debt left on the row for the next touch to
+/// retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OldSignalPayout {
+    Paid,
+    InsideMonth,
+    Failed,
+}
+
 /// A look written at the tailor's mirror (`app/deadchannel/tailor`):
 /// `Worn` landed, `NoRunner` found no standing runner to dress, `Failed`
 /// is the write not landing.
@@ -212,6 +223,30 @@ pub enum TailorBeat {
     Worn,
     NoRunner,
     Failed,
+}
+
+/// What the presence wire did (`app/presence`): `Published` a notify
+/// sent, `PublishFailed` one that did not land (the next heartbeat carries
+/// it again), `Heard` another replica's batch folded in, `Rejected` a
+/// payload that failed to parse, `Expired` a remote session dropped
+/// because its replica went quiet (a dead replica, or a leaver missed
+/// across a LISTEN reconnect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceWire {
+    Published,
+    PublishFailed,
+    Heard,
+    Rejected,
+    Expired,
+}
+
+/// Which presence records a replica counts (`app/presence`): `Local` its
+/// own sessions, `All` every live record it holds, its own and every other
+/// replica's. `All` should read the same on every replica.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresenceScope {
+    Local,
+    All,
 }
 
 /// A stage of a session's start, from TCP accept to the first frame on
@@ -353,11 +388,12 @@ mod inner {
         DailyPuzzle, DailyWinPayout, DoorGame, FightBeat, FirstContactBeat, GalleryApplauseResult,
         GalleryHangResult, GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal,
         GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
-        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OnlineTimeFlushResult,
-        PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal, PotReminderOutcome,
-        Presence, Refresh, RefreshOutcome, RenderReason, RoundRefusal, RunnerDoor, Screen,
-        SessionStartStage, SessionUser, SongQueueReward, SshRejectReason, SummaryResult,
-        TailorBeat, TranslationResult, VizWireBands,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OldSignalPayout,
+        OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal,
+        PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome,
+        RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage, SessionUser,
+        SongQueueReward, SshRejectReason, SummaryResult, TailorBeat, TranslationResult,
+        VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
     use crate::app::bonsai::state::BranchAction;
@@ -1047,6 +1083,40 @@ mod inner {
         })
     }
 
+    fn deadchannel_old_signal_payouts_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_deadchannel_old_signal_payouts_total")
+                .with_description(
+                    "Old Signal kills by what the chips did (paid, refused by the month's gate, or the grant failing)",
+                )
+                .build()
+        })
+    }
+
+    fn presence_records() -> &'static Gauge<u64> {
+        static METRIC: OnceLock<Gauge<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_gauge("late_ssh_presence_records")
+                .with_description(
+                    "presence records a replica holds, its own sessions (local) or every one (all)",
+                )
+                .build()
+        })
+    }
+
+    fn presence_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_presence_total")
+                .with_description("presence (tavern, stools, street) on the wire, by beat")
+                .build()
+        })
+    }
+
     fn deadchannel_tailor_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -1167,8 +1237,51 @@ mod inner {
         deadchannel_tailor_total().add(1, &[KeyValue::new("beat", tailor_beat_label(beat))]);
     }
 
+    fn presence_wire_label(beat: PresenceWire) -> &'static str {
+        match beat {
+            PresenceWire::Published => "published",
+            PresenceWire::PublishFailed => "publish_failed",
+            PresenceWire::Heard => "heard",
+            PresenceWire::Rejected => "rejected",
+            PresenceWire::Expired => "expired",
+        }
+    }
+
+    pub fn record_presence(beat: PresenceWire) {
+        presence_total().add(1, &[KeyValue::new("beat", presence_wire_label(beat))]);
+    }
+
+    fn presence_scope_label(scope: PresenceScope) -> &'static str {
+        match scope {
+            PresenceScope::Local => "local",
+            PresenceScope::All => "all",
+        }
+    }
+
+    pub fn record_presence_records(scope: PresenceScope, count: usize) {
+        presence_records().record(
+            count as u64,
+            &[KeyValue::new("scope", presence_scope_label(scope))],
+        );
+    }
+
     pub fn record_deadchannel_fight(beat: FightBeat) {
         deadchannel_fights_total().add(1, &[KeyValue::new("beat", fight_beat_label(beat))]);
+    }
+
+    fn old_signal_payout_label(payout: OldSignalPayout) -> &'static str {
+        match payout {
+            OldSignalPayout::Paid => "paid",
+            OldSignalPayout::InsideMonth => "inside_month",
+            OldSignalPayout::Failed => "failed",
+        }
+    }
+
+    pub fn record_deadchannel_old_signal_payout(payout: OldSignalPayout) {
+        deadchannel_old_signal_payouts_total().add(
+            1,
+            &[KeyValue::new("outcome", old_signal_payout_label(payout))],
+        );
     }
 
     pub fn record_first_contact_bio_screen(outcome: BioScreenOutcome) {
@@ -2146,11 +2259,12 @@ mod inner {
         DailyPuzzle, DailyWinPayout, DoorGame, FightBeat, FirstContactBeat, GalleryApplauseResult,
         GalleryHangResult, GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal,
         GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
-        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OnlineTimeFlushResult,
-        PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal, PotReminderOutcome,
-        Presence, Refresh, RefreshOutcome, RenderReason, RoundRefusal, RunnerDoor, Screen,
-        SessionStartStage, SessionUser, SongQueueReward, SshRejectReason, SummaryResult,
-        TailorBeat, TranslationResult, VizWireBands,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OldSignalPayout,
+        OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal,
+        PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome,
+        RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage, SessionUser,
+        SongQueueReward, SshRejectReason, SummaryResult, TailorBeat, TranslationResult,
+        VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
 
@@ -2158,7 +2272,10 @@ mod inner {
     pub fn record_ssh_connection_rejected(_reason: SshRejectReason) {}
     pub fn record_first_contact_beat(_beat: FirstContactBeat) {}
     pub fn record_deadchannel_fight(_beat: FightBeat) {}
+    pub fn record_deadchannel_old_signal_payout(_payout: OldSignalPayout) {}
     pub fn record_deadchannel_tailor(_beat: TailorBeat) {}
+    pub fn record_presence(_beat: PresenceWire) {}
+    pub fn record_presence_records(_scope: PresenceScope, _count: usize) {}
     pub fn record_runner_door(_door: RunnerDoor) {}
     pub fn record_first_contact_bio_screen(_outcome: BioScreenOutcome) {}
     pub fn record_first_contact_gate(_verdict: GateVerdict, _staff: bool) {}

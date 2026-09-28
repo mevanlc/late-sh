@@ -23,7 +23,6 @@ use ratatui::text::{Line, Span};
 
 use super::data::{StatusData, clock_icon};
 use crate::app::common::theme;
-use crate::app::deadchannel::fight::state::Sheet;
 
 /// Which border row the bar is painted on, and therefore which end of it
 /// collides with the other title on that row.
@@ -115,12 +114,10 @@ pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 4] {
 }
 
 /// Preserve the upstream HUD's priority: voice, mentions and chips get space
-/// first, then the runner's readout, then the pot. The runner and pot paint
-/// before chips, while sharing the same measured layout and click targets as
-/// configurable segments.
+/// first, then the pot. The pot paints before chips, while sharing the same
+/// measured layout and click targets as configurable segments.
 pub(crate) fn build_top_status_bar(
     data: &StatusData<'_>,
-    runner: Option<&Sheet>,
     area: Rect,
     title_width: u16,
 ) -> Option<StatusBar> {
@@ -132,44 +129,17 @@ pub(crate) fn build_top_status_bar(
         .position(|segment| segment.component == Some(StatusComponent::Pot))
         .map(|index| segments.remove(index));
     let mut segments = fit(segments, spare_cols, Placement::TopRight);
-    for extra in [runner.map(runner_segment), pot].into_iter().flatten() {
+    if let Some(pot) = pot {
         let available = spare_cols.saturating_sub(total_width(&segments));
-        if let Some(extra) = fit(vec![extra], available, Placement::TopRight).pop() {
+        if let Some(pot) = fit(vec![pot], available, Placement::TopRight).pop() {
             let before_chips = segments
                 .iter()
                 .position(|segment| segment.component == Some(StatusComponent::Chips))
                 .unwrap_or(segments.len());
-            segments.insert(before_chips, extra);
+            segments.insert(before_chips, pot);
         }
     }
     lay_out(segments, Placement::TopRight, area)
-}
-
-fn runner_segment(sheet: &Sheet) -> Segment {
-    let muted = Style::default().fg(theme::TEXT_MUTED());
-    let signal_style = Style::default()
-        .fg(if sheet.is_down() {
-            theme::ERROR()
-        } else {
-            theme::TEXT_BRIGHT()
-        })
-        .add_modifier(Modifier::BOLD);
-    let spans = |head: String| {
-        vec![
-            Span::styled(head, muted),
-            Span::styled(
-                format!("{}/{}", sheet.signal, sheet.max_signal()),
-                signal_style,
-            ),
-            Span::styled(" ", muted),
-        ]
-    };
-    Segment {
-        component: None,
-        spans: spans(format!(" rations {} · signal ", sheet.rations_left)),
-        compacts: vec![spans(" signal ".to_string())],
-        low_priority: true,
-    }
 }
 
 #[derive(Clone, Copy)]

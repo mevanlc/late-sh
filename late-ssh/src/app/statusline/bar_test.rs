@@ -109,18 +109,8 @@ fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
 }
 
 #[test]
-fn fixed_topbar_reads_the_runners_rations_and_signal() {
-    use crate::app::common::theme;
-    use crate::app::deadchannel::fight::state::Sheet;
-
-    let mut sheet = Sheet::fresh(
-        uuid::Uuid::from_u128(1),
-        chrono::NaiveDate::from_ymd_opt(2026, 9, 25).expect("date"),
-    );
-    sheet.level = 2;
-    sheet.signal = 12;
-    sheet.rations_left = 7;
-    let with_runner = |sheet: &Sheet, border_width: u16| {
+fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
+    let hud = |border_width: u16| {
         build_top_status_bar(
             &StatusData {
                 chip_balance: 1_500,
@@ -129,52 +119,31 @@ fn fixed_topbar_reads_the_runners_rations_and_signal() {
                 pot_draws_in: Some("3h12m"),
                 ..StatusData::default()
             },
-            Some(sheet),
             Rect::new(0, 0, border_width, 24),
             0,
         )
     };
-    let full = " unread 2 ─ rations 7 · signal 12/20 ─ pot 84,200 · 3h12m ─ chips 1500 ─";
-    let without_pot = " unread 2 ─ rations 7 · signal 12/20 ─ chips 1500 ─";
-    let signal_only = " unread 2 ─ signal 12/20 ─ chips 1500 ─";
-    // With the readout gone the pot has room for its size again.
-    let without_runner = " unread 2 ─ pot 84,200 ─ chips 1500 ─";
+    let full = " unread 2 ─ pot 84,200 · 3h12m ─ chips 1500 ─";
+    let compact = " unread 2 ─ pot 84,200 ─ chips 1500 ─";
+    let without_pot = " unread 2 ─ chips 1500 ─";
     let width = |text: &str| Span::raw(text).width() as u16 + 2;
 
-    let hud = with_runner(&sheet, 200).expect("hud");
-    assert_eq!(hud.line.to_string(), full);
-    let signal = hud
-        .line
-        .spans
-        .iter()
-        .find(|span| span.content.as_ref() == "12/20")
-        .expect("signal span");
-    assert_eq!(signal.style.fg, Some(theme::TEXT_BRIGHT()));
+    assert_eq!(hud(200).expect("hud").line.to_string(), full);
     assert_eq!(
-        with_runner(&sheet, width(without_pot)).map(|hud| hud.line.to_string()),
+        hud(width(full)).map(|hud| hud.line.to_string()),
+        Some(full.to_string()),
+        "the full pot fits exactly"
+    );
+    assert_eq!(
+        hud(width(full) - 1).map(|hud| hud.line.to_string()),
+        Some(compact.to_string()),
+        "the draw time yields before the pot size"
+    );
+    assert_eq!(
+        hud(width(compact) - 1).map(|hud| hud.line.to_string()),
         Some(without_pot.to_string()),
-        "the pot sheds before the runner's readout"
+        "the pot sheds before mentions or chips"
     );
-    assert_eq!(
-        with_runner(&sheet, width(without_pot) - 1).map(|hud| hud.line.to_string()),
-        Some(signal_only.to_string()),
-        "one cell short drops the rations, not the signal"
-    );
-    assert_eq!(
-        with_runner(&sheet, width(signal_only) - 1).map(|hud| hud.line.to_string()),
-        Some(without_runner.to_string()),
-        "too tight for the signal drops the readout"
-    );
-
-    sheet.signal = 0;
-    let down = with_runner(&sheet, 200).expect("hud");
-    let signal = down
-        .line
-        .spans
-        .iter()
-        .find(|span| span.content.as_ref() == "0/20")
-        .expect("signal span");
-    assert_eq!(signal.style.fg, Some(theme::ERROR()));
 }
 
 #[test]
