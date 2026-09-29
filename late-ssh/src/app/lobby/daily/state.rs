@@ -2,11 +2,12 @@ use std::{cell::Cell, collections::HashMap, collections::HashSet, sync::Arc, tim
 
 use chrono::{DateTime, Utc};
 use cozy_chess::{BitBoard, Board};
-use late_core::models::daily_match::DailyMatch;
+use late_core::models::daily_match::{DailyMatch, DailyResult};
 use ratatui::layout::Rect;
 use tokio::sync::{broadcast, oneshot, watch};
 use uuid::Uuid;
 
+use crate::app::live::pick::{LIVE_AIM_WINDOW, LiveCandidate, LiveSource};
 use crate::app::{
     common::primitives::{Banner, Screen},
     games::{
@@ -32,6 +33,7 @@ use super::{
     checkers::DailyCheckersState,
     connect4::DailyConnect4State,
     games::DailyGame,
+    live::{LiveView, MatchStripView, finish_headline},
     pool::{DailyPoolState, PoolAimShare},
     pool_draft::{PoolCueHit, PoolDetail, PoolDraft, PoolPlayback, should_share_aim},
     reversi::DailyReversiState,
@@ -114,6 +116,22 @@ pub struct DailyState {
     own_loss: bool,
 
     pub board: Option<DailyBoardState>,
+
+    /// The latest aim per match another player is lining up, and when it
+    /// arrived. Presentation only, like the aim itself: pruned past
+    /// `LIVE_AIM_WINDOW` on every tick, so it holds tables in play right now.
+    live_aims: HashMap<Uuid, (PoolAimShare, Instant)>,
+    /// The last match that ended, kept for the live strip (`note_finished`).
+    /// The strip decides how long it is news (`app/live/state.rs`).
+    live_finish: Option<LiveFinish>,
+}
+
+/// A match that just ended, as the #lounge strip shows it: the position it
+/// ended on and the result line.
+struct LiveFinish {
+    item: DailyMatchItem,
+    headline: String,
+    at: Instant,
 }
 
 /// Full-screen correspondence board (`Screen::DailyMatch`).
@@ -160,6 +178,18 @@ impl EventEffect {
     }
 }
 
+/// How a board was opened. A hop from one board to the next keeps the
+/// entry of the first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoardEntry {
+    /// From the Lobby modal, or the backtick cycle: closing reopens the
+    /// modal, so multi-match move-making stays one keypress per hop.
+    Lobby,
+    /// From the #lounge live strip: closing returns to the card, the modal
+    /// was never open.
+    LoungeStrip,
+}
+
 pub struct DailyBoardState {
     pub match_id: Uuid,
     /// You aren't a player in this match: the board is read-only. No cursor,
@@ -167,6 +197,8 @@ pub struct DailyBoardState {
     pub spectating: bool,
     /// Screen to restore when the board closes.
     pub return_screen: Screen,
+    /// How the viewer got here, which decides what closing lands on.
+    pub entry: BoardEntry,
     pub cursor: usize,
     pub selected: Option<usize>,
     pub piece_render_mode: ChessPieceRenderMode,
@@ -236,7 +268,33 @@ impl DailyBoardState {
 /// plus the parsed, per-game view of its state JSON.
 pub struct DailyMatchDetail {
     pub row: DailyMatch,
+    pub standing: MatchStanding,
     pub game: DailyGameDetail,
+}
+
+/// Where a loaded match stands, read once off the row's `status` and
+/// `result` columns. There is no open variant: boards open from the active
+/// list, and a claimed match never goes back to open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatchStanding {
+    Active,
+    Finished(DailyResult),
+    Cancelled,
+}
+
+impl MatchStanding {
+    fn of(row: &DailyMatch) -> Result<Self, String> {
+        match row.status.as_str() {
+            DailyMatch::STATUS_ACTIVE => Ok(Self::Active),
+            DailyMatch::STATUS_FINISHED => match DailyResult::parse(&row.result) {
+                Ok(result) => Ok(Self::Finished(result)),
+                Err(error) => Err(error.to_string()),
+            },
+            DailyMatch::STATUS_CANCELLED => Ok(Self::Cancelled),
+            DailyMatch::STATUS_OPEN => Err("this challenge has not been claimed".to_string()),
+            other => Err(format!("unknown daily match status: {other}")),
+        }
+    }
 }
 
 pub enum DailyGameDetail {
@@ -392,6 +450,7 @@ fn carry_pool_playback(previous: Option<&mut DailyMatchDetail>, fresh: &mut Dail
 
 impl DailyMatchDetail {
     fn from_row(row: DailyMatch) -> Result<Self, String> {
+        let standing = MatchStanding::of(&row)?;
         let game = match DailyGame::from_kind(&row.game_kind) {
             Some(DailyGame::Chess) => DailyGameDetail::Chess(ChessDetail::from_row(&row)?),
             Some(DailyGame::Chess960) => DailyGameDetail::Chess960(ChessDetail::from_row(&row)?),
@@ -422,79 +481,141 @@ impl DailyMatchDetail {
                 state: DailyBriscolaState::parse(&row.state).map_err(|e| e.to_string())?,
                 play_in_flight: false,
             }),
-            Some(game @ (DailyGame::EightBall | DailyGame::NineBall | DailyGame::Snooker)) => {
-                let state = DailyPoolState::parse(&row.state).map_err(|e| e.to_string())?;
-                let detail = PoolDetail {
-                    draft: PoolDraft::new(&state),
-                    state,
-                    shot_in_flight: false,
-                    playback: None,
-                    watching: None,
-                };
-                match game {
-                    DailyGame::NineBall => DailyGameDetail::NineBall(detail),
-                    DailyGame::Snooker => DailyGameDetail::Snooker(detail),
-                    _ => DailyGameDetail::EightBall(detail),
-                }
-            }
+            Some(DailyGame::EightBall) => DailyGameDetail::EightBall(pool_detail(&row)?),
+            Some(DailyGame::NineBall) => DailyGameDetail::NineBall(pool_detail(&row)?),
+            Some(DailyGame::Snooker) => DailyGameDetail::Snooker(pool_detail(&row)?),
             None => return Err(format!("unknown daily game: {}", row.game_kind)),
         };
-        Ok(Self { row, game })
+        Ok(Self {
+            row,
+            standing,
+            game,
+        })
     }
 
     pub fn chess(&self) -> Option<&ChessDetail> {
         match &self.game {
             DailyGameDetail::Chess(chess) | DailyGameDetail::Chess960(chess) => Some(chess),
-            _ => None,
+            DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     fn chess_mut(&mut self) -> Option<&mut ChessDetail> {
         match &mut self.game {
             DailyGameDetail::Chess(chess) | DailyGameDetail::Chess960(chess) => Some(chess),
-            _ => None,
+            DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     pub fn battleship(&self) -> Option<&BattleshipDetail> {
         match &self.game {
             DailyGameDetail::Battleship(battleship) => Some(battleship),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     pub fn connect4(&self) -> Option<&Connect4Detail> {
         match &self.game {
             DailyGameDetail::Connect4(connect4) => Some(connect4),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     pub fn reversi(&self) -> Option<&ReversiDetail> {
         match &self.game {
             DailyGameDetail::Reversi(reversi) => Some(reversi),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     pub fn checkers(&self) -> Option<&CheckersDetail> {
         match &self.game {
             DailyGameDetail::Checkers(checkers) => Some(checkers),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     pub fn backgammon(&self) -> Option<&BackgammonDetail> {
         match &self.game {
             DailyGameDetail::Backgammon(backgammon) => Some(backgammon),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Briscola(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
     pub fn briscola(&self) -> Option<&BriscolaDetail> {
         match &self.game {
             DailyGameDetail::Briscola(briscola) => Some(briscola),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::EightBall(_)
+            | DailyGameDetail::NineBall(_)
+            | DailyGameDetail::Snooker(_) => None,
         }
     }
 
@@ -506,7 +627,14 @@ impl DailyMatchDetail {
             DailyGameDetail::EightBall(pool)
             | DailyGameDetail::NineBall(pool)
             | DailyGameDetail::Snooker(pool) => Some(pool),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_) => None,
         }
     }
 
@@ -515,7 +643,14 @@ impl DailyMatchDetail {
             DailyGameDetail::EightBall(pool)
             | DailyGameDetail::NineBall(pool)
             | DailyGameDetail::Snooker(pool) => Some(pool),
-            _ => None,
+            DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Briscola(_) => None,
         }
     }
 
@@ -524,8 +659,24 @@ impl DailyMatchDetail {
     }
 
     pub fn is_active(&self) -> bool {
-        self.row.status == DailyMatch::STATUS_ACTIVE
+        match self.standing {
+            MatchStanding::Active => true,
+            MatchStanding::Finished(_) | MatchStanding::Cancelled => false,
+        }
     }
+}
+
+/// A pool detail fresh off the row: the ruleset rides inside the state, so
+/// all three pool games build it the same way.
+fn pool_detail(row: &DailyMatch) -> Result<PoolDetail, String> {
+    let state = DailyPoolState::parse(&row.state).map_err(|e| e.to_string())?;
+    Ok(PoolDetail {
+        draft: PoolDraft::new(&state),
+        state,
+        shot_in_flight: false,
+        playback: None,
+        watching: None,
+    })
 }
 
 impl DailyState {
@@ -546,6 +697,8 @@ impl DailyState {
             own_win: false,
             own_loss: false,
             board: None,
+            live_aims: HashMap::new(),
+            live_finish: None,
         }
     }
 
@@ -561,7 +714,9 @@ impl DailyState {
         let mut banner = None;
         let mut changed = false;
         if self.snapshot_rx.has_changed().unwrap_or(false) {
-            self.snapshot = self.snapshot_rx.borrow_and_update().clone();
+            let next = self.snapshot_rx.borrow_and_update().clone();
+            self.note_finished(&next);
+            self.snapshot = next;
             self.notify_turn_edges();
             changed = true;
         }
@@ -597,6 +752,9 @@ impl DailyState {
         if self.drive_pool_playback() {
             changed = true;
         }
+        let now = Instant::now();
+        self.live_aims
+            .retain(|_, (_, at)| now.saturating_duration_since(*at) < LIVE_AIM_WINDOW);
         DailyTick {
             banner,
             changed,
@@ -678,7 +836,7 @@ impl DailyState {
                         Some(Banner::info(&format!(
                             "Daily {}: you lost the match ({})",
                             game.label(),
-                            result_phrase(&result)
+                            result_phrase(result)
                         )))
                     }
                     DailyFinishOutcome::Draw if playing => Some(Banner::info(&format!(
@@ -688,7 +846,8 @@ impl DailyState {
                     DailyFinishOutcome::Won { .. } | DailyFinishOutcome::Draw => None,
                 };
                 // A match you are not in, finishing while you are not watching
-                // it, is news for the lobby snapshot and not for this frame.
+                // it, is news for the lobby snapshot and not for this frame:
+                // the #lounge strip takes its final board off the snapshot.
                 let changed = reloaded || banner.is_some();
                 EventEffect { banner, changed }
             }
@@ -701,6 +860,13 @@ impl DailyState {
                 by_user_id,
                 aim,
             } => {
+                // Every other player's aim is also news for the live strip.
+                // It is stored, not repainted: the strip repaints on the
+                // half-tick edge while it draws a cue (`LiveState::aiming`),
+                // so a shooter sweeping the cue costs no frames beyond that.
+                if by_user_id != self.user_id {
+                    self.live_aims.insert(match_id, (aim, Instant::now()));
+                }
                 let mut drawn_on = false;
                 if by_user_id != self.user_id
                     && let Some(board) = &mut self.board
@@ -726,10 +892,10 @@ impl DailyState {
                 }
                 EventEffect::touched(mine)
             }
-            // Everything else on the feed is somebody else's match. The lobby
-            // panel and the modal read the snapshot, not this feed, and the
-            // snapshot raises its own flag at the top of the tick.
-            _ => EventEffect::ignored(),
+            // Somebody else's error or challenge. The lobby panel and the
+            // modal read the snapshot, not this feed, and the snapshot raises
+            // its own flag at the top of the tick.
+            DailyEvent::Error { .. } | DailyEvent::ChallengePosted { .. } => EventEffect::ignored(),
         }
     }
 
@@ -839,6 +1005,112 @@ impl DailyState {
             .collect();
         matches.sort_by_key(|item| (item.turn_deadline_at, item.id));
         matches
+    }
+
+    /// Every active match, the viewer's own included, as the live strip
+    /// weighs it: its last write, and its shooter's aim if one is fresh.
+    pub fn live_candidates(&self) -> Vec<LiveCandidate> {
+        self.snapshot
+            .active_matches
+            .iter()
+            .map(|item| LiveCandidate {
+                source: LiveSource::DailyMatch(item.id),
+                updated: item.updated,
+                aimed_at: self.live_aims.get(&item.id).map(|(_, at)| *at),
+            })
+            .collect()
+    }
+
+    /// One active match as the live strip paints it: its board, and a fresh
+    /// aim if its shooter is lining up. `None` once it left the lobby.
+    pub fn live_match_view(&self, match_id: Uuid) -> Option<MatchStripView<'_>> {
+        let item = self
+            .snapshot
+            .active_matches
+            .iter()
+            .find(|item| item.id == match_id)?;
+        let aim = self
+            .live_aims
+            .get(&item.id)
+            .filter(|(_, at)| at.elapsed() < LIVE_AIM_WINDOW)
+            .map(|(aim, _)| aim);
+        Some(MatchStripView {
+            view: LiveView {
+                item,
+                board: &item.board,
+                aim,
+            },
+            finish: None,
+        })
+    }
+
+    /// A match that left the active list and landed among the finished
+    /// ones just ended: hold the position it ended on, off the finished
+    /// row, with the result for the live strip. Read off the snapshot rather than the event feed,
+    /// so it fires on every replica and not only where the finish was
+    /// written. A held result whose row is still listed re-reads its
+    /// headline, since the payout is a second write behind the finish.
+    fn note_finished(&mut self, next: &DailySnapshot) {
+        for item in &self.snapshot.active_matches {
+            if next.active_matches.iter().any(|n| n.id == item.id) {
+                continue;
+            }
+            let Some(finished) = next.finished_matches.iter().find(|f| f.id == item.id) else {
+                continue;
+            };
+            self.live_finish = Some(LiveFinish {
+                // The active item is the position before the last move: the
+                // final one is on the finished row, with nobody on the clock.
+                item: DailyMatchItem {
+                    turn_user_id: None,
+                    turn_deadline_at: None,
+                    move_count: finished.move_count,
+                    board: finished.board.clone(),
+                    ..item.clone()
+                },
+                headline: finish_headline(finished),
+                at: Instant::now(),
+            });
+        }
+        if let Some(finish) = self.live_finish.as_mut()
+            && let Some(finished) = next
+                .finished_matches
+                .iter()
+                .find(|f| f.id == finish.item.id)
+        {
+            finish.headline = finish_headline(finished);
+        }
+    }
+
+    /// When the last match ended, for the live strip to weigh against
+    /// its linger.
+    pub fn live_finish_at(&self) -> Option<Instant> {
+        self.live_finish.as_ref().map(|finish| finish.at)
+    }
+
+    /// The last match that ended, as the live strip paints it: the final
+    /// board with the result.
+    pub fn live_finish_view(&self) -> Option<MatchStripView<'_>> {
+        let finish = self.live_finish.as_ref()?;
+        Some(MatchStripView {
+            view: LiveView {
+                item: &finish.item,
+                board: &finish.item.board,
+                aim: None,
+            },
+            finish: Some(finish.headline.as_str()),
+        })
+    }
+
+    /// A match on the live strip, for the key or click that opens it:
+    /// read-only for a spectator, playable for one of its players
+    /// (`open_board` decides).
+    pub fn live_item(&self, match_id: Uuid) -> Option<DailyMatchItem> {
+        self.snapshot
+            .active_matches
+            .iter()
+            .find(|item| item.id == match_id)
+            .cloned()
     }
 
     /// Open challenges + active matches counted against the per-user cap.
@@ -960,7 +1232,7 @@ impl DailyState {
 
     // ── Board screen ───────────────────────────────────────────
 
-    pub fn open_board(&mut self, item: &DailyMatchItem, return_screen: Screen) {
+    pub fn open_board(&mut self, item: &DailyMatchItem, return_screen: Screen, entry: BoardEntry) {
         let mut names = HashMap::new();
         if let Some(name) = &item.challenger_username {
             names.insert(item.challenger_id, name.clone());
@@ -970,12 +1242,17 @@ impl DailyState {
         }
         // You're a spectator unless you're one of the two players.
         let spectating = item.challenger_id != self.user_id && item.opponent_id != self.user_id;
-        self.open_board_inner(item.id, item.game, names, spectating, return_screen);
+        self.open_board_inner(item.id, item.game, names, spectating, return_screen, entry);
     }
 
     /// Open the board for an unseen finished match (a result row in the
     /// modal). Always one of your own matches, so never spectating.
-    pub fn open_finished_board(&mut self, item: &DailyFinishedItem, return_screen: Screen) {
+    pub fn open_finished_board(
+        &mut self,
+        item: &DailyFinishedItem,
+        return_screen: Screen,
+        entry: BoardEntry,
+    ) {
         let mut names = HashMap::new();
         if let Some(name) = &item.challenger_username {
             names.insert(item.challenger_id, name.clone());
@@ -983,7 +1260,7 @@ impl DailyState {
         if let Some(name) = &item.opponent_username {
             names.insert(item.opponent_id, name.clone());
         }
-        self.open_board_inner(item.id, item.game, names, false, return_screen);
+        self.open_board_inner(item.id, item.game, names, false, return_screen, entry);
     }
 
     fn open_board_inner(
@@ -993,6 +1270,7 @@ impl DailyState {
         names: HashMap<Uuid, String>,
         spectating: bool,
         return_screen: Screen,
+        entry: BoardEntry,
     ) {
         // Hopping straight from one board to another replaces `self.board`
         // without a close; the old board still counts as looked-at.
@@ -1001,6 +1279,7 @@ impl DailyState {
             match_id,
             spectating,
             return_screen,
+            entry,
             // Start the cursor mid-board for each game's grid.
             cursor: match game {
                 DailyGame::Chess | DailyGame::Chess960 => 12,
@@ -1078,12 +1357,11 @@ impl DailyState {
         if board.spectating {
             return;
         }
-        let finished = board
-            .detail
-            .as_ref()
-            .is_some_and(|detail| detail.row.status == DailyMatch::STATUS_FINISHED);
-        if finished {
-            self.svc.mark_result_seen_task(self.user_id, board.match_id);
+        match board.detail.as_ref().map(|detail| detail.standing) {
+            Some(MatchStanding::Finished(_)) => {
+                self.svc.mark_result_seen_task(self.user_id, board.match_id);
+            }
+            Some(MatchStanding::Active) | Some(MatchStanding::Cancelled) | None => {}
         }
     }
 
@@ -1236,8 +1514,13 @@ impl DailyState {
                 board.cursor = (row.clamp(0, backgammon::SLOT_ROWS as isize - 1) * cols
                     + col.clamp(0, cols - 1)) as usize;
             }
-            _ => {
+            Some(DailyGameDetail::Chess(_)) | Some(DailyGameDetail::Chess960(_)) | None => {
                 board.cursor = cursor::move_cursor(board.cursor, orientation, dx, dy);
+            }
+            Some(DailyGameDetail::EightBall(_))
+            | Some(DailyGameDetail::NineBall(_))
+            | Some(DailyGameDetail::Snooker(_)) => {
+                unreachable!("pool boards took pool_move_cursor above")
             }
         }
     }
@@ -1711,7 +1994,15 @@ impl DailyState {
             DailyGameDetail::EightBall(pool)
             | DailyGameDetail::NineBall(pool)
             | DailyGameDetail::Snooker(pool) => pool.draft.cancel(),
-            _ => false,
+            // Nothing pending: Esc leaves.
+            DailyGameDetail::Checkers(_)
+            | DailyGameDetail::Backgammon(_)
+            | DailyGameDetail::Chess(_)
+            | DailyGameDetail::Chess960(_)
+            | DailyGameDetail::Battleship(_)
+            | DailyGameDetail::Connect4(_)
+            | DailyGameDetail::Reversi(_)
+            | DailyGameDetail::Briscola(_) => false,
         }
     }
 
@@ -2022,25 +2313,23 @@ fn fresh_turn_edges(notified: &mut HashSet<Uuid>, my_turn_ids: &[Uuid]) -> Vec<U
         .collect()
 }
 
-/// Human phrase for a `daily_matches.result` string, for result rows and
-/// banners. Falls back to "finished" for results this build doesn't know.
-pub fn result_phrase(result: &str) -> &'static str {
+/// Human phrase for how a match ended, for result rows and banners.
+pub fn result_phrase(result: DailyResult) -> &'static str {
     match result {
-        DailyMatch::RESULT_CHECKMATE => "checkmate",
-        DailyMatch::RESULT_DRAW => "draw",
-        DailyMatch::RESULT_RESIGN => "resignation",
-        DailyMatch::RESULT_TIMEOUT => "timeout",
-        DailyMatch::RESULT_FLEET_SUNK => "fleet sunk",
-        DailyMatch::RESULT_FOUR_IN_A_ROW => "four in a row",
-        DailyMatch::RESULT_MOST_DISCS => "most discs",
-        DailyMatch::RESULT_NO_MOVES => "no moves left",
-        DailyMatch::RESULT_BORNE_OFF => "borne off",
-        DailyMatch::RESULT_MOST_POINTS => "most points",
-        DailyMatch::RESULT_EIGHT_POTTED => "eight ball",
-        DailyMatch::RESULT_EARLY_EIGHT => "early eight",
-        DailyMatch::RESULT_NINE_POTTED => "nine ball",
-        DailyMatch::RESULT_FRAME_WON => "frame won",
-        _ => "finished",
+        DailyResult::Checkmate => "checkmate",
+        DailyResult::Draw => "draw",
+        DailyResult::Resign => "resignation",
+        DailyResult::Timeout => "timeout",
+        DailyResult::FleetSunk => "fleet sunk",
+        DailyResult::FourInARow => "four in a row",
+        DailyResult::MostDiscs => "most discs",
+        DailyResult::NoMoves => "no moves left",
+        DailyResult::BorneOff => "borne off",
+        DailyResult::MostPoints => "most points",
+        DailyResult::EightPotted => "eight ball",
+        DailyResult::EarlyEight => "early eight",
+        DailyResult::NinePotted => "nine ball",
+        DailyResult::FrameWon => "frame won",
     }
 }
 

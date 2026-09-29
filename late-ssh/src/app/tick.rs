@@ -467,8 +467,13 @@ impl App {
                 _ => (),
             }
         }
+        let reading = self.lounge_card_shown() && self.chat.selected_message_id.is_some();
         let daily_tick = self.daily.tick();
         changed |= daily_tick.changed;
+        let picture_settings = self.inline_image_render_settings();
+        changed |= self
+            .live
+            .tick(&self.daily, &self.audio, reading, picture_settings);
         if let Some(b) = daily_tick.banner {
             self.banner = Some(b);
             changed = true;
@@ -1185,6 +1190,9 @@ impl App {
         // strip, which the frame diff then drops.
         changed |=
             anim_half && (sidebar_visible || self.show_bonsai_modal || self.screen == Screen::Zen);
+        // The #lounge live strip draws a shooter's cue: the aim is stored,
+        // the half-tick edge paints it.
+        changed |= anim_half && self.lounge_card_shown() && self.live.aiming();
 
         // Sidebar marquees: track rows and the friends row scroll while their
         // text overflows. The marquee moves at most once per
@@ -1315,6 +1323,7 @@ impl App {
         if self.screen == Screen::Clubhouse
             || self.screen == Screen::City
             || self.right_sidebar_visible()
+            || (self.lounge_card_shown() && self.live.aiming())
             || (self.screen == Screen::Zen && self.zen.shows_equalizer())
             || self.last_pet_frame.get().is_some()
             || self.show_bonsai_modal
@@ -1347,6 +1356,17 @@ impl App {
             None => false,
             Some(client) => !client.muted,
         }
+    }
+
+    /// Whether Home is showing the #lounge card, the one surface that
+    /// carries the live strip.
+    pub(crate) fn lounge_card_shown(&self) -> bool {
+        self.screen == Screen::Dashboard
+            && crate::app::render::dashboard_home_selected(
+                self.chat.lounge_room_id(),
+                self.chat.selected_room_id,
+                self.chat.synthetic_entry_selected(),
+            )
     }
 
     /// Whether the right sidebar draws this frame (the settings draft

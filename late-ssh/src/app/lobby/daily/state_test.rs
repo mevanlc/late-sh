@@ -137,7 +137,7 @@ async fn a_finished_match_tells_the_pet_win_or_loss_and_a_draw_tells_it_nothing(
         challenger_id: challenger,
         opponent_id: Some(opponent),
         outcome,
-        result: "checkmate".to_string(),
+        result: DailyResult::Checkmate,
     };
     let won_by = |user_id| DailyFinishOutcome::Won {
         user_id,
@@ -177,6 +177,114 @@ async fn a_finished_match_tells_the_pet_win_or_loss_and_a_draw_tells_it_nothing(
     assert!(!tick.own_win && !tick.own_loss);
 }
 
+/// The #lounge strip goes up when a match is claimed, waits to appear while
+/// the viewer is reading, and holds the result once the match ends. The
+/// viewer sits on a replica that never wrote any of it: the claim and the
+/// resign land on another service over the same database, and reach this
+/// one through the `daily_match_changed` notify.
+#[tokio::test]
+async fn a_claim_and_a_result_are_offered_to_the_strip_on_every_replica() {
+    use crate::app::activity::{event::ActivityEvent, publisher::ActivityPublisher};
+    use crate::app::games::chips::svc::ChipService;
+    use late_core::test_utils::create_test_user;
+    use std::time::Duration;
+
+    let test_db = crate::test_helpers::new_test_db().await;
+    let me = create_test_user(&test_db.db, "daily-strip-me").await;
+    let them = create_test_user(&test_db.db, "daily-strip-them").await;
+    let (activity_tx, _activity_rx) = broadcast::channel::<ActivityEvent>(8);
+    let daily_service = || {
+        DailyService::new(
+            test_db.db.clone(),
+            ChipService::new(test_db.db.clone()),
+            ActivityPublisher::new(test_db.db.clone(), activity_tx.clone()),
+        )
+    };
+    let writer = daily_service();
+    let other_replica = daily_service();
+    let mut pg_listener = crate::pg_listener::PgListener::new();
+    let _worker = other_replica.start_notify_worker(pg_listener.subscribe(DailyService::CHANNELS));
+    let _listener = pg_listener.start(test_db.db.config().clone());
+    let mut snapshot_rx = other_replica.subscribe_snapshot();
+    let (notifier, _outbox) = crate::app::notify::channel();
+    let mut state = DailyState::new(other_replica.clone(), me.id, notifier);
+    let _ = state.tick();
+    assert!(
+        state.live_candidates().is_empty() && state.live_finish_view().is_none(),
+        "nothing live, nothing for the strip"
+    );
+
+    let posted = writer
+        .post_challenge(them.id, DailyGame::Chess, None)
+        .await
+        .expect("post");
+    writer
+        .claim_challenge(me.id, posted.id)
+        .await
+        .expect("claim");
+
+    // Whether the LISTEN is live before or after the claim, the listening
+    // replica's seed read or the notify lands the match in its snapshot.
+    let arrived = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let listed = snapshot_rx
+                .borrow_and_update()
+                .active_matches
+                .iter()
+                .any(|item| item.id == posted.id);
+            if listed {
+                return;
+            }
+            snapshot_rx.changed().await.expect("snapshot watch open");
+        }
+    })
+    .await;
+    arrived.expect("the listening replica learns the claim");
+
+    let _ = state.tick();
+    let offered: Vec<LiveSource> = state
+        .live_candidates()
+        .iter()
+        .map(|candidate| candidate.source)
+        .collect();
+    assert_eq!(offered, vec![LiveSource::DailyMatch(posted.id)]);
+    let strip = state
+        .live_match_view(posted.id)
+        .expect("a fresh claim is a match the strip can paint");
+    assert!(strip.finish.is_none());
+
+    // The match ends on the other replica: this one's strip keeps the final
+    // board with the result, read off the finished row in its snapshot.
+    writer.resign(me.id, posted.id).await.expect("resign");
+    let finished = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let listed = snapshot_rx
+                .borrow_and_update()
+                .finished_matches
+                .iter()
+                .any(|item| item.id == posted.id);
+            if listed {
+                return;
+            }
+            snapshot_rx.changed().await.expect("snapshot watch open");
+        }
+    })
+    .await;
+    finished.expect("the listening replica learns the finish");
+    let _ = state.tick();
+    assert!(state.live_candidates().is_empty(), "it left the lobby");
+    assert!(state.live_finish_at().is_some());
+    let strip = state
+        .live_finish_view()
+        .expect("the result is held for the strip");
+    assert_eq!(strip.view.item.id, posted.id);
+    assert_eq!(
+        strip.finish,
+        Some(format!("{} won · resignation", them.username).as_str()),
+        "a resignation before five moves pays nothing, so no chips are named"
+    );
+}
+
 #[test]
 fn draft_picker_wraps_at_both_ends() {
     let mut draft = ChallengeDraft {
@@ -196,4 +304,125 @@ fn draft_picker_wraps_at_both_ends() {
     draft.username = Some(String::new());
     draft.move_selection(1);
     assert_eq!(draft.selected, 0);
+}
+
+#[tokio::test]
+async fn a_board_reads_how_its_match_stands_and_refuses_an_open_challenge() {
+    use crate::app::activity::{event::ActivityEvent, publisher::ActivityPublisher};
+    use crate::app::games::chips::svc::ChipService;
+    use late_core::test_utils::create_test_user;
+
+    let test_db = crate::test_helpers::new_test_db().await;
+    let challenger = create_test_user(&test_db.db, "daily-standing-challenger").await;
+    let claimer = create_test_user(&test_db.db, "daily-standing-claimer").await;
+    let (activity_tx, _) = tokio::sync::broadcast::channel::<ActivityEvent>(16);
+    let svc = DailyService::new(
+        test_db.db.clone(),
+        ChipService::new(test_db.db.clone()),
+        ActivityPublisher::new(test_db.db.clone(), activity_tx),
+    );
+    let client = test_db.db.get().await.expect("db client");
+    let load = |id| {
+        let client = &client;
+        async move {
+            DailyMatch::get(client, id)
+                .await
+                .expect("load match")
+                .expect("match exists")
+        }
+    };
+
+    let challenge = svc
+        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .await
+        .expect("post challenge");
+    let open = DailyMatchDetail::from_row(load(challenge.id).await);
+    assert_eq!(
+        open.err().as_deref(),
+        Some("this challenge has not been claimed")
+    );
+
+    svc.claim_challenge(claimer.id, challenge.id)
+        .await
+        .expect("claim challenge");
+    let active = DailyMatchDetail::from_row(load(challenge.id).await).expect("active detail");
+    assert_eq!(active.standing, MatchStanding::Active);
+
+    svc.resign(claimer.id, challenge.id)
+        .await
+        .expect("claimer resigns");
+    let finished = DailyMatchDetail::from_row(load(challenge.id).await).expect("finished detail");
+    assert_eq!(
+        finished.standing,
+        MatchStanding::Finished(DailyResult::Resign)
+    );
+}
+
+/// The held result shows the board the match ended on. The finish writes the
+/// final state and the finished status in one update, so the winning move
+/// never appears in an active snapshot: the board has to come off the
+/// finished row.
+#[tokio::test]
+async fn the_held_result_shows_the_position_the_match_ended_on() {
+    use crate::app::activity::{event::ActivityEvent, publisher::ActivityPublisher};
+    use crate::app::games::chips::svc::ChipService;
+    use crate::app::lobby::daily::{connect4, live::LiveBoard};
+    use late_core::test_utils::create_test_user;
+
+    let test_db = crate::test_helpers::new_test_db().await;
+    let challenger = create_test_user(&test_db.db, "daily-final-challenger").await;
+    let claimer = create_test_user(&test_db.db, "daily-final-claimer").await;
+    let (activity_tx, _activity_rx) = broadcast::channel::<ActivityEvent>(8);
+    let svc = DailyService::new(
+        test_db.db.clone(),
+        ChipService::new(test_db.db.clone()),
+        ActivityPublisher::new(test_db.db.clone(), activity_tx),
+    );
+    let (notifier, _outbox) = crate::app::notify::channel();
+    let mut state = DailyState::new(svc.clone(), Uuid::now_v7(), notifier);
+
+    let posted = svc
+        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .await
+        .expect("post");
+    let claimed = svc
+        .claim_challenge(claimer.id, posted.id)
+        .await
+        .expect("claim");
+    let red = claimed.turn_user_id.expect("red is on the clock");
+    let yellow = if red == challenger.id {
+        claimer.id
+    } else {
+        challenger.id
+    };
+    // Red stacks column b while yellow answers in c.
+    for _ in 0..3 {
+        svc.play_move(red, claimed.id, 1, 1).await.expect("red");
+        svc.play_move(yellow, claimed.id, 2, 2)
+            .await
+            .expect("yellow");
+    }
+    let _ = state.tick();
+    assert!(
+        state.live_match_view(claimed.id).is_some(),
+        "the match in play is offered to the strip"
+    );
+
+    svc.play_move(red, claimed.id, 1, 1)
+        .await
+        .expect("red connects four");
+    let _ = state.tick();
+
+    let strip = state
+        .live_finish_view()
+        .expect("the result is held for the strip");
+    assert!(strip.finish.is_some());
+    let LiveBoard::ConnectFour { grid, last } = strip.view.board else {
+        panic!("a connect four match paints a connect four board");
+    };
+    assert_eq!(*last, Some((3, 1)), "the winning drop is the last one");
+    for (row, cells) in grid.iter().enumerate().take(4) {
+        assert_eq!(cells[1], Some(connect4::Disc::Red), "row {row} of b");
+    }
+    assert_eq!(strip.view.item.move_count, 7);
 }

@@ -6,6 +6,7 @@ use late_core::models::media_queue_item::SongQueueReward;
 use crate::app::activity::event::ActivityGame;
 use crate::app::arcade::share::ShareCardKind;
 use crate::app::arcade::sliding_puzzle::svc::SlidingPuzzleArtLoad;
+use crate::app::audio::svc::ThumbnailFetch;
 use crate::app::bonsai::state::BonsaiAction;
 use crate::app::bonsai::svc::BonsaiActionResult;
 use crate::app::chat::news::svc::XMediaLookup;
@@ -15,7 +16,7 @@ use crate::app::common::primitives::Screen;
 use crate::app::crown::svc::CrownRefusal;
 use crate::app::deadchannel::haunt::state::GateVerdict;
 use crate::app::games::chips::svc::{GiftDrinkRefusal, RoundRefusal};
-use crate::app::lobby::daily::svc::{DailyWinPayout, PoolShotOutcome};
+use crate::app::lobby::daily::svc::{DailyWinPayout, PoolShotOutcome, SnapshotRowError};
 use crate::app::pot::svc::{PotRefusal, PotReminderOutcome};
 use crate::pg_listener::Refresh;
 
@@ -392,8 +393,8 @@ mod inner {
         OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal,
         PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome,
         RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage, SessionUser,
-        SongQueueReward, SshRejectReason, SummaryResult, TailorBeat, TranslationResult,
-        VizWireBands,
+        SnapshotRowError, SongQueueReward, SshRejectReason, SummaryResult, TailorBeat,
+        ThumbnailFetch, TranslationResult, VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
     use crate::app::bonsai::state::BranchAction;
@@ -934,6 +935,18 @@ mod inner {
         })
     }
 
+    fn daily_snapshot_rows_rejected_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_daily_snapshot_rows_rejected_total")
+                .with_description(
+                    "Daily match rows left out of the lobby snapshot, by reason, counted once per replica when a row first goes missing. `unknown_game` is expected during a rolling deploy that adds a game; anything else is a corrupt row or a build that cannot read what another wrote",
+                )
+                .build()
+        })
+    }
+
     fn pool_shots_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -974,6 +987,18 @@ mod inner {
             meter()
                 .u64_counter("late_ssh_news_share_chips_paid_total")
                 .with_description("Chips minted as News share rewards")
+                .build()
+        })
+    }
+
+    fn booth_thumbnails_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_booth_thumbnails_total")
+                .with_description(
+                    "YouTube thumbnail fetches for the live strip, once per track per replica",
+                )
                 .build()
         })
     }
@@ -1459,6 +1484,7 @@ mod inner {
             Refresh::AppFlags => "app_flags",
             Refresh::RunnerLooks => "runner_looks",
             Refresh::CrownHolder => "crown_holder",
+            Refresh::DailyMatches => "daily_matches",
             Refresh::Pot => "pot",
             Refresh::Articles => "articles",
             Refresh::ActiveQuestBoards => "active_quest_boards",
@@ -1674,6 +1700,25 @@ mod inner {
         );
     }
 
+    fn daily_snapshot_row_rejected_label(error: &SnapshotRowError) -> &'static str {
+        match error {
+            SnapshotRowError::UnknownGame(_) => "unknown_game",
+            SnapshotRowError::NoOpponent => "no_opponent",
+            SnapshotRowError::UnknownResult(_) => "unknown_result",
+            SnapshotRowError::UnreadableState(_) => "unreadable_state",
+        }
+    }
+
+    pub fn record_daily_snapshot_row_rejected(error: &SnapshotRowError) {
+        daily_snapshot_rows_rejected_total().add(
+            1,
+            &[KeyValue::new(
+                "reason",
+                daily_snapshot_row_rejected_label(error),
+            )],
+        );
+    }
+
     fn pool_shot_outcome_label(outcome: PoolShotOutcome) -> &'static str {
         match outcome {
             PoolShotOutcome::Settled => "settled",
@@ -1737,6 +1782,20 @@ mod inner {
             SongQueueReward::Paid => "paid",
             SongQueueReward::DailyCapReached => "daily_cap",
         }
+    }
+
+    fn thumbnail_fetch_label(outcome: ThumbnailFetch) -> &'static str {
+        match outcome {
+            ThumbnailFetch::Fetched => "fetched",
+            ThumbnailFetch::Failed => "failed",
+        }
+    }
+
+    pub fn record_booth_thumbnail(outcome: ThumbnailFetch) {
+        booth_thumbnails_total().add(
+            1,
+            &[KeyValue::new("outcome", thumbnail_fetch_label(outcome))],
+        );
     }
 
     pub fn record_song_queued(reward: SongQueueReward) {
@@ -2263,8 +2322,8 @@ mod inner {
         OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal,
         PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome,
         RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage, SessionUser,
-        SongQueueReward, SshRejectReason, SummaryResult, TailorBeat, TranslationResult,
-        VizWireBands,
+        SnapshotRowError, SongQueueReward, SshRejectReason, SummaryResult, TailorBeat,
+        ThumbnailFetch, TranslationResult, VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
 
@@ -2318,9 +2377,11 @@ mod inner {
     pub fn record_sliding_puzzle_art(_load: SlidingPuzzleArtLoad) {}
     pub fn record_daily_win_payout(_payout: DailyWinPayout) {}
     pub fn record_pool_shot(_outcome: PoolShotOutcome) {}
+    pub fn record_daily_snapshot_row_rejected(_error: &SnapshotRowError) {}
     pub fn record_news_shared(_reward: NewsShareReward) {}
     pub fn record_news_x_media_lookup(_lookup: XMediaLookup) {}
     pub fn record_song_queued(_reward: SongQueueReward) {}
+    pub fn record_booth_thumbnail(_outcome: ThumbnailFetch) {}
     pub fn record_gild_bought(_tier: GildTier) {}
     pub fn record_gild_refused(_refusal: GildRefusal) {}
     pub fn record_bonsai_action(_action: BonsaiAction, _result: BonsaiActionResult) {}

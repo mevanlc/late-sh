@@ -2723,6 +2723,9 @@ fn handle_mouse_click(app: &mut App, screen: Screen, mouse: MouseEvent) -> bool 
     if handle_pet_click(app, x, y) {
         return true;
     }
+    if !chat_scroll_clicks_blocked(app) && crate::app::live::input::open_from_click(app, x, y) {
+        return true;
+    }
     // A click on a Zen tile focuses it, then falls through so the composer
     // and the messages of that tile still take the click. A modal over the
     // page takes the click itself, the same guard the pet click uses.
@@ -3931,6 +3934,15 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         {
             open_bonsai_modal_globally(app);
             true
+        }
+        b'o' | b'O'
+            if global_letter_keys
+                && !ctx.chat_composing
+                && !ctx.feeds_processing
+                && !ctx.news_composing
+                && app.lounge_card_shown() =>
+        {
+            crate::app::live::input::open_from_key(app)
         }
         b'1' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);
