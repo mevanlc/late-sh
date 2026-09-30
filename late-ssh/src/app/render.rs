@@ -274,6 +274,7 @@ struct DrawContext<'a> {
     /// row): the street's strip, and the frame HUD on every other page.
     city_sheet: Option<&'a crate::app::deadchannel::fight::state::Sheet>,
     city_scene: Option<&'a crate::app::deadchannel::fight::session::Scene>,
+    city_picker: Option<&'a crate::app::deadchannel::fight::session::Picker>,
     city_till: Option<&'a str>,
     city_tailor: crate::app::deadchannel::tailor::ui::MirrorView<'a>,
     city_guide: &'a crate::app::deadchannel::guide::state::State,
@@ -310,6 +311,7 @@ struct DrawContext<'a> {
     show_hub_modal: bool,
     aquarium_state: &'a crate::app::hub::aquarium::state::AquariumState,
     aquarium_care: &'a crate::app::hub::aquarium::state::AquariumCare,
+    pet_state: &'a crate::app::pet::state::PetState,
     leaderboard_page: &'a crate::app::leaderboard::state::LeaderboardPageState,
     quest_state: &'a crate::app::hub::dailies::state::QuestState,
     shop_state: &'a crate::app::hub::shop::state::ShopState,
@@ -615,8 +617,6 @@ impl App {
         let dashboard_messages = shell_active_room
             .map(|room_id| self.chat.messages_for_room(room_id))
             .unwrap_or(&[]);
-        let dashboard_selected_news_message = shell_active_room
-            .is_some_and(|room_id| self.chat.selected_message_is_news_in_room(room_id));
         let dashboard_selected_image_message = shell_active_room
             .is_some_and(|room_id| self.chat.selected_message_has_inline_image_in_room(room_id));
         let dashboard_room_effects = shell_active_room
@@ -628,7 +628,12 @@ impl App {
         // The strip is the #lounge card's alone; another room's card, or
         // the chat center, never carries it.
         let dashboard_live_strip = if home_selected {
-            self.live.view(&self.daily, &self.audio, self.paired_source)
+            self.live.view(
+                &self.daily,
+                &self.audio,
+                self.paired_source,
+                self.chat.news.all_articles(),
+            )
         } else {
             None
         };
@@ -716,7 +721,6 @@ impl App {
             show_flag_fallback: self.profile_state.profile().show_flag_fallback,
             selected_message_id: self.chat.selected_message_id,
             selected_image_message: dashboard_selected_image_message,
-            selected_news_message: dashboard_selected_news_message,
             highlighted_message_id: self.chat.highlighted_message_id,
             reaction_picker_active: self.chat.is_reaction_leader_active(),
             composer: self.chat.composer(),
@@ -800,10 +804,6 @@ impl App {
                 payload: &modal.payload,
                 meta: &modal.meta,
             });
-        let selected_news_message = self
-            .chat
-            .selected_room_id
-            .is_some_and(|room_id| self.chat.selected_message_is_news_in_room(room_id));
         let selected_image_message = self
             .chat
             .selected_room_id
@@ -867,7 +867,6 @@ impl App {
             rail_scroll_nudge: self.chat.rail_scroll_nudge(),
             selected_message_id: self.chat.selected_message_id,
             selected_image_message,
-            selected_news_message,
             reaction_picker_active: self.chat.is_reaction_leader_active(),
             highlighted_message_id: self.chat.highlighted_message_id,
             composer: self.chat.composer(),
@@ -1215,7 +1214,6 @@ impl App {
             composing: self.chat.composing,
             selected_message: false,
             selected_image_message: false,
-            selected_news_message: false,
             reaction_picker_active: false,
             reply_author: self.chat.reply_target().map(|reply| reply.author.as_str()),
             is_editing: self.chat.edited_message_id.is_some(),
@@ -1399,6 +1397,7 @@ impl App {
                             .map(|entry| &entry.look),
                         city_sheet: self.fight.sheet.as_ref(),
                         city_scene: self.fight.scene.as_ref(),
+                        city_picker: self.fight.picker.as_ref(),
                         city_till: self.fight.till.as_deref(),
                         city_tailor: crate::app::deadchannel::tailor::ui::MirrorView {
                             draft: self.tailor.draft.as_ref(),
@@ -1431,6 +1430,7 @@ impl App {
                         show_hub_modal: self.show_hub_modal,
                         aquarium_state: &self.aquarium_state,
                         aquarium_care: &self.aquarium_care,
+                        pet_state: &self.pet_state,
                         leaderboard_page: &self.leaderboard_page,
                         quest_state: &self.quest_state,
                         shop_state: &self.shop_state,
@@ -2003,6 +2003,7 @@ impl App {
                     look: ctx.city_look,
                     sheet: ctx.city_sheet,
                     scene: ctx.city_scene,
+                    picker: ctx.city_picker,
                     till: ctx.city_till,
                     tailor: ctx.city_tailor,
                     guide: ctx.city_guide,
@@ -2107,6 +2108,17 @@ impl App {
                     paired_client: ctx.paired_client,
                     eq_state: ctx.eq_state,
                     bonsai: ctx.bonsai,
+                    pet: ctx
+                        .shop_state
+                        .entitlements()
+                        .has_pet_companion()
+                        .then_some(ctx.pet_state),
+                    tank: ctx.shop_state.entitlements().has_aquarium().then_some(
+                        crate::app::common::sidebar::SidebarTank {
+                            aquarium: ctx.aquarium_state,
+                            hungry: ctx.aquarium_care.hungry(),
+                        },
+                    ),
                     clock_text: ctx.sidebar_clock,
                     queue_snapshot: &ctx.booth_snapshot,
                     youtube_source_count: ctx.youtube_source_count,
@@ -2175,7 +2187,15 @@ impl App {
         }
 
         if ctx.show_settings {
-            settings_modal::ui::draw(frame, inner, ctx.settings_modal_state);
+            settings_modal::ui::draw(
+                frame,
+                inner,
+                ctx.settings_modal_state,
+                crate::app::common::sidebar::SidebarOwnership {
+                    pet: ctx.shop_state.entitlements().has_pet_companion(),
+                    tank: ctx.shop_state.entitlements().has_aquarium(),
+                },
+            );
         }
 
         if ctx.show_mod_modal {

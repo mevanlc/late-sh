@@ -2311,11 +2311,16 @@ fn dispatch_escape(app: &mut App) {
         return;
     }
     // Esc in the city backs out one step at a time: the guide first, then
-    // the fight scene (a run while the fight is on, `fight/input.rs`), then
-    // an open shop panel or the ledge; on the bare street it goes up to the
-    // chat with #lounge open (the wire and `0` go to the clubhouse instead).
+    // the fight picker, then the fight scene (a run while the fight is on,
+    // `fight/input.rs`), then an open shop panel or the ledge; on the bare
+    // street it goes up to the chat with #lounge open (the wire and `0` go
+    // to the clubhouse instead).
     if ctx.screen == Screen::City && app.guide.state.is_open() {
         app.guide.state.close();
+        return;
+    }
+    if ctx.screen == Screen::City && app.fight.picker_open() {
+        app.fight.close();
         return;
     }
     if ctx.screen == Screen::City && app.fight.scene_open() {
@@ -3943,6 +3948,17 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
                 && app.lounge_card_shown() =>
         {
             crate::app::live::input::open_from_key(app)
+        }
+        // With a message selected, `r` replies to it (chat's message keys).
+        b'r' | b'R'
+            if global_letter_keys
+                && !ctx.chat_composing
+                && !ctx.feeds_processing
+                && !ctx.news_composing
+                && app.lounge_card_shown()
+                && app.chat.selected_message_id.is_none() =>
+        {
+            crate::app::live::input::reply_from_key(app)
         }
         b'1' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);

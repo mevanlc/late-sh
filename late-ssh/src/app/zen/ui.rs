@@ -16,7 +16,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{
     bigclock,
-    layout::{self, BONSAI_STATUS_ROWS, FLOOR_ROWS},
+    layout::{self, FLOOR_ROWS},
     rows::{Headline, InboxRow},
     state::{BorderKind, TileKind, ZenState},
 };
@@ -39,7 +39,7 @@ use crate::app::{
     files::terminal_image::TerminalImageFrame,
     hub::aquarium::state::{AquariumCare, AquariumState, CareBar},
     lobby::daily::{panel::draw_daily_compact, state::DailyState},
-    pet::ui::{Neighbours, PetPose, PetView, WatchTarget, draw_pet_box},
+    pet::ui::{Neighbours, PetView, draw_pet_box, status_line},
 };
 
 /// A chat tile's frame: its room's label, the watcher count badge when the
@@ -557,79 +557,25 @@ fn hint_line_fitting(hints: &[(&str, &str)], width: usize) -> Line<'static> {
     hint_line(&hints[..keep])
 }
 
-/// The care modal's canvas at its true size, never the preview; pot on the
-/// floor, status row under it. A tile smaller than the canvas cuts it: the
-/// top rows go first, and the sides go evenly so the trunk stays centered.
+/// The care modal's canvas at its true size, never the preview, pot on the
+/// floor. No status row: the numbers live in the care modal (`w`), so the
+/// tile gives every row to the tree. A tile smaller than the canvas cuts it:
+/// the top rows go first, and the sides go evenly so the trunk stays centered.
 fn draw_bonsai_tile(frame: &mut Frame, area: Rect, state: &BonsaiState, wall_tick: usize) {
-    if area.height < BONSAI_STATUS_ROWS {
-        return;
-    }
-    let tree_area = Rect::new(
-        area.x,
-        area.y,
-        area.width,
-        area.height.saturating_sub(BONSAI_STATUS_ROWS),
-    );
     let mut lines = canvas_lines(state, true);
     apply_sway(&mut lines, wall_tick);
-    center_lines(&mut lines, tree_area.width as usize, CANVAS_WIDTH);
-    let cut_left = CANVAS_WIDTH.saturating_sub(tree_area.width as usize) / 2;
-    let visible = lines.len().min(tree_area.height as usize);
+    center_lines(&mut lines, area.width as usize, CANVAS_WIDTH);
+    let cut_left = CANVAS_WIDTH.saturating_sub(area.width as usize) / 2;
+    let visible = lines.len().min(area.height as usize);
     let dropped = lines.len() - visible;
     let mut lines: Vec<Line<'static>> = lines.into_iter().skip(dropped).collect();
-    let top_pad = (tree_area.height as usize).saturating_sub(lines.len());
+    let top_pad = (area.height as usize).saturating_sub(lines.len());
     let mut padded = Vec::with_capacity(top_pad + lines.len());
     for _ in 0..top_pad {
         padded.push(Line::from(""));
     }
     padded.append(&mut lines);
-    frame.render_widget(
-        Paragraph::new(padded).scroll((0, cut_left as u16)),
-        tree_area,
-    );
-
-    let status_area = Rect::new(area.x, tree_area.bottom(), area.width, BONSAI_STATUS_ROWS);
-    frame.render_widget(
-        Paragraph::new(bonsai_status_line(state)).centered(),
-        status_area,
-    );
-}
-
-fn bonsai_status_line(state: &BonsaiState) -> Line<'static> {
-    let dim = Style::default().fg(theme::TEXT_DIM());
-    let dot = || Span::styled(" · ", Style::default().fg(theme::TEXT_FAINT()));
-    let (label, color) = if !state.is_alive {
-        ("rip", theme::ERROR())
-    } else if state.water_stress >= 60 {
-        ("dry", theme::ERROR())
-    } else if state.water_stress >= 25 {
-        ("watch", theme::AMBER())
-    } else {
-        ("alive", theme::SUCCESS())
-    };
-    let mut spans = vec![
-        Span::styled(format!("day {}", state.age_days), dim),
-        dot(),
-        Span::styled(
-            format!("vigor {}", state.vigor),
-            Style::default().fg(theme::SUCCESS()),
-        ),
-        dot(),
-        Span::styled(
-            format!("stress {}", state.water_stress),
-            Style::default().fg(color),
-        ),
-        dot(),
-        Span::styled(label, Style::default().fg(color)),
-    ];
-    if let Some(message) = state.message.as_deref() {
-        spans.push(dot());
-        spans.push(Span::styled(
-            message.to_string(),
-            Style::default().fg(theme::AMBER()),
-        ));
-    }
-    Line::from(spans)
+    frame.render_widget(Paragraph::new(padded).scroll((0, cut_left as u16)), area);
 }
 
 /// The tank. Without the shop unlock the tile reads like the pet's, a
@@ -666,39 +612,8 @@ fn draw_pet_tile(frame: &mut Frame, area: Rect, pet: Option<&PetView<'_>>, neigh
         return;
     }
     let box_area = if area.height >= FLOOR_ROWS + 2 {
-        let state = view.state;
-        let dim = Style::default().fg(theme::TEXT_DIM());
-        let name = state
-            .name
-            .clone()
-            .unwrap_or_else(|| state.species.as_str().to_string());
-        let pose = PetPose::for_frame(
-            state.mood(),
-            neighbours,
-            state.perch(),
-            state.animation_ticks(),
-        );
-        let line = Line::from(vec![
-            Span::styled(
-                name,
-                Style::default()
-                    .fg(theme::AMBER_GLOW())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!(" · {}", state.mood().as_str()), dim),
-            Span::styled(
-                match pose {
-                    PetPose::Watch(WatchTarget::Tank, _) => " · watching the fish",
-                    PetPose::Watch(WatchTarget::Bonsai, _) => " · watching the tree",
-                    PetPose::At(_) => " · at your cursor",
-                    PetPose::Stroll | PetPose::Sulk | PetPose::Sleep => "",
-                },
-                dim,
-            ),
-        ])
-        .centered();
         frame.render_widget(
-            Paragraph::new(line),
+            Paragraph::new(status_line(view.state, neighbours).centered()),
             Rect::new(area.x, area.y, area.width, 1),
         );
         Rect::new(area.x, area.y + 1, area.width, area.height - 1)
