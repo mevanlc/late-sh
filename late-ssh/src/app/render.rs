@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use late_core::models::leaderboard::LeaderboardData;
-use late_core::models::statusline::{StatusComponent, StatusComponentSetting};
+use late_core::models::statusline::StatusComponentSetting;
 use late_core::models::user::{RightSidebarComponentSetting, RightSidebarMode, RoomListMode};
 
 use super::{
@@ -394,7 +394,7 @@ struct DrawContext<'a> {
     status_data: crate::app::statusline::data::StatusData<'a>,
     /// Slot for where each clickable top- or bottom-bar segment landed this
     /// frame, read by the hit test in `input.rs`.
-    status_hits: &'a std::cell::RefCell<Vec<(StatusComponent, Rect)>>,
+    status_hits: &'a std::cell::RefCell<Vec<(crate::app::statusline::bar::StatusClick, Rect)>>,
     home_selected: bool,
     /// The Zen pages (`app/zen`): layout state, the current room's chat
     /// (drawn at most once per frame), and the strings their status rows show.
@@ -517,14 +517,7 @@ impl App {
         };
         // Same draft-aware live preview as the sidebar panels above. These are
         // the user-arranged bottom-left components; the top bar is fixed.
-        let statusline_components = if self.show_settings {
-            self.settings_modal_state
-                .draft()
-                .statusline_components
-                .clone()
-        } else {
-            self.profile_state.profile().statusline_components.clone()
-        };
+        let statusline_components = self.statusline_components().to_vec();
         let shell_active_room = self.chat.selected_room_id;
         let synthetic_selected = self.chat.synthetic_entry_selected();
         let home_selected = dashboard_home_selected(
@@ -636,6 +629,7 @@ impl App {
                 &self.audio,
                 self.paired_source,
                 self.chat.news.all_articles(),
+                &self.chat.live_streams,
             )
         } else {
             None
@@ -650,6 +644,7 @@ impl App {
                 &self.audio,
                 self.paired_source,
                 self.chat.news.all_articles(),
+                &self.chat.live_streams,
             )
         } else {
             None
@@ -687,6 +682,27 @@ impl App {
         );
         let status_clock_24 = status_local_now.format("%H:%M").to_string();
         let status_clock_ampm = status_local_now.format("%-I:%M %P").to_string();
+        let status_date_short = status_local_now.format("%a %-d %b").to_string();
+        let status_date_full = status_local_now.format("%A, %-d %B").to_string();
+        let status_date_iso = status_local_now.format("%Y-%m-%d").to_string();
+        // What the live strip shows, in a line, built only while the bar
+        // carries the Live segment.
+        let status_live = if statusline_components.iter().any(|setting| {
+            setting.enabled
+                && setting.component == late_core::models::statusline::StatusComponent::Live
+        }) {
+            self.live
+                .view(
+                    &self.daily,
+                    &self.audio,
+                    self.paired_source,
+                    self.chat.news.all_articles(),
+                    &self.chat.live_streams,
+                )
+                .map(|strip| crate::app::live::ui::status_text(&strip))
+        } else {
+            None
+        };
         let (status_quests_daily, status_quests_weekly) = self.quest_state.open_counts();
         let status_station_name = match self.paired_source {
             late_core::models::user::AudioSource::Radio => {
@@ -1174,7 +1190,7 @@ impl App {
             self.selected_radio_station,
             radio_now_playing.as_deref(),
         );
-        let zen_date = zen_date_text(self.profile_state.profile().timezone.as_deref());
+        let zen_date = status_date_full.clone();
         let care_day = chrono::Utc::now().date_naive();
         let zen_care = crate::app::zen::ui::Care {
             bonsai: crate::app::zen::ui::Chore::of(
@@ -1524,6 +1540,9 @@ impl App {
                             clock_24: &status_clock_24,
                             clock_ampm: &status_clock_ampm,
                             hour: chrono::Timelike::hour(&status_local_now),
+                            date_short: &status_date_short,
+                            date_full: &status_date_full,
+                            date_iso: &status_date_iso,
                             chip_balance: self.chip_balance,
                             mentions_unread: self.chat.notifications.unread_count(),
                             dms_unread: self.chat.unread_dm_count(),
@@ -1540,6 +1559,7 @@ impl App {
                             quests_open_weekly: status_quests_weekly,
                             care_due: zen_care.due_count(),
                             voice: voice_badge.as_deref(),
+                            live: status_live.as_deref(),
                         },
                         status_hits: &self.last_status_hits,
                         home_selected,
@@ -1735,10 +1755,10 @@ impl App {
         }
 
         // The Zen pages are full-bleed: no frame, no HUD, no tab bar. Every
-        // other page keeps the app frame.
+        // other page keeps the app frame. Zen paints its own status row and
+        // fills the click slots below.
         let zen_page = screen == Screen::Zen;
         let inner = if zen_page {
-            ctx.status_hits.borrow_mut().clear();
             frame.render_widget(Clear, area);
             area
         } else {
@@ -2043,7 +2063,26 @@ impl App {
                 },
             ),
             Screen::Zen => {
+                // A page too small to draw has no row, so it keeps no
+                // click target either.
+                let (_, row) = crate::app::zen::layout::rice_areas(
+                    content_area,
+                    crate::app::zen::layout::rice_fits(content_area)
+                        && crate::app::statusline::bar::zen_row_shown(&ctx.statusline_components),
+                );
+                let status_row = row.map(|row| {
+                    crate::app::statusline::bar::build_zen_status_row(
+                        &ctx.statusline_components,
+                        &ctx.status_data,
+                        row,
+                    )
+                });
+                *ctx.status_hits.borrow_mut() = match &status_row {
+                    Some(status_row) => status_row.hits.clone(),
+                    None => Vec::new(),
+                };
                 let view = crate::app::zen::ui::ZenView {
+                    status_row,
                     zen: ctx.zen,
                     bonsai: ctx.bonsai,
                     aquarium: ctx.aquarium_state,
@@ -2948,13 +2987,3 @@ fn sponsor_line(include_thanks: bool) -> Line<'static> {
 #[cfg(test)]
 #[path = "render_test.rs"]
 mod render_test;
-
-/// Today's date in the profile timezone (UTC when unset or unparseable),
-/// for the Zen clock tile.
-fn zen_date_text(timezone: Option<&str>) -> String {
-    let now = chrono::Utc::now();
-    match timezone.and_then(|tz| tz.parse::<chrono_tz::Tz>().ok()) {
-        Some(tz) => now.with_timezone(&tz).format("%A, %-d %B").to_string(),
-        None => now.format("%A, %-d %B").to_string(),
-    }
-}

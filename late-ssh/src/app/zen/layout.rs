@@ -8,16 +8,32 @@ use crate::app::pet::ui::{Neighbours, WatchSide};
 
 /// The pet box at its smallest: its three art rows.
 pub const FLOOR_ROWS: u16 = crate::app::pet::ui::PET_BOX_MIN_ROWS;
-/// The Rice page: one hint row at the bottom, tiles above.
-pub fn rice_areas(area: Rect) -> (Rect, Rect) {
-    let hint = Rect::new(
-        area.x,
-        area.bottom().saturating_sub(1),
-        area.width,
-        1.min(area.height),
-    );
-    let tiles = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
-    (tiles, hint)
+/// The smallest page Rice draws. Under it the page is its too-small notice
+/// alone: no tiles, and no status row to click.
+pub const RICE_MIN_COLS: u16 = 40;
+pub const RICE_MIN_ROWS: u16 = 12;
+
+pub fn rice_fits(area: Rect) -> bool {
+    area.width >= RICE_MIN_COLS && area.height >= RICE_MIN_ROWS
+}
+
+/// The Rice page: the tiles, then the status row at the bottom when the
+/// page has one (`statusline::bar::zen_row_shown`); without it the tiles
+/// take the whole page.
+pub fn rice_areas(area: Rect, status_row: bool) -> (Rect, Option<Rect>) {
+    match status_row {
+        true => {
+            let row = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(1),
+                area.width,
+                1.min(area.height),
+            );
+            let tiles = Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1));
+            (tiles, Some(row))
+        }
+        false => (area, None),
+    }
 }
 
 /// Every tile's rect in layout order, with `gap` cells between siblings.

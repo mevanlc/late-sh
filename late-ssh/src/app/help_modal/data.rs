@@ -1485,7 +1485,7 @@ fn zen_help_lines() -> Vec<String> {
         "",
         "Zen is the clubhouse cut down to the things you keep alive: your bonsai, the reef, the pet, your rooms' chat, music, a clock, and the lobby, as tiles you arrange yourself. Ctrl+F opens it from any page and the same chord hands you back; Esc stays on the page. The layout is saved per account, the rooms your chat tiles are bound to included.",
         "",
-        "Each tile names its own keys on the right of its title (t hides the titles). The footer shows the keys you use most; the full list is here.",
+        "Each tile names its own keys on the right of its title (t hides the titles). The bottom row is your status line (Settings, Statusline); switch every component off and the row goes. ? opens this list, with every key.",
         "",
         "Focus and tiles",
         "  Tab / Shift+Tab   focus the next or previous tile",
@@ -1516,7 +1516,8 @@ fn zen_help_lines() -> Vec<String> {
         "  a                 feed the tank (free, once a day, +100 chips)",
         "  m  - =  v x  v1-5 mute, volume, audio source, and station, as everywhere",
         "  click             pet the pet; it reads the rest of your session itself",
-        "  Enter / click     on the live tile, open what the #lounge live strip shows",
+        "  o                 with a live tile on the page, open what the #lounge live strip shows",
+        "  Enter / click     on the live tile, the same",
         "  sprout            no page key: its Shop row (/shop, Companions) cuts it with - within the week",
         "",
         "Leaving",
@@ -1645,11 +1646,13 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "  Segments paint left to right in the order the list shows them top to bottom."
             .to_string(),
-        "  Available segments: Keyhints, station, voice, mentions, your move, care, quests, pot, chips, users online, time"
+        "  Available segments: Keyhints, mentions, voice, live, date, your move, care, quests, station, pot, chips, users online, time"
             .to_string(),
-        "  On by default, and visible even while idle: Keyhints, station, voice, mentions, your move, care."
+        "  On by default, and visible even while idle: Keyhints, mentions, voice, live, date."
             .to_string(),
         "  Care counts the bonsai, tank, and pet still waiting on today's care; click it for Zen."
+            .to_string(),
+        "  Live reads what the #lounge live strip shows (a stream, a match, a booth track, a shared link); click it to open that."
             .to_string(),
         "  Status segments with a destination are clickable and jump to what they count."
             .to_string(),

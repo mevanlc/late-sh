@@ -30,7 +30,7 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
     handle_rice(app, event)
 }
 
-/// The chat keys and the tank feed `a`. The chat keys belong to the
+/// The chat keys, the Live strip's `o`, and the tank feed `a`. The chat keys belong to the
 /// focused chat tile: `[` `]` rebind it to the previous or next joined
 /// room, `i` and Enter write in its room, `j` `k` select in it, and the
 /// message actions act on its selection; with any other tile focused all
@@ -69,6 +69,12 @@ fn handle_common(app: &mut App, event: &ParsedInput) -> bool {
         }
     }
     match byte {
+        // `o` opens what a Live tile on the page shows, whichever tile has
+        // the focus, as on the #lounge card. One zoomed away is not shown.
+        b'o' if app.zen.draws(TileKind::Live) => {
+            crate::app::live::input::open_from_key(app);
+            true
+        }
         b'[' => {
             if chat_focused {
                 cycle_room(app, -1);
@@ -342,7 +348,10 @@ pub(crate) fn focus_moved(app: &mut App) {
 /// nothing to trade.
 fn resize_or_explain(app: &mut App, dir: Dir, delta_cells: i16) -> bool {
     let (cols, rows) = app.size;
-    let (tiles_area, _) = super::layout::rice_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let (tiles_area, _) = super::layout::rice_areas(
+        ratatui::layout::Rect::new(0, 0, cols, rows),
+        app.zen_status_row(),
+    );
     if app.zen.resize_focused(dir, delta_cells, tiles_area) {
         return true;
     }
@@ -360,7 +369,10 @@ fn resize_or_explain(app: &mut App, dir: Dir, delta_cells: i16) -> bool {
 /// twice as tall as wide, so width is halved before comparing).
 fn focused_tile_is_wide(app: &App) -> bool {
     let (cols, rows) = app.size;
-    let (tiles_area, _) = super::layout::rice_areas(ratatui::layout::Rect::new(0, 0, cols, rows));
+    let (tiles_area, _) = super::layout::rice_areas(
+        ratatui::layout::Rect::new(0, 0, cols, rows),
+        app.zen_status_row(),
+    );
     let rects = super::layout::tile_rects(
         &app.zen.rice.root,
         tiles_area,

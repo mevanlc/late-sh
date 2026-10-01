@@ -44,6 +44,7 @@ use crate::app::{
     live::{pick::LiveSource, state::LiveStripView},
     lobby::daily::{panel::draw_daily_compact, state::DailyState},
     pet::ui::{Neighbours, PetView, draw_pet_box, status_line},
+    statusline::bar::ZenStatusRow,
 };
 
 /// A chat tile's frame: its room's label, the watcher count badge when the
@@ -79,6 +80,9 @@ pub(crate) fn chat_tile_title(label: &str, stream_badge: Option<&str>, width: u1
 /// Everything the Zen page reads, assembled once per frame in `render.rs`.
 pub(crate) struct ZenView<'a> {
     pub zen: &'a ZenState,
+    /// The bottom row, `None` when every status line component is off and
+    /// the tiles take the whole page.
+    pub status_row: Option<ZenStatusRow>,
     pub bonsai: &'a BonsaiState,
     /// The reef is drawn for everyone; `aquarium_owned` says whether the
     /// account has fish in it or gets the shop caption instead.
@@ -126,11 +130,18 @@ pub(crate) fn draw_rice(
     mut view: ZenView<'_>,
     terminal_images: &mut TerminalImageFrame,
 ) {
-    if area.width < 40 || area.height < 12 {
-        crate::app::common::primitives::draw_too_small(frame, area, "Rice", 40, 12);
+    if !layout::rice_fits(area) {
+        crate::app::common::primitives::draw_too_small(
+            frame,
+            area,
+            "Rice",
+            layout::RICE_MIN_COLS,
+            layout::RICE_MIN_ROWS,
+        );
         return;
     }
-    let (tiles_area, hint_area) = layout::rice_areas(area);
+    let status_row = view.status_row.take();
+    let (tiles_area, row_area) = layout::rice_areas(area, status_row.is_some());
     // One frame per chat tile in layout order. Zoomed, the one tile drawn
     // is the focused one, so it takes the active chat's frame, not the
     // first.
@@ -300,7 +311,9 @@ pub(crate) fn draw_rice(
             TileKind::Blank => draw_blank_tile(frame, inner, focused),
         }
     }
-    draw_rice_hint(frame, hint_area, zen);
+    if let (Some(row), Some(row_area)) = (status_row, row_area) {
+        draw_status_row(frame, row_area, row);
+    }
     draw_kind_picker(frame, area, zen);
 }
 
@@ -391,7 +404,7 @@ fn draw_kind_picker(frame: &mut Frame, area: Rect, zen: &ZenState) {
 
 /// The keys a tile answers to, named on the right of its title so the
 /// page explains itself in one place per tile; `t` hides the titles and
-/// the keys with them. The layout keys are the footer's.
+/// the keys with them. The layout keys are the guide's (`?`).
 fn tile_keys(kind: TileKind, view: &ZenView<'_>) -> &'static [(&'static str, &'static str)] {
     match kind {
         TileKind::Bonsai => &[("w", "tend")],
@@ -415,7 +428,7 @@ fn tile_keys(kind: TileKind, view: &ZenView<'_>) -> &'static [(&'static str, &'s
                 .as_ref()
                 .is_some_and(|strip| strip.opens().is_some()) =>
         {
-            &[("enter", "open")]
+            &[("o", "open")]
         }
         TileKind::Live => &[],
         TileKind::Clock
@@ -536,45 +549,12 @@ pub(crate) fn care_bar_spans(bar: CareBar) -> Vec<Span<'static>> {
     ]
 }
 
-fn draw_rice_hint(frame: &mut Frame, area: Rect, zen: &ZenState) {
-    if area.height == 0 {
-        return;
+/// The user's status line. The layout keys live in the guide (`?`); each
+/// tile names its own in its title.
+fn draw_status_row(frame: &mut Frame, area: Rect, row: ZenStatusRow) {
+    if let Some(bar) = row.bar {
+        frame.render_widget(Paragraph::new(bar), area);
     }
-    let focus = zen.focused_kind().map(TileKind::label).unwrap_or("nothing");
-    let mut spans = vec![
-        Span::styled(" ▌ ", Style::default().fg(theme::AMBER())),
-        Span::styled(
-            focus.to_string(),
-            Style::default()
-                .fg(theme::AMBER_GLOW())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if zen.zoomed { " zoomed" } else { "" },
-            Style::default().fg(theme::TEXT_DIM()),
-        ),
-    ];
-    // The layout keys, the way out and the guide first, then by how often
-    // they are used; the tail is dropped hint by hint on a narrow terminal
-    // so nothing is cut in half. The tiles name their own keys.
-    let head_width: usize = spans.iter().map(Span::width).sum();
-    let hints = hint_line_fitting(
-        &[
-            ("Ctrl+F", "back"),
-            ("?", "keys"),
-            ("Tab ←→", "focus"),
-            ("space", "kind"),
-            ("S", "split"),
-            ("X", "close"),
-            ("z", "zoom"),
-            ("<>{}", "resize"),
-            ("r", "flip"),
-            ("R", "reset"),
-        ],
-        (area.width as usize).saturating_sub(head_width),
-    );
-    spans.extend(hints.spans);
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// `hint_line` with as many leading hints as fit in `width` cells.
@@ -801,9 +781,15 @@ fn draw_visualizer_tile(frame: &mut Frame, area: Rect, wall_tick: usize, eq_stat
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The live strip while something is up; otherwise a narrow "nothing
-/// live" beside the #lounge feed, which takes the larger share, so the
-/// tile is never dead.
+/// The fewest columns the #lounge feed gets beside a live strip: under
+/// this its rows are cut to a word, and the strip keeps the whole tile.
+const LIVE_FEED_MIN_WIDTH: u16 = 30;
+
+/// The live strip, or a faint "nothing live" while nothing is up, beside
+/// the #lounge feed, so the tile is never dead. The strip takes three
+/// fifths of the tile, never less than its full form's width
+/// (`live::ui::MIN_FULL_WIDTH`), and keeps the whole tile when the feed
+/// would get fewer than `LIVE_FEED_MIN_WIDTH` columns; the note takes 30%.
 fn draw_live_tile(
     frame: &mut Frame,
     area: Rect,
@@ -812,13 +798,26 @@ fn draw_live_tile(
     entries: &[ActivityTickerEntry],
     friends: &[ActiveFriend],
 ) {
-    if let Some(strip) = strip {
-        crate::app::live::ui::draw_live_tile(frame, area, strip, hit);
-        return;
-    }
-    let [note, feed] =
-        Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(area);
-    draw_centered_note(frame, pad_sides(note), &["nothing live"]);
+    let feed = match strip {
+        Some(strip) => {
+            let strip_width = (area.width * 3 / 5).max(crate::app::live::ui::MIN_FULL_WIDTH);
+            if area.width.saturating_sub(strip_width) < 1 + LIVE_FEED_MIN_WIDTH {
+                crate::app::live::ui::draw_live_tile(frame, area, strip, hit);
+                return;
+            }
+            let [strip_area, feed] =
+                Layout::horizontal([Constraint::Length(strip_width), Constraint::Fill(1)])
+                    .areas(area);
+            crate::app::live::ui::draw_live_tile(frame, strip_area, strip, hit);
+            feed
+        }
+        None => {
+            let [note, feed] =
+                Layout::horizontal([Constraint::Percentage(30), Constraint::Fill(1)]).areas(area);
+            draw_centered_note(frame, pad_sides(note), &["nothing live"]);
+            feed
+        }
+    };
     let feed_block = Block::default()
         .borders(Borders::LEFT)
         .border_style(Style::default().fg(theme::BORDER_DIM()));

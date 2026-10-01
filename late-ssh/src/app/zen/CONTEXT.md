@@ -3,7 +3,7 @@
 ## Metadata
 - Scope: `late-ssh/src/app/zen`
 - Purpose: the full-bleed page that cuts the clubhouse down to the things you keep alive.
-- Status: Experimental. Reached with `Ctrl+F` from any page, or `/zen` from any composer (same toggle); a surface over that page, absent from the Tab cycle. The chord returns to the page it was opened from (`App::zen_return_screen`), or to the Clubhouse when the session landed on Zen (Settings, Tweaks, "Land on"). Leaving by any route (a digit, a tour step) clears the return page in `App::set_screen`, so a later chord never hands back a stale page. The one route back that is not the chord is the backtick chain: going into the games from Zen makes Zen the chain's base (`App::workspace_base`), which carries the return page and refills it when the wrap or an Esc off a board or table lands back here. The first-visit tour's `VisitZen` stop is reached with the chord (or Enter, for terminals that swallow it) and left with `0`.
+- Status: Experimental. Reached with `Ctrl+F` from any page, or `/zen` from any composer (same toggle); a surface over that page, absent from the Tab cycle. The chord returns to the page it was opened from (`App::zen_return_screen`), or to the Clubhouse when the session landed on Zen (Settings, Tweaks, "Land on"). A daily board or a house table closes on the way in, so over one of those Zen remembers the page the board or table was opened from, and Zen's own page when that was Zen (`input.rs::zen_return_screen`). Leaving by any route (a digit, a tour step) clears the return page in `App::set_screen`, so a later chord never hands back a stale page. The one route back that is not the chord is the backtick chain: going into the games from Zen makes Zen the chain's base (`App::workspace_base`), which carries the return page and refills it when the wrap or an Esc off a board or table lands back here. The first-visit tour's `VisitZen` stop is reached with the chord (or Enter, for terminals that swallow it) and left with `0`.
 - Parent context: `../../../../CONTEXT.md`
 
 ---
@@ -45,9 +45,11 @@ viewer's RSS entries merged newest first, two rows each (the title with
 its source and age, then the link), an entry shared to News listed once,
 as the article), live (the #lounge live strip, `../live/CONTEXT.md`: the
 picture rows from 8 rows and 56 columns inside, else its one row, with no
-hint row and no rule since the title names the key; while nothing is up,
-a faint `nothing live` on 30% of the width, beside the #lounge
-activity feed on the rest), blank. The look (border style, gap, titles) is
+hint row and no rule since the title names the key, on three fifths of
+the width (56 columns at least) beside the #lounge activity feed on the
+rest, or the whole tile when the feed would get under 30 columns; while
+nothing is up, a faint `nothing live` on 30% of the width beside the
+feed), blank. The look (border style, gap, titles) is
 part of the layout.
 
 The default, which `R` also resets to (rounded borders, no gap, titles on):
@@ -102,7 +104,7 @@ never the count (`chat_tile_title`, `ui_test.rs`).
 late-ssh/src/app/zen/
 |-- mod.rs        # module declarations only
 |-- state.rs      # TileKind, Node (split tree), Look, RiceLayout (serde), ZenState + edits
-|-- layout.rs     # pure rect math: rice_areas, tile_rects, tile_inner, neighbour_side, pet_neighbours
+|-- layout.rs     # pure rect math: rice_fits (the 40x12 floor under which the page is its too-small notice alone), rice_areas (tiles + optional status row), tile_rects, tile_inner, neighbour_side, pet_neighbours
 |-- rows.rs       # pure row builders for the Inbox and Headlines tiles
 |-- ui.rs         # ZenView, draw_rice, the tile widgets
 |-- input.rs      # feed keys, room walk, focus and layout keys
@@ -110,10 +112,10 @@ late-ssh/src/app/zen/
 ```
 
 Glue: `Screen::Zen` in `common/primitives.rs`; the frame skip, `ZenView`
-assembly, and `zen_chat_view` in `render.rs`; the digit `7`, the top-bar
+assembly, the status row build, and `zen_chat_view` in `render.rs`; the digit `7`, the top-bar
 hit test, the picker staying put in `room_search_modal/input.rs`, and the
 dedicated-input hook in `input.rs`; `App::zen`, `App::zen_chat_rows_cache`,
-`sync_aquarium_bounds`, and `mark_zen_layout_dirty` / `flush_zen_layout` in `state.rs`; the
+`zen_status_row`, `sync_aquarium_bounds`, and `mark_zen_layout_dirty` / `flush_zen_layout` in `state.rs`; the
 aquarium stepping and anim edge in `tick.rs`; `extract_zen_layout` /
 `User::set_zen_layout` in `late-core/src/models/user.rs`.
 
@@ -121,12 +123,14 @@ aquarium stepping and anim edge in `tick.rs`; `extract_zen_layout` /
 
 Where they are shown: each tile names its own keys on the right of its
 title (`tile_keys`, drawn with `hint_line` so the key is amber and the
-word dim, as in the footer), always, so `t` hides them with the titles; the footer
-carries Esc and `?` first, then the layout keys by use (focus, kind,
-split, close, zoom, resize, flip, reset), and drops whole hints from the
-right when the terminal is narrow;
-`?` opens `HelpTopic::Zen` with everything. Nothing else on the page
-names a key: the lobby's compact footer lost its key pair to the title.
+word dim), always, so `t` hides them with the titles. `?` opens
+`HelpTopic::Zen`, which lists the layout keys and everything else. The
+page's last row is the user's status line (`../statusline/CONTEXT.md`,
+Zen row), where the default Keyhints already say `Guide ?`; with every
+status line component switched off the row is gone and the tiles take
+the whole page. Nothing
+else on the page names a key: the lobby's compact footer lost its key
+pair to the title.
 
 `Ctrl+F` leaves. Esc only peels the tile picker, the composer, or a selected
 message, and otherwise does nothing: it never leaves. Backtick runs the
@@ -156,9 +160,11 @@ modal instead, and a page with no chat tile says so in a banner.
 With Headlines focused, `j` `k` walk its items the same way and Enter
 copies the selected link to the clipboard (`pending_clipboard`, the way a
 copied search hit goes).
-With Live focused, Enter opens what the strip shows, as `o` does on the
-#lounge card (`live::input::open_from_key`); a click on the strip opens it
-without focusing the tile. There is no reply key here: `r` flips the split.
+With a Live tile on the page (`ZenState::draws`, so not one zoomed away
+from), `o` opens what the strip shows from whichever tile has the focus,
+as on the #lounge card (`live::input::open_from_key`); with Live focused,
+Enter does too, and a click on the strip opens it without focusing the
+tile. There is no reply key here: `r` flips the split.
 The pet has no key: it is petted with a left click and reads the rest of
 the session itself. The sprout on the tank floor (the fortnightly bud;
 leave it a week and it roots as a plant) is cut on its Shop row
@@ -186,6 +192,10 @@ leaving the page, so a held resize key costs one row update.
   re-binds it on every `set_screen`, resize, and layout edit to the
   aquarium tile's inner rect, from the same pure functions the renderer
   uses (`layout.rs`), so the sim and the drawing never disagree on size.
+  The status row comes and goes with a setting, not an edit here (a
+  Settings preview, the profile landing after login), so tick also
+  re-binds when `App::zen_status_row` differs from the row the reef was
+  bound with (`App::zen_row_bound`).
   It steps on the quarter edge whenever the page is up, owned or not
   (`aquarium_visible` in `tick.rs`), though the tile only draws it
   once the tank is owned; unowned it is the shop note.
@@ -255,7 +265,8 @@ leaving the page, so a held resize key costs one row update.
   (`layout_test.rs`), the care bar, the music tile's rows, and the bonsai
   canvas cut (`ui_test.rs`),
   the resize floor (`state_test.rs`), the Inbox and Headlines rows
-  (`rows_test.rs`), Inbox Enter, Live Enter and the click the picker
-  swallows (`input_flow_test.rs`), the drawn-kinds gate (`state_test.rs`), and
-  the empty Live tile (`ui_test.rs`); the rest of the tile drawing is
+  (`rows_test.rs`), Inbox Enter, Live Enter and `o`, the click the picker
+  swallows, `?` opening the Zen topic, and the status row's all-off
+  removal (`input_flow_test.rs`), the drawn-kinds gate (`state_test.rs`), and
+  the Live tile, empty and sharing a wide tile with the feed (`ui_test.rs`); the rest of the tile drawing is
   untested.
