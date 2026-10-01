@@ -10089,9 +10089,6 @@ impl WorldState {
                 return;
             };
             let adopted = p.kennel.adopt_tamed(&mut p.pet, species);
-            let before = skill_level_for_xp(p.taming_xp);
-            p.taming_xp += gained as i64;
-            let after = skill_level_for_xp(p.taming_xp);
             let outcome = match adopted {
                 Adopted::AtHeel => format!("The {} is yours now.", species.name),
                 Adopted::Kenneled => format!(
@@ -10112,13 +10109,7 @@ impl WorldState {
                     TamingSkill::label()
                 ),
             );
-            if after > before {
-                self.log_to(
-                    user_id,
-                    LogKind::System,
-                    format!("Your {} rises to level {after}!", TamingSkill::label()),
-                );
-            }
+            self.train_taming(user_id, i64::from(gained));
             self.tame_cooldowns.remove(&(user_id, bi));
         } else {
             // Failure: it bolts, and stays spooked for a spell.
@@ -10133,6 +10124,24 @@ impl WorldState {
             );
         }
         self.dirty = true;
+    }
+
+    /// Train Animal Taming by `gained` xp, announcing any level it rises to.
+    /// Both lanes feed it: a successful tame and a kill made with a companion.
+    fn train_taming(&mut self, user_id: Uuid, gained: i64) {
+        let Some(p) = self.players.get_mut(&user_id) else {
+            return;
+        };
+        let before = skill_level_for_xp(p.taming_xp);
+        p.taming_xp += gained;
+        let after = skill_level_for_xp(p.taming_xp);
+        if after > before {
+            self.log_to(
+                user_id,
+                LogKind::System,
+                format!("Your {} rises to level {after}!", TamingSkill::label()),
+            );
+        }
     }
 
     // ---- Player housing -------------------------------------------------
