@@ -19,7 +19,8 @@ use crate::app::common::primitives::thousands;
 
 use super::frame::FramedPiece;
 use super::svc::{
-    ContentRatingAction, GalleryPiece, GalleryResult, GalleryService, HangRefusal, applause_label,
+    ContentRatingAction, ContentRatingOutcome, GalleryPiece, GalleryResult, GalleryService,
+    HangRefusal, applause_label,
 };
 
 /// The gallery's listings, in rail order.
@@ -803,14 +804,14 @@ impl GalleryState {
                 GalleryResult::ContentRating {
                     piece_id,
                     generation,
-                    result,
+                    outcome,
                 } => {
                     if generation != self.rating_generation {
                         continue;
                     }
                     self.pending_rating = false;
-                    match result {
-                        Ok(summary) => {
+                    match outcome {
+                        ContentRatingOutcome::Rated(summary) => {
                             self.update_piece(piece_id, |piece| piece.content_rating = summary);
                             // An older listing must not put its old verdict back.
                             for section in GallerySection::ALL {
@@ -825,16 +826,30 @@ impl GalleryState {
                                 dialog.error = None;
                             }
                         }
-                        Err(error) => {
-                            self.notice = Some(error.clone());
-                            if let Some(dialog) = &mut self.rating_dialog
-                                && dialog.piece_id == piece_id
-                            {
-                                dialog.pending = false;
-                                dialog.error = Some(error);
-                            }
+                        ContentRatingOutcome::OwnPiece => {
+                            self.rating_refused(piece_id, OWN_PIECE_CONTENT_VOTE)
+                        }
+                        ContentRatingOutcome::NotYours => {
+                            self.rating_refused(piece_id, NOT_YOURS_NSFW_FLAG)
+                        }
+                        ContentRatingOutcome::NotFound => {
+                            self.rating_refused(piece_id, PIECE_GONE_CONTENT_RATING)
+                        }
+                        ContentRatingOutcome::Closed => {
+                            self.rating_refused(piece_id, GALLERY_CLOSED_CONTENT_RATING)
                         }
                     }
+                }
+                GalleryResult::ContentRatingFailed {
+                    piece_id,
+                    generation,
+                    error,
+                } => {
+                    if generation != self.rating_generation {
+                        continue;
+                    }
+                    self.pending_rating = false;
+                    self.rating_refused(piece_id, &error);
                 }
                 GalleryResult::Counts(counts) => {
                     self.counts = Some(counts);
@@ -997,6 +1012,18 @@ impl GalleryState {
         }
     }
 
+    /// A rating request that changed nothing: say why, in the notice and in
+    /// the dialog when it is still open on that piece.
+    fn rating_refused(&mut self, piece_id: Uuid, notice: &str) {
+        self.notice = Some(notice.to_string());
+        if let Some(dialog) = &mut self.rating_dialog
+            && dialog.piece_id == piece_id
+        {
+            dialog.pending = false;
+            dialog.error = Some(notice.to_string());
+        }
+    }
+
     fn update_piece(&mut self, piece_id: Uuid, mut apply: impl FnMut(&mut GalleryPiece)) {
         for state in &mut self.sections {
             for piece in &mut state.pieces {
@@ -1011,6 +1038,10 @@ impl GalleryState {
 const OWN_PIECE_APPLAUSE: &str = "You cannot applaud your own piece.";
 const CLOSED_MONTH_APPLAUSE: &str = "Applause closed with the month. The ranking stands.";
 const NOT_YOURS_TAKE_DOWN: &str = "Only the hanger takes a piece down.";
+const OWN_PIECE_CONTENT_VOTE: &str = "Artists cannot vote on their own pieces.";
+const NOT_YOURS_NSFW_FLAG: &str = "Only the hanger sets a piece's NSFW flag.";
+const PIECE_GONE_CONTENT_RATING: &str = "The piece is no longer hanging.";
+const GALLERY_CLOSED_CONTENT_RATING: &str = "The gallery is closed.";
 const CLOSED_MONTH_TAKE_DOWN: &str = "Last month's wall is settled; that piece stays up.";
 
 /// The first day of the current UTC month, the `period_month` a piece hung

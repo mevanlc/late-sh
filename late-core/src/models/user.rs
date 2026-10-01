@@ -652,7 +652,7 @@ impl User {
     /// Staff (admin/moderator) flags for the given users. Users with neither
     /// flag are omitted; values are `(is_admin, is_moderator)`.
     pub async fn staff_flags_by_ids(
-        client: &Client,
+        client: &impl GenericClient,
         user_ids: &[Uuid],
     ) -> Result<HashMap<Uuid, (bool, bool)>> {
         if user_ids.is_empty() {

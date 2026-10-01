@@ -682,7 +682,7 @@ fn primary_username(command: &ModCommand) -> &str {
         | ModCommand::ArtboardRemovePiece { .. }
         | ModCommand::ArtboardFeaturePiece { .. }
         | ModCommand::ArtboardMark { .. }
-        | ModCommand::ArtboardUnmarkMod { .. }
+        | ModCommand::ArtboardUnmarkBy { .. }
         | ModCommand::ArtboardSafetyView { .. }
         | ModCommand::ArtboardGallery { .. } => {
             panic!("command does not have a primary username: {command:?}")
@@ -723,7 +723,7 @@ fn parses_art_safety_tiers_clear_and_inspection() {
     }
     assert_eq!(
         parse_mod_command("artboard safety none 1234abcd by @reviewer mistaken").unwrap(),
-        ModCommand::ArtboardUnmarkMod {
+        ModCommand::ArtboardUnmarkBy {
             id_prefix: "1234abcd".into(),
             actor: "@reviewer".into(),
             reason: "mistaken".into()

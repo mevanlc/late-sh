@@ -10,6 +10,7 @@ use ratatui::{
 
 use crate::app::common::theme;
 use crate::app::input::{MouseEvent, MouseEventKind};
+use crate::moderation::command::ModCommandHead;
 
 use super::state::{ModLogKind, ModLogLine, ModModalState};
 
@@ -165,21 +166,7 @@ fn help_line(text: &str) -> Line<'static> {
     let syntax = text.split(" - ").next().unwrap_or(text);
     let mut tokens = syntax.split_whitespace();
     let command = tokens.next().unwrap_or_default();
-    let known_command = matches!(
-        command,
-        "rename-room"
-            | "rename-user"
-            | "room-voice"
-            | "view"
-            | "artboard"
-            | "kick"
-            | "ban"
-            | "unban"
-            | "slow"
-            | "unslow"
-            | "admin"
-            | "help"
-    );
+    let known_command = ModCommandHead::from_word(command).is_some();
     let mut has_argument = false;
     let is_usage = tokens.all(|token| {
         if token.starts_with(['<', '[', '@', '#']) {

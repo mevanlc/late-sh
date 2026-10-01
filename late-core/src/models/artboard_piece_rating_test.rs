@@ -98,18 +98,44 @@ async fn hang(db: &Db, owner: Uuid, hash: &str) -> Uuid {
     }
 }
 
+async fn try_vote(
+    db: &Db,
+    piece: Uuid,
+    user: Uuid,
+    rating: Option<ArtContentRating>,
+) -> VoteOutcome {
+    let mut client = db.get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    let outcome = ArtboardPieceRating::set_vote(&tx, piece, user, rating)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    outcome
+}
+
+/// A vote that must land, and the summary it left.
 async fn vote(
     db: &Db,
     piece: Uuid,
     user: Uuid,
     rating: Option<ArtContentRating>,
-) -> Result<ContentRatingSummary> {
-    let mut client = db.get().await?;
-    let tx = client.transaction().await?;
-    ArtboardPieceRating::set_vote(&tx, piece, user, rating).await?;
-    let summary = ArtboardPieceRating::read(&tx, piece, user).await?.unwrap();
-    tx.commit().await?;
-    Ok(summary)
+) -> ContentRatingSummary {
+    assert_eq!(try_vote(db, piece, user, rating).await, VoteOutcome::Saved);
+    let client = db.get().await.unwrap();
+    ArtboardPieceRating::read(&client, piece, user)
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+async fn set_owner_flag(db: &Db, piece: Uuid, user: Uuid, nsfw: bool) -> OwnerFlagOutcome {
+    let mut client = db.get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    let outcome = ArtboardPieceRating::set_owner_flag(&tx, piece, user, nsfw)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    outcome
 }
 
 async fn mark(
@@ -121,9 +147,10 @@ async fn mark(
 ) {
     let mut client = db.get().await.unwrap();
     let tx = client.transaction().await.unwrap();
-    ArtboardPieceRating::set_staff_mark(&tx, piece, actor, tier, rating, "test")
+    let outcome = ArtboardPieceRating::set_staff_mark(&tx, piece, actor, tier, rating, "test")
         .await
         .unwrap();
+    assert!(matches!(outcome, StaffMarkOutcome::Saved { .. }));
     tx.commit().await.unwrap();
 }
 
@@ -135,34 +162,42 @@ async fn votes_are_replaceable_revocable_independent_of_applause_and_never_self_
     let fan = create_test_user(db, "rating-fan").await;
     let fan2 = create_test_user(db, "rating-fan2").await;
     let piece = hang(db, owner.id, "replaceable-rating").await;
-    assert!(
-        vote(db, piece, owner.id, Some(ArtContentRating::Sfw))
-            .await
-            .is_err()
+    assert_eq!(
+        try_vote(db, piece, owner.id, Some(ArtContentRating::Sfw)).await,
+        VoteOutcome::OwnPiece
     );
-    assert!(
-        vote(db, piece, owner.id, Some(ArtContentRating::Nsfw))
-            .await
-            .is_err()
+    assert_eq!(
+        try_vote(db, piece, owner.id, Some(ArtContentRating::Nsfw)).await,
+        VoteOutcome::OwnPiece
     );
-    let first = vote(db, piece, fan.id, Some(ArtContentRating::Nsfw))
-        .await
-        .unwrap();
+    let first = vote(db, piece, fan.id, Some(ArtContentRating::Nsfw)).await;
     assert_eq!(first.viewer_vote, Some(ArtContentRating::Nsfw));
     assert!(!first.determination().0.is_nsfw());
-    let second = vote(db, piece, fan2.id, Some(ArtContentRating::Nsfw))
-        .await
-        .unwrap();
+    let second = vote(db, piece, fan2.id, Some(ArtContentRating::Nsfw)).await;
     assert!(second.determination().0.is_nsfw());
-    let replaced = vote(db, piece, fan.id, Some(ArtContentRating::Sfw))
-        .await
-        .unwrap();
+    let replaced = vote(db, piece, fan.id, Some(ArtContentRating::Sfw)).await;
     assert_eq!((replaced.sfw_votes, replaced.nsfw_votes), (1, 1));
+    let client = db.get().await.unwrap();
+    assert_eq!(
+        ArtboardPieceRating::content_votes(&client, piece)
+            .await
+            .unwrap(),
+        vec![
+            ContentVote {
+                user_id: fan2.id,
+                username: fan2.username.clone(),
+                rating: ArtContentRating::Nsfw,
+            },
+            ContentVote {
+                user_id: fan.id,
+                username: fan.username.clone(),
+                rating: ArtContentRating::Sfw,
+            },
+        ]
+    );
     assert!(!replaced.determination().0.is_nsfw());
-    vote(db, piece, fan.id, Some(ArtContentRating::Sfw))
-        .await
-        .unwrap();
-    let withdrawn = vote(db, piece, fan.id, None).await.unwrap();
+    vote(db, piece, fan.id, Some(ArtContentRating::Sfw)).await;
+    let withdrawn = vote(db, piece, fan.id, None).await;
     assert_eq!(
         (
             withdrawn.sfw_votes,
@@ -195,13 +230,12 @@ async fn clearing_each_override_reveals_votes_cast_while_overridden_and_past_mon
     let moderator = create_test_user(db, "fallback-mod").await;
     let admin = create_test_user(db, "fallback-admin").await;
     let piece = hang(db, owner.id, "fallback-rating").await;
-    let mut client = db.get().await.unwrap();
+    let client = db.get().await.unwrap();
     client.execute("UPDATE artboard_pieces SET period_month = (period_month - INTERVAL '1 month')::date WHERE id = $1", &[&piece]).await.unwrap();
-    let tx = client.transaction().await.unwrap();
-    ArtboardPieceRating::set_owner_flag(&tx, piece, owner.id, true)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
+    assert_eq!(
+        set_owner_flag(db, piece, owner.id, true).await,
+        OwnerFlagOutcome::Saved
+    );
     mark(
         db,
         piece,
@@ -218,12 +252,8 @@ async fn clearing_each_override_reveals_votes_cast_while_overridden_and_past_mon
         Some(ArtContentRating::Sfw),
     )
     .await;
-    vote(db, piece, fan.id, Some(ArtContentRating::Nsfw))
-        .await
-        .unwrap();
-    let summary = vote(db, piece, fan2.id, Some(ArtContentRating::Nsfw))
-        .await
-        .unwrap();
+    vote(db, piece, fan.id, Some(ArtContentRating::Nsfw)).await;
+    let summary = vote(db, piece, fan2.id, Some(ArtContentRating::Nsfw)).await;
     assert_eq!(
         (summary.nsfw_votes, summary.determination().1),
         (2, RatingSource::Admin)
@@ -247,11 +277,10 @@ async fn clearing_each_override_reveals_votes_cast_while_overridden_and_past_mon
             .1,
         RatingSource::Owner
     );
-    let tx = client.transaction().await.unwrap();
-    ArtboardPieceRating::set_owner_flag(&tx, piece, owner.id, false)
-        .await
-        .unwrap();
-    tx.commit().await.unwrap();
+    assert_eq!(
+        set_owner_flag(db, piece, owner.id, false).await,
+        OwnerFlagOutcome::Saved
+    );
     assert_eq!(
         ArtboardPieceRating::read(&client, piece, owner.id)
             .await
@@ -260,16 +289,24 @@ async fn clearing_each_override_reveals_votes_cast_while_overridden_and_past_mon
             .determination(),
         (ArtContentRating::Nsfw, RatingSource::Community)
     );
-    let tx = client.transaction().await.unwrap();
-    assert!(
-        ArtboardPieceRating::set_owner_flag(&tx, piece, fan.id, false)
+    assert_eq!(
+        set_owner_flag(db, piece, fan.id, true).await,
+        OwnerFlagOutcome::NotYours
+    );
+    assert_eq!(
+        ArtboardPieceRating::read(&client, piece, owner.id)
             .await
-            .is_err()
+            .unwrap()
+            .unwrap()
+            .determination(),
+        (ArtContentRating::Nsfw, RatingSource::Community),
+        "a refused flag changes nothing"
     );
 }
 
 #[tokio::test]
-async fn staff_authority_survives_role_changes_and_deletion_and_admin_removal_targets_mod_marks() {
+async fn staff_authority_survives_role_changes_and_deletion_and_removal_by_actor_clears_either_tier()
+ {
     let test_db = test_db().await;
     let db = &test_db.db;
     let owner = create_test_user(db, "authority-owner").await;
@@ -326,7 +363,7 @@ async fn staff_authority_survives_role_changes_and_deletion_and_admin_removal_ta
         .await
         .unwrap();
     assert!(marks.iter().any(|mark| mark.actor_user_id == admin.id
-        && mark.authority == "admin"
+        && mark.authority == StaffAuthority::Admin
         && mark.username.is_none()));
     assert_eq!(
         ArtboardPieceRating::read(&client, piece, owner.id)
@@ -336,16 +373,42 @@ async fn staff_authority_survives_role_changes_and_deletion_and_admin_removal_ta
             .determination(),
         (ArtContentRating::Sfw, RatingSource::Admin)
     );
+    // The deleted admin's mark is still removable, by its actor id.
     let tx = client.transaction().await.unwrap();
-    assert!(
-        !ArtboardPieceRating::remove_moderator_mark(&tx, piece, admin.id)
+    assert_eq!(
+        ArtboardPieceRating::remove_staff_mark(&tx, piece, admin.id)
             .await
-            .unwrap()
+            .unwrap(),
+        RemoveMarkOutcome::Removed {
+            owner: owner.id,
+            authority: StaffAuthority::Admin
+        }
     );
-    assert!(
-        ArtboardPieceRating::remove_moderator_mark(&tx, piece, moderator.id)
+    tx.commit().await.unwrap();
+    assert_eq!(
+        ArtboardPieceRating::read(&client, piece, owner.id)
             .await
             .unwrap()
+            .unwrap()
+            .determination(),
+        (ArtContentRating::Nsfw, RatingSource::Moderator),
+        "the moderator tie decides again once the admin mark is gone"
+    );
+    let tx = client.transaction().await.unwrap();
+    assert_eq!(
+        ArtboardPieceRating::remove_staff_mark(&tx, piece, moderator.id)
+            .await
+            .unwrap(),
+        RemoveMarkOutcome::Removed {
+            owner: owner.id,
+            authority: StaffAuthority::Moderator
+        }
+    );
+    assert_eq!(
+        ArtboardPieceRating::remove_staff_mark(&tx, piece, moderator.id)
+            .await
+            .unwrap(),
+        RemoveMarkOutcome::NoMark
     );
     tx.commit().await.unwrap();
 }
@@ -358,14 +421,15 @@ async fn concurrent_votes_are_counted_once_and_removed_pieces_refuse_writes() {
     let fan = create_test_user(db, "concurrent-rating-fan").await;
     let fan2 = create_test_user(db, "concurrent-rating-fan2").await;
     let piece = hang(db, owner.id, "concurrent-rating").await;
-    let (a, b, c) = tokio::join!(
-        vote(db, piece, fan.id, Some(ArtContentRating::Nsfw)),
-        vote(db, piece, fan.id, Some(ArtContentRating::Nsfw)),
-        vote(db, piece, fan2.id, Some(ArtContentRating::Nsfw))
+    let outcomes = tokio::join!(
+        try_vote(db, piece, fan.id, Some(ArtContentRating::Nsfw)),
+        try_vote(db, piece, fan.id, Some(ArtContentRating::Nsfw)),
+        try_vote(db, piece, fan2.id, Some(ArtContentRating::Nsfw))
     );
-    a.unwrap();
-    b.unwrap();
-    c.unwrap();
+    assert_eq!(
+        outcomes,
+        (VoteOutcome::Saved, VoteOutcome::Saved, VoteOutcome::Saved)
+    );
     let client = db.get().await.unwrap();
     assert_eq!(
         ArtboardPieceRating::read(&client, piece, fan.id)
@@ -376,7 +440,10 @@ async fn concurrent_votes_are_counted_once_and_removed_pieces_refuse_writes() {
         2
     );
     ArtboardPiece::remove(&client, piece).await.unwrap();
-    assert!(vote(db, piece, fan.id, None).await.is_err());
+    assert_eq!(
+        try_vote(db, piece, fan.id, None).await,
+        VoteOutcome::NotFound
+    );
     assert!(
         ArtboardPieceRating::read(&client, piece, fan.id)
             .await

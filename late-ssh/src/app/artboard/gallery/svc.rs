@@ -24,20 +24,23 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDate, Utc};
 use dartboard_core::Canvas;
 use late_core::db::Db;
-use late_core::models::app_flag::AppFlags;
+use late_core::models::app_flag::{AppFlag, AppFlags};
 use late_core::models::artboard_piece::{
     ApplauseOutcome, ArtboardPiece, HangOutcome, HangParams, ListingCounts, PieceListing,
     TakeDownOutcome,
 };
 use late_core::models::artboard_piece_rating::{
-    ArtContentRating, ArtboardPieceRating, ContentRatingSummary,
+    ArtContentRating, ArtboardPieceRating, ContentRatingSummary, OwnerFlagOutcome, VoteOutcome,
 };
 use late_core::models::user::ArtSplashMode;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
 use crate::app::artboard::provenance::ArtboardProvenance;
-use crate::metrics::{self, GalleryApplauseResult, GalleryHangResult, GalleryTakeDownResult};
+use crate::metrics::{
+    self, GalleryApplauseResult, GalleryContentRatingResult, GalleryHangResult,
+    GalleryTakeDownResult,
+};
 
 use super::frame::{Credit, FramedPiece};
 
@@ -169,7 +172,12 @@ pub enum GalleryResult {
     ContentRating {
         piece_id: Uuid,
         generation: u64,
-        result: Result<ContentRatingSummary, String>,
+        outcome: ContentRatingOutcome,
+    },
+    ContentRatingFailed {
+        piece_id: Uuid,
+        generation: u64,
+        error: String,
     },
     Counts(ListingCounts),
     CountsFailed(String),
@@ -219,6 +227,18 @@ pub struct GalleryService {
 pub enum ContentRatingAction {
     Vote(Option<ArtContentRating>),
     OwnerFlag(bool),
+}
+
+/// How a content-rating request ended. A refusal is an outcome; only a
+/// database failure is `GalleryResult::ContentRatingFailed`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentRatingOutcome {
+    /// The piece's summary as it stands, after the write when there was one.
+    Rated(ContentRatingSummary),
+    OwnPiece,
+    NotYours,
+    NotFound,
+    Closed,
 }
 
 impl GalleryService {
@@ -281,10 +301,27 @@ impl GalleryService {
         if mode == ArtSplashMode::Never {
             return None;
         }
-        let mut splash = self.splash_piece()?;
-        if splash.shown_on != day {
-            return None;
-        }
+        let mut splash = match self.splash_piece()? {
+            splash if splash.shown_on == day => splash,
+            // The hourly refresh has not crossed midnight yet, so the cache
+            // still holds an earlier day's piece. Assign and publish this
+            // day's here rather than show the cup until the next refresh.
+            _stale => match self.refresh_splash(day).await {
+                Ok(SplashRefresh::Wall {
+                    piece: Some(piece), ..
+                }) => *piece,
+                Ok(SplashRefresh::Wall { piece: None, .. }) | Ok(SplashRefresh::Off) => {
+                    return None;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        "artboard gallery splash refresh at login failed"
+                    );
+                    return None;
+                }
+            },
+        };
         let db = self.db.as_ref()?;
         let result = async {
             let client = db.get().await?;
@@ -308,6 +345,8 @@ impl GalleryService {
         }
     }
 
+    /// The rating dialog's round trip: read the piece's summary, after the
+    /// vote or owner flag in `action` when there is one.
     pub fn content_rating_task(
         &self,
         piece_id: Uuid,
@@ -316,35 +355,61 @@ impl GalleryService {
         action: Option<ContentRatingAction>,
         tx: mpsc::UnboundedSender<GalleryResult>,
     ) {
-        let service = self.clone();
-        tokio::spawn(async move {
-            let result: Result<ContentRatingSummary> = async {
-                let db = service.db.as_ref().ok_or_else(|| anyhow::anyhow!("The gallery is closed."))?;
-                let mut client = db.get().await?;
-                let transaction = client.transaction().await?;
-                if let Some(action) = action {
-                    let enabled: bool = transaction.query_one(
-                        "SELECT EXISTS (SELECT 1 FROM app_flags WHERE key = 'artboard_gallery_enabled' AND enabled)", &[]
-                    ).await?.get(0);
-                    anyhow::ensure!(enabled, "The gallery is closed.");
-                    match action {
-                        ContentRatingAction::Vote(rating) => ArtboardPieceRating::set_vote(&transaction, piece_id, viewer_id, rating).await?,
-                        ContentRatingAction::OwnerFlag(nsfw) => ArtboardPieceRating::set_owner_flag(&transaction, piece_id, viewer_id, nsfw).await?,
-                    }
-                }
-                let summary = ArtboardPieceRating::read(&transaction, piece_id, viewer_id).await?
-                    .ok_or_else(|| anyhow::anyhow!("The piece is no longer hanging."))?;
-                transaction.commit().await?;
-                Ok(summary)
-            }.await;
-            if let Err(error) = &result {
-                tracing::warn!(?error, %piece_id, %viewer_id, "artboard content rating request failed");
-            }
+        let Some(db) = self.db.clone() else {
             let _ = tx.send(GalleryResult::ContentRating {
                 piece_id,
                 generation,
-                result: result.map_err(|error| error.to_string()),
+                outcome: ContentRatingOutcome::Closed,
             });
+            return;
+        };
+        tokio::spawn(async move {
+            let msg = match rate_content(&db, piece_id, viewer_id, action).await {
+                Ok(outcome) => {
+                    metrics::record_gallery_content_rating(match outcome {
+                        ContentRatingOutcome::Rated(_) => match action {
+                            None => GalleryContentRatingResult::Viewed,
+                            Some(ContentRatingAction::Vote(Some(_))) => {
+                                GalleryContentRatingResult::Voted
+                            }
+                            Some(ContentRatingAction::Vote(None)) => {
+                                GalleryContentRatingResult::VoteWithdrawn
+                            }
+                            Some(ContentRatingAction::OwnerFlag(true)) => {
+                                GalleryContentRatingResult::Flagged
+                            }
+                            Some(ContentRatingAction::OwnerFlag(false)) => {
+                                GalleryContentRatingResult::Unflagged
+                            }
+                        },
+                        ContentRatingOutcome::OwnPiece => GalleryContentRatingResult::OwnPiece,
+                        ContentRatingOutcome::NotYours => GalleryContentRatingResult::NotYours,
+                        ContentRatingOutcome::NotFound => GalleryContentRatingResult::NotFound,
+                        ContentRatingOutcome::Closed => GalleryContentRatingResult::Closed,
+                    });
+                    GalleryResult::ContentRating {
+                        piece_id,
+                        generation,
+                        outcome,
+                    }
+                }
+                Err(error) => {
+                    metrics::record_gallery_content_rating(GalleryContentRatingResult::Failed);
+                    late_core::error_span!(
+                        "artboard_gallery_content_rating",
+                        error = ?error,
+                        %viewer_id,
+                        %piece_id,
+                        "artboard content rating request failed"
+                    );
+                    GalleryResult::ContentRatingFailed {
+                        piece_id,
+                        generation,
+                        error: "The content rating did not go through. Try again.".to_string(),
+                    }
+                }
+            };
+            let _ = tx.send(msg);
         });
     }
 
@@ -672,6 +737,60 @@ impl GalleryService {
             };
             let _ = tx.send(msg);
         });
+    }
+}
+
+/// One content-rating round trip in one transaction: the write in `action`
+/// when there is one, then the summary it left. A write reads the switch
+/// from the database, not the watch, so it cannot land on a gallery another
+/// replica just closed.
+async fn rate_content(
+    db: &Db,
+    piece_id: Uuid,
+    viewer_id: Uuid,
+    action: Option<ContentRatingAction>,
+) -> Result<ContentRatingOutcome> {
+    let mut client = db.get().await?;
+    let transaction = client.transaction().await?;
+    match action {
+        None => {}
+        Some(action) => {
+            if !AppFlags::read(&transaction, AppFlag::ArtboardGalleryEnabled).await? {
+                return Ok(ContentRatingOutcome::Closed);
+            }
+            match action {
+                ContentRatingAction::Vote(rating) => {
+                    match ArtboardPieceRating::set_vote(&transaction, piece_id, viewer_id, rating)
+                        .await?
+                    {
+                        VoteOutcome::Saved => {}
+                        VoteOutcome::OwnPiece => return Ok(ContentRatingOutcome::OwnPiece),
+                        VoteOutcome::NotFound => return Ok(ContentRatingOutcome::NotFound),
+                    }
+                }
+                ContentRatingAction::OwnerFlag(nsfw) => {
+                    match ArtboardPieceRating::set_owner_flag(
+                        &transaction,
+                        piece_id,
+                        viewer_id,
+                        nsfw,
+                    )
+                    .await?
+                    {
+                        OwnerFlagOutcome::Saved => {}
+                        OwnerFlagOutcome::NotYours => return Ok(ContentRatingOutcome::NotYours),
+                        OwnerFlagOutcome::NotFound => return Ok(ContentRatingOutcome::NotFound),
+                    }
+                }
+            }
+        }
+    }
+    match ArtboardPieceRating::read(&transaction, piece_id, viewer_id).await? {
+        Some(summary) => {
+            transaction.commit().await?;
+            Ok(ContentRatingOutcome::Rated(summary))
+        }
+        None => Ok(ContentRatingOutcome::NotFound),
     }
 }
 

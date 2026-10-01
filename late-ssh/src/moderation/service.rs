@@ -10,7 +10,7 @@ use late_core::{
         artboard_piece::{ArtboardPiece, PieceLookup},
         artboard_piece_rating::{
             ArtContentRating, ArtSafetyPiece, ArtboardPieceRating, ContentRatingSummary,
-            RatingSource, StaffAuthority,
+            RatingSource, RemoveMarkOutcome, StaffAuthority, StaffMarkOutcome,
         },
         audio_ban::{AudioBan, AudioBanListItem},
         chat_room::ChatRoom,
@@ -314,12 +314,12 @@ impl ModerationService {
                 )
                 .await
             }
-            ModCommand::ArtboardUnmarkMod {
+            ModCommand::ArtboardUnmarkBy {
                 id_prefix,
                 actor,
                 reason,
             } => {
-                self.artboard_unmark_mod(actor_user_id, permissions, &id_prefix, &actor, &reason)
+                self.artboard_unmark_by(actor_user_id, permissions, &id_prefix, &actor, &reason)
                     .await
             }
             ModCommand::ArtboardSafetyView { target } => {
@@ -1653,8 +1653,7 @@ impl ModerationService {
             StaffAuthority::Moderator
         };
         let piece_id = lookup_gallery_piece(&tx, id_prefix).await?;
-        let owner = ArtboardPieceRating::lock_piece(&tx, piece_id).await?;
-        ArtboardPieceRating::set_staff_mark(
+        let owner = match ArtboardPieceRating::set_staff_mark(
             &tx,
             piece_id,
             actor_user_id,
@@ -1662,7 +1661,11 @@ impl ModerationService {
             rating,
             reason,
         )
-        .await?;
+        .await?
+        {
+            StaffMarkOutcome::Saved { owner } => owner,
+            StaffMarkOutcome::NotFound => anyhow::bail!("the piece is no longer hanging"),
+        };
         ModerationAuditLog::record(
             &tx,
             actor_user_id,
@@ -1682,7 +1685,10 @@ impl ModerationService {
         Ok(lines)
     }
 
-    async fn artboard_unmark_mod(
+    /// An admin removes the mark another actor left, at whichever tier it
+    /// holds. Marks outlive their actor's role and account, so this is how a
+    /// mark by a demoted or deleted admin comes off.
+    async fn artboard_unmark_by(
         &self,
         actor_user_id: Uuid,
         permissions: Permissions,
@@ -1692,35 +1698,33 @@ impl ModerationService {
     ) -> Result<Vec<String>> {
         ensure_admin(permissions)?;
         let mut client = self.db.get().await?;
+        // A deleted account has no name left; its marks are found by id.
+        let marked_by = match Uuid::parse_str(actor) {
+            Ok(id) => id,
+            Err(_) => find_user_by_mod_name(&client, actor).await?.id,
+        };
         let tx = client.transaction().await?;
         anyhow::ensure!(
             self.artboard_mark_authority(&tx, actor_user_id).await? == StaffAuthority::Admin,
             "admin only"
         );
         let piece_id = lookup_gallery_piece(&tx, id_prefix).await?;
-        let marked_by = if let Ok(id) = Uuid::parse_str(actor) {
-            id
-        } else {
-            tx.query_opt(
-                "SELECT id FROM users WHERE LOWER(username) = LOWER($1)",
-                &[&strip_user_prefix(actor)],
-            )
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("no user named {actor}"))?
-            .get("id")
-        };
-        let owner = ArtboardPieceRating::lock_piece(&tx, piece_id).await?;
-        anyhow::ensure!(
-            ArtboardPieceRating::remove_moderator_mark(&tx, piece_id, marked_by).await?,
-            "No moderator-tier mark by {actor} exists on that piece; safety none by cannot remove admin marks."
-        );
+        let (owner, authority) =
+            match ArtboardPieceRating::remove_staff_mark(&tx, piece_id, marked_by).await? {
+                RemoveMarkOutcome::Removed { owner, authority } => (owner, authority),
+                RemoveMarkOutcome::NoMark => {
+                    anyhow::bail!("no mark by {actor} exists on that piece")
+                }
+                RemoveMarkOutcome::NotFound => anyhow::bail!("the piece is no longer hanging"),
+            };
         ModerationAuditLog::record(
             &tx,
             actor_user_id,
-            "artboard_unmark_mod",
+            "artboard_unmark_by",
             "artboard_piece",
             Some(owner),
-            json!({"piece_id": piece_id, "marked_by": marked_by, "reason": reason}),
+            json!({"piece_id": piece_id, "marked_by": marked_by,
+                "authority": authority.as_str(), "reason": reason}),
         )
         .await?;
         let lines = self.artboard_marks(&tx, piece_id).await?;
@@ -1728,24 +1732,20 @@ impl ModerationService {
         Ok(lines)
     }
 
+    /// The actor's staff tier as the database has it now, not as the session
+    /// remembers it, so a demoted session cannot keep marking.
     async fn artboard_mark_authority(
         &self,
         client: &impl deadpool_postgres::GenericClient,
         actor: Uuid,
     ) -> Result<StaffAuthority> {
-        let user = client
-            .query_opt(
-                "SELECT is_admin, is_moderator FROM users WHERE id = $1",
-                &[&actor],
-            )
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("user not found"))?;
-        if user.get::<_, bool>("is_admin") || self.infra.force_admin {
-            Ok(StaffAuthority::Admin)
-        } else if user.get::<_, bool>("is_moderator") {
-            Ok(StaffAuthority::Moderator)
-        } else {
-            anyhow::bail!("moderator or admin only")
+        let flags = User::staff_flags_by_ids(client, &[actor]).await?;
+        match (self.infra.force_admin, flags.get(&actor)) {
+            (true, _) | (false, Some((true, _))) => Ok(StaffAuthority::Admin),
+            (false, Some((false, true))) => Ok(StaffAuthority::Moderator),
+            (false, Some((false, false))) | (false, None) => {
+                anyhow::bail!("moderator or admin only")
+            }
         }
     }
 
@@ -1756,7 +1756,7 @@ impl ModerationService {
     ) -> Result<Vec<String>> {
         let summary = ArtboardPieceRating::read(client, piece_id, Uuid::nil())
             .await?
-            .ok_or_else(|| anyhow::anyhow!("The piece is no longer hanging."))?;
+            .ok_or_else(|| anyhow::anyhow!("the piece is no longer hanging"))?;
         let (rating, source) = summary.determination();
         let mut lines = vec![
             format!("Art id: {piece_id}"),
@@ -1770,6 +1770,17 @@ impl ModerationService {
                 summary.mod_sfw, summary.mod_nsfw, summary.admin_sfw, summary.admin_nsfw
             ),
         ];
+        let votes = ArtboardPieceRating::content_votes(client, piece_id).await?;
+        for rating in [ArtContentRating::Nsfw, ArtContentRating::Sfw] {
+            let voters: Vec<String> = votes
+                .iter()
+                .filter(|vote| vote.rating == rating)
+                .map(|vote| format!("@{}", vote.username))
+                .collect();
+            if !voters.is_empty() {
+                lines.push(format!("Voted {}: {}", rating.label(), voters.join(", ")));
+            }
+        }
         for mark in ArtboardPieceRating::staff_marks(client, piece_id).await? {
             let actor = mark
                 .username
@@ -1777,7 +1788,7 @@ impl ModerationService {
                 .unwrap_or_else(|| mark.actor_user_id.to_string());
             lines.push(format!(
                 "{} {actor}: {} · {} · {}",
-                mark.authority,
+                mark.authority.as_str(),
                 mark.rating.label(),
                 mark.updated.format("%Y-%m-%d %H:%M UTC"),
                 mark.reason
@@ -2131,21 +2142,39 @@ fn artboard_safety_piece_line(piece: &ArtSafetyPiece) -> String {
     )
 }
 
-fn artboard_safety_review_reason(summary: &ContentRatingSummary) -> Option<&'static str> {
+/// Why a piece is on the staff review list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SafetyReviewReason {
+    StaffDisagree,
+    OwnerNsfwUnreviewed,
+    CommunityNsfwUnreviewed,
+}
+
+impl SafetyReviewReason {
+    fn label(self) -> &'static str {
+        match self {
+            Self::StaffDisagree => "staff disagree",
+            Self::OwnerNsfwUnreviewed => "owner NS; no staff",
+            Self::CommunityNsfwUnreviewed => "community NS; no staff",
+        }
+    }
+}
+
+fn artboard_safety_review_reason(summary: &ContentRatingSummary) -> Option<SafetyReviewReason> {
     let staff_sfw = summary.mod_sfw + summary.admin_sfw;
     let staff_nsfw = summary.mod_nsfw + summary.admin_nsfw;
     if staff_sfw > 0 && staff_nsfw > 0 {
-        Some("staff disagree")
+        Some(SafetyReviewReason::StaffDisagree)
     } else if staff_sfw + staff_nsfw == 0 && summary.owner_marked_nsfw {
-        Some("owner NS; no staff")
+        Some(SafetyReviewReason::OwnerNsfwUnreviewed)
     } else if staff_sfw + staff_nsfw == 0 && summary.nsfw_votes > 0 {
-        Some("community NS; no staff")
+        Some(SafetyReviewReason::CommunityNsfwUnreviewed)
     } else {
         None
     }
 }
 
-fn artboard_safety_review_table(review: &[(&ArtSafetyPiece, &str)]) -> Vec<String> {
+fn artboard_safety_review_table(review: &[(&ArtSafetyPiece, SafetyReviewReason)]) -> Vec<String> {
     if review.is_empty() {
         return Vec::new();
     }
@@ -2165,7 +2194,7 @@ fn artboard_safety_review_table(review: &[(&ArtSafetyPiece, &str)]) -> Vec<Strin
                 piece.id.to_string()[..13].to_owned(),
                 rating.label().into(),
                 reason.into(),
-                (*summary).into(),
+                summary.label().into(),
                 piece.username.clone(),
                 piece.title.clone(),
             ]
@@ -2229,13 +2258,14 @@ fn artboard_safety_summary_lines(pieces: &[ArtSafetyPiece]) -> Vec<String> {
             artboard_safety_review_reason(&piece.summary).map(|reason| (piece, reason))
         })
         .collect();
-    review.sort_by_key(|(piece, reason)| {
-        if *reason == "staff disagree" {
-            0
-        } else if piece.summary.determination().0.is_nsfw() {
-            1
-        } else {
-            2
+    review.sort_by_key(|(piece, reason)| match reason {
+        SafetyReviewReason::StaffDisagree => 0,
+        SafetyReviewReason::OwnerNsfwUnreviewed | SafetyReviewReason::CommunityNsfwUnreviewed => {
+            if piece.summary.determination().0.is_nsfw() {
+                1
+            } else {
+                2
+            }
         }
     });
     lines.push(format!("Review candidates: {}", review.len()));

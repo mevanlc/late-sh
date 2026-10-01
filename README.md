@@ -185,7 +185,7 @@ artboard safety none 0e77a39a by @art_mod1
 `view` shows a summary and review candidates; `@user` lists their hanging art,
 and an ID shows one piece's full safety record. `none` clears your mark at the
 selected tier. The per-piece record prints the full UUID on an `Art id:` line
-for copying into commands. Removing another user's moderator mark with `by`
+for copying into commands. Removing another account's mark, at either tier, with `by`
 is admin-only. Each account has one staff mark per piece; marking again
 replaces its mark and tier.
 

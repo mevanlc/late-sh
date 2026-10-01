@@ -99,7 +99,7 @@ pub(crate) enum ModCommand {
         rating: Option<ArtContentRating>,
         reason: String,
     },
-    ArtboardUnmarkMod {
+    ArtboardUnmarkBy {
         id_prefix: String,
         actor: String,
         reason: String,
@@ -332,6 +332,45 @@ impl RoleAction {
     }
 }
 
+/// The first word of every mod command. The parser dispatches on it and the
+/// console's help styling recognizes commands by it, so a command cannot be
+/// added to one without the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ModCommandHead {
+    Help,
+    View,
+    RenameRoom,
+    RenameUser,
+    RoomVoice,
+    Kick,
+    Ban,
+    Unban,
+    Slow,
+    Unslow,
+    Artboard,
+    Admin,
+}
+
+impl ModCommandHead {
+    pub(crate) fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "help" => Some(Self::Help),
+            "view" => Some(Self::View),
+            "rename-room" => Some(Self::RenameRoom),
+            "rename-user" => Some(Self::RenameUser),
+            "room-voice" => Some(Self::RoomVoice),
+            "kick" => Some(Self::Kick),
+            "ban" => Some(Self::Ban),
+            "unban" => Some(Self::Unban),
+            "slow" => Some(Self::Slow),
+            "unslow" => Some(Self::Unslow),
+            "artboard" => Some(Self::Artboard),
+            "admin" => Some(Self::Admin),
+            _ => None,
+        }
+    }
+}
+
 pub(crate) fn parse_mod_command(input: &str) -> Result<ModCommand> {
     let input = input.trim();
     let input = if input == "/mod" {
@@ -349,22 +388,24 @@ pub(crate) fn parse_mod_command(input: &str) -> Result<ModCommand> {
     };
     let rest = parts.collect::<Vec<_>>();
 
+    let Some(head) = ModCommandHead::from_word(head) else {
+        anyhow::bail!("unknown mod command: {head}");
+    };
     match head {
-        "help" => Ok(ModCommand::Help {
+        ModCommandHead::Help => Ok(ModCommand::Help {
             topic: nonempty(rest.join(" ")),
         }),
-        "view" => parse_view_mod_command(&rest),
-        "rename-room" => parse_rename_room_mod_command(&rest),
-        "rename-user" => parse_rename_user_mod_command(&rest),
-        "room-voice" => parse_room_voice_mod_command(&rest),
-        "kick" => parse_kick_mod_command(&rest),
-        "ban" => parse_ban_mod_command(&rest),
-        "unban" => parse_unban_mod_command(&rest),
-        "slow" => parse_slow_mod_command(&rest),
-        "unslow" => parse_unslow_mod_command(&rest),
-        "artboard" => parse_artboard_mod_command(&rest),
-        "admin" => parse_admin_mod_command(&rest),
-        _ => anyhow::bail!("unknown mod command: {head}"),
+        ModCommandHead::View => parse_view_mod_command(&rest),
+        ModCommandHead::RenameRoom => parse_rename_room_mod_command(&rest),
+        ModCommandHead::RenameUser => parse_rename_user_mod_command(&rest),
+        ModCommandHead::RoomVoice => parse_room_voice_mod_command(&rest),
+        ModCommandHead::Kick => parse_kick_mod_command(&rest),
+        ModCommandHead::Ban => parse_ban_mod_command(&rest),
+        ModCommandHead::Unban => parse_unban_mod_command(&rest),
+        ModCommandHead::Slow => parse_slow_mod_command(&rest),
+        ModCommandHead::Unslow => parse_unslow_mod_command(&rest),
+        ModCommandHead::Artboard => parse_artboard_mod_command(&rest),
+        ModCommandHead::Admin => parse_admin_mod_command(&rest),
     }
 }
 
@@ -814,7 +855,7 @@ fn parse_artboard_safety_mod_command(parts: &[&str]) -> Result<ModCommand> {
     if parts.get(2).copied() == Some("by") {
         anyhow::ensure!(rating.is_none(), "by is only supported with safety none");
         let actor = parts.get(3).ok_or_else(|| anyhow::anyhow!(USAGE))?;
-        return Ok(ModCommand::ArtboardUnmarkMod {
+        return Ok(ModCommand::ArtboardUnmarkBy {
             id_prefix,
             actor: actor.to_string(),
             reason: parts.get(4..).unwrap_or_default().join(" "),
@@ -1331,13 +1372,13 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "view alone shows hanging-piece counts, today's splash and up to 20 review candidates.",
             "Candidates have staff disagreement or owner/community NSFW signals with no staff mark.",
             "view @user lists their newest 20 hanging pieces, ratings, owner flags and vote counts.",
-            "view <id> shows one piece's rating, counts, staff marks and reasons.",
+            "view <id> shows one piece's rating, counts, who voted, staff marks and reasons.",
             "Without admin, staff (including admins) mark as moderators. admin selects the admin tier.",
             "Each account has one mark per piece; a new mark replaces its previous mark and tier.",
             "SFW is an explicit override. none removes your mark only at the selected tier.",
             "Admins outrank moderators: any admin NSFW wins; moderator ties are NSFW.",
             "Staff may classify their own art. Community votes remain open under overrides.",
-            "none ... by is admin-only and removes that actor's moderator mark, never an admin mark.",
+            "none ... by is admin-only and removes that actor's mark at either tier, another admin's included.",
             "A user UUID also identifies marks whose author's account was deleted.",
         ],
         "artboard feature" => &[

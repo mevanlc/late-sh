@@ -1,6 +1,6 @@
 //! Durable content classification, separate from applause and monthly awards.
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use chrono::{DateTime, NaiveDate, Utc};
 use deadpool_postgres::GenericClient;
 use tokio_postgres::Row;
@@ -113,15 +113,68 @@ impl StaffAuthority {
             Self::Admin => "admin",
         }
     }
+
+    /// The column is CHECKed to these two spellings (migration 216).
+    fn from_db(value: &str) -> Self {
+        match value {
+            "moderator" => Self::Moderator,
+            "admin" => Self::Admin,
+            other => panic!("unknown staff authority in the database: {other}"),
+        }
+    }
+}
+
+/// What a community vote did. A refusal is an outcome, not an error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VoteOutcome {
+    Saved,
+    OwnPiece,
+    NotFound,
+}
+
+/// What a write to the hanger's own NSFW flag did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OwnerFlagOutcome {
+    Saved,
+    NotYours,
+    NotFound,
+}
+
+/// What a staff mark write did. `owner` is the piece's hanger, for the audit
+/// row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaffMarkOutcome {
+    Saved { owner: Uuid },
+    NotFound,
+}
+
+/// What removing another actor's staff mark did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoveMarkOutcome {
+    Removed {
+        owner: Uuid,
+        authority: StaffAuthority,
+    },
+    NoMark,
+    NotFound,
 }
 
 pub struct StaffMark {
     pub actor_user_id: Uuid,
     pub username: Option<String>,
-    pub authority: String,
+    pub authority: StaffAuthority,
     pub rating: ArtContentRating,
     pub reason: String,
     pub updated: DateTime<Utc>,
+}
+
+/// One community vote with its voter named. Staff only: other users see
+/// counts, never who voted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContentVote {
+    pub user_id: Uuid,
+    pub username: String,
+    pub rating: ArtContentRating,
 }
 
 pub struct ArtboardPieceRating;
@@ -200,12 +253,16 @@ impl ArtboardPieceRating {
 
     /// Call inside a transaction; serializes classification writers with
     /// removal so a stale session cannot write to a piece already taken down.
-    pub async fn lock_piece(client: &impl GenericClient, piece_id: Uuid) -> Result<Uuid> {
-        let row = client.query_opt(
-            "SELECT user_id FROM artboard_pieces WHERE id = $1 AND removed_at IS NULL FOR UPDATE",
-            &[&piece_id],
-        ).await?.ok_or_else(|| anyhow::anyhow!("The piece is no longer hanging."))?;
-        Ok(row.get("user_id"))
+    /// The hanger's id, or `None` when the piece is no longer hanging.
+    async fn lock_piece(client: &impl GenericClient, piece_id: Uuid) -> Result<Option<Uuid>> {
+        let row = client
+            .query_opt(
+                "SELECT user_id FROM artboard_pieces
+                 WHERE id = $1 AND removed_at IS NULL FOR UPDATE",
+                &[&piece_id],
+            )
+            .await?;
+        Ok(row.map(|row| row.get("user_id")))
     }
 
     pub async fn set_vote(
@@ -213,27 +270,36 @@ impl ArtboardPieceRating {
         piece_id: Uuid,
         user_id: Uuid,
         rating: Option<ArtContentRating>,
-    ) -> Result<()> {
-        let owner = Self::lock_piece(client, piece_id).await?;
+    ) -> Result<VoteOutcome> {
+        let Some(owner) = Self::lock_piece(client, piece_id).await? else {
+            return Ok(VoteOutcome::NotFound);
+        };
         if owner == user_id {
-            bail!("Artists cannot vote on their own pieces.");
+            return Ok(VoteOutcome::OwnPiece);
         }
-        if let Some(rating) = rating {
-            client.execute(
-                "INSERT INTO artboard_piece_content_votes (piece_id, user_id, author_user_id, nsfw)
-                 VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (piece_id, user_id) DO UPDATE SET nsfw = EXCLUDED.nsfw",
-                &[&piece_id, &user_id, &owner, &rating.is_nsfw()],
-            ).await?;
-        } else {
-            client
-                .execute(
-                    "DELETE FROM artboard_piece_content_votes WHERE piece_id = $1 AND user_id = $2",
-                    &[&piece_id, &user_id],
-                )
-                .await?;
+        match rating {
+            Some(rating) => {
+                client
+                    .execute(
+                        "INSERT INTO artboard_piece_content_votes
+                             (piece_id, user_id, author_user_id, nsfw)
+                         VALUES ($1, $2, $3, $4)
+                         ON CONFLICT (piece_id, user_id) DO UPDATE SET nsfw = EXCLUDED.nsfw",
+                        &[&piece_id, &user_id, &owner, &rating.is_nsfw()],
+                    )
+                    .await?;
+            }
+            None => {
+                client
+                    .execute(
+                        "DELETE FROM artboard_piece_content_votes
+                         WHERE piece_id = $1 AND user_id = $2",
+                        &[&piece_id, &user_id],
+                    )
+                    .await?;
+            }
         }
-        Ok(())
+        Ok(VoteOutcome::Saved)
     }
 
     pub async fn set_owner_flag(
@@ -241,9 +307,12 @@ impl ArtboardPieceRating {
         piece_id: Uuid,
         user_id: Uuid,
         nsfw: bool,
-    ) -> Result<()> {
-        if Self::lock_piece(client, piece_id).await? != user_id {
-            bail!("Only the owner may change the owner's NSFW flag.");
+    ) -> Result<OwnerFlagOutcome> {
+        let Some(owner) = Self::lock_piece(client, piece_id).await? else {
+            return Ok(OwnerFlagOutcome::NotFound);
+        };
+        if owner != user_id {
+            return Ok(OwnerFlagOutcome::NotYours);
         }
         client
             .execute(
@@ -251,9 +320,10 @@ impl ArtboardPieceRating {
                 &[&piece_id, &user_id, &nsfw],
             )
             .await?;
-        Ok(())
+        Ok(OwnerFlagOutcome::Saved)
     }
 
+    /// Set (`Some`) or clear (`None`) the actor's own mark at `authority`.
     pub async fn set_staff_mark(
         client: &impl GenericClient,
         piece_id: Uuid,
@@ -261,43 +331,93 @@ impl ArtboardPieceRating {
         authority: StaffAuthority,
         rating: Option<ArtContentRating>,
         reason: &str,
-    ) -> Result<()> {
-        Self::lock_piece(client, piece_id).await?;
-        if let Some(rating) = rating {
-            client.execute(
-                "INSERT INTO artboard_piece_staff_marks (piece_id, actor_user_id, authority, nsfw, reason)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (piece_id, actor_user_id) DO UPDATE
-                 SET authority = EXCLUDED.authority, nsfw = EXCLUDED.nsfw,
-                     reason = EXCLUDED.reason, updated = current_timestamp",
-                &[&piece_id, &actor_user_id, &authority.as_str(), &rating.is_nsfw(), &reason],
-            ).await?;
-        } else {
-            client
-                .execute(
-                    "DELETE FROM artboard_piece_staff_marks
-                WHERE piece_id = $1 AND actor_user_id = $2 AND authority = $3",
-                    &[&piece_id, &actor_user_id, &authority.as_str()],
-                )
-                .await?;
+    ) -> Result<StaffMarkOutcome> {
+        let Some(owner) = Self::lock_piece(client, piece_id).await? else {
+            return Ok(StaffMarkOutcome::NotFound);
+        };
+        match rating {
+            Some(rating) => {
+                client
+                    .execute(
+                        "INSERT INTO artboard_piece_staff_marks
+                             (piece_id, actor_user_id, authority, nsfw, reason)
+                         VALUES ($1, $2, $3, $4, $5)
+                         ON CONFLICT (piece_id, actor_user_id) DO UPDATE
+                         SET authority = EXCLUDED.authority, nsfw = EXCLUDED.nsfw,
+                             reason = EXCLUDED.reason, updated = current_timestamp",
+                        &[
+                            &piece_id,
+                            &actor_user_id,
+                            &authority.as_str(),
+                            &rating.is_nsfw(),
+                            &reason,
+                        ],
+                    )
+                    .await?;
+            }
+            None => {
+                client
+                    .execute(
+                        "DELETE FROM artboard_piece_staff_marks
+                         WHERE piece_id = $1 AND actor_user_id = $2 AND authority = $3",
+                        &[&piece_id, &actor_user_id, &authority.as_str()],
+                    )
+                    .await?;
+            }
         }
-        Ok(())
+        Ok(StaffMarkOutcome::Saved { owner })
     }
 
-    pub async fn remove_moderator_mark(
+    /// Remove the mark `actor_user_id` left on the piece, at whichever tier
+    /// it holds. Marks outlive the actor's role and account, so this is the
+    /// only way a mark by a demoted or deleted admin ever comes off.
+    pub async fn remove_staff_mark(
         client: &impl GenericClient,
         piece_id: Uuid,
         actor_user_id: Uuid,
-    ) -> Result<bool> {
-        Self::lock_piece(client, piece_id).await?;
-        Ok(client
-            .execute(
+    ) -> Result<RemoveMarkOutcome> {
+        let Some(owner) = Self::lock_piece(client, piece_id).await? else {
+            return Ok(RemoveMarkOutcome::NotFound);
+        };
+        let row = client
+            .query_opt(
                 "DELETE FROM artboard_piece_staff_marks
-             WHERE piece_id = $1 AND actor_user_id = $2 AND authority = 'moderator'",
+                 WHERE piece_id = $1 AND actor_user_id = $2
+                 RETURNING authority",
                 &[&piece_id, &actor_user_id],
             )
+            .await?;
+        match row {
+            Some(row) => Ok(RemoveMarkOutcome::Removed {
+                owner,
+                authority: StaffAuthority::from_db(row.get("authority")),
+            }),
+            None => Ok(RemoveMarkOutcome::NoMark),
+        }
+    }
+
+    /// Who voted on a piece, NSFW votes first, then by name.
+    pub async fn content_votes(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+    ) -> Result<Vec<ContentVote>> {
+        Ok(client
+            .query(
+                "SELECT v.user_id, u.username, v.nsfw
+                 FROM artboard_piece_content_votes v
+                 JOIN users u ON u.id = v.user_id
+                 WHERE v.piece_id = $1
+                 ORDER BY v.nsfw DESC, LOWER(u.username), v.user_id",
+                &[&piece_id],
+            )
             .await?
-            > 0)
+            .into_iter()
+            .map(|row| ContentVote {
+                user_id: row.get("user_id"),
+                username: row.get("username"),
+                rating: ArtContentRating::from_nsfw(row.get("nsfw")),
+            })
+            .collect())
     }
 
     pub async fn staff_marks(
@@ -316,7 +436,7 @@ impl ArtboardPieceRating {
             .map(|row| StaffMark {
                 actor_user_id: row.get("actor_user_id"),
                 username: row.get("username"),
-                authority: row.get("authority"),
+                authority: StaffAuthority::from_db(row.get("authority")),
                 rating: ArtContentRating::from_nsfw(row.get("nsfw")),
                 reason: row.get("reason"),
                 updated: row.get("updated"),

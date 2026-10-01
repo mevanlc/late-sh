@@ -92,6 +92,26 @@ impl AppFlags {
         })
     }
 
+    /// Read one switch fresh from the database, for a write that decides
+    /// inside its own transaction and must not trust a replica's `watch`.
+    /// Bails when the row is missing, same reasoning as [`AppFlags::load`].
+    pub async fn read(
+        client: &impl deadpool_postgres::GenericClient,
+        flag: AppFlag,
+    ) -> Result<bool> {
+        let row = client
+            .query_opt(
+                "SELECT enabled FROM app_flags WHERE key = $1",
+                &[&flag.key()],
+            )
+            .await
+            .context("reading app flag")?;
+        match row {
+            Some(row) => Ok(row.get("enabled")),
+            None => bail!("app flag {} has no row; seed it in a migration", flag.key()),
+        }
+    }
+
     /// Flip one switch. The trigger tells every replica, including the one
     /// that wrote it. Bails when the row is missing, same reasoning as
     /// [`AppFlags::load`].

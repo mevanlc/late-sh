@@ -229,6 +229,38 @@ async fn artboard_staff_marks_enforce_authority_self_marks_and_targeted_removal(
         .await
         .is_err()
     );
+    // The demoted admin's mark still decides the verdict; another admin
+    // takes it off, and the piece falls back to unmarked.
+    svc.run_command(
+        admin2.id,
+        admin_permissions,
+        &format!(
+            "artboard safety none {prefix} by @{} demoted",
+            admin.username
+        ),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ArtboardPieceRating::read(&client, piece, regular.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .determination()
+            .1,
+        late_core::models::artboard_piece_rating::RatingSource::Default
+    );
+    let unmark: serde_json::Value = client
+        .query_one(
+            "SELECT metadata FROM moderation_audit_log
+             WHERE action = 'artboard_unmark_by' ORDER BY created DESC LIMIT 1",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(unmark["authority"], "admin");
+    assert_eq!(unmark["marked_by"], admin.id.to_string());
 }
 
 #[tokio::test]
@@ -268,13 +300,28 @@ async fn artboard_safety_admin_mode_is_explicit_and_clearing_is_tier_scoped() {
         );
     }
     for (mode, expected) in [
-        ("nsfw", Some(("moderator", ArtContentRating::Nsfw))),
-        ("admin sfw", Some(("admin", ArtContentRating::Sfw))),
-        ("none", Some(("admin", ArtContentRating::Sfw))),
+        (
+            "nsfw",
+            Some((StaffAuthority::Moderator, ArtContentRating::Nsfw)),
+        ),
+        (
+            "admin sfw",
+            Some((StaffAuthority::Admin, ArtContentRating::Sfw)),
+        ),
+        ("none", Some((StaffAuthority::Admin, ArtContentRating::Sfw))),
         ("admin none", None),
-        ("admin nsfw", Some(("admin", ArtContentRating::Nsfw))),
-        ("sfw", Some(("moderator", ArtContentRating::Sfw))),
-        ("admin none", Some(("moderator", ArtContentRating::Sfw))),
+        (
+            "admin nsfw",
+            Some((StaffAuthority::Admin, ArtContentRating::Nsfw)),
+        ),
+        (
+            "sfw",
+            Some((StaffAuthority::Moderator, ArtContentRating::Sfw)),
+        ),
+        (
+            "admin none",
+            Some((StaffAuthority::Moderator, ArtContentRating::Sfw)),
+        ),
         ("none", None),
     ] {
         svc.run_command(
@@ -321,8 +368,11 @@ fn artboard_safety_review_table_aligns_unicode_cells() {
         },
     };
     let lines = artboard_safety_review_table(&[
-        (&admin_piece, "staff disagree"),
-        (&community_piece, "community NS; no staff"),
+        (&admin_piece, SafetyReviewReason::StaffDisagree),
+        (
+            &community_piece,
+            SafetyReviewReason::CommunityNsfwUnreviewed,
+        ),
     ]);
     let separator_columns = |line: &str| {
         line.match_indices('|')
@@ -490,6 +540,26 @@ async fn artboard_safety_view_summarizes_filters_and_inspects_without_writing() 
         assert!(detailed.contains("Moderators SFW 1 / NSFW 1"));
         assert!(detailed.contains("reviewed"));
     }
+    // The per-piece record names the community voters, for staff only.
+    let reported_record = svc
+        .run_command(
+            admin.id,
+            permissions,
+            &format!("artboard safety view {reported}"),
+        )
+        .await
+        .unwrap();
+    let mut voters = [
+        format!("@{}", other.username),
+        format!("@{}", voter.username),
+    ];
+    voters.sort_by_key(|name| name.to_lowercase());
+    assert!(reported_record.contains(&format!("Voted NSFW: {}", voters.join(", "))));
+    assert!(
+        !reported_record
+            .iter()
+            .any(|line| line.starts_with("Voted SFW"))
+    );
     assert!(
         svc.run_command(
             voter.id,

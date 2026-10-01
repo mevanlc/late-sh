@@ -249,7 +249,7 @@ fn rating_result_updates_all_copies_after_close_and_invalidates_older_listing() 
         .send(GalleryResult::ContentRating {
             piece_id: piece.id,
             generation: 1,
-            result: Ok(summary),
+            outcome: ContentRatingOutcome::Rated(summary),
         })
         .unwrap();
     gallery.tick();
@@ -266,7 +266,7 @@ fn rating_result_updates_all_copies_after_close_and_invalidates_older_listing() 
         .send(GalleryResult::ContentRating {
             piece_id: piece.id,
             generation: 2,
-            result: Ok(summary),
+            outcome: ContentRatingOutcome::Rated(summary),
         })
         .unwrap();
     gallery.tick();
@@ -291,7 +291,7 @@ fn rating_result_updates_all_copies_after_close_and_invalidates_older_listing() 
 }
 
 #[test]
-fn failed_rating_result_leaves_the_verdict_and_vote_unchanged() {
+fn refused_and_failed_rating_results_leave_the_verdict_and_vote_unchanged() {
     let mut gallery = state();
     drain(&mut gallery);
     let piece = listed_piece(2, Utc::now().date_naive());
@@ -304,7 +304,7 @@ fn failed_rating_result_leaves_the_verdict_and_vote_unchanged() {
         .send(GalleryResult::ContentRating {
             piece_id: piece.id,
             generation: 1,
-            result: Err("The gallery is closed.".to_string()),
+            outcome: ContentRatingOutcome::Closed,
         })
         .unwrap();
     gallery.tick();
@@ -313,6 +313,24 @@ fn failed_rating_result_leaves_the_verdict_and_vote_unchanged() {
     assert_eq!(
         gallery.rating_dialog.as_ref().unwrap().error.as_deref(),
         Some("The gallery is closed.")
+    );
+    assert_eq!(gallery.notice(), Some("The gallery is closed."));
+
+    gallery.pending_rating = true;
+    gallery
+        .results_tx
+        .send(GalleryResult::ContentRatingFailed {
+            piece_id: piece.id,
+            generation: 1,
+            error: "The content rating did not go through. Try again.".to_string(),
+        })
+        .unwrap();
+    gallery.tick();
+    assert_eq!(gallery.sections[0].pieces[0], piece);
+    assert!(!gallery.pending_rating);
+    assert_eq!(
+        gallery.rating_dialog.as_ref().unwrap().error.as_deref(),
+        Some("The content rating did not go through. Try again.")
     );
 }
 

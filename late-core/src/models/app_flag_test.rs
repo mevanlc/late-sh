@@ -66,3 +66,40 @@ async fn a_missing_row_is_an_error_not_a_default() {
         "{error}"
     );
 }
+
+#[tokio::test]
+async fn a_single_switch_reads_fresh_inside_a_transaction() {
+    let test_db = test_db().await;
+    let mut client = test_db.db.get().await.expect("db client");
+    let tx = client.transaction().await.expect("transaction");
+
+    assert!(
+        AppFlags::read(&tx, AppFlag::ArtboardGalleryEnabled)
+            .await
+            .expect("read")
+    );
+    AppFlags::set(&tx, AppFlag::ArtboardGalleryEnabled, false)
+        .await
+        .expect("set");
+    assert!(
+        !AppFlags::read(&tx, AppFlag::ArtboardGalleryEnabled)
+            .await
+            .expect("read")
+    );
+
+    tx.execute(
+        "DELETE FROM app_flags WHERE key = $1",
+        &[&AppFlag::ArtboardGalleryEnabled.key()],
+    )
+    .await
+    .expect("delete");
+    let error = AppFlags::read(&tx, AppFlag::ArtboardGalleryEnabled)
+        .await
+        .expect_err("read must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("artboard_gallery_enabled has no row"),
+        "{error}"
+    );
+}
