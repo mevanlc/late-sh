@@ -1275,7 +1275,7 @@ impl App {
         if self.show_profile_modal && anim_quarter {
             changed |= self.profile_modal_state.step_reef();
         }
-        // The profile hero's bonsai sways like the sidebar's.
+        // The profile's bonsai sways like the sidebar's.
         changed |=
             self.show_profile_modal && anim_half && self.profile_modal_state.bonsai().is_some();
 
@@ -1320,7 +1320,7 @@ impl App {
         // Slower tiers match the frame edges their surfaces paint on. The
         // pet's clocks are wall-synced (PetState::tick takes marquee_tick),
         // so the pet box rides the half tier it paints on. The
-        // bonsai care modal and the profile hero sway on the same edge as
+        // bonsai care modal and the profile's bonsai sway on the same edge as
         // the sidebar, which always carries the eq strip and that sway. A
         // Zen music or visualizer tile paints its eq on that edge too; left
         // to the aquarium's quarter tier it drops to ~3.8fps.
