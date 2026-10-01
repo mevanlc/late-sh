@@ -49,14 +49,16 @@ impl ModModalState {
         }
     }
 
-    pub(crate) fn open(&mut self, can_moderate: bool) {
+    pub(crate) fn open(&mut self, can_moderate: bool, help_topic: Option<&str>) {
         composer::set_themed_textarea_cursor_visible(&mut self.command_input, true);
-        if self.has_opened {
+        if help_topic.is_some() {
+            self.clear_screen();
+        } else if self.has_opened {
             return;
         }
         self.has_opened = true;
         if can_moderate {
-            self.append_help();
+            self.append_help(help_topic);
         } else {
             self.append_error("access denied: moderator or admin only");
         }
@@ -70,12 +72,13 @@ impl ModModalState {
         &self.log
     }
 
-    pub(crate) fn viewport_start(&self, height: usize) -> usize {
-        let len = self.log.len();
+    pub(crate) fn viewport_start(&self, height: usize, line_heights: &[usize]) -> usize {
+        let len = line_heights.iter().sum::<usize>();
         if height == 0 {
             return len;
         }
-        let screen_bottom_start = self.screen_start.min(len).max(len.saturating_sub(height));
+        let screen_start = line_heights.iter().take(self.screen_start).sum::<usize>();
+        let screen_bottom_start = screen_start.max(len.saturating_sub(height));
         screen_bottom_start.saturating_sub(self.scroll)
     }
 
@@ -203,8 +206,8 @@ impl ModModalState {
         self.push_log(line.into(), ModLogKind::Error);
     }
 
-    fn append_help(&mut self) {
-        for line in mod_help_lines(None) {
+    fn append_help(&mut self, topic: Option<&str>) {
+        for line in mod_help_lines(topic) {
             self.push_log(line, ModLogKind::Help);
         }
     }

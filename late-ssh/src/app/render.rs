@@ -299,6 +299,7 @@ struct DrawContext<'a> {
     banner: Option<&'a Banner>,
     is_admin: bool,
     is_moderator: bool,
+    can_access_mod_surface: bool,
     show_right_sidebar: bool,
     /// Resolved ordered sidebar panels (draft while the settings modal is open,
     /// else the saved profile). Order is render order, top to bottom.
@@ -1401,6 +1402,7 @@ impl App {
                         banner: banner.as_ref(),
                         is_admin: self.is_admin,
                         is_moderator: self.is_moderator,
+                        can_access_mod_surface: self.permissions.can_access_mod_surface(),
                         show_right_sidebar,
                         right_sidebar_components,
                         show_room_list_sidebar,
@@ -1768,7 +1770,13 @@ impl App {
             }
             Screen::Artboard => {
                 if let Some(state) = ctx.dartboard_state {
-                    artboard::ui::draw_game(frame, content_area, state, ctx.artboard_interacting);
+                    artboard::ui::draw_game(
+                        frame,
+                        content_area,
+                        state,
+                        ctx.artboard_interacting,
+                        ctx.can_access_mod_surface,
+                    );
                 }
             }
             Screen::Games => {

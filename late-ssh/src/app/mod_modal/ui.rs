@@ -64,14 +64,28 @@ fn draw_log(frame: &mut Frame, area: Rect, state: &ModModalState) {
     let inner = block.inner(area);
     let height = inner.height as usize;
     let log = state.log();
-    let start = state.viewport_start(height);
-    let lines: Vec<Line<'static>> = log.iter().skip(start).take(height).map(log_line).collect();
+    let lines: Vec<Line<'static>> = log.iter().map(log_line).collect();
+    let line_heights: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            Paragraph::new(line.clone())
+                .wrap(Wrap { trim: false })
+                .line_count(inner.width)
+        })
+        .collect();
+    let total_height = line_heights.iter().sum::<usize>();
+    let start = state.viewport_start(height, &line_heights);
     frame.render_widget(block, area);
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((start.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 
-    if log.len() > height {
-        let mut scrollbar_state = ScrollbarState::new(log.len())
-            .position(start.min(log.len().saturating_sub(1)))
+    if total_height > height {
+        let mut scrollbar_state = ScrollbarState::new(total_height)
+            .position(start.min(total_height.saturating_sub(1)))
             .viewport_content_length(height);
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)

@@ -1313,7 +1313,7 @@ fn overview_lines() -> Vec<String> {
         "  v then s          skip-vote the current YouTube track",
         "  v then 1..5       select stream/station in the active source",
         "  w, m, + / - and the v music prefix are off on the Artboard: that page",
-        "  spends those letters itself (v applauds a gallery piece)",
+        "  spends those letters itself (v applauds; m opens gallery moderation for staff)",
         "",
         "Home",
         "  click top bar     jump screens",

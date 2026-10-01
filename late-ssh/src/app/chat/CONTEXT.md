@@ -359,6 +359,9 @@ User commands:
 - `/list` lists public rooms.
 - `/members` lists selected-room members.
 - `/mod` opens the moderation command modal; `/mod ...` in chat is rejected because commands run only in the modal.
+  Artboard staff can also open the same console with `m`/`M` in a gallery list or full-piece view.
+  That entry point starts a fresh visible section with safety help and runs `artboard safety view`
+  for the selected full UUID; earlier output remains scrollable and any command draft stays intact.
 - `/paste-image` asks a paired `late` CLI with `clipboard_image` capability to read the local system clipboard image, sends it back over `/api/ws/pair`, uploads the PNG bytes through the normal image upload path, and inserts the resulting public URL into the composer. Pending clipboard requests time out after 15s so a dead paired client cannot wedge the command.
 - `/petname [name]` shows or sets the user's cat name; `/petname clear` removes it.
 - `/brb` sends this session away now instead of after 30 quiet minutes; the next key brings it back. No announcement message, no free-text note (trailing text gets a usage banner), no audio muting. Parsed in `submit_composer`, drained via `take_requested_brb` into `App::sent_away`. See away above.
@@ -437,7 +440,7 @@ retains its usual colors, and help colors follow the active theme at render time
 - `artboard remove <piece-id-prefix> [reason...]` (takes a gallery piece down; the first 13 characters of the id are printed on the key line of the piece's full-frame view, 8+ are needed, must match one piece)
 - `artboard feature <piece-id-prefix>` (pins a piece as today's Sliding Puzzle art at once, `ArtboardPiece::feature_now`; the day's previous holder returns to the queue; same prefix rule as remove)
 - `artboard safety help` (advertised shortcut for NSFW/SFW command help; `help artboard safety` is an unadvertised alternative)
-- `artboard safety view [@user|piece-id-prefix]` (staff; no target shows gallery summary, today's splash and up to 20 review candidates; `@user` lists their newest 20 hanging pieces with safety counts; an ID prefix shows the effective verdict, source, counts and individual marks)
+- `artboard safety view [@user|piece-id-prefix]` (staff; no target shows gallery summary, today's splash and up to 20 review candidates; `@user` lists their newest 20 hanging pieces with safety counts; an ID prefix shows the full UUID on a dedicated `Art id:` line, effective verdict, source, counts and individual marks)
   Review candidates use an aligned table: `art id | state | reason | summary | user | art title`.
   Reasons are abbreviated `admin`, `mod`, `owner`, `commu.`; summaries use `staff disagree`,
   `owner NS; no staff`, or `community NS; no staff`. IDs keep their first 13 characters,

@@ -12,9 +12,8 @@ use crate::app::input::{MouseButton, MouseEvent, MouseEventKind, ParsedInput};
 
 use super::state::{Focus, HangFlow, RailActivation, RailRow};
 
-/// What the page must do after a gallery key: nothing, or one of the rail
-/// actions that need the page (the live board, the ban gate, the archive
-/// lists).
+/// What the page must do after a gallery key: nothing, or an action that needs
+/// the app (the live board, hang gate, archives, or staff moderation console).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GalleryAction {
     Ignored,
@@ -23,6 +22,7 @@ pub enum GalleryAction {
     FocusBoard,
     BeginHang,
     OpenArchive(ArtboardSnapshotKind),
+    OpenModeration(uuid::Uuid),
 }
 
 fn from_activation(activation: RailActivation) -> GalleryAction {
@@ -390,6 +390,7 @@ fn handle_archive_event(state: &mut State, event: &ParsedInput) -> GalleryAction
 
 fn handle_list_key(state: &mut State, byte: u8) -> GalleryAction {
     match byte {
+        b'm' | b'M' => moderation_action(state),
         b'n' | b'N' => {
             state.gallery_mut().open_rating_dialog();
             GalleryAction::Handled
@@ -424,6 +425,7 @@ fn handle_list_key(state: &mut State, byte: u8) -> GalleryAction {
 
 fn handle_piece_key(state: &mut State, byte: u8) -> GalleryAction {
     match byte {
+        b'm' | b'M' => moderation_action(state),
         b'n' | b'N' => {
             state.gallery_mut().open_rating_dialog();
             GalleryAction::Handled
@@ -450,6 +452,15 @@ fn handle_piece_key(state: &mut State, byte: u8) -> GalleryAction {
         }
         _ => GalleryAction::Ignored,
     }
+}
+
+fn moderation_action(state: &State) -> GalleryAction {
+    state
+        .gallery()
+        .selected_piece()
+        .map_or(GalleryAction::Handled, |piece| {
+            GalleryAction::OpenModeration(piece.id)
+        })
 }
 
 // ----- framing -----

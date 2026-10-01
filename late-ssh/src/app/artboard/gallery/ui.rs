@@ -243,7 +243,7 @@ fn rail_label(marker: &str, label: &str, tail: &str) -> String {
 }
 
 /// The listing pane: list on the left, the selected piece on the right.
-pub fn draw_gallery_pane(frame: &mut Frame, area: Rect, state: &State) {
+pub fn draw_gallery_pane(frame: &mut Frame, area: Rect, state: &State, can_moderate: bool) {
     let gallery = state.gallery();
     let Some(section) = gallery.viewed_section() else {
         return;
@@ -282,7 +282,12 @@ pub fn draw_gallery_pane(frame: &mut Frame, area: Rect, state: &State) {
         } else {
             &[("n", "rating"), ("Enter", "view"), ("v", "applaud")]
         };
-        frame.render_widget(Paragraph::new(key_hint_line(hints)), body[1]);
+        let can_moderate =
+            can_moderate && gallery.focus() == Focus::List && gallery.selected_piece().is_some();
+        frame.render_widget(
+            Paragraph::new(piece_key_hint_line(hints, can_moderate)),
+            body[1],
+        );
         return;
     }
     let list_width = (area.width / 5 * 2).clamp(LIST_MIN_WIDTH, area.width.saturating_sub(20));
@@ -294,7 +299,14 @@ pub fn draw_gallery_pane(frame: &mut Frame, area: Rect, state: &State) {
     .split(rows[3]);
     draw_list(frame, columns[0], gallery, section);
     if let Some(piece) = gallery.selected_piece() {
-        draw_preview(frame, columns[2], piece, mine, gallery.focus());
+        draw_preview(
+            frame,
+            columns[2],
+            piece,
+            mine,
+            gallery.focus(),
+            can_moderate,
+        );
     }
 }
 
@@ -368,7 +380,14 @@ fn draw_list(frame: &mut Frame, area: Rect, gallery: &GalleryState, section: Gal
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-fn draw_preview(frame: &mut Frame, area: Rect, piece: &GalleryPiece, mine: bool, focus: Focus) {
+fn draw_preview(
+    frame: &mut Frame,
+    area: Rect,
+    piece: &GalleryPiece,
+    mine: bool,
+    focus: Focus,
+    can_moderate: bool,
+) {
     if area.width < 10 || area.height < 4 {
         return;
     }
@@ -405,11 +424,17 @@ fn draw_preview(frame: &mut Frame, area: Rect, piece: &GalleryPiece, mine: bool,
         (Focus::Rail, _) => &[("Enter/→", "browse")],
         (Focus::Canvas | Focus::Piece | Focus::Archive, _) => &[],
     };
-    frame.render_widget(Paragraph::new(key_hint_line(keys)), rows[3]);
+    frame.render_widget(
+        Paragraph::new(piece_key_hint_line(
+            keys,
+            can_moderate && focus == Focus::List,
+        )),
+        rows[3],
+    );
 }
 
 /// One piece, full frame, over the whole detail pane.
-pub fn draw_piece_view(frame: &mut Frame, area: Rect, state: &State) {
+pub fn draw_piece_view(frame: &mut Frame, area: Rect, state: &State, can_moderate: bool) {
     let gallery = state.gallery();
     let Some(piece) = gallery.selected_piece() else {
         return;
@@ -452,7 +477,7 @@ pub fn draw_piece_view(frame: &mut Frame, area: Rect, state: &State) {
             ("Esc", "back"),
         ]
     };
-    let mut keys = key_hint_line(hints);
+    let mut keys = piece_key_hint_line(hints, can_moderate);
     keys.spans.push(Span::styled(
         format!("   id {}", piece_id_prefix(piece.id)),
         Style::default().fg(theme::TEXT_FAINT()),
@@ -930,6 +955,14 @@ fn section_heading(text: &str) -> Line<'static> {
             .fg(theme::AMBER())
             .add_modifier(Modifier::BOLD),
     ))
+}
+
+fn piece_key_hint_line(keys: &[(&str, &str)], can_moderate: bool) -> Line<'static> {
+    let mut keys = keys.to_vec();
+    if can_moderate {
+        keys.insert(1, ("m", "moderate"));
+    }
+    key_hint_line(&keys)
 }
 
 fn key_hint_line(keys: &[(&str, &str)]) -> Line<'static> {

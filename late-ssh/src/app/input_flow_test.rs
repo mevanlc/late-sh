@@ -149,6 +149,177 @@ async fn art_content_dialog_routes_owner_votes_mouse_and_close_keys() {
     );
 }
 
+#[tokio::test]
+async fn gallery_moderation_opens_selected_safety_record_only_for_staff() {
+    use crate::app::artboard::gallery::state::{Focus, GallerySection, RailRow};
+    use crate::app::common::primitives::Screen;
+    use crate::app::mod_modal::state::ModLogKind;
+    use late_core::models::artboard_piece::{ArtboardPiece, HangOutcome, HangParams};
+
+    let test_db = new_test_db().await;
+    let owner = create_test_user(&test_db.db, "gallery-mod-owner").await;
+    let client = test_db.db.get().await.unwrap();
+    let mut piece_ids = Vec::new();
+    for title in ["moderation target", "other gallery piece"] {
+        let HangOutcome::Hung(piece) = ArtboardPiece::hang(&client, HangParams {
+            user_id: owner.id, title: title.to_string(), width: 12, height: 4,
+            canvas: serde_json::json!({"width":12,"height":4,"cells":[[{"x":0,"y":0},{"Narrow":"#"}]],"colors":[]}),
+            provenance: serde_json::json!({"cells":[[{"x":0,"y":0},"painter"]]}), glyph_count: 40,
+            own_share_percent: 100, content_hash: format!("gallery-mod-{title}"),
+        }).await.unwrap() else { panic!("hang"); };
+        piece_ids.push(piece.id);
+    }
+
+    for (role, permissions) in [
+        ("regular", Permissions::default()),
+        ("moderator", Permissions::new(false, true)),
+        ("admin", Permissions::new(true, false)),
+    ] {
+        let viewer = create_test_user(&test_db.db, &format!("gallery-mod-{role}")).await;
+        let mut app = make_app_with_permissions(test_db.db.clone(), viewer.id, role, permissions);
+        app.handle_input(b"4");
+        wait_for_render_contains(&mut app, "GALLERY").await;
+        app.handle_input(b"m");
+        assert!(!app.show_mod_modal, "rail has no moderation shortcut");
+        app.handle_input(b"j\r");
+        wait_for_render_contains(&mut app, "moderation target").await;
+        app.handle_input(b"j");
+        assert_eq!(
+            app.dartboard_state
+                .as_ref()
+                .unwrap()
+                .gallery()
+                .selected_piece()
+                .unwrap()
+                .id,
+            piece_ids[0],
+        );
+
+        for (width, full_piece, key) in [(80, false, b'm'), (140, false, b'm'), (140, true, b'M')] {
+            app.resize(width, 44).unwrap();
+            if full_piece {
+                app.handle_input(b"\r");
+            }
+            let focus = if full_piece {
+                Focus::Piece
+            } else {
+                Focus::List
+            };
+            let hints = render_plain(&mut app);
+            assert_eq!(
+                hints.contains("m moderate"),
+                permissions.can_access_mod_surface(),
+                "{role}, {width}"
+            );
+            let prior_log_len = app.mod_modal_state.log().len();
+            app.banner = None;
+            app.handle_input(&[key]);
+            assert_eq!(
+                app.show_mod_modal,
+                permissions.can_access_mod_surface(),
+                "{role}"
+            );
+            assert!(app.banner.is_none(), "m must never mute the paired client");
+            if permissions.can_access_mod_surface() {
+                let command = format!("> artboard safety view {}", piece_ids[0]);
+                assert!(
+                    app.mod_modal_state
+                        .log()
+                        .iter()
+                        .any(|line| line.text == command)
+                );
+                assert!(
+                    app.mod_modal_state
+                        .log()
+                        .iter()
+                        .skip(prior_log_len)
+                        .any(|line| {
+                            line.kind == ModLogKind::Help
+                                && line.text == "artboard safety view [@user|piece-id-prefix]"
+                        })
+                );
+                assert!(
+                    !app.mod_modal_state
+                        .log()
+                        .iter()
+                        .skip(prior_log_len)
+                        .any(|line| line.text.contains("rename-room"))
+                );
+                // Wait for this opening's asynchronous record, not an earlier cached output.
+                let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+                let id_line = format!("Art id: {}", piece_ids[0]);
+                loop {
+                    app.tick();
+                    if app
+                        .mod_modal_state
+                        .log()
+                        .iter()
+                        .skip(prior_log_len)
+                        .any(|line| line.text == id_line)
+                    {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "safety record did not arrive"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                assert!(
+                    render_plain(&mut app).contains("Art id:"),
+                    "the record must be visible at {width} columns"
+                );
+                // A later contextual opening must not submit or erase this draft.
+                if prior_log_len == 0 {
+                    app.handle_input(b"help artboard");
+                }
+                assert_eq!(app.mod_modal_state.command_text(), "help artboard");
+                app.handle_input(b"\x1b");
+                wait_for_render_not_contains(&mut app, " Moderation ").await;
+                assert!(!app.show_mod_modal);
+            } else {
+                assert_eq!(app.mod_modal_state.log().len(), prior_log_len);
+            }
+            assert_eq!(app.screen, Screen::Artboard);
+            let gallery = app.dartboard_state.as_ref().unwrap().gallery();
+            assert_eq!(gallery.focus(), focus);
+            assert_eq!(gallery.selected_piece().unwrap().id, piece_ids[0]);
+        }
+
+        app.handle_input(b"n");
+        wait_for_render_contains(&mut app, " Content rating ").await;
+        app.handle_input(b"m");
+        assert!(
+            !app.show_mod_modal,
+            "the voting dialog retains its own controls"
+        );
+        app.handle_input(b"\x1b");
+        wait_for_render_not_contains(&mut app, " Content rating ").await;
+
+        if permissions.is_admin() {
+            ArtboardPiece::remove(&client, piece_ids[0]).await.unwrap();
+            app.handle_input(b"m");
+            wait_for_render_contains(&mut app, "no gallery piece starts with").await;
+            assert!(app.mod_modal_state.log().iter().any(|line| {
+                line.kind == ModLogKind::Error && line.text.contains("no gallery piece starts with")
+            }));
+            app.handle_input(b"\x1b");
+            wait_for_render_not_contains(&mut app, " Moderation ").await;
+        }
+
+        let gallery = app.dartboard_state.as_mut().unwrap().gallery_mut();
+        gallery.close_piece();
+        gallery.rail_select(RailRow::Gallery(GallerySection::Mine));
+        gallery.rail_activate();
+        wait_for_render_contains(&mut app, "you have not hung a piece").await;
+        assert!(!render_plain(&mut app).contains("m moderate"));
+        let prior_log_len = app.mod_modal_state.log().len();
+        app.handle_input(b"m");
+        assert!(!app.show_mod_modal, "an empty listing has no target");
+        assert_eq!(app.mod_modal_state.log().len(), prior_log_len);
+    }
+}
+
 use crate::authz::Permissions;
 use crate::test_helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_in_world,

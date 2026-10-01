@@ -209,12 +209,20 @@ Where a piece shows up beyond the page:
 
 Moderation: `/mod artboard remove <id-prefix> [reason]` (`RESTORE_ARTBOARD` cap; the first 13 characters of the id are printed on the key line of the full-frame view, `gallery::ui::piece_id_prefix`; at least `PIECE_ID_PREFIX_MIN_CHARS` = 8 characters; must match exactly one piece still up; the same soft delete as the hanger's, any owner, any month; applause rows stay, audit row keeps the title) and `/mod artboard gallery on|off` (admin; the `app_flags` row, so every replica follows).
 
-Staff content commands run inside the `/mod` console and use the same unambiguous 8+ character piece-prefix lookup:
+Staff content commands run inside the `/mod` console and use the same unambiguous 8+ character piece-prefix lookup.
+Moderators and admins can press `m`/`M` from a gallery list or full-piece view with a selected piece.
+The shortcut and its `m moderate` hint use the same mod-surface permission check; regular users get neither.
+Opening starts a fresh visible console section with styled `artboard safety` help, then submits
+`artboard safety view <full UUID>` through the ordinary asynchronous command path. Earlier output remains
+scrollable and the command draft is preserved. Escape returns to the same gallery focus and selection.
+The shortcut does not apply inside the rating dialog, rail, archives or hang flow.
+
 - `artboard safety help` opens focused NSFW/SFW command help, advertised in default `/mod` help and `help artboard`; `help artboard safety` is an unadvertised alternative.
 - `artboard safety view [@user|piece-id-prefix]` reads safety data. No target shows hanging-piece counts, today's splash and up to 20 review candidates (staff disagreement or owner/community NSFW signals with no staff mark). `@user` lists their newest 20 hanging pieces and safety counts. An ID prefix shows the effective verdict, source, counts and all staff marks, including reasons and actor IDs. Removed pieces are excluded.
   Review rows are a table with `art id`, `state`, `reason`, `summary`, `user`, and `art title`.
   Sources use `admin`/`mod`/`owner`/`commu.`, summaries are abbreviated, usernames omit `@`,
-  and displayed IDs retain the usable first 13 characters of the piece UUID.
+  and displayed IDs retain the usable first 13 characters of the piece UUID. Per-piece records print
+  the full UUID on a dedicated `Art id:` line for copying into commands.
 - `artboard safety <nsfw|sfw|none> <piece> [reason...]` writes/replaces a moderator-tier mark, including for admin callers; `none` removes the caller's moderator-tier mark. Staff may mark their own pieces.
 - `artboard safety admin <nsfw|sfw|none> <piece> [reason...]` is admin-only and selects the admin tier; `none` removes the caller's admin-tier mark. Each account has one staff mark per piece, so marking at a different tier replaces the previous mark. Explicit SFW overrides lower tiers; removing a mark restores their determination.
 - `artboard safety none <piece> by <@user|user-id> [reason...]` is admin-only and removes only that actor's stored moderator-tier mark; it cannot remove another admin mark.
@@ -304,6 +312,7 @@ Keyboard reference:
 | Archives | rail rows `Daily` / `Monthly` / `Curated` | The rail becomes the key list; `j/k`, arrows, wheel, `PgUp`/`PgDn`, `Home`/`End` move and the board shows the key under the cursor; `Enter` to the board, `Esc` back to the rail (archive stays up), Board row returns live |
 | Hang a piece | rail row `Hang a piece` | Shift+arrows or left drag frame the board, `Enter` names it, `Enter` hangs, `Esc` cancels |
 | Applaud a piece | `v` | In a gallery list or full frame; `v` again withdraws; refused on a past month's piece. `v` is not the music prefix on this page |
+| Moderate a piece | `m` / `M` | Staff only, in a gallery list or full frame; opens safety help and the selected piece's record |
 | Take your piece down | `x`, `x` | Your own piece, this month only; the first `x` asks, the second sends, any other key keeps it |
 | Draw / erase active mode | printable chars, `Space`, `Backspace`, `Delete` | Plain typing edits the shared canvas |
 | Paint color | `Ctrl+U`, `Ctrl+Y` | Steps the 16 presets; separate from peer color; a custom colour steps back onto the presets |

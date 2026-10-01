@@ -21,16 +21,16 @@ fn clear_screen_preserves_scrollback() {
     state.clear_screen();
 
     assert_eq!(state.log().len(), 1);
-    assert_eq!(state.viewport_start(8), 1);
+    assert_eq!(state.viewport_start(8, &[1]), 1);
     state.scroll_log(1);
-    assert_eq!(state.viewport_start(8), 0);
+    assert_eq!(state.viewport_start(8, &[1]), 0);
 }
 
 #[test]
 fn first_moderator_open_displays_command_help_once() {
     let mut state = ModModalState::new();
 
-    state.open(true);
+    state.open(true, None);
 
     assert!(
         state
@@ -42,7 +42,7 @@ fn first_moderator_open_displays_command_help_once() {
     );
     let first_len = state.log().len();
 
-    state.open(true);
+    state.open(true, None);
 
     assert_eq!(
         state.log().len(),
@@ -52,10 +52,49 @@ fn first_moderator_open_displays_command_help_once() {
 }
 
 #[test]
+fn contextual_help_starts_a_fresh_view_and_preserves_history_and_draft() {
+    let mut state = ModModalState::new();
+    state.open(true, None);
+    state.append_info("earlier result");
+    state.command_input.insert_str("help artboard");
+
+    for _ in 0..2 {
+        let prior_len = state.log().len();
+        state.open(true, Some("artboard safety"));
+        assert_eq!(
+            state.viewport_start(100, &vec![1; state.log().len()]),
+            prior_len
+        );
+        assert_eq!(state.command_text(), "help artboard");
+        assert!(
+            state.log().iter().skip(prior_len).all(|line| {
+                line.kind == ModLogKind::Help && !line.text.contains("rename-room")
+            })
+        );
+        assert_eq!(
+            state.log()[prior_len].text,
+            "artboard safety view [@user|piece-id-prefix]"
+        );
+        state.scroll_log(prior_len as i16);
+        assert_eq!(state.viewport_start(100, &vec![1; state.log().len()]), 0);
+    }
+    assert!(state.log().iter().any(|line| line.text == "earlier result"));
+
+    let mut first_open = ModModalState::new();
+    first_open.open(true, Some("artboard safety"));
+    assert!(
+        first_open
+            .log()
+            .iter()
+            .all(|line| { line.kind == ModLogKind::Help && !line.text.contains("rename-room") })
+    );
+}
+
+#[test]
 fn first_non_moderator_open_displays_access_denied() {
     let mut state = ModModalState::new();
 
-    state.open(false);
+    state.open(false, None);
 
     assert_eq!(state.log().len(), 1);
     assert_eq!(

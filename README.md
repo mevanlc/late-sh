@@ -158,6 +158,8 @@ Their tutorial is already marked completed, including when reseeding existing
 fixture accounts.
 They join the normal public auto-join rooms, including `#lounge`. From Home,
 select `#lounge` and enter `/mod` in its composer to open the staff console.
+Moderators and admins can also press `m` in a gallery list or full-piece view
+to open the console with art safety help and that piece's safety record.
 Rerunning restores these fixture pieces, applause, votes, marks, and staff
 roles; it preserves account preferences and all other users and art. Changes
 made while testing these pieces are reset by the next seed. Existing
@@ -182,8 +184,10 @@ artboard safety none 0e77a39a by @art_mod1
 
 `view` shows a summary and review candidates; `@user` lists their hanging art,
 and an ID shows one piece's full safety record. `none` clears your mark at the
-selected tier. Removing another user's moderator mark with `by` is admin-only.
-Each account has one staff mark per piece; marking again replaces its mark and tier.
+selected tier. The per-piece record prints the full UUID on an `Art id:` line
+for copying into commands. Removing another user's moderator mark with `by`
+is admin-only. Each account has one staff mark per piece; marking again
+replaces its mark and tier.
 
 ## Verification
 

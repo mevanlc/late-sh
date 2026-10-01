@@ -122,20 +122,6 @@ fn open_settings_modal(app: &mut App) {
     app.show_settings = true;
 }
 
-fn open_mod_modal(app: &mut App) {
-    app.show_help = false;
-    app.show_settings = false;
-    app.show_hub_modal = false;
-    app.show_profile_modal = false;
-    app.show_bonsai_modal = false;
-    app.show_poll_modal = false;
-    app.poll_modal_state.close();
-    app.show_quit_confirm = false;
-    app.mod_modal_state
-        .open(app.permissions.can_access_mod_surface());
-    app.show_mod_modal = true;
-}
-
 fn open_poll_modal(app: &mut App, room_id: Uuid) {
     app.show_help = false;
     app.show_settings = false;
@@ -250,7 +236,7 @@ pub(crate) fn handle_post_submit_requests(app: &mut App, allow_poll_modal: bool)
         }
     }
     if app.chat.take_requested_mod_modal() {
-        open_mod_modal(app);
+        crate::app::mod_modal::input::open(app, None);
     }
     if let Some(room_id) = app.chat.take_requested_poll_room() {
         open_requested_poll_modal(app, room_id, allow_poll_modal);

@@ -33,6 +33,32 @@ fn draw_log_keeps_latest_line_above_command_input() {
 }
 
 #[test]
+fn wrapped_safety_help_keeps_the_piece_record_visible_and_history_scrollable() {
+    let mut terminal = Terminal::new(TestBackend::new(80, 32)).expect("terminal");
+    let mut state = ModModalState::new();
+    state.append_info("earlier console history");
+    state.open(true, Some("artboard safety"));
+    let id = uuid::Uuid::new_v4();
+    state.append_result(
+        uuid::Uuid::new_v4(),
+        true,
+        vec![format!("Art id: {id}"), "NSFW (admin marks)".into()],
+    );
+    terminal
+        .draw(|frame| draw(frame, frame.area(), &state))
+        .expect("draw");
+    text_position(terminal.backend().buffer(), &format!("Art id: {id}"));
+    text_position(terminal.backend().buffer(), "NSFW (admin marks)");
+
+    state.scroll_log(1000);
+    terminal
+        .draw(|frame| draw(frame, frame.area(), &state))
+        .expect("draw");
+    text_position(terminal.backend().buffer(), "earlier console history");
+    text_position(terminal.backend().buffer(), "artboard safety view");
+}
+
+#[test]
 fn draw_mod_modal_renders_mention_autocomplete() {
     let backend = TestBackend::new(100, 32);
     let mut terminal = Terminal::new(backend).expect("terminal");
@@ -120,7 +146,7 @@ fn help_highlights_commands_arguments_and_section_titles_in_dark_and_light_theme
         theme::set_current_by_id(theme_id);
         let mut terminal = Terminal::new(TestBackend::new(160, 48)).expect("terminal");
         let mut state = ModModalState::new();
-        state.open(true);
+        state.open(true, None);
         terminal
             .draw(|frame| draw(frame, frame.area(), &state))
             .expect("draw");

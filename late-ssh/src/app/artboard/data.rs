@@ -40,6 +40,7 @@ fn overview_lines() -> Vec<String> {
         "  frame rules       at least 40 glyphs, at most 100x40, 75% painted by you",
         "  v                 applaud a piece (one per person, take it back with v again)",
         "  n                 content rating: vote SFW/NSFW or withdraw; artists toggle their NSFW flag",
+        "  m                 moderate the selected piece (moderators/admins): safety help and record",
         "  rating dialog     j/k or arrows select, Enter applies, Esc/q closes; mouse clicks apply",
         "  community NSFW    at least 2 NSFW votes, and more NSFW than SFW; never vote on your own art",
         "  overrides         admins, then moderators, then the artist's NSFW flag, then community votes",

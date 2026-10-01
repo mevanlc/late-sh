@@ -164,7 +164,8 @@ async fn artboard_staff_marks_enforce_authority_self_marks_and_targeted_removal(
         )
         .await
         .unwrap();
-    assert!(inspection[0].contains("SFW (unmarked)"));
+    assert_eq!(inspection[0], format!("Art id: {piece}"));
+    assert_eq!(inspection[1], "SFW (unmarked)");
     let count: i64 = client
         .query_one(
             "SELECT count(*) FROM moderation_audit_log WHERE target_kind = 'artboard_piece'",
@@ -481,6 +482,11 @@ async fn artboard_safety_view_summarizes_filters_and_inspects_without_writing() 
             .unwrap()
             .join("\n");
         assert!(detailed.contains("NSFW (moderator marks)"));
+        assert!(
+            detailed
+                .lines()
+                .any(|line| line == format!("Art id: {disputed}"))
+        );
         assert!(detailed.contains("Moderators SFW 1 / NSFW 1"));
         assert!(detailed.contains("reviewed"));
     }
@@ -489,6 +495,15 @@ async fn artboard_safety_view_summarizes_filters_and_inspects_without_writing() 
             voter.id,
             Permissions::new(false, false),
             "artboard safety view"
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        svc.run_command(
+            admin.id,
+            permissions,
+            &format!("artboard safety view {removed}")
         )
         .await
         .is_err()

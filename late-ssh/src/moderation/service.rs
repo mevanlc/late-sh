@@ -1759,7 +1759,8 @@ impl ModerationService {
             .ok_or_else(|| anyhow::anyhow!("The piece is no longer hanging."))?;
         let (rating, source) = summary.determination();
         let mut lines = vec![
-            format!("{piece_id}: {} ({})", rating.label(), source.label()),
+            format!("Art id: {piece_id}"),
+            format!("{} ({})", rating.label(), source.label()),
             format!(
                 "Owner NSFW: {}; community SFW {} / NSFW {}",
                 summary.owner_marked_nsfw, summary.sfw_votes, summary.nsfw_votes
