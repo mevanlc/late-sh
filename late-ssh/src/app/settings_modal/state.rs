@@ -1959,6 +1959,15 @@ impl SettingsModalState {
         self.editing_bio
     }
 
+    /// Whether a text field holds typing that is not in the draft yet. A
+    /// global chord that closes or reopens the modal now would drop it.
+    pub(crate) fn editing_text(&self) -> bool {
+        self.editing_username
+            || self.editing_system_field.is_some()
+            || self.editing_bio
+            || self.editing_feed_url
+    }
+
     pub(crate) fn username_input(&self) -> &TextArea<'static> {
         &self.username_input
     }

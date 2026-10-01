@@ -3619,6 +3619,14 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
             app.force_full_repaint();
             true
         }
+        // A Settings text field being edited holds typing that is not in the
+        // draft yet. Each of these chords closes or reopens the modal and
+        // would drop it, so the field keeps the key instead.
+        CTRL_O | CTRL_G | CTRL_F | CTRL_S
+            if app.show_settings && app.settings_modal_state.editing_text() =>
+        {
+            false
+        }
         CTRL_O => {
             open_settings_modal_globally(app);
             true

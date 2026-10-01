@@ -1184,6 +1184,45 @@ async fn ctrl_s_keeps_profile_save_and_job_post_bindings() {
     assert!(!app.show_hub_modal);
 }
 
+/// A Settings text field being edited holds typing that is not saved yet, so
+/// the chords that would close or reopen the modal leave it alone. Ctrl+S
+/// matters most: it is a save habit.
+#[tokio::test]
+async fn modal_chords_leave_a_settings_text_editor_alone() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "chords-bio-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "chords-bio-flow-it");
+    wait_for_render_contains(&mut app, " Home ").await;
+
+    app.handle_input(b"\x0f"); // Settings
+    app.handle_input(b"\t"); // Bio tab
+    app.handle_input(b"\r"); // start editing
+    assert!(app.settings_modal_state.editing_bio());
+    app.handle_input(b"late night coder");
+
+    for (chord, name) in [
+        (b"\x0f", "Ctrl+O"),
+        (b"\x07", "Ctrl+G"),
+        (b"\x06", "Ctrl+F"),
+        (b"\x13", "Ctrl+S"),
+    ] {
+        app.handle_input(chord);
+        assert!(app.show_settings, "{name} leaves Settings open");
+        assert!(
+            app.settings_modal_state.editing_bio(),
+            "{name} leaves the bio editor open"
+        );
+        assert!(!app.show_lobby_modal, "{name} opens no Lobby");
+        assert!(!app.show_hub_modal, "{name} opens no Shop");
+        assert_ne!(app.screen, Screen::Zen, "{name} opens no Zen");
+    }
+
+    app.handle_input(b"\r"); // Enter leaves edit mode and saves
+    assert_eq!(app.settings_modal_state.draft().bio, "late night coder");
+}
+
 /// `/lobby`, `/zen`, and `/guide` are the typed fallbacks for Ctrl+G, Ctrl+F,
 /// and `?`, for terminals that swallow the chords.
 #[tokio::test]
