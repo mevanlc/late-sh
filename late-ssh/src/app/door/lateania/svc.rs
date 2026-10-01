@@ -67,7 +67,9 @@ use super::stats::{
     AbilityScores, CritOutcome, SCORE_CAP, Score, ScoreOfferView, crit_outcome, modifier,
     points_earned,
 };
-use super::taming::{PetSkillEffect, beast_species, beasts_at, tame_chance, tame_xp};
+use super::taming::{
+    PetSkillEffect, beast_species, beasts_at, companion_kill_taming_xp, tame_chance, tame_xp,
+};
 use super::world::{
     CritterKind, Dir, FeatureKind, MobBehavior, MobSpawn, Perk, RegionProgress, ResourceNode,
     RoomId, World, craft_stations_at, critter_index, critters_at, features_at,
@@ -7165,11 +7167,26 @@ impl WorldState {
             None => return,
         };
         let gold = gold_for_kill(xp, boss);
-        self.log_to(
-            user_id,
-            LogKind::Loot,
-            format!("You have slain {mob_name}! (+{xp} xp, +{gold} gold)"),
-        );
+        // A standing companion at the player's heel shares the kill: a slice
+        // of its xp trains Animal Taming, the trade's passive lane.
+        let companion_fought = self
+            .players
+            .get(&user_id)
+            .and_then(|p| p.pet)
+            .is_some_and(|pet| !pet.downed);
+        let taming_gained = match companion_fought {
+            true => companion_kill_taming_xp(xp),
+            false => 0,
+        };
+        let line = match taming_gained > 0 {
+            true => format!(
+                "You have slain {mob_name}! (+{xp} xp, +{gold} gold, +{taming_gained} {} xp)",
+                TamingSkill::label()
+            ),
+            false => format!("You have slain {mob_name}! (+{xp} xp, +{gold} gold)"),
+        };
+        self.log_to(user_id, LogKind::Loot, line);
+        self.train_taming(user_id, taming_gained);
         if let Some(p) = self.players.get_mut(&user_id) {
             p.target = None;
             p.xp += xp as i64;
