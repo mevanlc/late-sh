@@ -31,10 +31,11 @@ fn default_list_covers_every_component_exactly_once() {
 }
 
 /// A user without a stored list gets the keyboard hint and the station, then
-/// four readings that auto-hide: the two signals the frame shows nowhere else,
-/// and what is waiting on them today. Every other reading is opt-in.
+/// the two signals the frame shows nowhere else and what is waiting on them
+/// today. All of it stays visible while idle, so a newcomer sees the whole
+/// default bar. Every other reading is opt-in and starts auto-hiding.
 #[test]
-fn default_bottom_bar_is_keyhints_station_and_four_auto_hiding_readings() {
+fn default_bottom_bar_is_six_always_visible_components() {
     let defaults = default_statusline_components();
     let enabled: Vec<StatusComponent> = defaults
         .iter()
@@ -58,8 +59,10 @@ fn default_bottom_bar_is_keyhints_station_and_four_auto_hiding_readings() {
         StatusComponent::Turns,
         StatusComponent::Care,
     ] {
-        assert!(find(&defaults, component).auto_hide);
+        assert!(!find(&defaults, component).auto_hide);
     }
+    assert!(find(&defaults, StatusComponent::Quests).auto_hide);
+    assert!(find(&defaults, StatusComponent::Pot).auto_hide);
     assert_eq!(
         find(&defaults, StatusComponent::Mentions).variant,
         Some(StatusVariant::MentionsAndDms),
@@ -69,20 +72,6 @@ fn default_bottom_bar_is_keyhints_station_and_four_auto_hiding_readings() {
         find(&defaults, StatusComponent::Station).label,
         LabelMode::Icon
     );
-}
-
-/// What ships enabled keeps normal priority while every opt-in status
-/// component starts in the low-priority tier.
-#[test]
-fn opt_in_status_components_start_low_priority() {
-    for setting in default_statusline_components() {
-        assert_eq!(
-            setting.low_priority,
-            !setting.enabled,
-            "{} priority tier",
-            setting.component.as_str()
-        );
-    }
 }
 
 /// `Time` supplies its icon at render time and the keyboard shortcuts are a
@@ -223,7 +212,6 @@ fn json_round_trips_through_parse() {
     components.swap(0, 3);
     components[0].enabled = true;
     components[0].label = LabelMode::Icon;
-    components[0].low_priority = true;
     let time = components
         .iter_mut()
         .find(|s| s.component == StatusComponent::Time)

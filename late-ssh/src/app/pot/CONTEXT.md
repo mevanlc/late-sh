@@ -135,10 +135,10 @@ carries the open pot as `pot 84,200 · 3h12m`, placed right before the chips
 segment so the prize reads against the viewer's own balance
 (`pot 84,200 · 3h12m ─ chips 1500 ─`). It reads the same `App.pot_view` `/pot`
 does, through `StatusData`, so it costs no query and repaints on the same ~1s
-edge. The bar shares its border row with the page tabs, so under a tight
-border the pot degrades: countdown first (`pot 84,200`), then the whole badge,
-and it yields before the chips do because it is ambient and `/pot` still
-answers. Absent before the first refresh and in a process with no pot service.
+edge. The bar shares its border row with the page tabs, and nothing on it is
+ever shortened: when the pot does not fit beside the chips it is dropped
+whole, because it is ambient and `/pot` still answers.
+Absent before the first refresh and in a process with no pot service.
 A user who turns the pot on in their bottom status bar moves it there
 (`late-ssh/src/app/statusline/CONTEXT.md`).
 

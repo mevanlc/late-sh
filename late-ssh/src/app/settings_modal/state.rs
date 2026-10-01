@@ -157,7 +157,6 @@ pub(crate) enum StatuslineDial {
     Brief,
     Label,
     AutoHide,
-    LowPriority,
     /// The component's own dial, whatever it happens to be. The heading comes
     /// from `StatusComponent::variant_title`.
     Variant,
@@ -169,7 +168,6 @@ impl StatuslineDial {
             Self::Brief => "Brief",
             Self::Label => "Label",
             Self::AutoHide => "Auto-hide",
-            Self::LowPriority => "Low priority",
             // Only offered when the component has a dial, and a component with
             // a dial always names it (locked by a `late-core` test).
             Self::Variant => setting.component.variant_title().unwrap_or("Mode"),
@@ -1024,7 +1022,6 @@ impl SettingsModalState {
                 setting.label = next_label_mode(setting.label, setting.component, forward);
             }
             StatuslineDial::AutoHide => setting.auto_hide ^= true,
-            StatuslineDial::LowPriority => setting.low_priority ^= true,
             StatuslineDial::Variant => {
                 let Some(next) =
                     next_variant(setting.variant, setting.component.variants(), forward)
@@ -2510,7 +2507,6 @@ fn statusline_dials_for(component: StatusComponent) -> Vec<StatuslineDial> {
     if component.can_auto_hide() {
         dials.push(StatuslineDial::AutoHide);
     }
-    dials.push(StatuslineDial::LowPriority);
     if !component.variants().is_empty() {
         dials.push(StatuslineDial::Variant);
     }

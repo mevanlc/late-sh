@@ -94,8 +94,6 @@ pub struct DailyChallengeItem {
     pub created: DateTime<Utc>,
     pub challenger_id: Uuid,
     pub challenger_username: Option<String>,
-    pub target_user_id: Option<Uuid>,
-    pub target_username: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -254,8 +252,6 @@ pub enum DailyEvent {
         match_id: Uuid,
         game: DailyGame,
         challenger_id: Uuid,
-        target_user_id: Option<Uuid>,
-        target_username: Option<String>,
     },
     ChallengeClaimed {
         match_id: Uuid,
@@ -589,44 +585,11 @@ impl DailyService {
         DailyMatch::delete_stale_chat_rooms(&client).await
     }
 
-    pub fn post_challenge_task(
-        &self,
-        user_id: Uuid,
-        game: DailyGame,
-        target_user_id: Option<Uuid>,
-    ) {
+    pub fn post_challenge_task(&self, user_id: Uuid, game: DailyGame) {
         let svc = self.clone();
         tokio::spawn(async move {
-            if let Err(e) = svc.post_challenge(user_id, game, target_user_id).await {
+            if let Err(e) = svc.post_challenge(user_id, game).await {
                 tracing::error!(error = ?e, %user_id, "failed to post daily challenge");
-                svc.send_error(user_id, &e);
-            }
-        });
-    }
-
-    /// Directed challenge addressed by username (the modal's directed-draft
-    /// prompt path). Resolves against the DB so the target does not need to
-    /// be online.
-    pub fn post_challenge_to_username_task(
-        &self,
-        user_id: Uuid,
-        game: DailyGame,
-        username: String,
-    ) {
-        let svc = self.clone();
-        tokio::spawn(async move {
-            let result = async {
-                let client = svc.db.get().await?;
-                let target = User::find_by_username(&client, &username)
-                    .await?
-                    .ok_or_else(|| anyhow::anyhow!("no user named {username}"))?;
-                drop(client);
-                svc.post_challenge(user_id, game, Some(target.id)).await?;
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            if let Err(e) = result {
-                tracing::error!(error = ?e, %user_id, "failed to post directed daily challenge");
                 svc.send_error(user_id, &e);
             }
         });
@@ -701,33 +664,14 @@ impl DailyService {
         });
     }
 
-    pub async fn post_challenge(
-        &self,
-        user_id: Uuid,
-        game: DailyGame,
-        target_user_id: Option<Uuid>,
-    ) -> Result<DailyMatch> {
-        if target_user_id == Some(user_id) {
-            bail!("you cannot challenge yourself");
-        }
+    pub async fn post_challenge(&self, user_id: Uuid, game: DailyGame) -> Result<DailyMatch> {
         let client = self.db.get().await?;
-        let target_username = if let Some(target) = target_user_id {
-            let user = User::get(&client, target)
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("challenged user not found"))?;
-            Some(user.username)
-        } else {
-            None
-        };
         self.ensure_entry_capacity(&client, user_id).await?;
-        let row =
-            DailyMatch::create_challenge(&client, game.kind(), user_id, target_user_id).await?;
+        let row = DailyMatch::create_challenge(&client, game.kind(), user_id).await?;
         let _ = self.event_tx.send(DailyEvent::ChallengePosted {
             match_id: row.id,
             game,
             challenger_id: row.challenger_id,
-            target_user_id: row.target_user_id,
-            target_username,
         });
         self.publish(&client).await?;
         Ok(row)
@@ -742,12 +686,6 @@ impl DailyService {
             .ok_or_else(|| anyhow::anyhow!("challenge is no longer open"))?;
         if challenge.challenger_id == user_id {
             bail!("you posted this challenge");
-        }
-        if challenge
-            .target_user_id
-            .is_some_and(|target| target != user_id)
-        {
-            bail!("this challenge is directed at someone else");
         }
         let game = DailyGame::from_kind(&challenge.game_kind)
             .ok_or_else(|| anyhow::anyhow!("unknown daily game: {}", challenge.game_kind))?;
@@ -2200,14 +2138,14 @@ impl DailyService {
         let finished = DailyMatch::list_finished_unseen(client).await?;
         let mut user_ids: Vec<Uuid> = open
             .iter()
-            .flat_map(|row| [Some(row.challenger_id), row.target_user_id])
+            .map(|row| row.challenger_id)
             .chain(
                 active
                     .iter()
                     .chain(finished.iter())
-                    .flat_map(|row| [Some(row.challenger_id), row.opponent_id]),
+                    .flat_map(|row| [Some(row.challenger_id), row.opponent_id])
+                    .flatten(),
             )
-            .flatten()
             .collect();
         user_ids.sort();
         user_ids.dedup();
@@ -2380,10 +2318,6 @@ fn challenge_item(
         created: row.created,
         challenger_id: row.challenger_id,
         challenger_username: usernames.get(&row.challenger_id).cloned(),
-        target_user_id: row.target_user_id,
-        target_username: row
-            .target_user_id
-            .and_then(|id| usernames.get(&id).cloned()),
     })
 }
 

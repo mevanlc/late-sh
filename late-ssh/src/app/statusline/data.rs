@@ -115,40 +115,6 @@ impl<'a> StatusData<'a> {
             StatusComponent::Voice => self.voice.map(str::to_string),
         }
     }
-
-    /// A shorter reading of the same value, used before the segment is dropped
-    /// outright. `None` means the component has nothing to give up beyond its
-    /// label.
-    pub(crate) fn compact_value(
-        &self,
-        component: StatusComponent,
-        variant: Option<StatusVariant>,
-    ) -> Option<String> {
-        match component {
-            // `channel [status]` -> `channel`.
-            StatusComponent::Voice => self
-                .voice
-                .map(|badge| badge.split_once(" [").map_or(badge, |(name, _)| name))
-                .map(str::to_string),
-            // Give up the countdown before the pot itself. Its low-priority
-            // default makes the whole segment the next concession.
-            StatusComponent::Pot => self.pot_size.map(thousands),
-            // A track line is unbounded; the station name it falls back to is
-            // short and fixed.
-            StatusComponent::Station => match shows_track(variant) {
-                true => Some(self.station_name.to_string()),
-                false => None,
-            },
-            StatusComponent::Shortcuts
-            | StatusComponent::Time
-            | StatusComponent::Chips
-            | StatusComponent::Mentions
-            | StatusComponent::Users
-            | StatusComponent::Turns
-            | StatusComponent::Quests
-            | StatusComponent::Care => None,
-        }
-    }
 }
 
 // Each dial is read through one exhaustive match, so a new `StatusVariant`

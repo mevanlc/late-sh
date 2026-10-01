@@ -2610,7 +2610,7 @@ async fn the_lounge_renders_its_own_topic_header() {
 }
 
 #[tokio::test]
-async fn default_bottom_bar_is_keyhints_station_and_the_auto_hiding_readings() {
+async fn default_bottom_bar_shows_every_default_component_even_while_idle() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "bottom-status-default").await;
     let mut app = make_app(test_db.db.clone(), viewer.id, "bottom-status-default-it");
@@ -2635,16 +2635,23 @@ async fn default_bottom_bar_is_keyhints_station_and_the_auto_hiding_readings() {
         ]
     );
 
-    // Voice, mentions and your-move auto-hide. A new account's bonsai has not
-    // been watered today, so care is due. Wide enough for all of it beside
-    // the sponsor line.
+    // Every default stays on the bar while idle. A new account's bonsai has
+    // not been watered today, so care is due. Wide enough for all of it
+    // beside the sponsor line.
     app.resize(160, 40).expect("resize test terminal");
     let frame = render_plain(&mut app);
-    assert!(
-        frame.contains("🎵 chillsynth") && frame.contains("care 1"),
-        "the station and today's care show by default: {frame:?}"
-    );
-    assert!(!frame.contains("your move"));
+    for reading in [
+        "🎵 chillsynth",
+        "mic -",
+        "unread 0",
+        "your move 0",
+        "care 1",
+    ] {
+        assert!(
+            frame.contains(reading),
+            "{reading:?} shows by default: {frame:?}"
+        );
+    }
     assert!(
         frame.contains("Settings ^O")
             && frame.contains("Zen ^F")
@@ -2652,7 +2659,6 @@ async fn default_bottom_bar_is_keyhints_station_and_the_auto_hiding_readings() {
             && frame.contains("Exit qq"),
         "Keyhints should render from the default component: {frame:?}"
     );
-    assert!(!frame.contains("unread") && !frame.contains(" mic "));
 }
 
 #[tokio::test]
@@ -2841,14 +2847,13 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
         Uuid::now_v7(),
         false,
     );
-    wait_for_render_contains(&mut app, "unread 1").await;
-
     // Chips sit on the top border row and the unread counter on the bottom
-    // one. Every glyph on both rows is single-width, so a char count is a
-    // display column.
-    const COLS: u16 = 120;
+    // one. Wide enough that the counter fits beside the sponsor's link; a
+    // segment with no room is dropped whole.
+    const COLS: u16 = 160;
     const ROWS: u16 = 40;
     app.resize(COLS, ROWS).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "unread 1").await;
     app.tick();
     app.reset_render();
     let mut terminal = vt100::Parser::new(ROWS, COLS, 0);
@@ -2856,12 +2861,14 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     let screen = terminal.screen().contents();
     let top_row = screen.lines().next().expect("top border row");
     let bottom_row = screen.lines().last().expect("bottom border row");
-    let char_col = |row: &str, needle: &str| {
+    // Display columns, not chars: the station's note ahead of the counter is
+    // two cells wide.
+    let display_col = |row: &str, needle: &str| {
         let byte = row.find(needle).expect("needle on the border row");
-        row[..byte].chars().count()
+        unicode_width::UnicodeWidthStr::width(&row[..byte])
     };
-    let chips_col = char_col(top_row, "chips");
-    let mentions_col = char_col(bottom_row, "unread");
+    let chips_col = display_col(top_row, "chips");
+    let mentions_col = display_col(bottom_row, "unread");
     assert!(
         !top_row.contains("unread"),
         "the unread counter lives on the bottom bar only: {top_row:?}"

@@ -215,7 +215,7 @@ async fn a_claim_and_a_result_are_offered_to_the_strip_on_every_replica() {
     );
 
     let posted = writer
-        .post_challenge(them.id, DailyGame::Chess, None)
+        .post_challenge(them.id, DailyGame::Chess)
         .await
         .expect("post");
     writer
@@ -327,21 +327,12 @@ async fn a_claim_and_a_result_are_offered_to_the_strip_on_every_replica() {
 
 #[test]
 fn draft_picker_wraps_at_both_ends() {
-    let mut draft = ChallengeDraft {
-        selected: 0,
-        directed: false,
-        username: None,
-    };
+    let mut draft = ChallengeDraft { selected: 0 };
     let last = DailyGame::ALL.len() - 1;
 
     // Up from the first game lands on the last, and down from there comes back.
     draft.move_selection(-1);
     assert_eq!(draft.selected, last);
-    draft.move_selection(1);
-    assert_eq!(draft.selected, 0);
-
-    // The username prompt owns the keys: j/k type, they don't move the cursor.
-    draft.username = Some(String::new());
     draft.move_selection(1);
     assert_eq!(draft.selected, 0);
 }
@@ -373,7 +364,7 @@ async fn a_board_reads_how_its_match_stands_and_refuses_an_open_challenge() {
     };
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .post_challenge(challenger.id, DailyGame::ConnectFour)
         .await
         .expect("post challenge");
     let open = DailyMatchDetail::from_row(load(challenge.id).await);
@@ -422,7 +413,7 @@ async fn the_held_result_shows_the_position_the_match_ended_on() {
     let mut state = DailyState::new(svc.clone(), Uuid::now_v7(), notifier);
 
     let posted = svc
-        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .post_challenge(challenger.id, DailyGame::ConnectFour)
         .await
         .expect("post");
     let claimed = svc
@@ -487,7 +478,7 @@ async fn a_gin_stock_draw_shows_its_card_only_once_the_server_has_it() {
         ActivityPublisher::new(test_db.db.clone(), activity_tx),
     );
     let posted = svc
-        .post_challenge(challenger.id, DailyGame::GinRummy, None)
+        .post_challenge(challenger.id, DailyGame::GinRummy)
         .await
         .expect("post");
     let claimed = svc

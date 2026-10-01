@@ -6,8 +6,9 @@
 //!    into [`Segment`]s. Disabled components, and auto-hiding components with
 //!    nothing to say, produce nothing. The top bar supplies a fixed list (pot
 //!    and chips); the bottom bar supplies the user's persisted list.
-//! 2. [`fit`] degrades and then drops segments until the bar clears the other
-//!    title sharing its border row.
+//! 2. [`fit`] keeps the segments that fit beside the other title sharing the
+//!    border row, in list order, and drops the rest whole. Nothing is ever
+//!    shortened: what a user sees is exactly what they configured, or nothing.
 //! 3. [`lay_out`] joins the survivors with dividers, measures, and converts
 //!    accumulated widths into click rects.
 //!
@@ -29,53 +30,20 @@ use crate::app::common::theme;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Placement {
     /// Right-aligned on the top border, sharing the row with the page tabs on
-    /// the left. Yields from its left end, the end that meets the tabs.
+    /// the left. The corner end has first claim on the room.
     TopRight,
-    /// Left-aligned on the bottom border, sharing the row with the optional
-    /// sponsor line on the right. Yields from its right end.
+    /// Left-aligned on the bottom border, sharing the row with the sponsor
+    /// line on the right. The corner end has first claim on the room.
     BottomLeft,
 }
 
 impl Placement {
-    /// Whether the end that yields first is the start of the list.
-    fn yields_from_front(self) -> bool {
+    /// Segment indices in the order they claim room: from the frame corner
+    /// the bar is anchored to, inward toward the other title.
+    fn claim_order(self, len: usize) -> Vec<usize> {
         match self {
-            Self::TopRight => true,
-            Self::BottomLeft => false,
-        }
-    }
-}
-
-/// Who yields first when the row runs short. Every segment of a tier compacts
-/// and then drops before the next tier gives anything up.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Tier {
-    /// The user marked the segment low priority.
-    Low,
-    Normal,
-    /// Voice and mentions. The bottom bar is the only place the frame shows
-    /// them, so they outlast everything else on it, the Keyhints included.
-    Signal,
-}
-
-impl Tier {
-    const YIELD_ORDER: [Tier; 3] = [Tier::Low, Tier::Normal, Tier::Signal];
-
-    fn of(setting: &StatusComponentSetting) -> Self {
-        match setting.low_priority {
-            true => Self::Low,
-            false => match setting.component {
-                StatusComponent::Voice | StatusComponent::Mentions => Self::Signal,
-                StatusComponent::Shortcuts
-                | StatusComponent::Time
-                | StatusComponent::Chips
-                | StatusComponent::Pot
-                | StatusComponent::Users
-                | StatusComponent::Turns
-                | StatusComponent::Station
-                | StatusComponent::Quests
-                | StatusComponent::Care => Self::Normal,
-            },
+            Self::TopRight => (0..len).rev().collect(),
+            Self::BottomLeft => (0..len).collect(),
         }
     }
 }
@@ -89,36 +57,11 @@ impl Tier {
 pub(crate) struct Segment {
     component: StatusComponent,
     spans: Vec<Span<'static>>,
-    /// A tighter rendering, offered under width pressure before the segment
-    /// is dropped. Keyhints have none.
-    compact: Option<Vec<Span<'static>>>,
-    tier: Tier,
 }
 
 impl Segment {
     fn width(&self) -> u16 {
         span_width(&self.spans)
-    }
-
-    /// How many cells compacting this segment would save; 0 when it has
-    /// nothing left to give.
-    fn compact_saving(&self) -> u16 {
-        match &self.compact {
-            Some(compact) => self.width().saturating_sub(span_width(compact)),
-            None => 0,
-        }
-    }
-
-    fn compact_in_place(&mut self) {
-        if let Some(compact) = self.compact.take() {
-            self.spans = compact;
-        }
-    }
-
-    /// Whether the sponsor line gives way to this segment rather than the
-    /// other way round: the key help, and the two signals shown nowhere else.
-    fn outranks_sponsor(&self) -> bool {
-        self.component == StatusComponent::Shortcuts || self.tier == Tier::Signal
     }
 }
 
@@ -139,14 +82,11 @@ pub(crate) struct StatusBar {
 /// The top-right bar is fixed UI policy, not part of the user's saved
 /// arrangement: the pot and the chip balance, the two ambient readings that
 /// belong in a corner that never moves. Expressing it as component settings
-/// lets both bars share formatting, fitting, and hit-testing.
+/// lets both bars share formatting, fitting, and hit-testing. The chips sit
+/// in the corner, so they claim room before the pot does.
 pub(crate) fn fixed_topbar_components() -> [StatusComponentSetting; 2] {
     [StatusComponent::Pot, StatusComponent::Chips].map(|component| StatusComponentSetting {
         enabled: true,
-        label: component.default_label_mode(),
-        // The pot is ambient: it gives up its countdown, then itself, before
-        // the balance yields anything.
-        low_priority: component == StatusComponent::Pot,
         ..StatusComponentSetting::new(component)
     })
 }
@@ -171,7 +111,7 @@ pub(crate) fn build_top_status_bar(
 /// The keyboard hint was the original bottom-left frame title. It stays its
 /// own styled component rather than flattening into the generic value/label
 /// treatment so its key names keep their emphasis. It has one rendering per
-/// setting and no tighter fallback: caret notation, or the brief glyph form.
+/// setting: caret notation, or the brief glyph form.
 fn shortcut_spans(brief: bool) -> Vec<Span<'static>> {
     let dim = Style::default().fg(theme::TEXT_DIM());
     let key = Style::default()
@@ -226,44 +166,6 @@ pub(crate) fn build_status_bar(
     lay_out(segments, placement, area)
 }
 
-/// Build the user's bottom-left bar, which shares its row with the sponsor
-/// line on the right.
-///
-/// The sponsor line has first claim: `sponsor_width`, its shortest form, is set
-/// aside and the bar fits in what is left. The exception is what outranks it
-/// (`Segment::outranks_sponsor`): when setting that width aside would cost the
-/// bar its Keyhints, its voice badge, or its unread counter, the bar gets the
-/// whole row instead.
-pub(crate) fn build_bottom_status_bar(
-    components: &[StatusComponentSetting],
-    data: &StatusData<'_>,
-    area: Rect,
-    sponsor_width: u16,
-) -> Option<StatusBar> {
-    let row_cols = area.width.saturating_sub(2);
-    let segments = build_segments(components, data);
-    let alone = fit(segments.clone(), row_cols, Placement::BottomLeft);
-    let beside_sponsor = fit(
-        segments,
-        row_cols.saturating_sub(sponsor_width),
-        Placement::BottomLeft,
-    );
-    let sponsor_costs_a_protected_segment = alone
-        .iter()
-        .filter(|kept| kept.outranks_sponsor())
-        .any(|kept| {
-            !beside_sponsor
-                .iter()
-                .any(|segment| segment.component == kept.component)
-        });
-    let sponsor_fits_the_row = sponsor_width <= row_cols;
-    let segments = match sponsor_fits_the_row && !sponsor_costs_a_protected_segment {
-        true => beside_sponsor,
-        false => alone,
-    };
-    lay_out(segments, Placement::BottomLeft, area)
-}
-
 /// Turn a component list into this frame's segments, in paint order.
 pub(crate) fn build_segments(
     components: &[StatusComponentSetting],
@@ -282,8 +184,6 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
         return Some(Segment {
             component,
             spans: shortcut_spans(setting.brief),
-            compact: None,
-            tier: Tier::of(setting),
         });
     }
     let value = match data.value(component, setting.variant) {
@@ -293,32 +193,9 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
         None => resting_value(component),
     };
 
-    let spans = segment_spans(setting, data, &value);
-    let own_compact = data
-        .compact_value(component, setting.variant)
-        .filter(|compact| *compact != value);
-    let compact = match own_compact {
-        Some(compact) => Some(segment_spans(setting, data, &compact)),
-        // Every text-labelled segment can also give up its label, which is
-        // worth more than most component-specific compactions.
-        None if setting.label == LabelMode::Text && !component.text_label().is_empty() => {
-            Some(segment_spans(
-                &StatusComponentSetting {
-                    label: LabelMode::None,
-                    ..*setting
-                },
-                data,
-                &value,
-            ))
-        }
-        None => None,
-    };
-
     Some(Segment {
         component,
-        spans,
-        compact,
-        tier: Tier::of(setting),
+        spans: segment_spans(setting, data, &value),
     })
 }
 
@@ -393,55 +270,28 @@ fn accent(component: StatusComponent) -> ratatui::style::Color {
     }
 }
 
-/// Shrink the bar until it fits `spare_cols`, cheapest concession first.
+/// Keep the segments that fit in `spare_cols` and drop the rest.
 ///
-/// The ladder, re-checked after every single change so the bar gives up the
-/// least it can: tier by tier in `Tier::YIELD_ORDER`, compact the tier's
-/// segments, then drop them. Every segment of a tier therefore goes before
-/// the next tier yields anything, and within a tier the segment nearest the
-/// colliding title yields first.
-pub(crate) fn fit(
-    mut segments: Vec<Segment>,
-    spare_cols: u16,
-    placement: Placement,
-) -> Vec<Segment> {
-    if segments.is_empty() {
-        return segments;
-    }
-
-    // Indices ordered by who yields first: the colliding end, then inward.
-    let yield_order = |len: usize| -> Vec<usize> {
-        if placement.yields_from_front() {
-            (0..len).collect()
-        } else {
-            (0..len).rev().collect()
-        }
-    };
-
-    for tier in Tier::YIELD_ORDER {
-        for idx in yield_order(segments.len()) {
-            if total_width(&segments) <= spare_cols {
-                return segments;
-            }
-            if segments[idx].tier == tier && segments[idx].compact_saving() > 0 {
-                segments[idx].compact_in_place();
-            }
-        }
-        loop {
-            if total_width(&segments) <= spare_cols {
-                return segments;
-            }
-            let Some(idx) = yield_order(segments.len())
-                .into_iter()
-                .find(|idx| segments[*idx].tier == tier)
-            else {
-                break;
-            };
-            segments.remove(idx);
+/// Segments claim room in `Placement::claim_order`, each with the one
+/// separator it brings. A segment with no room left for it is dropped whole;
+/// a narrower one after it may still fit. Nothing is shortened and nothing
+/// outranks the list order, so getting a bar that fits a small terminal is up
+/// to the arrangement the user saved.
+pub(crate) fn fit(segments: Vec<Segment>, spare_cols: u16, placement: Placement) -> Vec<Segment> {
+    let mut used: u16 = 0;
+    let mut kept = vec![false; segments.len()];
+    for idx in placement.claim_order(segments.len()) {
+        let cost = segments[idx].width().saturating_add(1);
+        if used.saturating_add(cost) <= spare_cols {
+            used = used.saturating_add(cost);
+            kept[idx] = true;
         }
     }
-
     segments
+        .into_iter()
+        .zip(kept)
+        .filter_map(|(segment, kept)| kept.then_some(segment))
+        .collect()
 }
 
 /// The bar is painted *over* the frame's border row, so its separators are
@@ -454,7 +304,7 @@ pub(crate) fn fit(
 const SEPARATOR: &str = "─";
 
 /// Painted width of the whole bar: every segment, a separator between each
-/// adjacent pair, and one more at the colliding end so the bar meets the frame
+/// adjacent pair, and one more at the corner end so the bar meets the frame
 /// corner through a border glyph instead of a blank cell.
 fn total_width(segments: &[Segment]) -> u16 {
     let segments_width: u16 = segments.iter().map(Segment::width).sum();

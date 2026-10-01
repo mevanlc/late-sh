@@ -1071,7 +1071,7 @@ fn lobby_help_lines() -> Vec<String> {
         "  r                 reply in #lounge to the link it is showing (shares are not posted into the chat)",
         "",
         "Daily matches",
-        "  c / C             post an open or directed chess, chess960, battleship, connect4, reversi, checkers, backgammon, briscola, cribbage, gin, 8ball, 9ball, or snooker challenge",
+        "  c                 post an open chess, chess960, battleship, connect4, reversi, checkers, backgammon, briscola, cribbage, gin, 8ball, 9ball, or snooker challenge",
         "  24h per move; boards live outside the Tab cycle, Esc returns to the Lobby",
         "  chess960 shuffles the back rank: same rules, and you castle by moving your king onto your own rook",
         "  briscola holds a hand: yours is drawn face up, theirs never is, and spectators see neither",
@@ -1624,9 +1624,11 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "  Segments paint left to right in the order the list shows them top to bottom."
             .to_string(),
-        "  Available segments: Keyhints, station, voice, mentions, your move, quests, invites, pot, chips, users online, time"
+        "  Available segments: Keyhints, station, voice, mentions, your move, care, quests, pot, chips, users online, time"
             .to_string(),
-        "  On by default: Keyhints and station, plus voice and mentions, which show only while there is something to show."
+        "  On by default, and visible even while idle: Keyhints, station, voice, mentions, your move, care."
+            .to_string(),
+        "  Care counts the bonsai, tank, and pet still waiting on today's care; click it for Zen."
             .to_string(),
         "  Status segments with a destination are clickable and jump to what they count."
             .to_string(),
@@ -1644,20 +1646,17 @@ fn settings_help_lines() -> Vec<String> {
             .to_string(),
         "    Label          Text or Icon before the value, or None".to_string(),
         "    Auto-hide      drop the segment while it reads zero or idle".to_string(),
-        "    Low priority   yields first when the bar runs out of room; every low-priority"
-            .to_string(),
-        "                   segment is given up before any normal one is".to_string(),
         "    plus one dial of its own on some segments: 24-hour vs AM/PM clock, mentions"
             .to_string(),
         "    with or without DMs, daily vs daily+weekly quests, station name vs track"
             .to_string(),
-        "  The sponsor line has first claim on that border row and the bar fits in what remains;"
+        "  The sponsor link has first claim on that border row and the bar gets what remains."
             .to_string(),
-        "  only the Keyhints, voice, and mentions take the row ahead of it."
+        "  Nothing is ever shortened: segments take room in list order, and one that does not"
             .to_string(),
-        "  When the bar itself runs short, segments compact and then drop, rightmost first;"
+        "  fit is dropped whole. The order you set is the only priority, so put what matters first."
             .to_string(),
-        "  voice and mentions go last, after the Keyhints."
+        "  On a narrow terminal, switch Keyhints to Brief or turn off what you do not need."
             .to_string(),
         "  The top-right corner shows the pot and your chips. Turn either on here and it moves"
             .to_string(),

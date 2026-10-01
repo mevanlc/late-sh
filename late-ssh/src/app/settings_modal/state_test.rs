@@ -59,10 +59,10 @@ fn statusline_dials_omit_controls_the_component_cannot_use() {
         statusline_dials_for(StatusComponent::Shortcuts),
         vec![StatuslineDial::Brief]
     );
-    // Always on, no dial of its own: label and drop tier, nothing else.
+    // Always on, no dial of its own: the label, nothing else.
     assert_eq!(
         statusline_dials_for(StatusComponent::Users),
-        vec![StatuslineDial::Label, StatuslineDial::LowPriority]
+        vec![StatuslineDial::Label]
     );
     // Hides when idle and picks what it counts.
     assert_eq!(
@@ -70,18 +70,13 @@ fn statusline_dials_omit_controls_the_component_cannot_use() {
         vec![
             StatuslineDial::Label,
             StatuslineDial::AutoHide,
-            StatuslineDial::LowPriority,
             StatuslineDial::Variant,
         ]
     );
     // Always on, but does have a dial.
     assert_eq!(
         statusline_dials_for(StatusComponent::Time),
-        vec![
-            StatuslineDial::Label,
-            StatuslineDial::LowPriority,
-            StatuslineDial::Variant,
-        ]
+        vec![StatuslineDial::Label, StatuslineDial::Variant]
     );
 }
 

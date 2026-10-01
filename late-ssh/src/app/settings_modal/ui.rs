@@ -1953,7 +1953,6 @@ fn statusline_dial_value(
         StatuslineDial::Brief => on_off(setting.brief),
         StatuslineDial::Label => setting.label.label().to_string(),
         StatuslineDial::AutoHide => on_off(setting.auto_hide),
-        StatuslineDial::LowPriority => on_off(setting.low_priority),
         StatuslineDial::Variant => setting
             .variant
             .or_else(|| setting.component.variants().first().copied())

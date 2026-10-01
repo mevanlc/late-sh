@@ -49,16 +49,12 @@ use super::{
 };
 
 /// A challenge being composed: a small picker overlay on the Lobby modal.
-/// Step one picks the game from the roster (one row per game, prize shown);
-/// directed challenges add a username step. A vertical list scales to any
-/// roster size where an inline one-row picker would not.
+/// It picks the game from the roster (one row per game, prize shown). A
+/// vertical list scales to any roster size where an inline one-row picker
+/// would not.
 pub struct ChallengeDraft {
     /// Picker cursor into `DailyGame::ALL`.
     pub selected: usize,
-    /// Directed challenges ask for a username after the game is picked.
-    pub directed: bool,
-    /// `Some` once the game is chosen and the username prompt is active.
-    pub username: Option<String>,
 }
 
 impl ChallengeDraft {
@@ -67,12 +63,8 @@ impl ChallengeDraft {
     }
 
     /// Move the picker cursor, wrapping at both ends so up from the first
-    /// game reaches the last. Ignored while the username prompt is active,
-    /// where `j`/`k` are letters being typed.
+    /// game reaches the last.
     pub fn move_selection(&mut self, delta: isize) {
-        if self.username.is_some() {
-            return;
-        }
         let count = DailyGame::ALL.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
     }
@@ -868,17 +860,11 @@ impl DailyState {
             DailyEvent::ChallengePosted {
                 game,
                 challenger_id,
-                target_username,
                 ..
-            } if challenger_id == self.user_id => EventEffect::raising(match target_username {
-                Some(name) => {
-                    Banner::success(&format!("Daily {} challenge sent to @{name}", game.label()))
-                }
-                None => Banner::success(&format!(
-                    "Daily {} challenge posted to the lobby",
-                    game.label()
-                )),
-            }),
+            } if challenger_id == self.user_id => EventEffect::raising(Banner::success(&format!(
+                "Daily {} challenge posted to the lobby",
+                game.label()
+            ))),
             DailyEvent::MatchFinished {
                 match_id,
                 game,
@@ -1221,21 +1207,12 @@ impl DailyState {
     // ── Modal actions ──────────────────────────────────────────
 
     pub fn post_open_challenge(&self, game: DailyGame) {
-        self.svc.post_challenge_task(self.user_id, game, None);
+        self.svc.post_challenge_task(self.user_id, game);
     }
 
-    pub fn post_directed_challenge(&self, username: &str, game: DailyGame) {
-        let username = username.trim().trim_start_matches('@').to_string();
-        if username.is_empty() {
-            return;
-        }
-        self.svc
-            .post_challenge_to_username_task(self.user_id, game, username);
-    }
-
-    /// `c` / `C` in the modal: open the challenge picker overlay.
-    pub fn begin_challenge_draft(&mut self, directed: bool) {
-        self.begin_challenge_draft_for(DailyGame::ALL[0], directed);
+    /// `c` in the modal: open the challenge picker overlay.
+    pub fn begin_challenge_draft(&mut self) {
+        self.begin_challenge_draft_for(DailyGame::ALL[0]);
     }
 
     /// The same picker, opened with the cursor already on one game.
@@ -1244,16 +1221,12 @@ impl DailyState {
     /// the Lounge's pool table is asking for pool, not for a list. The picker
     /// still opens rather than posting outright, so the choice of variant and
     /// the prize are in front of the player before anything is committed.
-    pub fn begin_challenge_draft_for(&mut self, game: DailyGame, directed: bool) {
+    pub fn begin_challenge_draft_for(&mut self, game: DailyGame) {
         let selected = DailyGame::ALL
             .iter()
             .position(|candidate| *candidate == game)
             .unwrap_or(0);
-        self.challenge_draft = Some(ChallengeDraft {
-            selected,
-            directed,
-            username: None,
-        });
+        self.challenge_draft = Some(ChallengeDraft { selected });
     }
 
     /// Move the picker cursor; see [`ChallengeDraft::move_selection`].
@@ -1263,41 +1236,17 @@ impl DailyState {
         }
     }
 
-    /// Enter on the draft: post an open challenge, advance a directed draft
-    /// to its username step, or send it. An empty username is a no-op so a
-    /// stray Enter can't fire a challenge at nobody.
+    /// Enter on the draft: post the picked game as an open challenge.
     pub fn draft_advance(&mut self) {
-        let Some(draft) = &mut self.challenge_draft else {
+        let Some(draft) = self.challenge_draft.take() else {
             return;
         };
-        match &draft.username {
-            None if draft.directed => draft.username = Some(String::new()),
-            None => {
-                let game = draft.game();
-                self.challenge_draft = None;
-                self.post_open_challenge(game);
-            }
-            Some(username) => {
-                if username.trim().trim_start_matches('@').is_empty() {
-                    return;
-                }
-                let game = draft.game();
-                let username = username.clone();
-                self.challenge_draft = None;
-                self.post_directed_challenge(&username, game);
-            }
-        }
+        self.post_open_challenge(draft.game());
     }
 
-    /// Esc on the draft: the username step falls back to the picker, the
-    /// picker closes the draft.
+    /// Esc on the draft: close the picker.
     pub fn draft_back(&mut self) {
-        let Some(draft) = &mut self.challenge_draft else {
-            return;
-        };
-        if draft.username.take().is_none() {
-            self.challenge_draft = None;
-        }
+        self.challenge_draft = None;
     }
 
     pub fn claim_challenge(&self, match_id: Uuid) {

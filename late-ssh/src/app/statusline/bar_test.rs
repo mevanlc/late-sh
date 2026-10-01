@@ -5,8 +5,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
 use super::bar::{
-    Placement, StatusClick, build_bottom_status_bar, build_status_bar, build_top_status_bar,
-    click_action, fixed_topbar_components,
+    Placement, StatusClick, build_status_bar, build_top_status_bar, click_action,
+    fixed_topbar_components,
 };
 use super::data::{StatusData, clock_icon};
 
@@ -35,7 +35,6 @@ fn on(component: StatusComponent, label: LabelMode) -> StatusComponentSetting {
     StatusComponentSetting {
         enabled: true,
         label,
-        low_priority: false,
         ..StatusComponentSetting::new(component)
     }
 }
@@ -88,7 +87,7 @@ fn every_icon_measures_two_cells() {
 }
 
 /// The top-right bar is fixed policy: the two ambient readings, the pot
-/// ahead of the balance and first to give way.
+/// ahead of the balance.
 #[test]
 fn fixed_topbar_is_the_pot_and_the_chips() {
     let topbar = fixed_topbar_components();
@@ -97,20 +96,17 @@ fn fixed_topbar_is_the_pot_and_the_chips() {
         [StatusComponent::Pot, StatusComponent::Chips]
     );
     assert!(topbar.iter().all(|setting| setting.enabled));
-    assert!(
-        topbar
-            .iter()
-            .all(|setting| { setting.low_priority == (setting.component == StatusComponent::Pot) })
-    );
 }
 
+/// The chips sit in the corner and claim room first; the pot paints whole
+/// beside them or not at all.
 #[test]
-fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
+fn fixed_topbar_renders_the_pot_before_chips_and_drops_it_whole() {
     let hud = |border_width: u16| {
         build_top_status_bar(
             &StatusData {
                 chip_balance: 1_500,
-                // Mentions and voice are bottom-bar signals: never painted here.
+                // Mentions and voice are bottom-bar readings: never painted here.
                 mentions_unread: 2,
                 voice: Some("#lounge [muted]"),
                 pot_size: Some(84_200),
@@ -121,28 +117,20 @@ fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
             0,
             &[],
         )
+        .map(|hud| hud.line.to_string())
     };
     let full = " pot 84,200 · 3h12m ─ chips 1500 ─";
-    let compact = " pot 84,200 ─ chips 1500 ─";
     let without_pot = " chips 1500 ─";
     let width = |text: &str| Span::raw(text).width() as u16 + 2;
 
-    assert_eq!(hud(200).expect("hud").line.to_string(), full);
+    assert_eq!(hud(200).as_deref(), Some(full));
+    assert_eq!(hud(width(full)).as_deref(), Some(full), "fits exactly");
     assert_eq!(
-        hud(width(full)).map(|hud| hud.line.to_string()),
-        Some(full.to_string()),
-        "the full pot fits exactly"
+        hud(width(full) - 1).as_deref(),
+        Some(without_pot),
+        "one column short and the pot goes whole, countdown and all"
     );
-    assert_eq!(
-        hud(width(full) - 1).map(|hud| hud.line.to_string()),
-        Some(compact.to_string()),
-        "the draw time yields before the pot size"
-    );
-    assert_eq!(
-        hud(width(compact) - 1).map(|hud| hud.line.to_string()),
-        Some(without_pot.to_string()),
-        "the pot sheds before the chips"
-    );
+    assert_eq!(hud(width(without_pot) - 1), None);
 }
 
 /// Placing the pot or the chips on the bottom bar moves the reading there:
@@ -165,7 +153,8 @@ fn a_reading_painted_on_the_bottom_bar_leaves_the_top_one() {
     };
 
     let roomy = Rect::new(0, 0, 200, 24);
-    let bottom = build_bottom_status_bar(&components, &data, roomy, 0).expect("bottom bar");
+    let bottom =
+        build_status_bar(&components, &data, Placement::BottomLeft, roomy, 0).expect("bottom bar");
     assert_eq!(
         bottom.painted,
         vec![StatusComponent::Shortcuts, StatusComponent::Chips]
@@ -179,7 +168,8 @@ fn a_reading_painted_on_the_bottom_bar_leaves_the_top_one() {
     // Room for the hints only: the chips never made it onto the bottom bar.
     let hints_only = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ";
     let tight = Rect::new(0, 0, Span::raw(hints_only).width() as u16 + 2, 24);
-    let bottom = build_bottom_status_bar(&components, &data, tight, 0).expect("bottom bar");
+    let bottom =
+        build_status_bar(&components, &data, Placement::BottomLeft, tight, 0).expect("bottom bar");
     assert_eq!(bottom.painted, vec![StatusComponent::Shortcuts]);
     assert_eq!(
         top(roomy, &bottom.painted).as_deref(),
@@ -223,7 +213,7 @@ fn the_voice_badge_is_labelled_once() {
         Some("#lounge".to_string())
     });
 
-    let bar = build_bottom_status_bar(
+    let bar = build_status_bar(
         &[
             StatusComponentSetting::new(StatusComponent::Shortcuts),
             StatusComponentSetting::new(StatusComponent::Voice),
@@ -232,6 +222,7 @@ fn the_voice_badge_is_labelled_once() {
             voice: badge.as_deref(),
             ..StatusData::default()
         },
+        Placement::BottomLeft,
         Rect::new(0, 0, 200, 24),
         0,
     )
@@ -242,7 +233,7 @@ fn the_voice_badge_is_labelled_once() {
     );
 }
 
-/// Keyhints have one rendering, caret notation, and no tighter fallback.
+/// Keyhints have one rendering, caret notation, and are never shortened.
 #[test]
 fn keyhints_paint_caret_notation_or_nothing() {
     let components = [StatusComponentSetting::new(StatusComponent::Shortcuts)];
@@ -262,82 +253,6 @@ fn keyhints_paint_caret_notation_or_nothing() {
     assert_eq!(render_in(200).as_deref(), Some(caret));
     assert_eq!(render_in(width).as_deref(), Some(caret));
     assert_eq!(render_in(width - 1), None);
-}
-
-/// Voice and mentions are shown nowhere else on the frame, so when the row
-/// cannot hold everything it is the hints that go, not the signal's wording.
-#[test]
-fn signals_outlast_the_keyhints() {
-    let components = [
-        StatusComponentSetting::new(StatusComponent::Shortcuts),
-        StatusComponentSetting::new(StatusComponent::Mentions),
-    ];
-    let data = StatusData {
-        mentions_unread: 3,
-        ..StatusData::default()
-    };
-    let both = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ unread 3 ";
-    let width = Span::raw(both).width() as u16 + 2;
-    let render_in = |width: u16| {
-        build_status_bar(
-            &components,
-            &data,
-            Placement::BottomLeft,
-            Rect::new(0, 0, width, 24),
-            0,
-        )
-        .map(|bar| bar.line.to_string())
-    };
-
-    assert_eq!(render_in(width).as_deref(), Some(both));
-    assert_eq!(render_in(width - 1).as_deref(), Some("─ unread 3 "));
-}
-
-/// The sponsor line has first claim on the bottom row, except against the
-/// Keyhints and the two signals: an opt-in reading gives way to it, those do
-/// not.
-#[test]
-fn the_sponsor_outranks_opt_in_readings_but_not_keyhints_or_signals() {
-    const SPONSOR: u16 = 28;
-    let data = StatusData {
-        clock_24: "14:32",
-        mentions_unread: 3,
-        ..StatusData::default()
-    };
-    let components = [
-        StatusComponentSetting::new(StatusComponent::Shortcuts),
-        StatusComponentSetting::new(StatusComponent::Mentions),
-        on(StatusComponent::Time, LabelMode::None),
-    ];
-    let protected = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ unread 3 ";
-    let with_clock =
-        "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ unread 3 ─ 14:32 ";
-    let protected_width = Span::raw(protected).width() as u16;
-    let render_in = |row_cols: u16| {
-        build_bottom_status_bar(
-            &components,
-            &data,
-            Rect::new(0, 0, row_cols + 2, 24),
-            SPONSOR,
-        )
-        .map(|bar| bar.line.to_string())
-    };
-
-    assert_eq!(
-        render_in(200).as_deref(),
-        Some(with_clock),
-        "room for everything beside the sponsor"
-    );
-    assert_eq!(
-        render_in(protected_width + SPONSOR).as_deref(),
-        Some(protected),
-        "the clock gives way to the sponsor"
-    );
-    assert_eq!(
-        render_in(protected_width + SPONSOR - 1).as_deref(),
-        Some(with_clock),
-        "the sponsor would cost a protected segment, so the bar takes the row"
-    );
 }
 
 #[test]
@@ -414,28 +329,6 @@ fn label_modes_pick_what_sits_beside_the_value() {
     );
 }
 
-#[test]
-fn pot_keeps_upstream_wording_and_compacts_before_it_drops() {
-    let pot = StatusComponentSetting {
-        low_priority: true,
-        ..on(StatusComponent::Pot, LabelMode::Text)
-    };
-    let chips = on(StatusComponent::Chips, LabelMode::Text);
-    let components = [pot, chips];
-    let full = " pot 84,200 · 3h12m ─ chips 1204 ─";
-    let compact = " pot 84,200 ─ chips 1204 ─";
-    let without_pot = " chips 1204 ─";
-    let width_for = |text: &str| 18 + 2 + text.chars().count() as u16;
-
-    assert_eq!(render(&components, width_for(full)), full);
-    assert_eq!(render(&components, width_for(full) - 1), compact);
-    assert_eq!(
-        render(&components, width_for(without_pot)),
-        without_pot,
-        "the low-priority pot drops before chips"
-    );
-}
-
 /// The clock names itself, so a text label would paint a stray space rather
 /// than a word.
 #[test]
@@ -459,7 +352,8 @@ fn separators_are_border_glyphs_supplied_by_the_layout_pass() {
         on(StatusComponent::Mentions, LabelMode::None),
         on(StatusComponent::Chips, LabelMode::None),
     ]);
-    assert_eq!(bar, " 3 ─ 1204 ─");
+    // The fixture's 3 mentions and 2 unread DMs, which the default counts too.
+    assert_eq!(bar, " 5 ─ 1204 ─");
 }
 
 /// A lone segment still meets the corner through a border glyph, and picks up
@@ -539,14 +433,19 @@ fn auto_hide_drops_a_component_reading_zero() {
     assert!(bar.is_none(), "an empty bar is no bar at all");
 }
 
-/// Care counts the companions still waiting on today's care and leaves the
-/// bar once they are all tended.
+/// Care counts the companions still waiting on today's care. It ships always
+/// visible, and leaves the bar once everything is tended only for a user who
+/// turned auto-hide on.
 #[test]
-fn care_shows_what_is_still_due_and_hides_when_tended() {
-    let components = [StatusComponentSetting::new(StatusComponent::Care)];
-    let render = |care_due: usize| {
+fn care_shows_what_is_still_due() {
+    let always = StatusComponentSetting::new(StatusComponent::Care);
+    let auto_hiding = StatusComponentSetting {
+        auto_hide: true,
+        ..always
+    };
+    let render = |setting: StatusComponentSetting, care_due: usize| {
         build_status_bar(
-            &components,
+            &[setting],
             &StatusData {
                 care_due,
                 ..StatusData::default()
@@ -558,8 +457,9 @@ fn care_shows_what_is_still_due_and_hides_when_tended() {
         .map(|bar| bar.line.to_string())
     };
 
-    assert_eq!(render(2).as_deref(), Some("─ care 2 "));
-    assert_eq!(render(0), None);
+    assert_eq!(render(always, 2).as_deref(), Some("─ care 2 "));
+    assert_eq!(render(always, 0).as_deref(), Some("─ care 0 "));
+    assert_eq!(render(auto_hiding, 0), None);
 }
 
 /// Auto-hide is offered exactly where it can do something: on an idle frame a
@@ -662,81 +562,35 @@ fn the_track_variant_falls_back_to_the_station_name() {
 
 // --- fitting -------------------------------------------------------------
 
-/// Under pressure a text-labelled segment gives up its word before anything is
-/// dropped, so the reading survives even when the wording cannot.
+/// A segment with no room is dropped whole: its wording is never shortened
+/// to squeeze it in.
 #[test]
-fn a_squeezed_bar_sheds_labels_before_segments() {
+fn a_segment_that_does_not_fit_is_dropped_not_shortened() {
     let components = [
-        on(StatusComponent::Mentions, LabelMode::Text),
+        on(StatusComponent::Users, LabelMode::Text),
         on(StatusComponent::Chips, LabelMode::Text),
     ];
-    // " unread 3 ─ chips 1204 " is 23 cells; give it 18.
-    let squeezed = render(&components, 18 + 18 + 2);
-    assert!(squeezed.contains('3'), "mentions survived: {squeezed:?}");
-    assert!(squeezed.contains("1204"), "chips survived: {squeezed:?}");
-    assert!(
-        !squeezed.contains("unread") || !squeezed.contains("chips"),
-        "at least one label was shed: {squeezed:?}"
-    );
+    let both = " online 12 ─ chips 1204 ─";
+    let width_for = |text: &str| 18 + 2 + Span::raw(text).width() as u16;
+
+    assert_eq!(render(&components, width_for(both)), both);
+    // Exact, not `contains`: a dropped segment takes its separator with it.
+    assert_eq!(render(&components, width_for(both) - 1), " chips 1204 ─");
 }
 
-/// The whole point of the tier: a low-priority segment is given up before a
-/// normal one yields, wherever the two sit relative to each other.
+/// The list order is the only priority. Room goes to the corner end first, so
+/// a top-right bar keeps its rightmost segment and a bottom-left bar its
+/// leftmost.
 #[test]
-fn low_priority_segments_drop_before_normal_ones() {
+fn the_corner_end_of_the_list_claims_room_first() {
     let components = [
-        StatusComponentSetting {
-            low_priority: true,
-            ..on(StatusComponent::Users, LabelMode::None)
-        },
+        on(StatusComponent::Users, LabelMode::None),
         on(StatusComponent::Chips, LabelMode::None),
     ];
     // Room for one segment and its edge glyph only.
-    let squeezed = render(&components, 18 + 9);
-    assert_eq!(
-        squeezed, " 1204 ─",
-        "normal segment held, alone and unseparated"
-    );
-}
+    assert_eq!(render(&components, 18 + 9), " 1204 ─");
 
-/// Tier beats position: the low-priority segment goes first even when a
-/// normal-priority segment sits further left, nearer the colliding tabs.
-#[test]
-fn tier_outranks_position_when_dropping() {
-    let components = [
-        on(StatusComponent::Chips, LabelMode::None),
-        StatusComponentSetting {
-            low_priority: true,
-            ..on(StatusComponent::Users, LabelMode::None)
-        },
-    ];
-    let squeezed = render(&components, 18 + 9);
-    assert_eq!(squeezed, " 1204 ─", "normal segment held");
-}
-
-/// Within a tier, the segment nearest the page tabs is the one that collides,
-/// so it is the one that yields.
-#[test]
-fn within_a_tier_the_leftmost_segment_yields_first() {
-    let components = [
-        on(StatusComponent::Users, LabelMode::None),
-        on(StatusComponent::Chips, LabelMode::None),
-    ];
-    // Exact, not `contains`: a dropped segment must take its separator with
-    // it rather than leaving a stray glyph behind.
-    let squeezed = render(&components, 18 + 9);
-    assert_eq!(squeezed, " 1204 ─", "rightmost held and leftmost yielded");
-}
-
-/// A bottom-left bar collides with the sponsor line on its right, so it yields
-/// from the other end.
-#[test]
-fn a_bottom_left_bar_yields_from_its_right_end() {
-    let components = [
-        on(StatusComponent::Users, LabelMode::None),
-        on(StatusComponent::Chips, LabelMode::None),
-    ];
-    let bar = build_status_bar(
+    let bottom = build_status_bar(
         &components,
         &data(),
         Placement::BottomLeft,
@@ -744,14 +598,28 @@ fn a_bottom_left_bar_yields_from_its_right_end() {
         18,
     )
     .expect("bar");
-    let text = bar
-        .line
-        .spans
-        .iter()
-        .map(|s| s.content.as_ref())
-        .collect::<String>();
-    assert!(text.contains("12"), "leftmost held: {text:?}");
-    assert!(!text.contains("1204"), "rightmost yielded: {text:?}");
+    assert_eq!(bottom.line.to_string(), "─ 12 ");
+}
+
+/// A segment too wide for the room left does not block a narrower one after
+/// it: each is kept or dropped on its own.
+#[test]
+fn a_narrower_segment_still_fits_after_a_wide_one_is_dropped() {
+    let components = [
+        on(StatusComponent::Chips, LabelMode::None),
+        on(StatusComponent::Station, LabelMode::Text),
+        on(StatusComponent::Users, LabelMode::None),
+    ];
+    let without_station = "─ 1204 ─ 12 ";
+    let bar = build_status_bar(
+        &components,
+        &data(),
+        Placement::BottomLeft,
+        Rect::new(0, 0, Span::raw(without_station).width() as u16 + 2 + 5, 24),
+        0,
+    )
+    .expect("bar");
+    assert_eq!(bar.line.to_string(), without_station);
 }
 
 #[test]
@@ -850,10 +718,7 @@ fn readout_components_get_no_hit_rect() {
 #[test]
 fn a_dropped_segment_leaves_no_hit_rect_behind() {
     let components = [
-        StatusComponentSetting {
-            low_priority: true,
-            ..on(StatusComponent::Users, LabelMode::None)
-        },
+        on(StatusComponent::Users, LabelMode::None),
         on(StatusComponent::Chips, LabelMode::None),
     ];
     let bar = build_status_bar(

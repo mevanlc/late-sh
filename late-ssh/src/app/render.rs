@@ -2872,11 +2872,11 @@ fn line_width(line: &Line<'_>) -> usize {
 /// The two titles sharing the app frame's bottom border row: the user's
 /// status bar on the left and the sponsor line on the right.
 ///
-/// The sponsor line has priority. Its shortest form is set aside first, the
-/// bar compacts and drops segments to fit in what is left, and the sponsor
-/// then grows into the richest form the fitted bar leaves room for. The bar
-/// keeps the whole row only when the sponsor would cost it the Keyhints, the
-/// voice badge, or the unread counter (`build_bottom_status_bar`).
+/// The sponsor's link is set aside first and the bar gets the rest of the
+/// row; segments with no room there are dropped (`statusline::bar::fit`).
+/// The one thing that flexes is the sponsor's own "thanks for hanging out",
+/// shown only when the fitted bar leaves room for it. A row too narrow for
+/// the link at all goes to the bar.
 fn app_frame_bottom_titles(
     components: &[StatusComponentSetting],
     data: &crate::app::statusline::data::StatusData<'_>,
@@ -2886,12 +2886,17 @@ fn app_frame_bottom_titles(
     Option<Line<'static>>,
 ) {
     let row_width = area.width.saturating_sub(2);
-    let shortest_sponsor_width = line_width(&sponsor_line(false, false)) as u16;
-    let bar = crate::app::statusline::bar::build_bottom_status_bar(
+    let link_width = line_width(&sponsor_line(false)) as u16;
+    let reserved_for_sponsor = match link_width <= row_width {
+        true => link_width,
+        false => 0,
+    };
+    let bar = crate::app::statusline::bar::build_status_bar(
         components,
         data,
+        crate::app::statusline::bar::Placement::BottomLeft,
         area,
-        shortest_sponsor_width,
+        reserved_for_sponsor,
     );
     let bar_width = match &bar {
         Some(bar) => line_width(&bar.line),
@@ -2901,17 +2906,15 @@ fn app_frame_bottom_titles(
     (bar, sponsor)
 }
 
+/// The sponsor line for the room it is given: with its thanks when that
+/// fits, the bare link when only that does, nothing when neither does.
 fn app_frame_sponsor_title(sponsor_width: usize) -> Option<Line<'static>> {
-    [
-        sponsor_line(true, true),
-        sponsor_line(false, true),
-        sponsor_line(false, false),
-    ]
-    .into_iter()
-    .find(|line| line_width(line) <= sponsor_width)
+    [sponsor_line(true), sponsor_line(false)]
+        .into_iter()
+        .find(|line| line_width(line) <= sponsor_width)
 }
 
-fn sponsor_line(include_thanks: bool, include_protocol: bool) -> Line<'static> {
+fn sponsor_line(include_thanks: bool) -> Line<'static> {
     let mut spans = Vec::new();
     if include_thanks {
         spans.push(Span::styled(
@@ -2923,12 +2926,10 @@ fn sponsor_line(include_thanks: bool, include_protocol: bool) -> Line<'static> {
     // The link carries its own blank cell on each side: this line is drawn
     // over the bottom border, so without them the `─` glyphs on either side
     // get swallowed into the URL by terminals that linkify what they see.
-    let url = if include_protocol {
-        " https://ko-fi.com/mateuszpiorowski "
-    } else {
-        " ko-fi.com/mateuszpiorowski "
-    };
-    spans.push(Span::styled(url, Style::default().fg(theme::AMBER_DIM())));
+    spans.push(Span::styled(
+        " https://ko-fi.com/mateuszpiorowski ",
+        Style::default().fg(theme::AMBER_DIM()),
+    ));
     Line::from(spans).right_aligned()
 }
 

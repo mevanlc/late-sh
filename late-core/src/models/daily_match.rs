@@ -107,7 +107,6 @@ crate::model! {
         pub status: String,
         pub challenger_id: Uuid,
         pub opponent_id: Option<Uuid>,
-        pub target_user_id: Option<Uuid>,
         pub turn_user_id: Option<Uuid>,
         pub turn_deadline_at: Option<DateTime<Utc>>,
         pub winner_user_id: Option<Uuid>,
@@ -161,19 +160,13 @@ impl DailyMatch {
         client: &Client,
         game_kind: &str,
         challenger_id: Uuid,
-        target_user_id: Option<Uuid>,
     ) -> Result<Self> {
         let row = client
             .query_one(
-                "INSERT INTO daily_matches (game_kind, status, challenger_id, target_user_id)
-                 VALUES ($1, $2, $3, $4)
+                "INSERT INTO daily_matches (game_kind, status, challenger_id)
+                 VALUES ($1, $2, $3)
                  RETURNING *",
-                &[
-                    &game_kind,
-                    &Self::STATUS_OPEN,
-                    &challenger_id,
-                    &target_user_id,
-                ],
+                &[&game_kind, &Self::STATUS_OPEN, &challenger_id],
             )
             .await?;
         Ok(Self::from(row))
@@ -204,7 +197,6 @@ impl DailyMatch {
                    AND status = $7
                    AND opponent_id IS NULL
                    AND challenger_id <> $2
-                   AND (target_user_id IS NULL OR target_user_id = $2)
                  RETURNING *",
                 &[
                     &match_id,

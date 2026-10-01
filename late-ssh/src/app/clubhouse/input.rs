@@ -94,8 +94,7 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
                     // eight-ball already under the cursor.
                     Some(Interactive::Pool) => {
                         crate::app::input::open_daily_modal_globally(app);
-                        app.daily
-                            .begin_challenge_draft_for(DailyGame::EightBall, false);
+                        app.daily.begin_challenge_draft_for(DailyGame::EightBall);
                     }
                     Some(Interactive::Easel) => app.set_screen(Screen::Artboard),
                     _ => {

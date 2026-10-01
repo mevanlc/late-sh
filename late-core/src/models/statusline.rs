@@ -8,9 +8,11 @@
 //!
 //! Shape deliberately mirrors `RightSidebarComponent` (closed enum, string
 //! keys, `normalize_*` backfill) so the two editors read the same way, with
-//! two divergences called out at their definitions: `backfill_existing` is a
-//! per-component decision rather than a blanket rule, and `low_priority` is a
-//! user-settable drop tier that the sidebar has no equivalent for.
+//! one divergence called out at its definition: `backfill_existing` is a
+//! per-component decision rather than a blanket rule.
+//!
+//! There is no priority dial. The list order is the only priority: the bar
+//! keeps the segments that fit, in order, and drops the rest whole.
 
 use serde_json::Value;
 
@@ -187,10 +189,9 @@ impl StatusComponent {
 
     /// Whether the component starts enabled for a user with no stored list.
     ///
-    /// Keyhints and the station, plus four readings that auto-hide and so
-    /// take space only while they have something to say: voice and mentions,
-    /// which the frame shows nowhere else, and what is waiting on the user
-    /// today (games to move in, daily care). Every other reading is opt-in.
+    /// Keyhints and the station, then voice and mentions, which the frame
+    /// shows nowhere else, and what is waiting on the user today (games to
+    /// move in, daily care). Every other reading is opt-in.
     pub fn default_enabled(self) -> bool {
         match self {
             Self::Shortcuts
@@ -221,15 +222,11 @@ impl StatusComponent {
         }
     }
 
+    /// What ships enabled stays on the bar even while idle (`unread 0`), so a
+    /// newcomer sees the whole default bar and trims it later. Opt-in
+    /// readings start auto-hiding.
     pub fn default_auto_hide(self) -> bool {
-        self.can_auto_hide()
-    }
-
-    /// Whether the component starts in the low-priority drop tier. What ships
-    /// enabled keeps normal priority; every opt-in status reading starts low
-    /// priority until the user promotes it.
-    pub fn default_low_priority(self) -> bool {
-        !self.default_enabled()
+        self.can_auto_hide() && !self.default_enabled()
     }
 
     /// What happens when this component is missing from a list a user has
@@ -418,12 +415,6 @@ pub struct StatusComponentSetting {
     /// Drop the segment entirely while the component reads inactive/zero.
     /// Meaningless, and not offered, when `!component.can_auto_hide()`.
     pub auto_hide: bool,
-    /// Drop tier. The bottom bar shares its row with the sponsor title, so when
-    /// space runs out every low-priority segment is given up before any
-    /// normal-priority one yields; within a tier the rightmost segment goes
-    /// first. Voice and mentions at normal priority outlast the rest of the
-    /// bar (`Tier::Signal` in `late-ssh/src/app/statusline/bar.rs`).
-    pub low_priority: bool,
     /// Resolved against `component.variants()`; `None` for components with no
     /// dial. A stored value that is absent or foreign resolves to the first
     /// variant rather than disabling the component.
@@ -439,7 +430,6 @@ impl StatusComponentSetting {
             brief: false,
             label: component.default_label_mode(),
             auto_hide: component.default_auto_hide(),
-            low_priority: component.default_low_priority(),
             variant: component.default_variant(),
         }
     }
@@ -494,7 +484,6 @@ pub fn normalize_statusline_components(
             brief: setting.brief && component == StatusComponent::Shortcuts,
             label: setting.label,
             auto_hide: setting.auto_hide && component.can_auto_hide(),
-            low_priority: setting.low_priority,
             variant,
         });
     }
@@ -539,10 +528,6 @@ pub fn parse_statusline_components(values: &[Value]) -> Vec<StatusComponentSetti
                 .get("auto_hide")
                 .and_then(Value::as_bool)
                 .unwrap_or_else(|| component.default_auto_hide()),
-            low_priority: value
-                .get("low_priority")
-                .and_then(Value::as_bool)
-                .unwrap_or_else(|| component.default_low_priority()),
             variant: value
                 .get("variant")
                 .and_then(Value::as_str)
@@ -564,7 +549,6 @@ pub fn statusline_components_json(components: &[StatusComponentSetting]) -> Valu
                     "brief": setting.brief,
                     "label": setting.label.as_str(),
                     "auto_hide": setting.auto_hide,
-                    "low_priority": setting.low_priority,
                     "variant": setting.variant.map(StatusVariant::as_str),
                 })
             })

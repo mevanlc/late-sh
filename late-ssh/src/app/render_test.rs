@@ -156,11 +156,12 @@ fn dashboard_home_selected_rejects_synthetic_and_non_lounge_rooms() {
     assert!(!dashboard_home_selected(None, Some(topic), false));
 }
 
+/// The sponsor line has one flexible part: its thanks. The link itself is
+/// all or nothing.
 #[test]
-fn sponsor_title_drops_optional_segments_to_fit_its_available_width() {
-    let full_width = line_width(&sponsor_line(true, true));
-    let url_width = line_width(&sponsor_line(false, true));
-    let short_url_width = line_width(&sponsor_line(false, false));
+fn sponsor_title_drops_its_thanks_before_its_link() {
+    let full_width = line_width(&sponsor_line(true));
+    let link_width = line_width(&sponsor_line(false));
 
     let full = app_frame_sponsor_title(full_width).expect("full sponsor should fit");
     assert_eq!(
@@ -168,24 +169,22 @@ fn sponsor_title_drops_optional_segments_to_fit_its_available_width() {
         " thanks for hanging out ☕ https://ko-fi.com/mateuszpiorowski "
     );
 
-    // Each fallback keeps the blank cell on both sides of the link: the title
-    // is drawn over the bottom border, so a URL flush against `─` gets the
-    // glyph linkified along with it.
-    let url_only = app_frame_sponsor_title(full_width - 1).expect("url-only sponsor should fit");
-    assert_eq!(line_text(&url_only), " https://ko-fi.com/mateuszpiorowski ");
+    // The link keeps the blank cell on both sides: the title is drawn over
+    // the bottom border, so a URL flush against `─` gets the glyph linkified
+    // along with it.
+    let link_only = app_frame_sponsor_title(full_width - 1).expect("the link should fit");
+    assert_eq!(
+        line_text(&link_only),
+        " https://ko-fi.com/mateuszpiorowski "
+    );
 
-    let short_url =
-        app_frame_sponsor_title(url_width - 1).expect("protocol-stripped sponsor should fit");
-    assert_eq!(line_text(&short_url), " ko-fi.com/mateuszpiorowski ");
-
-    let hidden = app_frame_sponsor_title(short_url_width - 1);
-    assert!(hidden.is_none());
+    assert!(app_frame_sponsor_title(link_width - 1).is_none());
 }
 
-/// The sponsor line outranks the user's bar on the bottom border row: however
-/// many segments are switched on, the bar is the one that yields.
+/// The sponsor's link is set aside before the bar gets any room: however many
+/// segments are switched on, the bar is the one that drops them.
 #[test]
-fn sponsor_line_keeps_its_place_however_full_the_status_bar_is() {
+fn sponsor_link_keeps_its_place_however_full_the_status_bar_is() {
     use crate::app::statusline::data::StatusData;
     use late_core::models::statusline::{StatusComponentSetting, default_statusline_components};
     use ratatui::layout::Rect;
@@ -195,7 +194,6 @@ fn sponsor_line_keeps_its_place_however_full_the_status_bar_is() {
         .map(|setting| StatusComponentSetting {
             enabled: true,
             auto_hide: false,
-            low_priority: false,
             ..setting
         })
         .collect();
@@ -209,10 +207,8 @@ fn sponsor_line_keeps_its_place_however_full_the_status_bar_is() {
 
     let (bar, sponsor) = app_frame_bottom_titles(&everything_on, &data, area);
 
-    // Which sponsor form fits depends on which segments the bar kept; that it
-    // is there at all is the point.
-    let sponsor = sponsor.expect("the sponsor line survives a full bar");
-    assert!(line_text(&sponsor).contains("ko-fi.com/mateuszpiorowski"));
+    let sponsor = sponsor.expect("the sponsor link survives a full bar");
+    assert!(line_text(&sponsor).contains("https://ko-fi.com/mateuszpiorowski"));
     let bar = bar.expect("the bar keeps what fits beside the sponsor");
     assert!(
         line_width(&bar.line) + line_width(&sponsor) <= usize::from(area.width - 2),
@@ -221,9 +217,9 @@ fn sponsor_line_keeps_its_place_however_full_the_status_bar_is() {
     assert!(line_text(&bar.line).contains("Settings"));
 }
 
-/// With room to spare the sponsor takes the richest form the bar leaves it.
+/// With room to spare the sponsor line carries its thanks too.
 #[test]
-fn sponsor_line_grows_into_the_room_the_status_bar_leaves() {
+fn sponsor_line_adds_its_thanks_when_the_status_bar_leaves_room() {
     use crate::app::statusline::data::StatusData;
     use late_core::models::statusline::default_statusline_components;
     use ratatui::layout::Rect;
@@ -241,21 +237,29 @@ fn sponsor_line_grows_into_the_room_the_status_bar_leaves() {
     );
 }
 
-/// Keyhints are the one thing the sponsor line does not push off the row: on
-/// a terminal too narrow for both, the hints keep the row to themselves.
+/// No segment is special: on a terminal too narrow for the Keyhints beside
+/// the sponsor's link, the hints are dropped like anything else and the
+/// narrower segments after them still paint.
 #[test]
-fn keyhints_keep_a_row_too_narrow_to_share_with_the_sponsor() {
+fn keyhints_too_wide_for_the_row_are_dropped_like_any_other_segment() {
     use crate::app::statusline::data::StatusData;
     use late_core::models::statusline::default_statusline_components;
     use ratatui::layout::Rect;
 
     let (bar, sponsor) = app_frame_bottom_titles(
         &default_statusline_components(),
-        &StatusData::default(),
+        &StatusData {
+            station_name: "chillsynth",
+            ..StatusData::default()
+        },
         Rect::new(0, 0, 80, 24),
     );
 
-    let bar = bar.expect("keyhints survive an 80-column terminal");
-    assert!(line_text(&bar.line).contains("Settings ^O"));
-    assert!(sponsor.is_none(), "no room is left for the sponsor line");
+    assert_eq!(
+        line_text(&sponsor.expect("sponsor link")),
+        " https://ko-fi.com/mateuszpiorowski "
+    );
+    let bar = line_text(&bar.expect("the narrower segments still fit").line);
+    assert!(!bar.contains("Settings"), "{bar:?}");
+    assert!(bar.contains("🎵 chillsynth"), "{bar:?}");
 }
