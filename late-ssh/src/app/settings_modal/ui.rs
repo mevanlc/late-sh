@@ -1,14 +1,17 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Flex, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap},
 };
 
 use late_core::models::user::{RightSidebarMode, RoomListMode};
 
 use crate::app::common::{markdown::render_body_to_lines, sidebar::SidebarOwnership, theme};
+
+use super::mouse::{Field, Pane, Target};
 
 use super::{
     data::country_label,
@@ -31,6 +34,94 @@ pub(crate) fn draw(
     state: &SettingsModalState,
     ownership: SidebarOwnership,
 ) {
+    let size = frame.area();
+    state.mouse.begin((size.width, size.height));
+    let mut surface = Surface {
+        buffer: frame.buffer_mut(),
+    };
+    draw_surface(&mut surface, area, state, ownership);
+    state.mouse.finish();
+}
+
+struct Surface<'a> {
+    buffer: &'a mut Buffer,
+}
+impl Surface<'_> {
+    fn render_widget(&mut self, widget: impl Widget, area: Rect) {
+        widget.render(area, self.buffer);
+    }
+}
+
+/// Render the complete body once, then copy its viewport and translate only
+/// visible hit targets. Short terminals never compress one-row controls.
+fn draw_scroll(
+    frame: &mut Surface<'_>,
+    area: Rect,
+    state: &SettingsModalState,
+    pane: Pane,
+    rows: usize,
+    focus: usize,
+    draw: impl FnOnce(&mut Surface<'_>, Rect),
+) {
+    if area.is_empty() {
+        return;
+    }
+    let rows = rows.max(area.height as usize).min(u16::MAX as usize);
+    let offset = state.mouse.pane(area, pane, rows, focus);
+    let local = Rect::new(0, 0, area.width, rows as u16);
+    let mut buffer = Buffer::empty(local);
+    let start = state.mouse.hits.borrow().len();
+    draw(
+        &mut Surface {
+            buffer: &mut buffer,
+        },
+        local,
+    );
+    state.mouse.translate(start, area, offset);
+    for y in 0..area.height {
+        for x in 0..area.width {
+            frame.buffer[(area.x + x, area.y + y)] = buffer[(x, y + offset as u16)].clone();
+        }
+    }
+}
+
+fn button(
+    frame: &mut Surface<'_>,
+    area: Rect,
+    state: &SettingsModalState,
+    label: &str,
+    target: Target,
+) {
+    let width = Span::raw(label).width() as u16;
+    let rect = Rect::new(area.x, area.y, area.width.min(width), area.height.min(1));
+    frame.render_widget(
+        Paragraph::new(label).style(Style::default().fg(theme::AMBER_GLOW())),
+        rect,
+    );
+    state.mouse.hit(rect, target);
+}
+
+fn close_button(frame: &mut Surface<'_>, popup: Rect, state: &SettingsModalState) {
+    button(
+        frame,
+        Rect::new(
+            popup.right().saturating_sub(4).max(popup.x),
+            popup.y,
+            popup.width.min(3),
+            popup.height.min(1),
+        ),
+        state,
+        "[x]",
+        Target::Close,
+    );
+}
+
+fn draw_surface(
+    frame: &mut Surface<'_>,
+    area: Rect,
+    state: &SettingsModalState,
+    ownership: SidebarOwnership,
+) {
     let popup = centered_rect(MODAL_WIDTH, MODAL_HEIGHT, area);
     frame.render_widget(Clear, popup);
 
@@ -45,86 +136,198 @@ pub(crate) fn draw(
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
+    let tabs_height = tab_rows(inner.width, state);
     let layout = Layout::vertical([
-        Constraint::Length(1), // breathing room
-        Constraint::Length(1), // tabs
-        Constraint::Length(1), // breathing room
-        Constraint::Min(14),   // body
-        Constraint::Length(1), // footer
+        Constraint::Length(0),           // breathing room
+        Constraint::Length(tabs_height), // tabs
+        Constraint::Length(1),           // breathing room
+        Constraint::Min(1),              // body
+        Constraint::Length(1),           // footer
     ])
     .split(inner);
 
     draw_tabs(frame, layout[1], state);
-    state.set_body_area(layout[3]);
 
     match state.selected_tab() {
-        Tab::Settings => draw_settings_tab(frame, layout[3], state),
-        Tab::Tweaks => draw_tweaks_tab(frame, layout[3], state),
+        Tab::Settings => draw_scroll(
+            frame,
+            layout[3],
+            state,
+            Pane::Settings,
+            27,
+            settings_row_y(state.selected_row()),
+            |f, a| draw_settings_tab(f, a, state),
+        ),
+        Tab::Tweaks => draw_scroll(
+            frame,
+            layout[3],
+            state,
+            Pane::Tweaks,
+            26,
+            tweak_row_y(state.selected_tweak_row()),
+            |f, a| draw_tweaks_tab(f, a, state),
+        ),
         Tab::Statusline => draw_statusline_tab(frame, layout[3], state),
         Tab::Themes => draw_themes_tab(frame, layout[3], state),
         Tab::Bio => draw_bio_tab(frame, layout[3], state),
-        Tab::Account => draw_account_tab(frame, layout[3], state),
+        Tab::Account => draw_scroll(
+            frame,
+            layout[3],
+            state,
+            Pane::Account,
+            10,
+            2 + AccountRow::ALL
+                .iter()
+                .position(|r| *r == state.selected_account_row())
+                .unwrap_or(0)
+                * 3,
+            |f, a| draw_account_tab(f, a, state),
+        ),
         Tab::Feeds => draw_feeds_tab(frame, layout[3], state),
     }
 
-    draw_footer(frame, layout[4], state);
+    let mut help_area = layout[4];
+    if state.editing_text() {
+        help_area.width = help_area.width.saturating_sub(21);
+    }
+    draw_footer(frame, help_area, state);
+    if state.editing_text() {
+        let buttons = Rect::new(
+            layout[4].right().saturating_sub(20).max(layout[4].x),
+            layout[4].y,
+            layout[4].width.min(20),
+            layout[4].height,
+        );
+        button(
+            frame,
+            buttons,
+            state,
+            if state.editing_bio() {
+                "[Done]"
+            } else {
+                "[Save]"
+            },
+            Target::Submit,
+        );
+        if !state.editing_bio() {
+            button(
+                frame,
+                Rect::new(
+                    buttons.x + 8,
+                    buttons.y,
+                    buttons.width.saturating_sub(8),
+                    buttons.height,
+                ),
+                state,
+                "[Cancel]",
+                Target::Cancel,
+            );
+        }
+    }
+    if let Some(error) = &state.mouse_error {
+        let mut error_area = layout[4];
+        if state.editing_text() {
+            error_area.width = error_area.width.saturating_sub(20);
+        }
+        frame.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(theme::ERROR())),
+            error_area,
+        );
+    }
 
     if state.picker_open() {
+        state.mouse.clear_surface();
         draw_picker(frame, popup, state);
     }
     if state.right_sidebar_components_open() {
+        state.mouse.clear_surface();
         draw_right_sidebar_components_dialog(frame, popup, state, ownership);
     }
     if state.chat_badges_open() {
+        state.mouse.clear_surface();
         draw_chat_badges_dialog(frame, popup, state);
     }
     if state.link_account_dialog().open() {
+        state.mouse.clear_surface();
         draw_link_account_dialog(frame, popup, state);
     }
     if state.delete_account_dialog().open() {
+        state.mouse.clear_surface();
         draw_delete_account_dialog(frame, popup, state);
     }
     if state.irc_token_dialog().open() {
+        state.mouse.clear_surface();
         draw_irc_token_dialog(frame, popup, state);
     }
 }
 
-fn draw_tabs(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
-    let selected = state.selected_tab();
-    let mut spans = vec![Span::raw("  ")];
-    let mut rects: [Option<Rect>; Tab::ALL.len()] = [None; Tab::ALL.len()];
-    let mut cursor_x = area.x.saturating_add(2);
+fn tab_rows(width: u16, state: &SettingsModalState) -> u16 {
+    let mut x = 0;
+    let mut rows = 1;
     for tab in state.visible_tabs() {
-        let active = tab == selected;
-        let style = if active {
-            Style::default()
+        let w = Span::raw(format!(" {} ", tab.label())).width() as u16;
+        if x > 0 && x + w > width {
+            rows += 1;
+            x = 0;
+        }
+        x += w + 1;
+    }
+    rows
+}
+
+fn draw_tabs(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
+    let mut x = area.x;
+    let mut y = area.y;
+    for tab in state.visible_tabs() {
+        let label = format!(" {} ", tab.label());
+        let width = Span::raw(&label).width() as u16;
+        if x > area.x && x + width > area.right() {
+            x = area.x;
+            y += 1;
+        }
+        if y >= area.bottom() {
+            break;
+        }
+        let rect = Rect::new(x, y, width.min(area.right().saturating_sub(x)), 1);
+        let style = if tab == state.selected_tab() {
+            theme::selection_style()
                 .fg(theme::AMBER_GLOW())
-                .bg(theme::BG_HIGHLIGHT())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme::TEXT_DIM())
         };
-        let label = format!(" {} ", tab.label());
-        let width = Span::raw(&label).width() as u16;
-        let cell_end = cursor_x.saturating_add(width).min(area.x + area.width);
-        if let Some(slot_idx) = Tab::ALL.iter().position(|t| *t == tab) {
-            rects[slot_idx] = Some(Rect::new(
-                cursor_x,
-                area.y,
-                cell_end.saturating_sub(cursor_x),
-                area.height.min(1),
-            ));
-        }
-        spans.push(Span::styled(label, style));
-        spans.push(Span::raw(" "));
-        cursor_x = cell_end.saturating_add(1);
+        frame.render_widget(Paragraph::new(label).style(style), rect);
+        state.mouse.hit(rect, Target::Tab(tab));
+
+        x += width + 1;
     }
-    state.set_tab_rects(rects);
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn settings_row_y(row: Row) -> usize {
+    [
+        1, 2, 3, 4, 7, 8, 9, 10, 13, 14, 15, 18, 19, 20, 21, 22, 23, 24,
+    ][Row::ALL.iter().position(|r| *r == row).unwrap_or(0)]
+}
+fn tweak_row_y(row: TweakRow) -> usize {
+    [1, 2, 3, 4, 7, 8, 11, 12, 13, 16, 17, 18]
+        [TweakRow::ALL.iter().position(|r| *r == row).unwrap_or(0)]
+}
+
+fn draw_footer(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
+    if state.editing_text() && area.width < 60 {
+        let hint = if state.editing_bio() {
+            "  Esc save · ^J newline"
+        } else {
+            "  Enter save · Esc cancel"
+        };
+        frame.render_widget(
+            Paragraph::new(hint).style(Style::default().fg(theme::TEXT_DIM())),
+            area,
+        );
+        return;
+    }
     let mut spans = vec![Span::raw("  ")];
     match (state.selected_tab(), state.editing_bio()) {
         (Tab::Bio, true) => {
@@ -264,7 +467,7 @@ fn theme_search_line(state: &SettingsModalState) -> Line<'static> {
     ])
 }
 
-fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_themes_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let sections = Layout::vertical([
         Constraint::Length(1), // heading
         Constraint::Length(1), // summary
@@ -313,18 +516,27 @@ fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let width = tree_area.width as usize;
     let visible_height = tree_area.height as usize;
     state.set_theme_visible_height(visible_height.max(1));
+    state.mouse.hit(sections[2], Target::Search);
+    let offset = state.mouse.pane(
+        tree_area,
+        Pane::Themes,
+        state.theme_tree_rows().len(),
+        state.theme_selected_row(),
+    );
 
     let mut lines: Vec<Line<'static>> = Vec::new();
-    for (row_idx, row) in state
-        .theme_tree_rows()
-        .into_iter()
-        .enumerate()
-        .skip(state.theme_scroll_offset())
-    {
+    for (row_idx, row) in state.theme_tree_rows().into_iter().enumerate().skip(offset) {
         if lines.len() >= visible_height {
             break;
         }
 
+        let row_rect = Rect::new(
+            tree_area.x,
+            tree_area.y + lines.len() as u16,
+            tree_area.width,
+            1,
+        );
+        state.mouse.hit(row_rect, Target::Theme(row_idx));
         let selected = row_idx == state.theme_selected_row();
         match row {
             ThemeTreeRow::Group { group, collapsed } => {
@@ -342,6 +554,15 @@ fn draw_themes_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 option_index,
                 last_in_group,
             } => {
+                state.mouse.hit(
+                    text_value_rect(row_rect, 6).intersection(Rect::new(
+                        row_rect.x + 6,
+                        row_rect.y,
+                        2,
+                        1,
+                    )),
+                    Target::Star(row_idx),
+                );
                 lines.push(theme_option_line(
                     theme::OPTIONS[option_index],
                     selected,
@@ -449,7 +670,7 @@ fn theme_option_line(
     ];
     // The star reads the same inside the Favorites block and out in the theme's
     // own group, so it is always obvious which themes are starred.
-    let star = if favorite { "★ " } else { "" };
+    let star = if favorite { "★ " } else { "☆ " };
     let id_text = format!("  {}", option.id);
     let used = prefix.chars().count()
         + star.chars().count()
@@ -483,7 +704,7 @@ fn swatch(color: ratatui::style::Color) -> Span<'static> {
     Span::styled("  ", Style::default().bg(color))
 }
 
-fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_settings_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let sections = Layout::vertical([
         Constraint::Length(1), // Identity heading
         Constraint::Length(1), // Username row
@@ -515,6 +736,10 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
     ])
     .split(area);
 
+    for row in Row::ALL {
+        let rect = sections[settings_row_y(row)];
+        state.mouse.hit(rect, Target::Row(row));
+    }
     let width = area.width as usize;
 
     frame.render_widget(Paragraph::new(section_heading("Identity")), sections[0]);
@@ -752,6 +977,29 @@ fn draw_settings_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) 
         sections[24],
     );
 
+    if state.editing_username() {
+        draw_text_field(
+            frame,
+            text_value_rect(sections[1], 19),
+            state,
+            Field::Username,
+            state.username_input(),
+        );
+    }
+    if let Some(field) = state.editing_system_field() {
+        let row = match field {
+            super::state::SystemField::Ide => Row::Ide,
+            super::state::SystemField::Terminal => Row::Terminal,
+            super::state::SystemField::Os => Row::Os,
+        };
+        draw_text_field(
+            frame,
+            text_value_rect(sections[settings_row_y(row)], 19),
+            state,
+            Field::System,
+            state.system_input(),
+        );
+    }
     frame.render_widget(Paragraph::new(shortcuts_hint_line(width)), sections[26]);
 }
 
@@ -790,7 +1038,7 @@ fn shortcuts_hint_line(width: usize) -> Line<'static> {
     ])
 }
 
-fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_tweaks_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let width = area.width as usize;
     let mut lines = Vec::new();
     let mut rows = Vec::new();
@@ -894,6 +1142,28 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             rows.push(Some(row));
         }
     }
+    for (idx, row) in rows.iter().enumerate() {
+        if let Some(row) = row {
+            state.mouse.hit(
+                Rect::new(area.x, area.y + idx as u16, area.width, 1),
+                Target::Tweak(*row),
+            );
+            if *row == TweakRow::RightSidebar {
+                let line = &lines[idx];
+                let x = line.spans.iter().take(2).map(Span::width).sum::<usize>();
+                let mode = line.spans[2].content.split("  ").next().unwrap_or("");
+                state.mouse.hit(
+                    Rect::new(
+                        area.x + x as u16,
+                        area.y + idx as u16,
+                        Span::raw(mode).width() as u16,
+                        1,
+                    ),
+                    Target::SidebarMode,
+                );
+            }
+        }
+    }
     // Controls take priority over decoration. On short terminals, scroll the
     // selected control into view rather than clipping an inaccessible row.
     let gem_height = 7.min(area.height.saturating_sub(lines.len() as u16));
@@ -917,6 +1187,9 @@ fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     );
     if gem_area.width > 0 && gem_area.height > 0 {
         draw_gem(frame, gem_area, state.gem());
+        if let Some(hit) = state.gem().hit_area.get() {
+            state.mouse.hit(hit, Target::Gem);
+        }
     } else {
         state.gem().hit_area.set(None);
     }
@@ -976,7 +1249,7 @@ fn tweak_row_line(
     ])
 }
 
-fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_account_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let sections = Layout::vertical([
         Constraint::Length(1), // heading
         Constraint::Length(1), // breathing
@@ -994,6 +1267,9 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
 
     frame.render_widget(Paragraph::new(section_heading("Account")), sections[0]);
 
+    for (idx, row) in AccountRow::ALL.into_iter().enumerate() {
+        state.mouse.hit(sections[2 + idx * 3], Target::Account(row));
+    }
     let width = area.width as usize;
     frame.render_widget(
         Paragraph::new(account_row_line(
@@ -1033,7 +1309,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
-        sections[5],
+        sections[6],
     );
     frame.render_widget(
         Paragraph::new(account_row_line(
@@ -1043,7 +1319,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             "Delete Account",
             true,
         )),
-        sections[7],
+        sections[8],
     );
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -1053,7 +1329,7 @@ fn draw_account_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
                 Style::default().fg(theme::TEXT_DIM()),
             ),
         ])),
-        sections[8],
+        sections[9],
     );
 }
 
@@ -1109,46 +1385,80 @@ fn account_row_line(
     ])
 }
 
-fn draw_feeds_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
-    let sections = Layout::vertical([
-        Constraint::Length(1), // heading
-        Constraint::Length(1), // hint
-        Constraint::Length(1), // breathing
-        Constraint::Min(4),    // list
+fn draw_feeds_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
+    let [head, controls, list] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
     ])
-    .split(area);
-
-    frame.render_widget(Paragraph::new(section_heading("RSS")), sections[0]);
+    .areas(area);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "RSS/Atom entries stay private until you share them from Chat > rss.",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ])),
-        sections[1],
+        Paragraph::new(section_heading("RSS — private until shared")),
+        head,
     );
-
-    let width = sections[3].width as usize;
-    let mut lines = Vec::new();
-    for (idx, feed) in state.feeds().iter().enumerate() {
-        lines.push(feed_row_line(
-            idx == state.feed_index() && !state.editing_feed_url(),
-            width,
-            feed_display_title(feed),
-            feed.url.as_str(),
-            feed.last_error.as_deref(),
-        ));
-    }
-    lines.push(feed_add_line(
-        state.feed_index_is_add_row() && !state.editing_feed_url(),
-        state.editing_feed_url(),
-        width,
+    button(frame, controls, state, "[Add]", Target::AddFeed);
+    button(
+        frame,
+        text_value_rect(controls, 7),
         state,
-    ));
-
-    frame.render_widget(Paragraph::new(lines), sections[3]);
+        "[Remove]",
+        Target::RemoveFeed,
+    );
+    button(
+        frame,
+        text_value_rect(controls, 17),
+        state,
+        "[Refresh]",
+        Target::RefreshFeeds,
+    );
+    draw_scroll(
+        frame,
+        list,
+        state,
+        Pane::Feeds,
+        state.feeds().len() + 1,
+        if state.editing_feed_url() {
+            state.feeds().len()
+        } else {
+            state.feed_index()
+        },
+        |frame, area| {
+            for (idx, feed) in state.feeds().iter().enumerate() {
+                let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
+                frame.render_widget(
+                    Paragraph::new(feed_row_line(
+                        idx == state.feed_index() && !state.editing_feed_url(),
+                        area.width as usize,
+                        feed_display_title(feed),
+                        &feed.url,
+                        feed.last_error.as_deref(),
+                    )),
+                    row,
+                );
+                state.mouse.hit(row, Target::Feed(feed.id));
+            }
+            let row = Rect::new(area.x, area.y + state.feeds().len() as u16, area.width, 1);
+            frame.render_widget(
+                Paragraph::new(feed_add_line(
+                    state.feed_index_is_add_row(),
+                    state.editing_feed_url(),
+                    area.width as usize,
+                    state,
+                )),
+                row,
+            );
+            state.mouse.hit(row, Target::AddFeed);
+            if state.editing_feed_url() {
+                draw_text_field(
+                    frame,
+                    text_value_rect(row, 3),
+                    state,
+                    Field::Feed,
+                    state.feed_url_input(),
+                );
+            }
+        },
+    );
 }
 
 fn feed_display_title(feed: &late_core::models::rss_feed::RssFeed) -> String {
@@ -1289,7 +1599,7 @@ fn feed_add_line(
 /// Special tab. The small gem hugs a corner; the grand gem is centered.
 /// The gem's screen-coordinate rect is stashed back on `gem.hit_area` so the
 /// input handler can do mouse hit testing.
-fn draw_gem(frame: &mut Frame, area: Rect, gem: &GemState) {
+fn draw_gem(frame: &mut Surface<'_>, area: Rect, gem: &GemState) {
     if gem.evolved() {
         draw_grand_gem(frame, area, gem);
     } else {
@@ -1297,7 +1607,7 @@ fn draw_gem(frame: &mut Frame, area: Rect, gem: &GemState) {
     }
 }
 
-fn draw_small_gem(frame: &mut Frame, area: Rect, gem: &GemState) {
+fn draw_small_gem(frame: &mut Surface<'_>, area: Rect, gem: &GemState) {
     const SMALL_W: u16 = 3;
     const SMALL_H: u16 = 3;
     if area.width < SMALL_W || area.height < SMALL_H {
@@ -1336,7 +1646,7 @@ fn draw_small_gem(frame: &mut Frame, area: Rect, gem: &GemState) {
 /// Speed-trail wisps. Rendered on the gem's middle and bottom rows,
 /// extending away from the gem in the direction it just came from.
 fn draw_speed_trail(
-    frame: &mut Frame,
+    frame: &mut Surface<'_>,
     area: Rect,
     gem_x: u16,
     gem_y_start: u16,
@@ -1392,7 +1702,7 @@ fn draw_speed_trail(
     }
 }
 
-fn draw_grand_gem(frame: &mut Frame, area: Rect, gem: &GemState) {
+fn draw_grand_gem(frame: &mut Surface<'_>, area: Rect, gem: &GemState) {
     // Each row is a list of (text, kind). `Kind::Gem` styles with the gem
     // color; `Kind::Shine` styles with the shine color. Splitting by kind
     // lets the two colors live on the same cell row.
@@ -1499,66 +1809,195 @@ fn notify_format_label(format: Option<&str>) -> &'static str {
     }
 }
 
-fn draw_bio_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
-    let editing = state.editing_bio();
-    let bio = state.bio_input();
-    let text = bio.lines().join("\n");
-    let char_count = text.chars().count();
-
-    // One-line header: char count + hint.
-    let sections = Layout::vertical([
-        Constraint::Length(1), // header
-        Constraint::Length(1), // breathing
-        Constraint::Min(4),    // editor OR preview
-    ])
-    .split(area);
-
-    let header_style_count = Style::default().fg(theme::TEXT_BRIGHT());
-    let header_style_dim = Style::default().fg(theme::TEXT_DIM());
-    let header = Line::from(vec![
-        Span::raw("  "),
-        Span::styled(
-            format!("{char_count}/{BIO_MAX_LEN}"),
-            if editing {
-                header_style_count.add_modifier(Modifier::BOLD)
-            } else {
-                header_style_count
-            },
-        ),
-        Span::styled("   chars", header_style_dim),
-    ]);
-    frame.render_widget(Paragraph::new(header), sections[0]);
-
-    let body = sections[2];
-    let padded = body.inner(Margin::new(2, 0));
-
-    if editing {
-        frame.render_widget(bio, padded);
-        return;
-    }
-
-    // Not editing → render the draft as markdown. Empty bio shows a nudge.
-    let draft_text = state.draft().bio.as_str();
-    if draft_text.trim().is_empty() {
-        let hint = Line::from(vec![Span::styled(
-            "Press ↵ to write your bio. Markdown is supported.",
-            Style::default().fg(theme::TEXT_DIM()),
-        )]);
-        frame.render_widget(Paragraph::new(hint).wrap(Wrap { trim: false }), padded);
-        return;
-    }
-
-    let wrap_width = padded.width.saturating_sub(0) as usize;
-    let lines = render_body_to_lines(
-        draft_text,
-        wrap_width,
-        Span::raw(""),
-        Style::default().fg(theme::TEXT()),
-    );
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), padded);
+fn text_value_rect(row: Rect, prefix: u16) -> Rect {
+    let prefix = prefix.min(row.width);
+    Rect::new(row.x + prefix, row.y, row.width - prefix, row.height)
 }
 
-fn draw_picker(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn reorder_buttons(
+    frame: &mut Surface<'_>,
+    row: Rect,
+    state: &SettingsModalState,
+    up: Target,
+    down: Target,
+) {
+    if row.width < 8 {
+        return;
+    }
+    let x = row.right() - 7;
+    button(frame, Rect::new(x, row.y, 3, row.height), state, "[↑]", up);
+    button(
+        frame,
+        Rect::new(x + 4, row.y, 3, row.height),
+        state,
+        "[↓]",
+        down,
+    );
+}
+
+fn draw_text_field(
+    frame: &mut Surface<'_>,
+    area: Rect,
+    state: &SettingsModalState,
+    field: Field,
+    input: &ratatui_textarea::TextArea<'_>,
+) {
+    if area.is_empty() {
+        return;
+    }
+    let text = input.lines().first().map(String::as_str).unwrap_or("");
+    let cursor = input.cursor().1;
+    let caret_x = Span::raw(text.chars().take(cursor).collect::<String>()).width();
+    let scroll = caret_x.saturating_sub(area.width.saturating_sub(1) as usize);
+    let mut spans = Vec::new();
+    let mut col = 0;
+    let mut logical_x = 0;
+    let mut x = 0;
+    for grapheme in Line::raw(text).styled_graphemes(Style::default()) {
+        let width = Span::raw(grapheme.symbol).width();
+        if logical_x >= scroll && x + width <= area.width as usize {
+            let style = Style::default().fg(theme::AMBER());
+            spans.push(Span::styled(
+                grapheme.symbol.to_string(),
+                if col == cursor {
+                    style.add_modifier(Modifier::REVERSED)
+                } else {
+                    style
+                },
+            ));
+            state.mouse.hit(
+                Rect::new(area.x + x as u16, area.y, width as u16, 1),
+                Target::Caret(field, 0, col),
+            );
+            x += width;
+        }
+        logical_x += width;
+        col += grapheme.symbol.chars().count();
+    }
+    if x < area.width as usize {
+        let end = Rect::new(area.x + x as u16, area.y, area.width - x as u16, 1);
+        state.mouse.hit(end, Target::Caret(field, 0, col));
+        if cursor == col {
+            spans.push(Span::styled("█", Style::default().fg(theme::AMBER())));
+        }
+    }
+    frame.render_widget(Clear, area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_bio_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
+    let [header, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
+    let text = state.bio_input().lines().join("\n");
+    frame.render_widget(
+        Paragraph::new(format!(
+            "  {}/{BIO_MAX_LEN} chars — click to edit",
+            text.chars().count()
+        ))
+        .style(Style::default().fg(theme::TEXT_DIM())),
+        header,
+    );
+    let body = body.inner(Margin::new(2, 0));
+    if body.is_empty() {
+        return;
+    }
+    if !state.editing_bio() {
+        let lines = if state.draft().bio.trim().is_empty() {
+            vec![Line::raw(
+                "Press ↵ or click to write your bio. Markdown is supported.",
+            )]
+        } else {
+            render_body_to_lines(
+                &state.draft().bio,
+                body.width as usize,
+                Span::raw(""),
+                Style::default().fg(theme::TEXT()),
+            )
+        };
+        let rows = Paragraph::new(lines.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(body.width);
+        let offset = state.mouse.pane(body, Pane::Bio, rows, 0);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .scroll((offset as u16, 0)),
+            body,
+        );
+        state.mouse.hit(body, Target::Bio);
+        return;
+    }
+    // Let TextArea own word wrapping and keyboard viewport geometry. Paint a
+    // clone in full so wheel scrolling never relocates the real cursor.
+    let local = Rect::new(0, 0, body.width, body.height);
+    state.bio_input().render(local, &mut Buffer::empty(local));
+    let cursor = state.bio_input().cursor();
+    let caret_y = state.bio_input().screen_cursor().row;
+    let mut probe = state.bio_input().clone();
+    let last = probe.lines().len() - 1;
+    probe.move_cursor(ratatui_textarea::CursorMove::Jump(
+        last as u16,
+        probe.lines()[last].chars().count() as u16,
+    ));
+    let rows = probe.screen_cursor().row + 1;
+    let mut rendered = state.bio_input().clone();
+    rendered.move_cursor(ratatui_textarea::CursorMove::Top);
+    rendered.move_cursor(ratatui_textarea::CursorMove::Head);
+    let full = Rect::new(0, 0, body.width, rows as u16);
+    rendered.render(full, &mut Buffer::empty(full));
+    rendered.move_cursor(ratatui_textarea::CursorMove::Jump(
+        cursor.0 as u16,
+        cursor.1 as u16,
+    ));
+    let mut cells = Vec::new();
+    let mut ends = vec![(0, 0, 0); rows];
+    for (row, text) in state.bio_input().lines().iter().enumerate() {
+        let mut col = 0;
+        for grapheme in Line::raw(text).styled_graphemes(Style::default()) {
+            probe.move_cursor(ratatui_textarea::CursorMove::Jump(row as u16, col as u16));
+            let screen = probe.screen_cursor();
+            let width = Span::raw(grapheme.symbol).width();
+            if screen.col < body.width as usize {
+                cells.push((
+                    Rect::new(
+                        screen.col as u16,
+                        screen.row as u16,
+                        width.min(body.width as usize - screen.col) as u16,
+                        1,
+                    ),
+                    Target::Caret(Field::Bio, row, col),
+                ));
+            }
+            col += grapheme.symbol.chars().count();
+            ends[screen.row] = ((screen.col + width).min(body.width as usize), row, col);
+        }
+        if text.is_empty() {
+            probe.move_cursor(ratatui_textarea::CursorMove::Jump(row as u16, 0));
+            ends[probe.screen_cursor().row] = (0, row, 0);
+        }
+    }
+    for (y, (x, row, col)) in ends.into_iter().enumerate() {
+        cells.push((
+            Rect::new(x as u16, y as u16, body.width - x as u16, 1),
+            Target::Caret(Field::Bio, row, col),
+        ));
+    }
+    draw_scroll(
+        frame,
+        body,
+        state,
+        Pane::Bio,
+        rows,
+        caret_y,
+        |frame, area| {
+            frame.render_widget(&rendered, area);
+            for (rect, target) in cells {
+                state.mouse.hit(rect, target);
+            }
+        },
+    );
+}
+
+fn draw_picker(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let popup = centered_rect(54, 20, area);
     frame.render_widget(Clear, popup);
 
@@ -1578,6 +2017,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
     let layout = Layout::vertical([
         Constraint::Length(1),
@@ -1619,10 +2059,19 @@ fn draw_picker(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let list_width = layout[2].width as usize;
     let visible_height = layout[2].height as usize;
     state.picker().visible_height.set(visible_height.max(1));
-    let scroll = state.picker().scroll_offset;
+    let scroll = state.mouse.pane(
+        layout[2],
+        Pane::Picker,
+        entries.len(),
+        state.picker().selected_index,
+    );
     let end = (scroll + visible_height).min(entries.len());
     let mut lines = Vec::new();
     for (idx, entry) in entries[scroll..end].iter().enumerate() {
+        state.mouse.hit(
+            Rect::new(layout[2].x, layout[2].y + idx as u16, layout[2].width, 1),
+            Target::Pick(scroll + idx),
+        );
         let selected = scroll + idx == state.picker().selected_index;
         let (marker, fg, bg, modifier) = if selected {
             (
@@ -1661,7 +2110,7 @@ fn draw_picker(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
 }
 
 fn draw_right_sidebar_components_dialog(
-    frame: &mut Frame,
+    frame: &mut Surface<'_>,
     area: Rect,
     state: &SettingsModalState,
     ownership: SidebarOwnership,
@@ -1683,58 +2132,62 @@ fn draw_right_sidebar_components_dialog(
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
-    let mut constraints = vec![
-        Constraint::Length(1), // heading
-        Constraint::Length(1), // blank
-    ];
-    constraints.extend(std::iter::repeat_n(Constraint::Length(1), components.len()));
-    constraints.push(Constraint::Min(0));
-    constraints.push(Constraint::Length(1)); // footer line 1
-    constraints.push(Constraint::Length(1)); // footer line 2
-    let layout = Layout::vertical(constraints).split(inner);
-
-    let width = inner.width as usize;
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(
-                "Clock is always shown on top.",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ])),
+        Paragraph::new("Clock is always shown on top.")
+            .style(Style::default().fg(theme::TEXT_DIM())),
         layout[0],
     );
-
-    for (idx, setting) in components.iter().enumerate() {
-        let selected = state.right_sidebar_components_index() == idx;
-        let marker = if selected { ">" } else { " " };
-        let checkbox = if setting.enabled { "[x]" } else { "[ ]" };
-        let label = setting.component.label();
-        let owned = ownership.owns(setting.component);
-        let text = if owned {
-            format!(" {marker} {checkbox} {label}")
-        } else {
-            format!(" {marker} {checkbox} {label} (/shop)")
-        };
-        let style = if selected {
-            Style::default()
-                .fg(theme::TEXT_BRIGHT())
-                .patch(theme::selection_style())
-                .add_modifier(Modifier::BOLD)
-        } else if setting.enabled && owned {
-            Style::default().fg(theme::TEXT())
-        } else {
-            Style::default().fg(theme::TEXT_FAINT())
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                pad_to_width(&text, width, selected),
-                style,
-            ))),
-            layout[idx + 2],
-        );
-    }
+    draw_scroll(
+        frame,
+        layout[2],
+        state,
+        Pane::Sidebar,
+        components.len(),
+        state.right_sidebar_components_index(),
+        |frame, area| {
+            for (idx, setting) in components.iter().enumerate() {
+                let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
+                let selected = state.right_sidebar_components_index() == idx;
+                let text = format!(
+                    " {} {} {}{}",
+                    if selected { ">" } else { " " },
+                    if setting.enabled { "[x]" } else { "[ ]" },
+                    setting.component.label(),
+                    if ownership.owns(setting.component) {
+                        ""
+                    } else {
+                        " (/shop)"
+                    }
+                );
+                frame.render_widget(
+                    Paragraph::new(text).style(statusline_row_style(
+                        selected,
+                        true,
+                        setting.enabled,
+                    )),
+                    row,
+                );
+                state.mouse.hit(row, Target::Sidebar(idx));
+                reorder_buttons(
+                    frame,
+                    row,
+                    state,
+                    Target::SidebarMove(idx, -1),
+                    Target::SidebarMove(idx, 1),
+                );
+            }
+        },
+    );
 
     let footer_top = Line::from(vec![
         Span::raw(" "),
@@ -1760,9 +2213,9 @@ fn draw_right_sidebar_components_dialog(
 /// The list is ordered top-to-bottom the way the bar reads left-to-right, so
 /// "move up" and "move left" are the same gesture and the user never has to
 /// hold the mapping in their head.
-fn draw_statusline_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_statusline_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     /// Columns given to the segment list; the dials take what's left.
-    const LIST_WIDTH: u16 = 28;
+    const LIST_WIDTH: u16 = 34;
 
     let inner = area.inner(Margin::new(2, 0));
     let layout = Layout::vertical([
@@ -1779,10 +2232,39 @@ fn draw_statusline_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState
         layout[0],
     );
 
-    let body =
-        Layout::horizontal([Constraint::Length(LIST_WIDTH), Constraint::Min(0)]).split(layout[2]);
-    draw_statusline_list(frame, body[0], state);
-    draw_statusline_dials(frame, body[1], state);
+    let body = Layout::horizontal([
+        Constraint::Length(LIST_WIDTH.min(layout[2].width / 2)),
+        Constraint::Length(2),
+        Constraint::Min(0),
+    ])
+    .split(layout[2]);
+    draw_scroll(
+        frame,
+        body[0],
+        state,
+        Pane::StatusList,
+        state.statusline_components().len(),
+        state.statusline_index(),
+        |f, a| draw_statusline_list(f, a, state),
+    );
+    let description_rows = state
+        .statusline_components()
+        .get(state.statusline_index())
+        .map(|setting| {
+            Paragraph::new(setting.component.description())
+                .wrap(Wrap { trim: true })
+                .line_count(body[2].width)
+        })
+        .unwrap_or(0);
+    draw_scroll(
+        frame,
+        body[2],
+        state,
+        Pane::StatusDetail,
+        description_rows + 3 + state.statusline_dials().len(),
+        description_rows + 3 + state.statusline_dial_index(),
+        |f, a| draw_statusline_dials(f, a, state),
+    );
 
     let dim = Style::default().fg(theme::TEXT_DIM());
     let key = Style::default().fg(theme::AMBER_DIM());
@@ -1807,10 +2289,9 @@ fn draw_statusline_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState
     frame.render_widget(Paragraph::new(Line::from(controls)), layout[3]);
 }
 
-fn draw_statusline_list(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_statusline_list(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let components = state.statusline_components();
     let focused = state.statusline_pane() == StatuslinePane::List;
-    let width = area.width as usize;
 
     for (idx, setting) in components.iter().enumerate() {
         if idx as u16 >= area.height {
@@ -1821,19 +2302,35 @@ fn draw_statusline_list(frame: &mut Frame, area: Rect, state: &SettingsModalStat
         let checkbox = if setting.enabled { "[x]" } else { "[ ]" };
         let text = format!(" {marker} {checkbox} {}", setting.component.label());
         let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
+        let style = statusline_row_style(selected, focused, setting.enabled);
+        frame.buffer.set_style(row, style);
+        let mut label_area = row;
+        label_area.width = label_area.width.saturating_sub(8);
+        state.mouse.hit(row, Target::Status(idx));
+        state.mouse.hit(
+            Rect::new(row.x + 3, row.y, 3.min(row.width.saturating_sub(3)), 1),
+            Target::StatusToggle(idx),
+        );
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                pad_to_width(&text, width, selected),
-                statusline_row_style(selected, focused, setting.enabled),
+                pad_to_width(&text, label_area.width as usize, selected),
+                style,
             ))),
+            label_area,
+        );
+        reorder_buttons(
+            frame,
             row,
+            state,
+            Target::StatusMove(idx, -1),
+            Target::StatusMove(idx, 1),
         );
     }
 }
 
 /// The description and dials for the selected segment. Renders nothing when
 /// the list is empty, which only happens if the roster itself is empty.
-fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_statusline_dials(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let Some(setting) = state
         .statusline_components()
         .get(state.statusline_index())
@@ -1885,11 +2382,16 @@ fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalSta
         if y >= area.height {
             break;
         }
+        state.mouse.hit(
+            Rect::new(area.x, area.y + y, area.width, 1),
+            Target::Dial(idx),
+        );
         let selected = focused && state.statusline_dial_index() == idx;
         let marker = if selected { "›" } else { " " };
         let title = dial.title(&setting);
         let value = statusline_dial_value(dial, &setting);
-        let text = format!("{marker} {title:<13}{value}");
+        let title_width = width.saturating_sub(Span::raw(&value).width() + 3).min(13);
+        let text = format!("{marker} {title:<title_width$} {value}");
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 pad_to_width(&text, width, selected),
@@ -1943,7 +2445,7 @@ fn statusline_row_style(selected: bool, focused: bool, enabled: bool) -> Style {
 /// Every badge a chat label can carry, one row each (a game's ladder is one
 /// row showing only its top rung), with a show/hide switch. The list scrolls
 /// to keep the cursor visible on short terminals.
-fn draw_chat_badges_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_chat_badges_dialog(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let rows = late_core::models::profile_award::chat_badge_rows();
     // rows + heading + blank + 2 footer lines + borders.
     let popup = centered_rect(58, rows.len() as u16 + 7, area);
@@ -1960,6 +2462,7 @@ fn draw_chat_badges_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalS
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
     let layout = Layout::vertical([
         Constraint::Length(1), // heading
@@ -1984,13 +2487,24 @@ fn draw_chat_badges_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalS
 
     let visible = layout[2].height as usize;
     let selected_index = state.chat_badges_index();
-    let offset = (selected_index + 1).saturating_sub(visible);
+    let offset = state
+        .mouse
+        .pane(layout[2], Pane::Badges, rows.len(), selected_index);
     let lines: Vec<Line> = rows
         .iter()
         .enumerate()
         .skip(offset)
         .take(visible)
         .map(|(idx, row)| {
+            state.mouse.hit(
+                Rect::new(
+                    layout[2].x,
+                    layout[2].y + (idx - offset) as u16,
+                    layout[2].width,
+                    1,
+                ),
+                Target::Badge(idx),
+            );
             let selected = selected_index == idx;
             let shown = state.chat_badge_row_shown(row);
             let marker = if selected { ">" } else { " " };
@@ -2027,7 +2541,7 @@ fn draw_chat_badges_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalS
     frame.render_widget(Paragraph::new(footer_bottom), layout[4]);
 }
 
-fn draw_link_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_link_account_dialog(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let popup = centered_rect(76, 22, area);
     frame.render_widget(Clear, popup);
 
@@ -2042,7 +2556,24 @@ fn draw_link_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsModal
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
+    draw_scroll(
+        frame,
+        inner,
+        state,
+        Pane::Link,
+        20,
+        if state.link_account_dialog().step() == LinkAccountStep::EnterCode {
+            7
+        } else {
+            11
+        },
+        |f, a| draw_link_account_body(f, a, state),
+    );
+}
+
+fn draw_link_account_body(frame: &mut Surface<'_>, inner: Rect, state: &SettingsModalState) {
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -2072,7 +2603,11 @@ fn draw_link_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsModal
     }
 }
 
-fn draw_link_account_enter_code(frame: &mut Frame, layout: &[Rect], state: &SettingsModalState) {
+fn draw_link_account_enter_code(
+    frame: &mut Surface<'_>,
+    layout: &[Rect],
+    state: &SettingsModalState,
+) {
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::raw(" "),
@@ -2151,11 +2686,20 @@ fn draw_link_account_enter_code(frame: &mut Frame, layout: &[Rect], state: &Sett
         ])),
         layout[9],
     );
+    state.mouse.hit(layout[2], Target::GenerateCode);
+    draw_text_field(
+        frame,
+        text_value_rect(layout[7], 3),
+        state,
+        Field::LinkCode,
+        state.link_account_dialog().code_input(),
+    );
+    button(frame, layout[12], state, "[Continue]", Target::LookupCode);
     draw_link_account_status(frame, layout[10], state);
     draw_link_account_footer(frame, layout[16], state);
 }
 
-fn draw_link_account_confirm(frame: &mut Frame, layout: &[Rect], state: &SettingsModalState) {
+fn draw_link_account_confirm(frame: &mut Surface<'_>, layout: &[Rect], state: &SettingsModalState) {
     let dialog = state.link_account_dialog();
     frame.render_widget(
         Paragraph::new(Line::from(vec![
@@ -2241,6 +2785,22 @@ fn draw_link_account_confirm(frame: &mut Frame, layout: &[Rect], state: &Setting
         layout[11],
     );
 
+    state.mouse.hit(layout[2], Target::KeepAccount(true));
+    state.mouse.hit(layout[3], Target::KeepAccount(false));
+    draw_text_field(
+        frame,
+        text_value_rect(layout[11], 3),
+        state,
+        Field::LinkConfirm,
+        dialog.confirm_input(),
+    );
+    button(
+        frame,
+        layout[14],
+        state,
+        "[Link accounts]",
+        Target::ConfirmLink,
+    );
     draw_link_account_status(frame, layout[13], state);
     draw_link_account_footer(frame, layout[16], state);
 }
@@ -2357,7 +2917,7 @@ fn link_account_input_line(
     ])
 }
 
-fn draw_link_account_status(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_link_account_status(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let Some(status) = state.link_account_dialog().status() else {
         return;
     };
@@ -2378,7 +2938,7 @@ fn draw_link_account_status(frame: &mut Frame, area: Rect, state: &SettingsModal
     );
 }
 
-fn draw_link_account_footer(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_link_account_footer(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let footer = match state.link_account_dialog().step() {
         LinkAccountStep::EnterCode => Line::from(vec![
             Span::raw(" "),
@@ -2407,7 +2967,7 @@ fn draw_link_account_footer(frame: &mut Frame, area: Rect, state: &SettingsModal
     frame.render_widget(Paragraph::new(footer), area);
 }
 
-fn draw_irc_token_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_irc_token_dialog(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let dialog = state.irc_token_dialog();
     let popup_height = if dialog.revealed_token().is_some() {
         15
@@ -2428,7 +2988,15 @@ fn draw_irc_token_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalSta
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
+    draw_scroll(frame, inner, state, Pane::Irc, 13, 3, |f, a| {
+        draw_irc_token_body(f, a, state)
+    });
+}
+
+fn draw_irc_token_body(frame: &mut Surface<'_>, inner: Rect, state: &SettingsModalState) {
+    let dialog = state.irc_token_dialog();
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -2488,7 +3056,11 @@ fn draw_irc_token_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalSta
             layout[5],
         );
         draw_irc_token_message(frame, layout[6], state);
-        draw_irc_token_footer(frame, layout[8], true, false);
+        let mut footer = layout[8];
+        footer.x += footer.width.min(8);
+        footer.width = footer.width.saturating_sub(8);
+        draw_irc_token_footer(frame, footer, true, false);
+        button(frame, layout[8], state, "[Done]", Target::DismissToken);
         return;
     }
 
@@ -2573,11 +3145,37 @@ fn draw_irc_token_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalSta
         }
     }
 
+    if dialog.status().is_some() {
+        state.mouse.hit(
+            Rect::new(
+                layout[3].x + 1,
+                layout[3].y,
+                if dialog.has_token() { 9 } else { 16 },
+                layout[3].height,
+            )
+            .intersection(layout[3]),
+            Target::Irc(IrcTokenFocus::Primary),
+        );
+        if dialog.has_token() {
+            let rect = Rect::new(layout[3].x + 12, layout[3].y, 10, layout[3].height)
+                .intersection(layout[3]);
+            state.mouse.hit(rect, Target::Irc(IrcTokenFocus::Revoke));
+            if dialog.confirming_revoke() {
+                button(
+                    frame,
+                    layout[5],
+                    state,
+                    "[Confirm revoke]",
+                    Target::Irc(IrcTokenFocus::Revoke),
+                );
+            }
+        }
+    }
     draw_irc_token_message(frame, layout[6], state);
     draw_irc_token_footer(frame, layout[8], false, dialog.pending());
 }
 
-fn draw_irc_token_message(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_irc_token_message(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let Some(message) = state.irc_token_dialog().message() else {
         return;
     };
@@ -2598,7 +3196,7 @@ fn draw_irc_token_message(frame: &mut Frame, area: Rect, state: &SettingsModalSt
     );
 }
 
-fn draw_irc_token_footer(frame: &mut Frame, area: Rect, reveal: bool, pending: bool) {
+fn draw_irc_token_footer(frame: &mut Surface<'_>, area: Rect, reveal: bool, pending: bool) {
     let footer = if reveal {
         Line::from(vec![
             Span::raw(" "),
@@ -2686,7 +3284,7 @@ fn token_time_label(time: &chrono::DateTime<chrono::Utc>) -> String {
     time.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
-fn draw_delete_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+fn draw_delete_account_dialog(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
     let popup = centered_rect(64, 12, area);
     frame.render_widget(Clear, popup);
 
@@ -2701,7 +3299,14 @@ fn draw_delete_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsMod
         .border_style(Style::default().fg(theme::ERROR()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
+    close_button(frame, popup, state);
 
+    draw_scroll(frame, inner, state, Pane::Delete, 10, 4, |f, a| {
+        draw_delete_account_body(f, a, state)
+    });
+}
+
+fn draw_delete_account_body(frame: &mut Surface<'_>, inner: Rect, state: &SettingsModalState) {
     let layout = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -2770,6 +3375,20 @@ fn draw_delete_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsMod
         layout[4],
     );
 
+    draw_text_field(
+        frame,
+        text_value_rect(layout[4], 3),
+        state,
+        Field::DeleteConfirm,
+        state.delete_account_dialog().input(),
+    );
+    button(
+        frame,
+        layout[7],
+        state,
+        "[Delete account]",
+        Target::ConfirmDelete,
+    );
     if let Some(status) = state.delete_account_dialog().status() {
         let color = if state.delete_account_dialog().pending() {
             theme::AMBER()
@@ -2793,6 +3412,13 @@ fn draw_delete_account_dialog(frame: &mut Frame, area: Rect, state: &SettingsMod
         Span::styled(" cancel", Style::default().fg(theme::TEXT_DIM())),
     ]);
     frame.render_widget(Paragraph::new(footer), layout[7]);
+    button(
+        frame,
+        layout[7],
+        state,
+        "[Delete account]",
+        Target::ConfirmDelete,
+    );
 }
 
 fn section_heading(title: &str) -> Line<'static> {

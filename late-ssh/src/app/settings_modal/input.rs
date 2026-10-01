@@ -2,6 +2,7 @@ use crate::app::input::{MouseButton, MouseEventKind, ParsedInput, sanitize_paste
 use crate::app::state::App;
 
 use super::gem::GemKey;
+use super::mouse::{Field, Target};
 use super::state::{
     AccountRow, BIO_MAX_LEN, FEED_URL_MAX_LEN, IrcTokenFocus, LinkAccountEnterCodeFocus,
     LinkAccountStep, PickerKind, Row, SYSTEM_FIELD_MAX_LEN, StatuslinePane, Tab, TweakRow,
@@ -13,6 +14,14 @@ use crate::app::common::textarea_input::{
 use crate::app::settings_modal::state::SettingsModalState;
 
 pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
+    if let ParsedInput::Mouse(mouse) = event {
+        handle_mouse(app, mouse);
+        return;
+    }
+    if app.settings_modal_state.mouse_save_pending() {
+        return;
+    }
+    app.settings_modal_state.mouse.reveal_selection();
     if app.settings_modal_state.link_account_dialog().open() {
         handle_link_account_dialog_input(app, event);
         return;
@@ -75,15 +84,6 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
             return;
         }
         _ => {}
-    }
-
-    // Tab-strip clicks and body scroll-wheel are handled at the top level so
-    // they work from every tab. Per-tab mouse handlers (e.g. the Special-tab
-    // gem) still get a shot at any mouse event we don't claim here.
-    if let ParsedInput::Mouse(mouse) = &event
-        && handle_top_level_mouse(app, *mouse)
-    {
-        return;
     }
 
     // An open theme search owns Esc: it backs out of the search, not out of
@@ -247,30 +247,6 @@ fn handle_tweaks_tab_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Byte(b'l') | ParsedInput::Char('l') => {
             app.settings_modal_state.gem_mut().handle_key(GemKey::L);
         }
-        ParsedInput::Mouse(mouse)
-            if mouse.kind == MouseEventKind::Down && mouse.button == Some(MouseButton::Left) =>
-        {
-            let Some(x) = mouse.x.checked_sub(1) else {
-                return;
-            };
-            let Some(y) = mouse.y.checked_sub(1) else {
-                return;
-            };
-            let hit = app
-                .settings_modal_state
-                .gem()
-                .hit_area
-                .get()
-                .filter(|rect| {
-                    x >= rect.x
-                        && x < rect.x + rect.width
-                        && y >= rect.y
-                        && y < rect.y + rect.height
-                });
-            if hit.is_some() {
-                app.settings_modal_state.gem_mut().handle_click();
-            }
-        }
         _ => {}
     }
 }
@@ -319,59 +295,139 @@ pub(crate) fn handle_escape(app: &mut App) {
     handle_input(app, ParsedInput::Byte(0x1B));
 }
 
-/// Handle tab-strip clicks and body scroll-wheel at the top level. Returns
-/// `true` if the event was claimed (caller should `return` early). False
-/// otherwise — the event then falls through to per-tab handlers, which may
-/// have their own mouse semantics (e.g. the Special-tab gem).
-fn handle_top_level_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) -> bool {
+fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
+    if !app.interaction_mode.mouse_enabled() {
+        return;
+    }
     let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
-        return false;
+        return;
     };
+    let state = &mut app.settings_modal_state;
     match mouse.kind {
+        MouseEventKind::ScrollUp => state.mouse.scroll(x, y, -3, app.size),
+        MouseEventKind::ScrollDown => state.mouse.scroll(x, y, 3, app.size),
         MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
-            if let Some(tab) = app.settings_modal_state.tab_at_point(x, y) {
-                app.settings_modal_state.select_tab(tab);
-                return true;
+            let Some(target) = state.mouse.target(x, y, app.size) else {
+                return;
+            };
+            if state.mouse_save_pending() {
+                return;
             }
-            false
+            let same_editor = matches!(target, Target::Caret(Field::Username, _, _) if state.editing_username())
+                || matches!(target, Target::Caret(Field::System, _, _) if state.editing_system_field().is_some())
+                || matches!(target, Target::Caret(Field::Bio, _, _) if state.editing_bio())
+                || matches!(target, Target::Caret(Field::Feed, _, _) if state.editing_feed_url());
+            if state.editing_text() && !same_editor && target != Target::Cancel {
+                state.save_before_mouse_navigation(target);
+            } else {
+                activate_mouse_target(app, target);
+            }
         }
-        MouseEventKind::ScrollUp if app.settings_modal_state.body_contains(x, y) => {
-            scroll_current_tab(app, -3)
-        }
-        MouseEventKind::ScrollDown if app.settings_modal_state.body_contains(x, y) => {
-            scroll_current_tab(app, 3)
-        }
-        _ => false,
+        _ => {}
     }
 }
 
-/// Scroll the row cursor on tabs that have one. Returns `true` if the wheel
-/// was consumed. Tabs without a list (Bio, Themes-with-its-own-scroll,
-/// Special) are left alone here.
-fn scroll_current_tab(app: &mut App, delta: isize) -> bool {
-    match app.settings_modal_state.selected_tab() {
-        Tab::Settings => {
-            app.settings_modal_state.move_row(delta);
-            true
-        }
-        Tab::Account => {
-            app.settings_modal_state.move_account_row(delta);
-            true
-        }
-        Tab::Feeds => {
-            app.settings_modal_state.move_feed_cursor(delta);
-            true
-        }
-        Tab::Statusline => {
-            let state = &mut app.settings_modal_state;
-            match state.statusline_pane() {
-                StatuslinePane::List => state.move_statusline_cursor(delta),
-                StatuslinePane::Detail => state.move_statusline_dial(delta),
-            }
-            true
-        }
-        _ => false,
+pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
+    if app.settings_modal_state.mouse_save_pending() {
+        return;
     }
+    let state = &mut app.settings_modal_state;
+    if state.link_account_dialog().pending() || state.irc_token_dialog().pending() {
+        return;
+    }
+    if state.delete_account_dialog().pending() && target != Target::Close {
+        return;
+    }
+    state.select_mouse_target(target);
+    match target {
+        Target::Close => {
+            if state.link_account_dialog().open() {
+                state.close_link_account_dialog();
+            } else if state.delete_account_dialog().open() {
+                state.close_delete_account_dialog();
+            } else if state.irc_token_dialog().open() {
+                state.close_irc_token_dialog();
+            } else if state.right_sidebar_components_open() {
+                state.close_right_sidebar_components();
+            } else if state.chat_badges_open() {
+                state.close_chat_badges();
+            } else if state.picker_open() {
+                state.close_picker();
+            } else {
+                app.show_settings = false;
+            }
+        }
+        Target::Tab(tab) => state.select_tab(tab),
+        Target::Row(_) => activate_selected_row(app),
+        Target::Tweak(TweakRow::RightSidebar) => state.open_right_sidebar_components(),
+        Target::Tweak(_) => toggle_tweak(app),
+        Target::SidebarMode => cycle_tweak(app, true),
+        Target::Account(row) => match row {
+            AccountRow::LinkAccounts => state.open_link_account_dialog(),
+            AccountRow::IrcToken => state.open_irc_token_dialog(),
+            AccountRow::DeleteAccount => state.open_delete_account_dialog(),
+        },
+        Target::Theme(_) => {
+            state.toggle_theme_tree_row();
+            if state.theme_searching() {
+                state.save();
+            }
+        }
+        Target::Star(_) => state.toggle_theme_favorite(),
+        Target::Search => state.start_theme_search(),
+        Target::Status(_) => {
+            state.focus_statusline_pane(StatuslinePane::Detail);
+            state.mouse.reveal_selection();
+        }
+        Target::StatusToggle(_) => state.toggle_statusline_component(),
+        Target::StatusMove(_, delta) => state.move_statusline_component(delta),
+        Target::Dial(_) => {
+            state.focus_statusline_pane(StatuslinePane::Detail);
+            state.cycle_statusline_dial(true);
+        }
+        Target::Sidebar(_) => state.toggle_right_sidebar_component(),
+        Target::SidebarMove(_, delta) => state.move_right_sidebar_component(delta),
+        Target::Badge(_) => state.toggle_chat_badge(),
+        Target::Pick(_) => state.apply_picker_selection(),
+        Target::Bio => state.start_bio_edit(),
+        Target::Feed(_) => {}
+        Target::AddFeed => state.start_feed_url_edit(),
+        Target::RemoveFeed => state.remove_selected_feed(),
+        Target::RefreshFeeds => state.refresh_feeds(),
+        Target::Submit => {} // the acknowledged edit is already committed
+        Target::Cancel => {
+            if state.editing_username() {
+                state.cancel_username_edit();
+            } else if state.editing_system_field().is_some() {
+                state.cancel_system_field_edit();
+            } else if state.editing_feed_url() {
+                state.cancel_feed_url_edit();
+            }
+        }
+        Target::Caret(field, row, col) => {
+            if field == Field::Bio && !state.editing_bio() {
+                state.start_bio_edit();
+            }
+            state.position_caret(field, row, col);
+        }
+        Target::GenerateCode => state.generate_link_account_code(),
+        Target::LookupCode => {
+            state.move_link_account_enter_code_focus(LinkAccountEnterCodeFocus::PeerCode);
+            state.activate_link_account_enter_code();
+        }
+        Target::KeepAccount(keep) => state.select_link_account_main(keep),
+        Target::ConfirmLink => state.submit_link_account_confirmation(),
+        Target::ConfirmDelete => state.submit_delete_account_confirmation(),
+        Target::Irc(focus) => {
+            if state.irc_token_dialog().focus() != focus {
+                state.move_irc_token_focus(focus);
+            }
+            state.activate_irc_token_focus();
+        }
+        Target::DismissToken => state.dismiss_irc_token_reveal(),
+        Target::Gem => state.gem_mut().handle_click(),
+    }
+    app.settings_modal_state.mouse.invalidate();
 }
 
 fn is_close_event(event: &ParsedInput) -> bool {
@@ -740,11 +796,6 @@ fn handle_picker_input(app: &mut App, event: ParsedInput) {
                 .max(1) as isize;
             app.settings_modal_state.picker_move(-page);
         }
-        ParsedInput::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => app.settings_modal_state.picker_move(-3),
-            MouseEventKind::ScrollDown => app.settings_modal_state.picker_move(3),
-            _ => {}
-        },
         ParsedInput::Char(ch) if !ch.is_control() => app.settings_modal_state.picker_push(ch),
         ParsedInput::Byte(byte) if byte.is_ascii_graphic() || byte == b' ' => {
             app.settings_modal_state.picker_push(byte as char)

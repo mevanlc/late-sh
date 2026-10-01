@@ -1,5 +1,6 @@
 use std::cell::Cell;
 
+use super::mouse::{Field, MouseState, Target};
 use chrono::{DateTime, Utc};
 use late_core::models::profile::{Profile, ProfileParams};
 use late_core::models::profile_award::{ChatBadgeRow, chat_badge_rows};
@@ -11,10 +12,9 @@ use late_core::models::user::{
     RightSidebarComponentSetting, RightSidebarMode, RoomListMode,
     normalize_text_brightness_adjustment, sanitize_username_input,
 };
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use uuid::Uuid;
 
 use crate::app::common::theme;
@@ -479,13 +479,23 @@ impl LinkAccountDialogState {
     }
 }
 
+struct MouseSave {
+    result: oneshot::Receiver<Result<(), String>>,
+    draft: Profile,
+    destination: Target,
+}
+
 pub(crate) struct SettingsTick {
+    pub destination: Option<Target>,
     pub banner: Option<Banner>,
     /// True when this tick drained any async result into the open modal.
     pub changed: bool,
 }
 
 pub(crate) struct SettingsModalState {
+    pub(crate) mouse: MouseState,
+    mouse_save: Option<MouseSave>,
+    pub(crate) mouse_error: Option<String>,
     profile_service: ProfileService,
     feed_service: FeedService,
     user_id: Uuid,
@@ -538,6 +548,8 @@ pub(crate) struct SettingsModalState {
     chat_badges_index: usize,
     feeds: Vec<RssFeed>,
     feed_index: usize,
+    /// A clicked feed survives older snapshots that temporarily omit its UUID.
+    selected_feed_id: Option<Uuid>,
     editing_feed_url: bool,
     feed_url_input: TextArea<'static>,
     feed_snapshot_rx: watch::Receiver<FeedSnapshot>,
@@ -546,15 +558,6 @@ pub(crate) struct SettingsModalState {
     /// Per-session gem easter egg on the Special tab. Persists across modal
     /// open/close cycles for the lifetime of the SSH session.
     gem: GemState,
-    /// On-screen rects for each tab in the strip, indexed by the tab's
-    /// position in `Tab::ALL`. `None` if the tab is currently hidden (e.g.
-    /// the Special tab before it's unlocked). Populated by the renderer
-    /// each frame.
-    tab_rects: Cell<[Option<Rect>; Tab::ALL.len()]>,
-    /// Bounds of the body area (whichever tab is showing). Used to gate
-    /// scroll-wheel events to the body, so the wheel doesn't move the
-    /// row cursor when the pointer is hovering over the tab strip or footer.
-    body_area: Cell<Rect>,
     /// The live interaction mode (keyboard / mouse / hybrid), mirrored here for
     /// the Input row to display. Seeded from the app when the modal opens; the
     /// input handler applies changes on the app itself (they persist + flip the
@@ -573,6 +576,9 @@ impl SettingsModalState {
         let profile_event_rx = profile_service.subscribe_events();
         feed_service.list_task(user_id);
         Self {
+            mouse: MouseState::default(),
+            mouse_save: None,
+            mouse_error: None,
             profile_service,
             feed_service,
             user_id,
@@ -610,14 +616,13 @@ impl SettingsModalState {
             chat_badges_index: 0,
             feeds: Vec::new(),
             feed_index: 0,
+            selected_feed_id: None,
             editing_feed_url: false,
             feed_url_input: new_short_textarea(false),
             feed_snapshot_rx,
             feed_event_rx,
             profile_event_rx,
             gem: GemState::new(),
-            tab_rects: Cell::new([None; Tab::ALL.len()]),
-            body_area: Cell::new(Rect::new(0, 0, 0, 0)),
             interaction_mode: late_core::models::user::InteractionMode::default(),
         }
     }
@@ -661,6 +666,8 @@ impl SettingsModalState {
         profile: &Profile,
         device_rails: (RoomListMode, RightSidebarMode),
     ) {
+        self.mouse.reveal_selection();
+        self.mouse_error = None;
         self.draft = profile.clone();
         self.device_rails = device_rails;
         self.selected_tab = Tab::Settings;
@@ -706,7 +713,49 @@ impl SettingsModalState {
         if let Some(feed_banner) = self.drain_feed_events() {
             banner = Some(feed_banner);
         }
-        SettingsTick { banner, changed }
+        let mut changed = changed;
+        let mut destination = None;
+        if let Some(pending) = self.mouse_save.as_mut() {
+            let result = match pending.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    Some(Err("Could not save. Please try again.".into()))
+                }
+                Err(oneshot::error::TryRecvError::Empty) => None,
+            };
+            if let Some(result) = result {
+                let pending = self.mouse_save.take().unwrap();
+                changed = true;
+                match result {
+                    Ok(()) => {
+                        self.draft = pending.draft;
+                        self.editing_username = false;
+                        self.editing_system_field = None;
+                        self.editing_bio = false;
+                        if self.editing_feed_url {
+                            self.feed_index = self.feeds.len();
+                        }
+                        self.editing_feed_url = false;
+                        set_bio_cursor_visible(&mut self.bio_input, false);
+                        self.mouse_error = None;
+                        destination = Some(pending.destination);
+                    }
+                    Err(error) => {
+                        self.mouse_error = Some(error.clone());
+                        banner = Some(Banner::error(&error));
+                    }
+                }
+                self.mouse.reveal_selection();
+            }
+        }
+        if changed {
+            self.mouse.invalidate();
+        }
+        SettingsTick {
+            banner,
+            changed,
+            destination,
+        }
     }
 
     pub(crate) fn selected_tab(&self) -> Tab {
@@ -768,29 +817,6 @@ impl SettingsModalState {
             self.sync_theme_index_to_draft();
         }
         self.selected_tab = next;
-    }
-
-    pub(crate) fn set_tab_rects(&self, rects: [Option<Rect>; Tab::ALL.len()]) {
-        self.tab_rects.set(rects);
-    }
-
-    pub(crate) fn set_body_area(&self, area: Rect) {
-        self.body_area.set(area);
-    }
-
-    /// Hit-test the tab strip. Returns the tab whose cell contains the
-    /// (0-based ratatui) point, if any.
-    pub(crate) fn tab_at_point(&self, x: u16, y: u16) -> Option<Tab> {
-        let rects = self.tab_rects.get();
-        Tab::ALL
-            .iter()
-            .copied()
-            .zip(rects.iter())
-            .find_map(|(tab, slot)| slot.filter(|rect| rect_contains(*rect, x, y)).map(|_| tab))
-    }
-
-    pub(crate) fn body_contains(&self, x: u16, y: u16) -> bool {
-        rect_contains(self.body_area.get(), x, y)
     }
 
     /// Tabs to show in the tab strip in display order. All tabs are always
@@ -1547,10 +1573,6 @@ impl SettingsModalState {
         self.theme_selected_row
     }
 
-    pub(crate) fn theme_scroll_offset(&self) -> usize {
-        self.theme_scroll_offset
-    }
-
     pub(crate) fn set_theme_visible_height(&self, height: usize) {
         self.theme_visible_height.set(height.max(1));
     }
@@ -2137,11 +2159,13 @@ impl SettingsModalState {
     }
 
     pub(crate) fn cancel_username_edit(&mut self) {
+        self.mouse_error = None;
         self.editing_username = false;
         self.username_input = new_short_textarea(false);
     }
 
     pub(crate) fn submit_username(&mut self) {
+        self.mouse_error = None;
         self.editing_username = false;
         let normalized = sanitize_username_input(self.username_text().trim());
         self.username_input = new_short_textarea(false);
@@ -2159,11 +2183,13 @@ impl SettingsModalState {
     }
 
     pub(crate) fn cancel_system_field_edit(&mut self) {
+        self.mouse_error = None;
         self.editing_system_field = None;
         self.system_input = new_short_textarea(false);
     }
 
     pub(crate) fn submit_system_field(&mut self) {
+        self.mouse_error = None;
         let Some(field) = self.editing_system_field.take() else {
             return;
         };
@@ -2180,6 +2206,7 @@ impl SettingsModalState {
     }
 
     pub(crate) fn stop_bio_edit(&mut self) {
+        self.mouse_error = None;
         self.editing_bio = false;
         self.draft.bio = self.bio_text().trim_end().to_string();
         reset_bio_view_to_top(&mut self.bio_input);
@@ -2194,6 +2221,7 @@ impl SettingsModalState {
             return;
         }
         self.feed_index = (self.feed_index as isize + delta).clamp(0, len as isize - 1) as usize;
+        self.selected_feed_id = self.feeds.get(self.feed_index).map(|feed| feed.id);
     }
 
     pub(crate) fn feed_slot_count(&self) -> usize {
@@ -2205,11 +2233,14 @@ impl SettingsModalState {
     }
 
     pub(crate) fn start_feed_url_edit(&mut self) {
+        self.feed_index = self.feeds.len();
+        self.selected_feed_id = None;
         self.editing_feed_url = true;
         self.feed_url_input = new_short_textarea(true);
     }
 
     pub(crate) fn cancel_feed_url_edit(&mut self) {
+        self.mouse_error = None;
         self.editing_feed_url = false;
         self.feed_url_input = new_short_textarea(false);
     }
@@ -2230,6 +2261,7 @@ impl SettingsModalState {
         let Some(feed) = self.feeds.get(self.feed_index) else {
             return;
         };
+        self.selected_feed_id = None;
         self.feed_service.delete_feed_task(self.user_id, feed.id);
     }
 
@@ -2242,7 +2274,20 @@ impl SettingsModalState {
         if let Ok(true) = self.feed_snapshot_rx.has_changed() {
             let snapshot = self.feed_snapshot_rx.borrow_and_update().clone();
             if snapshot.user_id == Some(self.user_id) {
+                let selected_id = self
+                    .selected_feed_id
+                    .or_else(|| self.feeds.get(self.feed_index).map(|feed| feed.id));
+                let was_add = self.selected_feed_id.is_none() && self.feed_index_is_add_row();
                 self.feeds = snapshot.feeds;
+                if was_add {
+                    self.feed_index = self.feeds.len();
+                } else if let Some(index) = self
+                    .feeds
+                    .iter()
+                    .position(|feed| Some(feed.id) == selected_id)
+                {
+                    self.feed_index = index;
+                }
                 self.feed_index = self
                     .feed_index
                     .min(self.feed_slot_count().saturating_sub(1));
@@ -2444,50 +2489,152 @@ impl SettingsModalState {
     }
 
     pub(crate) fn save(&self) {
-        self.profile_service.edit_profile(
-            self.user_id,
-            ProfileParams {
-                username: self.draft.username.clone(),
-                bio: self.draft.bio.clone(),
-                country: self.draft.country.clone(),
-                timezone: self.draft.timezone.clone(),
-                ide: self.draft.ide.clone(),
-                terminal: self.draft.terminal.clone(),
-                os: self.draft.os.clone(),
-                langs: self.draft.langs.clone(),
-                notify_kinds: self.draft.notify_kinds.clone(),
-                notify_bell: self.draft.notify_bell,
-                notify_cooldown_mins: self.draft.notify_cooldown_mins,
-                notify_format: self.draft.notify_format.clone(),
-                theme_id: Some(
-                    self.draft
-                        .theme_id
-                        .clone()
-                        .unwrap_or_else(|| theme::DEFAULT_ID.to_string()),
-                ),
-                enable_background_color: self.draft.enable_background_color,
-                text_brightness_adjustment: self.draft.text_brightness_adjustment,
-                show_right_sidebar: self.draft.show_right_sidebar,
-                right_sidebar_mode: self.draft.right_sidebar_mode,
-                right_sidebar_components: self.draft.right_sidebar_components.clone(),
-                statusline_components: self.draft.statusline_components.clone(),
-                show_room_list_sidebar: self.draft.show_room_list_sidebar,
-                room_list_mode: self.draft.room_list_mode,
-                keep_composer_focused: self.draft.keep_composer_focused,
-                start_with_music_muted: self.draft.start_with_music_muted,
-                landing_page: self.draft.landing_page,
-                paper_at_login: self.draft.paper_at_login,
-                art_splash_mode: self.draft.art_splash_mode,
-                terminal_images: self.draft.terminal_images,
-                hidden_award_categories: self.draft.hidden_award_categories.clone(),
-                show_flag_fallback: self.draft.show_flag_fallback,
-                translate_to: self.draft.translate_to,
-                auto_translate: self.draft.auto_translate,
-                translate_mine_to_en: self.draft.translate_mine_to_en,
-                favorite_room_ids: self.draft.favorite_room_ids.clone(),
-                favorite_theme_ids: self.draft.favorite_theme_ids.clone(),
-            },
-        );
+        self.profile_service
+            .edit_profile(self.user_id, Self::params(&self.draft));
+    }
+
+    fn params(draft: &Profile) -> ProfileParams {
+        ProfileParams {
+            username: draft.username.clone(),
+            bio: draft.bio.clone(),
+            country: draft.country.clone(),
+            timezone: draft.timezone.clone(),
+            ide: draft.ide.clone(),
+            terminal: draft.terminal.clone(),
+            os: draft.os.clone(),
+            langs: draft.langs.clone(),
+            notify_kinds: draft.notify_kinds.clone(),
+            notify_bell: draft.notify_bell,
+            notify_cooldown_mins: draft.notify_cooldown_mins,
+            notify_format: draft.notify_format.clone(),
+            theme_id: Some(
+                draft
+                    .theme_id
+                    .clone()
+                    .unwrap_or_else(|| theme::DEFAULT_ID.to_string()),
+            ),
+            enable_background_color: draft.enable_background_color,
+            text_brightness_adjustment: draft.text_brightness_adjustment,
+            show_right_sidebar: draft.show_right_sidebar,
+            right_sidebar_mode: draft.right_sidebar_mode,
+            right_sidebar_components: draft.right_sidebar_components.clone(),
+            statusline_components: draft.statusline_components.clone(),
+            show_room_list_sidebar: draft.show_room_list_sidebar,
+            room_list_mode: draft.room_list_mode,
+            keep_composer_focused: draft.keep_composer_focused,
+            start_with_music_muted: draft.start_with_music_muted,
+            landing_page: draft.landing_page,
+            paper_at_login: draft.paper_at_login,
+            art_splash_mode: draft.art_splash_mode,
+            terminal_images: draft.terminal_images,
+            hidden_award_categories: draft.hidden_award_categories.clone(),
+            show_flag_fallback: draft.show_flag_fallback,
+            translate_to: draft.translate_to,
+            auto_translate: draft.auto_translate,
+            translate_mine_to_en: draft.translate_mine_to_en,
+            favorite_room_ids: draft.favorite_room_ids.clone(),
+            favorite_theme_ids: draft.favorite_theme_ids.clone(),
+        }
+    }
+
+    pub(crate) fn mouse_save_pending(&self) -> bool {
+        self.mouse_save.is_some()
+    }
+
+    /// Keep the editor buffer until this particular write is acknowledged.
+    pub(crate) fn save_before_mouse_navigation(&mut self, destination: Target) {
+        if self.mouse_save.is_some() {
+            return;
+        }
+        let mut draft = self.draft.clone();
+        let result = if self.editing_feed_url {
+            self.feed_service.add_feed_with_result(
+                self.user_id,
+                self.feed_url_input.lines().join("").trim().to_string(),
+            )
+        } else {
+            if self.editing_username {
+                draft.username = sanitize_username_input(self.username_text().trim());
+            } else if let Some(field) = self.editing_system_field {
+                field.set_value(&mut draft, self.system_text());
+            } else if self.editing_bio {
+                draft.bio = self.bio_text().trim_end().to_string();
+            }
+            self.profile_service
+                .edit_profile_with_result(self.user_id, Self::params(&draft))
+        };
+        self.mouse_error = None;
+        self.mouse_save = Some(MouseSave {
+            result,
+            draft,
+            destination,
+        });
+        self.mouse.invalidate();
+    }
+
+    pub(crate) fn select_mouse_target(&mut self, target: Target) {
+        match target {
+            Target::Row(row) => {
+                self.row_index = Row::ALL.iter().position(|r| *r == row).unwrap_or(0)
+            }
+            Target::Tweak(row) => {
+                self.tweak_row_index = TweakRow::ALL.iter().position(|r| *r == row).unwrap_or(0)
+            }
+            Target::SidebarMode => {
+                self.tweak_row_index = TweakRow::ALL
+                    .iter()
+                    .position(|r| *r == TweakRow::RightSidebar)
+                    .unwrap_or(0)
+            }
+            Target::Account(row) => {
+                self.account_row_index = AccountRow::ALL.iter().position(|r| *r == row).unwrap_or(0)
+            }
+            Target::Theme(index) | Target::Star(index) => {
+                self.theme_selected_row = index.min(self.theme_tree_rows().len().saturating_sub(1))
+            }
+            Target::Status(index) | Target::StatusToggle(index) | Target::StatusMove(index, _) => {
+                self.statusline_index =
+                    index.min(self.statusline_components().len().saturating_sub(1));
+                self.clamp_statusline_dial();
+            }
+            Target::Dial(index) => {
+                self.statusline_dial_index =
+                    index.min(self.statusline_dials().len().saturating_sub(1))
+            }
+            Target::Sidebar(index) | Target::SidebarMove(index, _) => {
+                self.right_sidebar_components_index =
+                    index.min(self.right_sidebar_components().len().saturating_sub(1))
+            }
+            Target::Badge(index) => {
+                self.chat_badges_index = index.min(chat_badge_rows().len().saturating_sub(1))
+            }
+            Target::Pick(index) => {
+                self.picker.selected_index = index.min(self.picker_len().saturating_sub(1))
+            }
+            Target::Feed(id) => {
+                self.selected_feed_id = Some(id);
+                if let Some(index) = self.feeds.iter().position(|feed| feed.id == id) {
+                    self.feed_index = index;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn position_caret(&mut self, field: Field, row: usize, col: usize) {
+        let input = match field {
+            Field::Username => &mut self.username_input,
+            Field::System => &mut self.system_input,
+            Field::Bio => &mut self.bio_input,
+            Field::Feed => &mut self.feed_url_input,
+            Field::LinkCode => {
+                self.move_link_account_enter_code_focus(LinkAccountEnterCodeFocus::PeerCode);
+                &mut self.link_account.code_input
+            }
+            Field::LinkConfirm => &mut self.link_account.confirm_input,
+            Field::DeleteConfirm => &mut self.delete_account.input,
+        };
+        input.move_cursor(CursorMove::Jump(row as u16, col as u16));
     }
 }
 
@@ -2645,15 +2792,6 @@ fn theme_matches(option: &theme::ThemeOption, query_lower: &str) -> bool {
     option.label.to_lowercase().contains(query_lower)
         || option.id.to_lowercase().contains(query_lower)
         || option.group.label().to_lowercase().contains(query_lower)
-}
-
-fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
-    rect.width > 0
-        && rect.height > 0
-        && x >= rect.x
-        && x < rect.x + rect.width
-        && y >= rect.y
-        && y < rect.y + rect.height
 }
 
 #[cfg(test)]

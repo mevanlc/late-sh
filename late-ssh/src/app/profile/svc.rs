@@ -379,6 +379,25 @@ impl ProfileService {
         );
     }
 
+    /// Private acknowledgement channel: unrelated profile events cannot finish
+    /// a Settings navigation request.
+    pub(crate) fn edit_profile_with_result(
+        &self,
+        user_id: Uuid,
+        params: ProfileParams,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let service = self.clone();
+        tokio::spawn(async move {
+            let result = service
+                .do_edit_profile(user_id, params)
+                .await
+                .map_err(|error| profile_error_message(&error).to_string());
+            let _ = tx.send(result);
+        });
+        rx
+    }
+
     #[tracing::instrument(skip(self, params), fields(user_id = %user_id))]
     async fn do_edit_profile(&self, user_id: Uuid, mut params: ProfileParams) -> Result<()> {
         let client = self.db.get().await?;
