@@ -22,7 +22,7 @@ fn data() -> StatusData<'static> {
         pot_draws_in: Some("3h12m"),
         online_count: 12,
         turns_waiting: 2,
-        station_name: Some("chillsynth"),
+        station_name: "chillsynth",
         station_track: Some("Artist - A Very Long Track Title"),
         quests_open_daily: 1,
         quests_open_weekly: 1,
@@ -144,6 +144,49 @@ fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
         Some(without_pot.to_string()),
         "the pot sheds before mentions or chips"
     );
+}
+
+/// The bar adds the `mic` label and the padding itself, so the badge it is
+/// handed must be the bare body. Fed from the real badge function so the two
+/// cannot drift apart again.
+#[test]
+fn fixed_topbar_labels_the_voice_badge_once() {
+    use crate::app::voice::svc::{VoiceParticipant, VoiceSnapshot};
+
+    let room_id = uuid::Uuid::from_u128(42);
+    let user_id = uuid::Uuid::from_u128(7);
+    let snapshot = VoiceSnapshot {
+        enabled: true,
+        livekit_url: None,
+        rooms: [(
+            room_id,
+            vec![VoiceParticipant {
+                user_id,
+                username: "tester".to_string(),
+                muted: true,
+                deafened: false,
+                speaking: false,
+                updated_at: chrono::Utc::now(),
+            }],
+        )]
+        .into_iter()
+        .collect(),
+    };
+    let badge = crate::app::voice::ui::global_voice_badge(&snapshot, user_id, |_| {
+        Some("#lounge".to_string())
+    });
+
+    let hud = build_top_status_bar(
+        &StatusData {
+            chip_balance: 1_500,
+            voice: badge.as_deref(),
+            ..StatusData::default()
+        },
+        Rect::new(0, 0, 200, 24),
+        0,
+    )
+    .expect("hud");
+    assert_eq!(hud.line.to_string(), " mic #lounge [muted] ─ chips 1500 ─");
 }
 
 #[test]
@@ -365,6 +408,26 @@ fn auto_hide_drops_a_component_reading_zero() {
         18,
     );
     assert!(bar.is_none(), "an empty bar is no bar at all");
+}
+
+/// Auto-hide is offered exactly where it can do something: on an idle frame a
+/// component either reads inactive or it always has a reading, never both.
+#[test]
+fn auto_hide_is_offered_exactly_where_a_component_can_read_inactive() {
+    let idle = StatusData::default();
+    for component in StatusComponent::ALL {
+        // Keyhints is styled help copy, not a value reading.
+        if component == StatusComponent::Shortcuts {
+            continue;
+        }
+        let variant = component.variants().first().copied();
+        assert_eq!(
+            idle.value(component, variant).is_none(),
+            component.can_auto_hide(),
+            "{}",
+            component.as_str()
+        );
+    }
 }
 
 #[test]

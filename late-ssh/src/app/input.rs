@@ -3081,7 +3081,7 @@ fn dashboard_room_rail_area(app: &App) -> Option<Rect> {
 /// Route a click on either frame status bar to the segment under it.
 ///
 /// The rects come from the bar's own layout pass, rebuilt every frame, so this
-/// stays correct however the bottom bar is reordered or resized — and a segment
+/// stays correct however the bottom bar is reordered or resized, and a segment
 /// either fit pass dropped simply has no rect to hit.
 fn handle_status_bar_click(app: &mut App, mouse: MouseEvent) -> bool {
     if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
@@ -3573,7 +3573,25 @@ fn game_owns_ctrl_s(app: &App) -> bool {
         Screen::GreenDragon => app.greendragon_state.is_some(),
         Screen::Darkroom => app.darkroom_state.is_some(),
         Screen::DailyMatch | Screen::HouseTable | Screen::City => true,
-        _ => false,
+        // Menus, launchers and plain pages. A running terminal door never
+        // gets here, so its screen only ever means the launcher.
+        Screen::Dashboard
+        | Screen::Games
+        | Screen::Rebels
+        | Screen::Nethack
+        | Screen::Dcss
+        | Screen::Brogue
+        | Screen::Dopewars
+        | Screen::Bashquest
+        | Screen::Codekeep
+        | Screen::Usurper
+        | Screen::Artboard
+        | Screen::Profiles
+        | Screen::Leaderboard
+        | Screen::Clubhouse
+        | Screen::Nightcap
+        | Screen::Zen
+        | Screen::Scratchpad => false,
     }
 }
 

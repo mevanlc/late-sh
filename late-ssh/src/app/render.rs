@@ -688,13 +688,13 @@ impl App {
         let status_clock_ampm = status_local_now.format("%-I:%M %P").to_string();
         let (status_quests_daily, status_quests_weekly) = self.quest_state.open_counts();
         let status_station_name = match self.paired_source {
-            late_core::models::user::AudioSource::Radio => Some(
-                crate::app::audio::stations::radio_station_display_name(selected_radio_station),
-            ),
-            late_core::models::user::AudioSource::Icecast => Some(
-                crate::app::audio::stations::icecast_stream_display_name(selected_icecast_stream),
-            ),
-            late_core::models::user::AudioSource::Youtube => Some("youtube"),
+            late_core::models::user::AudioSource::Radio => {
+                crate::app::audio::stations::radio_station_display_name(selected_radio_station)
+            }
+            late_core::models::user::AudioSource::Icecast => {
+                crate::app::audio::stations::icecast_stream_display_name(selected_icecast_stream)
+            }
+            late_core::models::user::AudioSource::Youtube => "youtube",
         };
         let status_station_track = match self.paired_source {
             late_core::models::user::AudioSource::Radio => radio_now_playing.as_deref(),
@@ -1756,25 +1756,13 @@ impl App {
                 block = block.title_top(bar.line);
             }
 
-            // The configurable bar owns the bottom-left title. It receives the
-            // whole border budget first, preserving the old keyboard hint's
-            // priority; the optional sponsor chooses the richest form that fits in
-            // whatever remains on the right.
-            let mut bottom_bar_width = 0;
-            if let Some(bar) = crate::app::statusline::bar::build_status_bar(
-                &ctx.statusline_components,
-                &ctx.status_data,
-                crate::app::statusline::bar::Placement::BottomLeft,
-                area,
-                0,
-            ) {
-                bottom_bar_width = line_width(&bar.line);
+            let (bottom_bar, sponsor_title) =
+                app_frame_bottom_titles(&ctx.statusline_components, &ctx.status_data, area);
+            if let Some(bar) = bottom_bar {
                 status_hits.extend(bar.hits);
                 block = block.title_bottom(bar.line);
             }
-            let sponsor_width =
-                usize::from(area.width.saturating_sub(2)).saturating_sub(bottom_bar_width);
-            if let Some(sponsor_title) = app_frame_sponsor_title(sponsor_width) {
+            if let Some(sponsor_title) = sponsor_title {
                 block = block.title_bottom(sponsor_title);
             }
             *ctx.status_hits.borrow_mut() = status_hits;
@@ -2876,6 +2864,38 @@ fn append_home_title_extras(spans: &mut Vec<Span<'static>>, ctx: &DrawContext<'_
 
 fn line_width(line: &Line<'_>) -> usize {
     line.width()
+}
+
+/// The two titles sharing the app frame's bottom border row: the user's
+/// status bar on the left and the sponsor line on the right.
+///
+/// The sponsor line has priority. Its shortest form is set aside first, the
+/// bar compacts and drops segments to fit in what is left, and the sponsor
+/// then grows into the richest form the fitted bar leaves room for. The bar
+/// keeps the whole row only when it is too narrow for the sponsor beside the
+/// Keyhints (`build_bottom_status_bar`).
+fn app_frame_bottom_titles(
+    components: &[StatusComponentSetting],
+    data: &crate::app::statusline::data::StatusData<'_>,
+    area: Rect,
+) -> (
+    Option<crate::app::statusline::bar::StatusBar>,
+    Option<Line<'static>>,
+) {
+    let row_width = area.width.saturating_sub(2);
+    let shortest_sponsor_width = line_width(&sponsor_line(false, false)) as u16;
+    let bar = crate::app::statusline::bar::build_bottom_status_bar(
+        components,
+        data,
+        area,
+        shortest_sponsor_width,
+    );
+    let bar_width = match &bar {
+        Some(bar) => line_width(&bar.line),
+        None => 0,
+    };
+    let sponsor = app_frame_sponsor_title(usize::from(row_width).saturating_sub(bar_width));
+    (bar, sponsor)
 }
 
 fn app_frame_sponsor_title(sponsor_width: usize) -> Option<Line<'static>> {

@@ -1,7 +1,7 @@
 use super::{
-    AUTO_RIGHT_SIDEBAR_MIN_COLS, AUTO_ROOM_LIST_MIN_COLS, app_frame_sponsor_title,
-    dashboard_home_selected, line_width, resolve_right_sidebar_enabled, resolve_room_list_enabled,
-    room_list_sidebar_enabled, sidebar_enabled, sponsor_line,
+    AUTO_RIGHT_SIDEBAR_MIN_COLS, AUTO_ROOM_LIST_MIN_COLS, app_frame_bottom_titles,
+    app_frame_sponsor_title, dashboard_home_selected, line_width, resolve_right_sidebar_enabled,
+    resolve_room_list_enabled, room_list_sidebar_enabled, sidebar_enabled, sponsor_line,
 };
 use crate::app::common::primitives::Screen;
 use late_core::models::user::{RightSidebarMode, RoomListMode};
@@ -180,4 +180,80 @@ fn sponsor_title_drops_optional_segments_to_fit_its_available_width() {
 
     let hidden = app_frame_sponsor_title(short_url_width - 1);
     assert!(hidden.is_none());
+}
+
+/// The sponsor line outranks the user's bar on the bottom border row: however
+/// many segments are switched on, the bar is the one that yields.
+#[test]
+fn sponsor_line_keeps_its_place_however_full_the_status_bar_is() {
+    use crate::app::statusline::data::StatusData;
+    use late_core::models::statusline::{StatusComponentSetting, default_statusline_components};
+    use ratatui::layout::Rect;
+
+    let everything_on: Vec<StatusComponentSetting> = default_statusline_components()
+        .into_iter()
+        .map(|setting| StatusComponentSetting {
+            enabled: true,
+            auto_hide: false,
+            low_priority: false,
+            ..setting
+        })
+        .collect();
+    let data = StatusData {
+        clock_24: "14:32",
+        clock_ampm: "2:32 pm",
+        station_name: "chillsynth",
+        ..StatusData::default()
+    };
+    let area = Rect::new(0, 0, 120, 40);
+
+    let (bar, sponsor) = app_frame_bottom_titles(&everything_on, &data, area);
+
+    let sponsor = sponsor.expect("the sponsor line survives a full bar");
+    assert_eq!(line_text(&sponsor), " ko-fi.com/mateuszpiorowski ");
+    let bar = bar.expect("the bar keeps what fits beside the sponsor");
+    assert!(
+        line_width(&bar.line) + line_width(&sponsor) <= usize::from(area.width - 2),
+        "the two titles share the row without overlapping"
+    );
+    assert!(line_text(&bar.line).contains("Settings"));
+}
+
+/// With room to spare the sponsor takes the richest form the bar leaves it.
+#[test]
+fn sponsor_line_grows_into_the_room_the_status_bar_leaves() {
+    use crate::app::statusline::data::StatusData;
+    use late_core::models::statusline::default_statusline_components;
+    use ratatui::layout::Rect;
+
+    let (bar, sponsor) = app_frame_bottom_titles(
+        &default_statusline_components(),
+        &StatusData::default(),
+        Rect::new(0, 0, 200, 40),
+    );
+
+    assert!(bar.is_some());
+    assert_eq!(
+        line_text(&sponsor.expect("sponsor")),
+        " thanks for hanging out ☕ https://ko-fi.com/mateuszpiorowski "
+    );
+}
+
+/// Keyhints are the one thing the sponsor line does not push off the row: on
+/// a terminal too narrow for both, the hints keep the row to themselves.
+#[test]
+fn keyhints_keep_a_row_too_narrow_to_share_with_the_sponsor() {
+    use crate::app::statusline::data::StatusData;
+    use late_core::models::statusline::default_statusline_components;
+    use ratatui::layout::Rect;
+
+    let (bar, sponsor) = app_frame_bottom_titles(
+        &default_statusline_components(),
+        &StatusData::default(),
+        Rect::new(0, 0, 80, 24),
+    );
+
+    let bar = bar.expect("keyhints survive an 80-column terminal");
+    assert!(line_text(&bar.line).contains("Settings Ctrl+O"));
+    assert!(sponsor.is_none(), "no room is left for the sponsor line");
 }

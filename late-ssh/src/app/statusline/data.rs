@@ -29,8 +29,9 @@ pub(crate) struct StatusData<'a> {
     pub online_count: usize,
     /// Daily correspondence matches waiting on this user's move.
     pub turns_waiting: usize,
-    /// Display name of the audio source the user is listening to.
-    pub station_name: Option<&'a str>,
+    /// Display name of the audio source the user is listening to. Every
+    /// source has one, which is why the station segment never reads inactive.
+    pub station_name: &'a str,
     /// Live `Artist - Title` for that source, when the metadata feed has one.
     pub station_track: Option<&'a str>,
     pub quests_open_daily: usize,
@@ -68,19 +69,17 @@ impl<'a> StatusData<'a> {
             // not a value/label status reading.
             StatusComponent::Shortcuts => None,
             StatusComponent::Time => Some(
-                match variant {
-                    Some(StatusVariant::ClockAmPm) => self.clock_ampm,
-                    _ => self.clock_24,
+                match clock_format(variant) {
+                    ClockFormat::AmPm => self.clock_ampm,
+                    ClockFormat::H24 => self.clock_24,
                 }
                 .to_string(),
             ),
             StatusComponent::Chips => Some(self.chip_balance.to_string()),
             StatusComponent::Mentions => {
-                let count = match variant {
-                    Some(StatusVariant::MentionsAndDms) => {
-                        self.mentions_unread.saturating_add(self.dms_unread)
-                    }
-                    _ => self.mentions_unread,
+                let count = match counts_dms(variant) {
+                    true => self.mentions_unread.saturating_add(self.dms_unread),
+                    false => self.mentions_unread,
                 };
                 (count > 0).then(|| count.to_string())
             }
@@ -94,20 +93,21 @@ impl<'a> StatusData<'a> {
             StatusComponent::Turns => {
                 (self.turns_waiting > 0).then(|| self.turns_waiting.to_string())
             }
-            StatusComponent::Station => match variant {
-                // Track first, station as the fallback: a source with no live
-                // metadata still names itself rather than going blank.
-                Some(StatusVariant::StationTrack) => {
-                    self.station_track.or(self.station_name).map(str::to_string)
+            StatusComponent::Station => Some(
+                match shows_track(variant) {
+                    // Track first, station as the fallback: a source with no
+                    // live metadata still names itself rather than going blank.
+                    true => self.station_track.unwrap_or(self.station_name),
+                    false => self.station_name,
                 }
-                _ => self.station_name.map(str::to_string),
-            },
+                .to_string(),
+            ),
             StatusComponent::Quests => {
-                let count = match variant {
-                    Some(StatusVariant::QuestsDailyWeekly) => self
+                let count = match counts_weekly(variant) {
+                    true => self
                         .quests_open_daily
                         .saturating_add(self.quests_open_weekly),
-                    _ => self.quests_open_daily,
+                    false => self.quests_open_daily,
                 };
                 (count > 0).then(|| count.to_string())
             }
@@ -125,7 +125,6 @@ impl<'a> StatusData<'a> {
         variant: Option<StatusVariant>,
     ) -> Option<String> {
         match component {
-            StatusComponent::Shortcuts => None,
             // `channel [status]` -> `channel`.
             StatusComponent::Voice => self
                 .voice
@@ -136,11 +135,88 @@ impl<'a> StatusData<'a> {
             StatusComponent::Pot => self.pot_size.map(thousands),
             // A track line is unbounded; the station name it falls back to is
             // short and fixed.
-            StatusComponent::Station => match variant {
-                Some(StatusVariant::StationTrack) => self.station_name.map(str::to_string),
-                _ => None,
+            StatusComponent::Station => match shows_track(variant) {
+                true => Some(self.station_name.to_string()),
+                false => None,
             },
-            _ => None,
+            StatusComponent::Shortcuts
+            | StatusComponent::Time
+            | StatusComponent::Chips
+            | StatusComponent::Mentions
+            | StatusComponent::Users
+            | StatusComponent::Turns
+            | StatusComponent::Quests
+            | StatusComponent::Invites => None,
         }
+    }
+}
+
+// Each dial is read through one exhaustive match, so a new `StatusVariant`
+// breaks the build here instead of silently painting the default. An absent
+// dial reads as the component's default. Another component's dial cannot reach
+// these: `normalize_statusline_components` drops it at the boundary.
+
+enum ClockFormat {
+    H24,
+    AmPm,
+}
+
+fn clock_format(variant: Option<StatusVariant>) -> ClockFormat {
+    match variant {
+        Some(StatusVariant::ClockAmPm) => ClockFormat::AmPm,
+        Some(StatusVariant::Clock24) | None => ClockFormat::H24,
+        Some(
+            StatusVariant::MentionsOnly
+            | StatusVariant::MentionsAndDms
+            | StatusVariant::QuestsDaily
+            | StatusVariant::QuestsDailyWeekly
+            | StatusVariant::StationName
+            | StatusVariant::StationTrack,
+        ) => unreachable!("the clock carries a clock dial"),
+    }
+}
+
+fn counts_dms(variant: Option<StatusVariant>) -> bool {
+    match variant {
+        Some(StatusVariant::MentionsAndDms) => true,
+        Some(StatusVariant::MentionsOnly) | None => false,
+        Some(
+            StatusVariant::Clock24
+            | StatusVariant::ClockAmPm
+            | StatusVariant::QuestsDaily
+            | StatusVariant::QuestsDailyWeekly
+            | StatusVariant::StationName
+            | StatusVariant::StationTrack,
+        ) => unreachable!("mentions carry a mentions dial"),
+    }
+}
+
+fn counts_weekly(variant: Option<StatusVariant>) -> bool {
+    match variant {
+        Some(StatusVariant::QuestsDailyWeekly) => true,
+        Some(StatusVariant::QuestsDaily) | None => false,
+        Some(
+            StatusVariant::Clock24
+            | StatusVariant::ClockAmPm
+            | StatusVariant::MentionsOnly
+            | StatusVariant::MentionsAndDms
+            | StatusVariant::StationName
+            | StatusVariant::StationTrack,
+        ) => unreachable!("quests carry a quests dial"),
+    }
+}
+
+fn shows_track(variant: Option<StatusVariant>) -> bool {
+    match variant {
+        Some(StatusVariant::StationTrack) => true,
+        Some(StatusVariant::StationName) | None => false,
+        Some(
+            StatusVariant::Clock24
+            | StatusVariant::ClockAmPm
+            | StatusVariant::MentionsOnly
+            | StatusVariant::MentionsAndDms
+            | StatusVariant::QuestsDaily
+            | StatusVariant::QuestsDailyWeekly,
+        ) => unreachable!("the station carries a station dial"),
     }
 }

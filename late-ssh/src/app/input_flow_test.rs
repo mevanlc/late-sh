@@ -2586,6 +2586,9 @@ async fn keyhints_is_the_default_bottom_left_component() {
         .collect::<Vec<_>>();
     assert_eq!(enabled, vec![StatusComponent::Shortcuts]);
 
+    // Wide enough for the full hints beside the sponsor line, which has first
+    // claim on the row and would otherwise compact them.
+    app.resize(160, 40).expect("resize test terminal");
     let frame = render_plain(&mut app);
     assert!(
         frame.contains("Settings Ctrl+O")
@@ -2683,6 +2686,7 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
         };
         wait_for_render_contains(&mut app, hint).await;
         let mut reloaded = make_app(test_db.db.clone(), user.id, "keyhints-reloaded-it");
+        reloaded.resize(160, 40).expect("resize test terminal");
         wait_for_render_contains(&mut reloaded, hint).await;
         assert_eq!(
             reloaded.profile_state.profile().statusline_components[0].brief,

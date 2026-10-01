@@ -39,7 +39,10 @@ pub(crate) enum Placement {
 impl Placement {
     /// Whether the end that yields first is the start of the list.
     fn yields_from_front(self) -> bool {
-        matches!(self, Self::TopRight)
+        match self {
+            Self::TopRight => true,
+            Self::BottomLeft => false,
+        }
     }
 }
 
@@ -150,6 +153,18 @@ enum ShortcutStyle {
     Brief,
 }
 
+/// The rendering Keyhints paints with room to spare, then each tighter one it
+/// falls back to under width pressure, widest first. Brief has no fallback.
+fn shortcut_styles(brief: bool) -> (ShortcutStyle, &'static [ShortcutStyle]) {
+    match brief {
+        true => (ShortcutStyle::Brief, &[]),
+        false => (
+            ShortcutStyle::DottedCtrl,
+            &[ShortcutStyle::SpacedCtrl, ShortcutStyle::SpacedCaret],
+        ),
+    }
+}
+
 /// The keyboard hint was the original bottom-left frame title. It stays a
 /// multi-style component rather than flattening into the generic value/label
 /// treatment so its key names retain their emphasis and its narrow-terminal
@@ -164,18 +179,24 @@ fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
         ShortcutStyle::DottedCtrl | ShortcutStyle::Brief => " · ",
         ShortcutStyle::SpacedCtrl | ShortcutStyle::SpacedCaret => "  ",
     };
-    let use_caret = matches!(style, ShortcutStyle::SpacedCaret);
-    let hints: &[_] = if matches!(style, ShortcutStyle::Brief) {
-        &[("⚙", "^o"), ("⚄", "^g"), ("◉", "^s")]
-    } else {
-        &[
-            ("Settings", ctrl_hint("O", use_caret)),
-            ("Lobby", ctrl_hint("G", use_caret)),
-            ("Zen", ctrl_hint("F", use_caret)),
-            ("Shop", ctrl_hint("S", use_caret)),
+    let hints: &[(&str, &str)] = match style {
+        ShortcutStyle::DottedCtrl | ShortcutStyle::SpacedCtrl => &[
+            ("Settings", "Ctrl+O"),
+            ("Lobby", "Ctrl+G"),
+            ("Zen", "Ctrl+F"),
+            ("Shop", "Ctrl+S"),
             ("Guide", "?"),
             ("Exit", "qq"),
-        ]
+        ],
+        ShortcutStyle::SpacedCaret => &[
+            ("Settings", "^O"),
+            ("Lobby", "^G"),
+            ("Zen", "^F"),
+            ("Shop", "^S"),
+            ("Guide", "?"),
+            ("Exit", "qq"),
+        ],
+        ShortcutStyle::Brief => &[("⚙", "^o"), ("⚄", "^g"), ("◉", "^s")],
     };
 
     let mut spans = Vec::new();
@@ -190,20 +211,6 @@ fn shortcut_spans(style: ShortcutStyle) -> Vec<Span<'static>> {
     }
     spans.push(Span::styled(" ", dim));
     spans
-}
-
-fn ctrl_hint(key: &'static str, use_caret: bool) -> &'static str {
-    match (use_caret, key) {
-        (true, "O") => "^O",
-        (true, "G") => "^G",
-        (true, "F") => "^F",
-        (true, "S") => "^S",
-        (false, "O") => "Ctrl+O",
-        (false, "G") => "Ctrl+G",
-        (false, "F") => "Ctrl+F",
-        (false, "S") => "Ctrl+S",
-        _ => key,
-    }
 }
 
 /// Build the bar for one frame.
@@ -225,6 +232,45 @@ pub(crate) fn build_status_bar(
     lay_out(segments, placement, area)
 }
 
+/// Build the user's bottom-left bar, which shares its row with the sponsor
+/// line on the right.
+///
+/// The sponsor line has first claim: `sponsor_width`, its shortest form, is set
+/// aside and the bar fits in what is left. Keyhints are the one exception. On a
+/// row too narrow for the sponsor beside even the tightest hints, the bar gets
+/// the whole row, so a small terminal never trades its key help for the link.
+pub(crate) fn build_bottom_status_bar(
+    components: &[StatusComponentSetting],
+    data: &StatusData<'_>,
+    area: Rect,
+    sponsor_width: u16,
+) -> Option<StatusBar> {
+    let row_cols = area.width.saturating_sub(2);
+    let keyhints = components
+        .iter()
+        .find(|setting| setting.enabled && setting.component == StatusComponent::Shortcuts);
+    let keyhints_cols = match keyhints {
+        Some(setting) => {
+            let (full, compactions) = shortcut_styles(setting.brief);
+            let tightest = compactions.last().copied().unwrap_or(full);
+            // +1 for the edge glyph the bar leads with.
+            span_width(&shortcut_spans(tightest)) + 1
+        }
+        None => 0,
+    };
+    let reserved_for_sponsor = match sponsor_width.saturating_add(keyhints_cols) <= row_cols {
+        true => sponsor_width,
+        false => 0,
+    };
+    build_status_bar(
+        components,
+        data,
+        Placement::BottomLeft,
+        area,
+        reserved_for_sponsor,
+    )
+}
+
 /// Turn a component list into this frame's segments, in paint order.
 pub(crate) fn build_segments(
     components: &[StatusComponentSetting],
@@ -240,21 +286,14 @@ pub(crate) fn build_segments(
 fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Option<Segment> {
     let component = setting.component;
     if component == StatusComponent::Shortcuts {
+        let (full, compactions) = shortcut_styles(setting.brief);
         return Some(Segment {
             component: Some(component),
-            spans: shortcut_spans(if setting.brief {
-                ShortcutStyle::Brief
-            } else {
-                ShortcutStyle::DottedCtrl
-            }),
-            compacts: if setting.brief {
-                Vec::new()
-            } else {
-                vec![
-                    shortcut_spans(ShortcutStyle::SpacedCtrl),
-                    shortcut_spans(ShortcutStyle::SpacedCaret),
-                ]
-            },
+            spans: shortcut_spans(full),
+            compacts: compactions
+                .iter()
+                .map(|style| shortcut_spans(*style))
+                .collect(),
             low_priority: setting.low_priority,
         });
     }
@@ -300,10 +339,21 @@ fn build_segment(setting: &StatusComponentSetting, data: &StatusData<'_>) -> Opt
 /// count at all.
 fn resting_value(component: StatusComponent) -> String {
     match component {
-        StatusComponent::Shortcuts => String::new(),
-        StatusComponent::Voice | StatusComponent::Station => "-".to_string(),
+        StatusComponent::Voice => "-".to_string(),
         StatusComponent::Pot => "closed".to_string(),
-        _ => "0".to_string(),
+        StatusComponent::Mentions
+        | StatusComponent::Turns
+        | StatusComponent::Quests
+        | StatusComponent::Invites => "0".to_string(),
+        // `StatusComponent::can_auto_hide` is false for these because they
+        // always have a reading, and Keyhints never reaches the value path.
+        StatusComponent::Shortcuts
+        | StatusComponent::Time
+        | StatusComponent::Chips
+        | StatusComponent::Users
+        | StatusComponent::Station => {
+            unreachable!("{} always has a reading", component.as_str())
+        }
     }
 }
 
@@ -323,26 +373,22 @@ fn segment_spans(
         .add_modifier(Modifier::BOLD);
     let label_style = Style::default().fg(theme::TEXT_MUTED());
 
-    match setting.label {
-        LabelMode::Text if !component.text_label().is_empty() => vec![
-            Span::styled(format!(" {} ", component.text_label()), label_style),
-            Span::styled(format!("{value} "), value_style),
-        ],
-        LabelMode::Icon => {
-            let icon = if component == StatusComponent::Time {
-                clock_icon(data.hour)
-            } else {
-                component.icon()
-            };
-            vec![
-                Span::styled(format!(" {icon} "), label_style),
-                Span::styled(format!("{value} "), value_style),
-            ]
-        }
-        // `LabelMode::None`, and `Text` for a component with no word to add
-        // (the clock), which would otherwise paint a stray space.
-        _ => vec![Span::styled(format!(" {value} "), value_style)],
+    let lead = match setting.label {
+        LabelMode::Text => component.text_label(),
+        // The clock's face follows the hour, so it has no static icon.
+        LabelMode::Icon if component == StatusComponent::Time => clock_icon(data.hour),
+        LabelMode::Icon => component.icon(),
+        LabelMode::None => "",
+    };
+    // A component with no word to add (the clock under `Text`) paints the
+    // bare value rather than a stray space.
+    if lead.is_empty() {
+        return vec![Span::styled(format!(" {value} "), value_style)];
     }
+    vec![
+        Span::styled(format!(" {lead} "), label_style),
+        Span::styled(format!("{value} "), value_style),
+    ]
 }
 
 fn accent(component: StatusComponent) -> ratatui::style::Color {

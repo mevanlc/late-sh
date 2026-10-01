@@ -235,47 +235,6 @@ fn brief_defaults_off_and_only_applies_to_keyhints() {
 }
 
 #[test]
-fn saved_brief_selection_becomes_a_keyhints_property_in_place() {
-    let parsed = parse_statusline_components(&[
-        json!({"key": "shortcuts", "enabled": false}),
-        json!({"key": "chips", "enabled": true}),
-        json!({"key": "keyhints_brief", "enabled": true, "low_priority": true}),
-    ]);
-    assert_eq!(parsed[0].component, StatusComponent::Chips);
-    assert_eq!(parsed[1].component, StatusComponent::Shortcuts);
-    assert!(parsed[1].enabled);
-    assert!(parsed[1].brief);
-    assert!(parsed[1].low_priority);
-    let stored = statusline_components_json(&parsed);
-    assert_eq!(stored[1]["key"], "shortcuts");
-    assert_eq!(stored[1]["brief"], true);
-    assert_eq!(
-        parse_statusline_components(stored.as_array().unwrap()),
-        parsed
-    );
-}
-
-#[test]
-fn merging_saved_keyhints_uses_full_when_enabled_and_preserves_disabled_state() {
-    for full_enabled in [false, true] {
-        for brief_enabled in [false, true] {
-            let parsed = parse_statusline_components(&[
-                json!({"key": "keyhints_brief", "enabled": brief_enabled}),
-                json!({"key": "shortcuts", "enabled": full_enabled}),
-            ]);
-            let hints = find(&parsed, StatusComponent::Shortcuts);
-            assert_eq!(hints.enabled, full_enabled || brief_enabled);
-            assert_eq!(hints.brief, !full_enabled && brief_enabled);
-            assert_eq!(parsed.len(), STATUS_COMPONENT_COUNT);
-        }
-    }
-    let parsed = parse_statusline_components(&[json!({"key": "keyhints_brief"})]);
-    let hints = find(&parsed, StatusComponent::Shortcuts);
-    assert!(!hints.enabled);
-    assert!(hints.brief);
-}
-
-#[test]
 fn label_mode_cycles_both_ways_and_wraps() {
     assert_eq!(LabelMode::Text.cycle(true), LabelMode::Icon);
     assert_eq!(LabelMode::Icon.cycle(true), LabelMode::None);

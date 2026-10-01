@@ -158,7 +158,7 @@ pub(crate) enum StatuslineDial {
     Label,
     AutoHide,
     LowPriority,
-    /// The component's own dial, whatever it happens to be — the heading comes
+    /// The component's own dial, whatever it happens to be. The heading comes
     /// from `StatusComponent::variant_title`.
     Variant,
 }
@@ -2531,7 +2531,7 @@ fn next_variant(
 }
 
 /// Advance a segment's label mode, skipping `Text` for a component that has no
-/// word to show — for those, `Text` paints exactly what `None` paints, and a
+/// word to show: for those, `Text` paints exactly what `None` paints, and a
 /// cycle position that visibly does nothing reads as a broken control.
 fn next_label_mode(current: LabelMode, component: StatusComponent, forward: bool) -> LabelMode {
     let next = current.cycle(forward);

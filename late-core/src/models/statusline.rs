@@ -168,10 +168,20 @@ impl StatusComponent {
     }
 
     /// Whether this component has an "inactive" reading at all, and so whether
-    /// the customizer offers it an auto-hide switch. Keyhints, Time, and Users
-    /// always have something to say; the rest can read zero/idle.
+    /// the customizer offers it an auto-hide switch. Keyhints, Time, Chips,
+    /// Users, and Station always have something to say (a balance of zero is
+    /// still a balance, and an audio source always names itself); the rest can
+    /// read zero/idle.
     pub fn can_auto_hide(self) -> bool {
-        !matches!(self, Self::Shortcuts | Self::Time | Self::Users)
+        match self {
+            Self::Shortcuts | Self::Time | Self::Chips | Self::Users | Self::Station => false,
+            Self::Mentions
+            | Self::Pot
+            | Self::Turns
+            | Self::Quests
+            | Self::Invites
+            | Self::Voice => true,
+        }
     }
 
     /// Whether the component starts enabled for a user with no stored list.
@@ -180,14 +190,34 @@ impl StatusComponent {
     /// readouts remain discoverable in the customizer rather than duplicating
     /// the fixed top bar until a user asks for them.
     pub fn default_enabled(self) -> bool {
-        self == Self::Shortcuts
+        match self {
+            Self::Shortcuts => true,
+            Self::Time
+            | Self::Chips
+            | Self::Mentions
+            | Self::Pot
+            | Self::Users
+            | Self::Turns
+            | Self::Station
+            | Self::Quests
+            | Self::Invites
+            | Self::Voice => false,
+        }
     }
 
     pub fn default_label_mode(self) -> LabelMode {
         match self {
             // The clock reads as a clock; a label would only cost columns.
             Self::Shortcuts | Self::Time => LabelMode::None,
-            _ => LabelMode::Text,
+            Self::Chips
+            | Self::Mentions
+            | Self::Pot
+            | Self::Users
+            | Self::Turns
+            | Self::Station
+            | Self::Quests
+            | Self::Invites
+            | Self::Voice => LabelMode::Text,
         }
     }
 
@@ -209,11 +239,23 @@ impl StatusComponent {
     /// saved component list does not make the longstanding bottom-left help
     /// disappear. Diverges on purpose from
     /// `normalize_right_sidebar_components`, which backfills everything
-    /// enabled — a sidebar panel that appears costs a user rows in a rail
+    /// enabled: a sidebar panel that appears costs a user rows in a rail
     /// built to hold panels, while a bar segment that appears costs horizontal
     /// frame space.
     pub fn backfill_existing(self) -> bool {
-        self == Self::Shortcuts
+        match self {
+            Self::Shortcuts => true,
+            Self::Time
+            | Self::Chips
+            | Self::Mentions
+            | Self::Pot
+            | Self::Users
+            | Self::Turns
+            | Self::Station
+            | Self::Quests
+            | Self::Invites
+            | Self::Voice => false,
+        }
     }
 
     /// The component's one extra dial, or `&[]` when it has none. The first
@@ -225,7 +267,13 @@ impl StatusComponent {
             Self::Mentions => &[StatusVariant::MentionsOnly, StatusVariant::MentionsAndDms],
             Self::Quests => &[StatusVariant::QuestsDaily, StatusVariant::QuestsDailyWeekly],
             Self::Station => &[StatusVariant::StationName, StatusVariant::StationTrack],
-            _ => &[],
+            Self::Shortcuts
+            | Self::Chips
+            | Self::Pot
+            | Self::Users
+            | Self::Turns
+            | Self::Invites
+            | Self::Voice => &[],
         }
     }
 
@@ -236,7 +284,13 @@ impl StatusComponent {
             Self::Mentions => Some("Count"),
             Self::Quests => Some("Count"),
             Self::Station => Some("Show"),
-            _ => None,
+            Self::Shortcuts
+            | Self::Chips
+            | Self::Pot
+            | Self::Users
+            | Self::Turns
+            | Self::Invites
+            | Self::Voice => None,
         }
     }
 
@@ -462,47 +516,22 @@ pub fn normalize_statusline_components(
 /// Parse the stored `statusline_components` array. Unknown keys are skipped,
 /// then `normalize_statusline_components` fills the gaps.
 pub fn parse_statusline_components(values: &[Value]) -> Vec<StatusComponentSetting> {
-    // Fold the former brief component into Keyhints, keeping the active entry's
-    // position and options. If both were enabled, the full Keyhints entry wins.
-    fn key(value: &Value) -> Option<&str> {
-        value.get("key").and_then(Value::as_str).map(str::trim)
-    }
-    let full = values
-        .iter()
-        .position(|value| key(value) == Some("shortcuts"));
-    let brief = values
-        .iter()
-        .position(|value| key(value) == Some("keyhints_brief"));
-    let selected_keyhints = brief
-        .filter(|&index| {
-            values[index].get("enabled").and_then(Value::as_bool) == Some(true)
-                && full.is_none_or(|index| {
-                    values[index].get("enabled").and_then(Value::as_bool) == Some(false)
-                })
-        })
-        .or(full)
-        .or(brief);
     let mut parsed: Vec<StatusComponentSetting> = Vec::new();
-    for (index, value) in values.iter().enumerate() {
-        let legacy_brief = key(value) == Some("keyhints_brief");
-        let component = if legacy_brief {
-            Some(StatusComponent::Shortcuts)
-        } else {
-            key(value).and_then(StatusComponent::from_key)
-        };
+    for value in values {
+        let component = value
+            .get("key")
+            .and_then(Value::as_str)
+            .and_then(StatusComponent::from_key);
         let Some(component) = component else {
             continue;
         };
-        if component == StatusComponent::Shortcuts && Some(index) != selected_keyhints {
-            continue;
-        }
         parsed.push(StatusComponentSetting {
             component,
             enabled: value
                 .get("enabled")
                 .and_then(Value::as_bool)
-                .unwrap_or_else(|| !legacy_brief && component.default_enabled()),
-            brief: legacy_brief || value.get("brief").and_then(Value::as_bool).unwrap_or(false),
+                .unwrap_or_else(|| component.default_enabled()),
+            brief: value.get("brief").and_then(Value::as_bool).unwrap_or(false),
             label: value
                 .get("label")
                 .and_then(Value::as_str)

@@ -10,7 +10,7 @@ pub fn timezone_current_time(now: DateTime<Utc>, timezone: Option<&str>) -> Opti
     Some(now.with_timezone(&tz).format("%a %H:%M").to_string())
 }
 /// The same instant in the user's saved timezone, falling back to UTC when it
-/// is unset or unparseable — the fallback `timezone_current_time` signals by
+/// is unset or unparseable: the fallback `timezone_current_time` signals by
 /// returning `None` and its callers spell as a `UTC` prefix.
 ///
 /// Returns the whole datetime rather than a formatted string because the
