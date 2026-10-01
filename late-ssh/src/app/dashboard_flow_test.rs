@@ -195,7 +195,7 @@ async fn o_opens_the_live_strip_match_from_the_lounge_card() {
         ActivityPublisher::new(test_db.db.clone(), activity_tx),
     );
     let posted = poster
-        .post_challenge(them.id, DailyGame::Chess, None)
+        .post_challenge(them.id, DailyGame::Chess)
         .await
         .expect("post");
     app.daily.claim_challenge(posted.id);
@@ -236,12 +236,12 @@ async fn closing_a_board_opened_from_the_live_strip_returns_to_the_lounge_card()
         ActivityPublisher::new(test_db.db.clone(), activity_tx),
     );
     let posted = poster
-        .post_challenge(them.id, DailyGame::Chess, None)
+        .post_challenge(them.id, DailyGame::Chess)
         .await
         .expect("post");
     // A second challenge stays open: news the viewer has not looked at.
     poster
-        .post_challenge(them.id, DailyGame::Reversi, None)
+        .post_challenge(them.id, DailyGame::Reversi)
         .await
         .expect("post the open one");
     app.daily.claim_challenge(posted.id);

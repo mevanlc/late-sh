@@ -37,11 +37,7 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
         }
         ParsedInput::Byte(b'c') | ParsedInput::Char('c') => {
             app.lobby.confirm_claim = None;
-            app.daily.begin_challenge_draft(false);
-        }
-        ParsedInput::Byte(b'C') | ParsedInput::Char('C') => {
-            app.lobby.confirm_claim = None;
-            app.daily.begin_challenge_draft(true);
+            app.daily.begin_challenge_draft();
         }
         ParsedInput::Byte(b'x' | b'X') | ParsedInput::Char('x' | 'X') => {
             enum Dismiss {
@@ -157,15 +153,9 @@ fn activate_selection(app: &mut App) {
     }
 }
 
-/// Keys on the challenge picker overlay. The picker step navigates the game
-/// list; the directed username step owns printable input (so `j`/`k` type,
-/// they don't scroll). Esc steps back, Enter advances/posts.
+/// Keys on the challenge picker overlay: `j`/`k` walk the game list, Esc
+/// closes it, Enter posts the picked game.
 fn handle_draft_input(app: &mut App, event: ParsedInput) {
-    let username_stage = app
-        .daily
-        .challenge_draft
-        .as_ref()
-        .is_some_and(|draft| draft.username.is_some());
     match event {
         ParsedInput::Byte(0x1B) => {
             app.daily.draft_back();
@@ -173,20 +163,6 @@ fn handle_draft_input(app: &mut App, event: ParsedInput) {
         ParsedInput::Byte(b'\r' | b'\n') => {
             app.daily.draft_advance();
         }
-        _ if username_stage => match event {
-            ParsedInput::Byte(0x7F | 0x08) => {
-                if let Some(buffer) = draft_username_buffer(app) {
-                    buffer.pop();
-                }
-            }
-            ParsedInput::Byte(byte) if byte.is_ascii_graphic() => {
-                push_prompt_char(app, byte as char);
-            }
-            ParsedInput::Char(ch) if !ch.is_control() => {
-                push_prompt_char(app, ch);
-            }
-            _ => {}
-        },
         ParsedInput::Arrow(b'B')
         | ParsedInput::Byte(b'j' | b'J')
         | ParsedInput::Char('j' | 'J') => {
@@ -198,21 +174,5 @@ fn handle_draft_input(app: &mut App, event: ParsedInput) {
             app.daily.draft_move_selection(-1);
         }
         _ => {}
-    }
-}
-
-fn draft_username_buffer(app: &mut App) -> Option<&mut String> {
-    app.daily
-        .challenge_draft
-        .as_mut()
-        .and_then(|draft| draft.username.as_mut())
-}
-
-fn push_prompt_char(app: &mut App, ch: char) {
-    const MAX_USERNAME_PROMPT: usize = 32;
-    if let Some(buffer) = draft_username_buffer(app)
-        && buffer.chars().count() < MAX_USERNAME_PROMPT
-    {
-        buffer.push(ch);
     }
 }

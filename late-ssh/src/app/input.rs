@@ -13,6 +13,7 @@ use crate::app::common::readline::ctrl_byte_to_input;
 use crate::app::door::game::DoorGame;
 use crate::app::files::terminal_image::TerminalImageProtocol;
 use crate::app::help_modal::data::HelpTopic;
+use crate::app::statusline::bar::StatusClick;
 use crate::usernames::UsernameLookup;
 use ratatui::{
     layout::{Constraint, Layout, Rect},
@@ -33,6 +34,7 @@ const CTRL_L: u8 = 0x0C;
 const CTRL_O: u8 = 0x0F;
 /// Global force-repaint ("refresh").
 const CTRL_R: u8 = 0x12;
+const CTRL_S: u8 = 0x13;
 const CTRL_T: u8 = 0x14;
 const CTRL_V: u8 = 0x16;
 /// Zen: the one page that is a chord, not a tab, so it is reachable from
@@ -1037,7 +1039,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
             if handle_mouse_click(app, ctx.screen, mouse) {
                 return;
             }
-            if handle_notifications_hud_click(app, mouse) {
+            if handle_status_bar_click(app, mouse) {
                 return;
             }
             if ctx.screen == Screen::Leaderboard
@@ -3076,34 +3078,50 @@ fn dashboard_room_rail_area(app: &App) -> Option<Rect> {
     })
 }
 
-fn handle_notifications_hud_click(app: &mut App, mouse: MouseEvent) -> bool {
+/// Route a click on either frame status bar to the segment under it.
+///
+/// The rects come from the bar's own layout pass, rebuilt every frame, so this
+/// stays correct however the bottom bar is reordered or resized, and a segment
+/// either fit pass dropped simply has no rect to hit.
+fn handle_status_bar_click(app: &mut App, mouse: MouseEvent) -> bool {
     if mouse.kind != MouseEventKind::Down || mouse.button != Some(MouseButton::Left) {
         return false;
     }
     if app.show_splash {
         return false;
     }
-    // Where the last frame drew the "N unread mentions" text; `None` when
-    // nothing is unread. The voice/chips text after it is not clickable.
-    let Some(rect) = app.last_mentions_hud_rect.get() else {
+    // SGR mouse coords are 1-indexed; the rects are in 0-indexed frame cells.
+    let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
         return false;
     };
-    // SGR mouse coords are 1-indexed; the rect is in 0-indexed frame cells.
-    let Some(x) = mouse.x.checked_sub(1) else {
+    let hit = app
+        .last_status_hits
+        .borrow()
+        .iter()
+        .find(|(_, rect)| rect_contains(*rect, x, y))
+        .and_then(|(component, _)| crate::app::statusline::bar::click_action(*component));
+    let Some(action) = hit else {
         return false;
     };
-    let Some(y) = mouse.y.checked_sub(1) else {
-        return false;
-    };
-    if !rect_contains(rect, x, y) {
-        return false;
-    }
 
     app.pending_chat_profile_open = None;
-    app.chat.reset_composer();
-    app.chat.clear_message_selection();
-    app.set_screen(Screen::Dashboard);
-    app.chat.select_notifications();
+    match action {
+        StatusClick::Mentions => {
+            app.chat.reset_composer();
+            app.chat.clear_message_selection();
+            app.set_screen(Screen::Dashboard);
+            app.chat.select_notifications();
+        }
+        StatusClick::Shop => open_shop_modal_globally(app),
+        StatusClick::Lobby => open_daily_modal_globally(app),
+        StatusClick::Booth => {
+            let submit_enabled = app.audio.booth_submit_enabled();
+            app.booth_modal_state.open(submit_enabled);
+        }
+        StatusClick::Arcade => app.set_screen(Screen::Arcade),
+        StatusClick::Profiles => app.set_screen(Screen::Profiles),
+        StatusClick::Zen => open_zen_globally(app),
+    }
     true
 }
 
@@ -3379,9 +3397,7 @@ fn open_settings_modal_globally(app: &mut App) {
     app.show_settings = true;
 }
 
-/// Open the Shop modal from anywhere. The Shop has no global chord: it is
-/// reached by typing `/shop` into a composer or through the locked-feature
-/// nudges, so this is the one shared entry point for both.
+/// Shared Shop entry point for Ctrl+S, `/shop`, and locked-feature nudges.
 pub(crate) fn open_shop_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
     app.show_help = false;
@@ -3548,6 +3564,38 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
     true
 }
 
+/// Live games own Ctrl+S even when they currently leave it unbound. Running
+/// terminal doors receive raw bytes in App::handle_input before this router;
+/// their launchers and the Arcade/Games menus still offer the Shop shortcut.
+fn game_owns_ctrl_s(app: &App) -> bool {
+    match app.screen {
+        Screen::Arcade => app.is_playing_game,
+        Screen::Lateania => app.lateania_state.is_some(),
+        Screen::GreenDragon => app.greendragon_state.is_some(),
+        Screen::Darkroom => app.darkroom_state.is_some(),
+        Screen::DailyMatch | Screen::HouseTable | Screen::City => true,
+        // Menus, launchers and plain pages. A running terminal door never
+        // gets here, so its screen only ever means the launcher.
+        Screen::Dashboard
+        | Screen::Games
+        | Screen::Rebels
+        | Screen::Nethack
+        | Screen::Dcss
+        | Screen::Brogue
+        | Screen::Dopewars
+        | Screen::Bashquest
+        | Screen::Codekeep
+        | Screen::Usurper
+        | Screen::Artboard
+        | Screen::Profiles
+        | Screen::Leaderboard
+        | Screen::Clubhouse
+        | Screen::Nightcap
+        | Screen::Zen
+        | Screen::Scratchpad => false,
+    }
+}
+
 fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
     let ParsedInput::Byte(byte) = event else {
         return false;
@@ -3572,6 +3620,14 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
             app.force_full_repaint();
             true
         }
+        // A Settings text field being edited holds typing that is not in the
+        // draft yet. Each of these chords closes or reopens the modal and
+        // would drop it, so the field keeps the key instead.
+        CTRL_O | CTRL_G | CTRL_F | CTRL_S
+            if app.show_settings && app.settings_modal_state.editing_text() =>
+        {
+            false
+        }
         CTRL_O => {
             open_settings_modal_globally(app);
             true
@@ -3584,6 +3640,18 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
         }
         CTRL_F => {
             toggle_zen_globally(app);
+            true
+        }
+        // Games keep their controls; these editors own Ctrl+S for save/post.
+        // Their tag picker also keeps input until it closes, leaving the draft
+        // underneath.
+        CTRL_S
+            if !game_owns_ctrl_s(app)
+                && !app.directory_editor.is_open()
+                && !app.jobs.post.is_open()
+                && !app.tag_picker.is_open() =>
+        {
+            open_shop_modal_globally(app);
             true
         }
         _ => false,

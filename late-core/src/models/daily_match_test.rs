@@ -87,7 +87,7 @@ async fn only_a_write_that_changes_a_row_notifies() {
         "the sweep changed nothing, so the marker is the first news"
     );
 
-    DailyMatch::create_challenge(&client, DailyMatch::GAME_KIND_CHESS, challenger.id, None)
+    DailyMatch::create_challenge(&client, DailyMatch::GAME_KIND_CHESS, challenger.id)
         .await
         .expect("post a challenge");
     assert_eq!(next_channel().await, DAILY_MATCH_CHANGED_CHANNEL);

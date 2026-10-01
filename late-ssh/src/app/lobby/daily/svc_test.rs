@@ -106,7 +106,7 @@ async fn resigned_match(
     played: bool,
 ) -> DailyMatch {
     let challenge = svc
-        .post_challenge(challenger, game, None)
+        .post_challenge(challenger, game)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -159,7 +159,7 @@ async fn claim_has_exactly_one_winner() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
 
@@ -204,7 +204,7 @@ async fn a_match_whose_state_does_not_read_is_left_out_of_the_snapshot() {
     let client = test_db.db.get().await.expect("db client");
 
     let broken = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let broken = svc
@@ -228,7 +228,7 @@ async fn a_match_whose_state_does_not_read_is_left_out_of_the_snapshot() {
     // The next publish (this claim's) reads the broken row and leaves it out,
     // rather than listing it with no board.
     let healthy = svc
-        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .post_challenge(challenger.id, DailyGame::ConnectFour)
         .await
         .expect("post challenge");
     svc.claim_challenge(claimer.id, healthy.id)
@@ -241,29 +241,6 @@ async fn a_match_whose_state_does_not_read_is_left_out_of_the_snapshot() {
 }
 
 #[tokio::test]
-async fn directed_challenge_is_claimable_only_by_target() {
-    let test_db = new_test_db().await;
-    let challenger = create_test_user(&test_db.db, "daily-direct-challenger").await;
-    let target = create_test_user(&test_db.db, "daily-direct-target").await;
-    let bystander = create_test_user(&test_db.db, "daily-direct-bystander").await;
-    let svc = daily_service(&test_db);
-
-    let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, Some(target.id))
-        .await
-        .expect("post directed challenge");
-
-    let stolen = svc.claim_challenge(bystander.id, challenge.id).await;
-    assert!(stolen.is_err(), "non-target claimed a directed challenge");
-
-    let claimed = svc
-        .claim_challenge(target.id, challenge.id)
-        .await
-        .expect("target claims");
-    assert_eq!(claimed.opponent_id, Some(target.id));
-}
-
-#[tokio::test]
 async fn moves_validate_turn_and_legality() {
     let test_db = new_test_db().await;
     let challenger = create_test_user(&test_db.db, "daily-move-challenger").await;
@@ -272,7 +249,7 @@ async fn moves_validate_turn_and_legality() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -321,7 +298,7 @@ async fn checkmate_finishes_match_and_pays_the_winner() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -384,7 +361,7 @@ async fn win_under_the_move_floor_pays_nothing() {
     // Post, claim, four plies, resign: the shape of the two-account loop the
     // gate exists for. The match finishes as a real win, the chips never move.
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -526,7 +503,7 @@ async fn pair_day_cap_keys_on_the_day_the_match_was_posted() {
     // Two long games against the same person finishing on the same day is
     // ordinary; they were posted on different days, so both pay.
     let challenge = svc
-        .post_challenge(a.id, DailyGame::Chess, None)
+        .post_challenge(a.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -563,7 +540,7 @@ async fn chess960_claim_shuffles_the_start_and_a_win_pays_the_chess960_reward() 
     let mut claimed = Vec::new();
     for _ in 0..3 {
         let challenge = svc
-            .post_challenge(challenger.id, DailyGame::Chess960, None)
+            .post_challenge(challenger.id, DailyGame::Chess960)
             .await
             .expect("post chess960 challenge");
         claimed.push(
@@ -623,7 +600,7 @@ async fn finished_match_posts_a_lounge_result_line() {
     let (svc, mut activity_rx) = daily_service_with_activity(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -678,7 +655,7 @@ async fn resign_finishes_match_for_the_other_player() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -708,7 +685,7 @@ async fn stale_revision_writes_are_rejected() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -771,7 +748,7 @@ async fn same_revision_writes_that_keep_the_turn_are_serialized() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Battleship, None)
+        .post_challenge(challenger.id, DailyGame::Battleship)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -814,7 +791,7 @@ async fn sweeper_forfeits_matches_past_their_deadline() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -867,12 +844,12 @@ async fn active_entry_cap_counts_challenges_and_matches() {
     let mut challenges = Vec::new();
     for _ in 0..DAILY_MAX_ACTIVE_ENTRIES {
         challenges.push(
-            svc.post_challenge(poster.id, DailyGame::Chess, None)
+            svc.post_challenge(poster.id, DailyGame::Chess)
                 .await
                 .expect("post challenge under the cap"),
         );
     }
-    let over = svc.post_challenge(poster.id, DailyGame::Chess, None).await;
+    let over = svc.post_challenge(poster.id, DailyGame::Chess).await;
     assert!(over.is_err(), "posted past the cap");
 
     // A claim converts one open challenge into an active match: the poster's
@@ -880,7 +857,7 @@ async fn active_entry_cap_counts_challenges_and_matches() {
     svc.claim_challenge(claimer.id, challenges[0].id)
         .await
         .expect("claim");
-    let still_over = svc.post_challenge(poster.id, DailyGame::Chess, None).await;
+    let still_over = svc.post_challenge(poster.id, DailyGame::Chess).await;
     assert!(
         still_over.is_err(),
         "active matches must count toward the cap"
@@ -890,7 +867,7 @@ async fn active_entry_cap_counts_challenges_and_matches() {
     svc.cancel_challenge(poster.id, challenges[1].id)
         .await
         .expect("cancel own challenge");
-    svc.post_challenge(poster.id, DailyGame::Chess, None)
+    svc.post_challenge(poster.id, DailyGame::Chess)
         .await
         .expect("slot freed by cancel");
 
@@ -902,18 +879,6 @@ async fn active_entry_cap_counts_challenges_and_matches() {
         foreign_cancel.is_err(),
         "cancelled someone else's challenge"
     );
-}
-
-#[tokio::test]
-async fn self_challenge_is_rejected() {
-    let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "daily-self").await;
-    let svc = daily_service(&test_db);
-
-    let result = svc
-        .post_challenge(user.id, DailyGame::Chess, Some(user.id))
-        .await;
-    assert!(result.is_err(), "self-challenge accepted");
 }
 
 fn battleship_state(row: &DailyMatch) -> DailyBattleshipState {
@@ -928,7 +893,7 @@ async fn battleship_hits_fire_again_and_sinking_the_fleet_pays() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Battleship, None)
+        .post_challenge(challenger.id, DailyGame::Battleship)
         .await
         .expect("post battleship challenge");
     assert_eq!(challenge.game_kind, DailyMatch::GAME_KIND_BATTLESHIP);
@@ -1047,7 +1012,7 @@ async fn battleship_resign_finishes_for_the_other_player() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Battleship, None)
+        .post_challenge(challenger.id, DailyGame::Battleship)
         .await
         .expect("post battleship challenge");
     let claimed = svc
@@ -1081,7 +1046,7 @@ async fn connect4_turns_alternate_and_connecting_four_pays() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .post_challenge(challenger.id, DailyGame::ConnectFour)
         .await
         .expect("post connect4 challenge");
     assert_eq!(challenge.game_kind, DailyMatch::GAME_KIND_CONNECTFOUR);
@@ -1182,7 +1147,7 @@ async fn connect4_full_board_draws_and_pays_nobody() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .post_challenge(challenger.id, DailyGame::ConnectFour)
         .await
         .expect("post connect4 challenge");
     let claimed = svc
@@ -1242,7 +1207,7 @@ async fn finished_results_linger_until_each_player_acks() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     let claimed = svc
@@ -1302,7 +1267,7 @@ async fn claim_creates_match_chat_with_voice() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Chess, None)
+        .post_challenge(challenger.id, DailyGame::Chess)
         .await
         .expect("post challenge");
     // An open challenge has nobody to talk to yet.
@@ -1365,7 +1330,7 @@ async fn stale_match_chat_rooms_are_reaped_after_30_days() {
     let mut match_ids = Vec::new();
     for _ in 0..3 {
         let challenge = svc
-            .post_challenge(challenger.id, DailyGame::Chess, None)
+            .post_challenge(challenger.id, DailyGame::Chess)
             .await
             .expect("post challenge");
         let claimed = svc
@@ -1466,7 +1431,7 @@ async fn claimed_challenge_rejects_a_later_claim() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::ConnectFour, None)
+        .post_challenge(challenger.id, DailyGame::ConnectFour)
         .await
         .expect("post challenge");
     svc.claim_challenge(opponent.id, challenge.id)
@@ -1587,7 +1552,7 @@ async fn pool_claim_racks_the_table_and_puts_the_breaker_on_the_clock() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::EightBall, None)
+        .post_challenge(challenger.id, DailyGame::EightBall)
         .await
         .expect("post eight-ball challenge");
     assert_eq!(challenge.game_kind, DailyMatch::GAME_KIND_EIGHTBALL);
@@ -1624,7 +1589,7 @@ async fn pool_shots_validate_the_turn_and_the_stroke() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::NineBall, None)
+        .post_challenge(challenger.id, DailyGame::NineBall)
         .await
         .expect("post nine-ball challenge");
     let claimed = svc
@@ -1662,19 +1627,21 @@ async fn pool_shots_validate_the_turn_and_the_stroke() {
         .is_err(),
         "an unplayable stroke speed is rejected"
     );
-    // Ball in hand is the ruling's to grant, not the shooter's to claim.
+    // The break is played from in hand, but only from the kitchen: where the
+    // cue ball may go is the ruling's to say, never the shooter's to claim.
+    let spec = pool_state(&claimed).spec().expect("known table");
     assert!(
         svc.play_pool_shot(
             breaker,
             claimed.id,
             Shot {
-                place: Some([0.3, 0.3]),
+                place: Some([spec.length * 0.6, spec.width * 0.5]),
                 ..break_shot
             }
         )
         .await
         .is_err(),
-        "placing the cue ball without ball in hand is rejected"
+        "breaking from past the head string is rejected"
     );
 
     svc.play_pool_shot(breaker, claimed.id, break_shot)
@@ -1696,7 +1663,7 @@ async fn potting_keeps_the_table_and_a_miss_hands_it_over() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::NineBall, None)
+        .post_challenge(challenger.id, DailyGame::NineBall)
         .await
         .expect("post nine-ball challenge");
     let claimed = svc
@@ -1778,7 +1745,7 @@ async fn nine_ball_out_finishes_the_match_and_pays_the_winner() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::NineBall, None)
+        .post_challenge(challenger.id, DailyGame::NineBall)
         .await
         .expect("post nine-ball challenge");
     let claimed = svc
@@ -1843,7 +1810,7 @@ async fn potting_the_eight_early_hands_the_match_to_the_other_player() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::EightBall, None)
+        .post_challenge(challenger.id, DailyGame::EightBall)
         .await
         .expect("post eight-ball challenge");
     let claimed = svc
@@ -1900,7 +1867,7 @@ async fn a_superseded_pool_shot_is_rejected_rather_than_applied_twice() {
     let svc = daily_service(&test_db);
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::NineBall, None)
+        .post_challenge(challenger.id, DailyGame::NineBall)
         .await
         .expect("post nine-ball challenge");
     let claimed = svc
@@ -2008,7 +1975,7 @@ async fn cribbage_plays_hand_after_hand_to_61_and_pays_the_winner() {
     let client = test_db.db.get().await.expect("db client");
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::Cribbage, None)
+        .post_challenge(challenger.id, DailyGame::Cribbage)
         .await
         .expect("post cribbage challenge");
     assert_eq!(challenge.game_kind, DailyMatch::GAME_KIND_CRIBBAGE);
@@ -2088,7 +2055,7 @@ async fn gin_turns_draw_then_discard_on_one_clock_and_a_match_to_100_pays() {
     let client = test_db.db.get().await.expect("db client");
 
     let challenge = svc
-        .post_challenge(challenger.id, DailyGame::GinRummy, None)
+        .post_challenge(challenger.id, DailyGame::GinRummy)
         .await
         .expect("post gin challenge");
     assert_eq!(challenge.game_kind, DailyMatch::GAME_KIND_GIN);

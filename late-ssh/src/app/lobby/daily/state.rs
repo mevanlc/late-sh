@@ -19,7 +19,6 @@ use crate::app::{
         pool_core::{
             cue::{PowerBand, ShotMode},
             shot::{Shot, Timeline},
-            sim,
             table_3d::Eye,
         },
     },
@@ -38,7 +37,7 @@ use super::{
     hand_ui::CardSlots,
     live::{LiveView, MatchStripView, finish_headline},
     pool::{DailyPoolState, PoolAimShare},
-    pool_draft::{PoolCueHit, PoolDetail, PoolDraft, PoolPlayback, should_share_aim},
+    pool_draft::{self, PoolCueHit, PoolDetail, PoolDraft, should_share_aim},
     reversi::DailyReversiState,
     std_deck::Card,
     svc::{
@@ -49,16 +48,12 @@ use super::{
 };
 
 /// A challenge being composed: a small picker overlay on the Lobby modal.
-/// Step one picks the game from the roster (one row per game, prize shown);
-/// directed challenges add a username step. A vertical list scales to any
-/// roster size where an inline one-row picker would not.
+/// It picks the game from the roster (one row per game, prize shown). A
+/// vertical list scales to any roster size where an inline one-row picker
+/// would not.
 pub struct ChallengeDraft {
     /// Picker cursor into `DailyGame::ALL`.
     pub selected: usize,
-    /// Directed challenges ask for a username after the game is picked.
-    pub directed: bool,
-    /// `Some` once the game is chosen and the username prompt is active.
-    pub username: Option<String>,
 }
 
 impl ChallengeDraft {
@@ -67,12 +62,8 @@ impl ChallengeDraft {
     }
 
     /// Move the picker cursor, wrapping at both ends so up from the first
-    /// game reaches the last. Ignored while the username prompt is active,
-    /// where `j`/`k` are letters being typed.
+    /// game reaches the last.
     pub fn move_selection(&mut self, delta: isize) {
-        if self.username.is_some() {
-            return;
-        }
         let count = DailyGame::ALL.len() as isize;
         self.selected = (self.selected as isize + delta).rem_euclid(count) as usize;
     }
@@ -118,6 +109,9 @@ pub struct DailyState {
     /// tick. A draw sets neither.
     own_win: bool,
     own_loss: bool,
+    /// News of a finish held back until the pool shot that caused it has
+    /// played out on the open board. See `pool_draft::pool_defers_finish`.
+    pool_finish_hold: Option<pool_draft::PoolFinishHold>,
 
     pub board: Option<DailyBoardState>,
 
@@ -237,10 +231,23 @@ pub struct DailyBoardState {
     /// it, so opening a match does not replay the shot that happened before
     /// you got there — only what arrives while you are watching.
     pub pool_animated: Option<usize>,
-    /// A shot being re-simulated for playback on a blocking thread. The tick
+    /// Shots being re-simulated for playback on a blocking thread. The tick
     /// path does not run physics (root `CONTEXT.md` §2.5), so the animation is
-    /// asked for here and collected a tick or two later.
-    timeline_rx: Option<oneshot::Receiver<Timeline>>,
+    /// asked for here and collected a tick or two later. Several because a
+    /// replayed visit is several shots; a fresh shot is a vector of one.
+    pub(super) timeline_rx: Option<oneshot::Receiver<Vec<Timeline>>>,
+    /// The blocking task behind the last replay this board asked for. Kept
+    /// after the receiver is dropped, because stopping a replay drops the
+    /// receiver and not the work: see `pool_draft::start_pool_replay`.
+    pub(super) replay_worker: Option<tokio::task::JoinHandle<()>>,
+    /// The simulation in flight is a **fresh shot** rather than a replay, so
+    /// the board owes the player the pre-shot rack and no word of the result
+    /// until it can animate it: the rack drawn, the status line, the last-shot
+    /// note and the win banner all wait on this. The window is a tick or two —
+    /// the reload brings the settled rack back before the physics thread has
+    /// re-derived the path to it — and without the hold the balls appear at
+    /// their final spots, jump back, and *then* play out.
+    pub(super) pool_shot_pending: bool,
     /// The last aim this session broadcast, and when. Kept so an unchanged
     /// draft costs nothing and a changing one is rate-limited.
     pub pool_shared: Option<PoolAimShare>,
@@ -269,6 +276,17 @@ impl DailyBoardState {
     /// them, so the pane stays shut exactly where the chat is not theirs.
     pub fn shows_chat(&self, detail: &DailyMatchDetail) -> bool {
         detail.row.chat_room_id.is_some() && (!self.spectating || self.chat_joined)
+    }
+
+    /// A shot has landed and its animation is not ready yet, so the board owes
+    /// the player the pre-shot rack and no word of the result. See the field.
+    pub fn pool_shot_pending(&self) -> bool {
+        self.pool_shot_pending
+    }
+
+    /// A row load is in flight or queued behind one.
+    pub(super) fn reloading(&self) -> bool {
+        self.load_rx.is_some() || self.reload_pending
     }
 }
 
@@ -760,13 +778,7 @@ impl DailyMatchDetail {
 /// all three pool games build it the same way.
 fn pool_detail(row: &DailyMatch) -> Result<PoolDetail, String> {
     let state = DailyPoolState::parse(&row.state).map_err(|e| e.to_string())?;
-    Ok(PoolDetail {
-        draft: PoolDraft::new(&state),
-        state,
-        shot_in_flight: false,
-        playback: None,
-        watching: None,
-    })
+    Ok(PoolDetail::new(state))
 }
 
 impl DailyState {
@@ -786,6 +798,7 @@ impl DailyState {
             turn_notify_seeded: false,
             own_win: false,
             own_loss: false,
+            pool_finish_hold: None,
             board: None,
             live_aims: HashMap::new(),
             live_results: Vec::new(),
@@ -836,13 +849,22 @@ impl DailyState {
         if self.poll_board_load() {
             changed = true;
         }
-        if self.poll_pool_timeline() {
-            changed = true;
-        }
-        if self.drive_pool_playback() {
-            changed = true;
+        if let Some(board) = &mut self.board {
+            changed |= pool_draft::poll_pool_timeline(board);
+            changed |= pool_draft::drive_pool_playback(board);
         }
         let now = Instant::now();
+        if self
+            .pool_finish_hold
+            .as_ref()
+            .is_some_and(|held| held.released(self.board.as_ref(), now))
+            && let Some(held) = self.pool_finish_hold.take()
+        {
+            banner = Some(held.banner);
+            self.own_win |= held.own_win;
+            self.own_loss |= held.own_loss;
+            changed = true;
+        }
         self.live_aims
             .retain(|_, (_, at)| now.saturating_duration_since(*at) < LIVE_AIM_WINDOW);
         DailyTick {
@@ -868,17 +890,11 @@ impl DailyState {
             DailyEvent::ChallengePosted {
                 game,
                 challenger_id,
-                target_username,
                 ..
-            } if challenger_id == self.user_id => EventEffect::raising(match target_username {
-                Some(name) => {
-                    Banner::success(&format!("Daily {} challenge sent to @{name}", game.label()))
-                }
-                None => Banner::success(&format!(
-                    "Daily {} challenge posted to the lobby",
-                    game.label()
-                )),
-            }),
+            } if challenger_id == self.user_id => EventEffect::raising(Banner::success(&format!(
+                "Daily {} challenge posted to the lobby",
+                game.label()
+            ))),
             DailyEvent::MatchFinished {
                 match_id,
                 game,
@@ -893,6 +909,7 @@ impl DailyState {
                     reloaded = true;
                 }
                 let playing = challenger_id == self.user_id || opponent_id == Some(self.user_id);
+                let (was_win, was_loss) = (self.own_win, self.own_loss);
                 let banner = match outcome {
                     DailyFinishOutcome::Won { user_id, payout } if user_id == self.user_id => {
                         self.own_win = true;
@@ -939,6 +956,26 @@ impl DailyState {
                 // it, is news for the lobby snapshot and not for this frame:
                 // the #lounge strip takes its final board off the snapshot.
                 let changed = reloaded || banner.is_some();
+                // On a pool board the shot that ended the rack has not been
+                // watched yet, so the news waits for it — otherwise the result
+                // is on the status line before the balls have stopped, which is
+                // the one moment in the game where being told early spoils it.
+                let banner = match banner {
+                    Some(banner)
+                        if pool_draft::pool_defers_finish(self.board.as_ref(), match_id) =>
+                    {
+                        self.pool_finish_hold = Some(pool_draft::PoolFinishHold::new(
+                            banner,
+                            self.own_win && !was_win,
+                            self.own_loss && !was_loss,
+                            Instant::now(),
+                        ));
+                        self.own_win = was_win;
+                        self.own_loss = was_loss;
+                        None
+                    }
+                    other => other,
+                };
                 EventEffect { banner, changed }
             }
             // Somebody is lining up a shot on a table this session has open.
@@ -1221,21 +1258,12 @@ impl DailyState {
     // ── Modal actions ──────────────────────────────────────────
 
     pub fn post_open_challenge(&self, game: DailyGame) {
-        self.svc.post_challenge_task(self.user_id, game, None);
+        self.svc.post_challenge_task(self.user_id, game);
     }
 
-    pub fn post_directed_challenge(&self, username: &str, game: DailyGame) {
-        let username = username.trim().trim_start_matches('@').to_string();
-        if username.is_empty() {
-            return;
-        }
-        self.svc
-            .post_challenge_to_username_task(self.user_id, game, username);
-    }
-
-    /// `c` / `C` in the modal: open the challenge picker overlay.
-    pub fn begin_challenge_draft(&mut self, directed: bool) {
-        self.begin_challenge_draft_for(DailyGame::ALL[0], directed);
+    /// `c` in the modal: open the challenge picker overlay.
+    pub fn begin_challenge_draft(&mut self) {
+        self.begin_challenge_draft_for(DailyGame::ALL[0]);
     }
 
     /// The same picker, opened with the cursor already on one game.
@@ -1244,16 +1272,12 @@ impl DailyState {
     /// the Lounge's pool table is asking for pool, not for a list. The picker
     /// still opens rather than posting outright, so the choice of variant and
     /// the prize are in front of the player before anything is committed.
-    pub fn begin_challenge_draft_for(&mut self, game: DailyGame, directed: bool) {
+    pub fn begin_challenge_draft_for(&mut self, game: DailyGame) {
         let selected = DailyGame::ALL
             .iter()
             .position(|candidate| *candidate == game)
             .unwrap_or(0);
-        self.challenge_draft = Some(ChallengeDraft {
-            selected,
-            directed,
-            username: None,
-        });
+        self.challenge_draft = Some(ChallengeDraft { selected });
     }
 
     /// Move the picker cursor; see [`ChallengeDraft::move_selection`].
@@ -1263,41 +1287,17 @@ impl DailyState {
         }
     }
 
-    /// Enter on the draft: post an open challenge, advance a directed draft
-    /// to its username step, or send it. An empty username is a no-op so a
-    /// stray Enter can't fire a challenge at nobody.
+    /// Enter on the draft: post the picked game as an open challenge.
     pub fn draft_advance(&mut self) {
-        let Some(draft) = &mut self.challenge_draft else {
+        let Some(draft) = self.challenge_draft.take() else {
             return;
         };
-        match &draft.username {
-            None if draft.directed => draft.username = Some(String::new()),
-            None => {
-                let game = draft.game();
-                self.challenge_draft = None;
-                self.post_open_challenge(game);
-            }
-            Some(username) => {
-                if username.trim().trim_start_matches('@').is_empty() {
-                    return;
-                }
-                let game = draft.game();
-                let username = username.clone();
-                self.challenge_draft = None;
-                self.post_directed_challenge(&username, game);
-            }
-        }
+        self.post_open_challenge(draft.game());
     }
 
-    /// Esc on the draft: the username step falls back to the picker, the
-    /// picker closes the draft.
+    /// Esc on the draft: close the picker.
     pub fn draft_back(&mut self) {
-        let Some(draft) = &mut self.challenge_draft else {
-            return;
-        };
-        if draft.username.take().is_none() {
-            self.challenge_draft = None;
-        }
+        self.challenge_draft = None;
     }
 
     pub fn claim_challenge(&self, match_id: Uuid) {
@@ -1341,7 +1341,7 @@ impl DailyState {
         self.open_board_inner(item.id, item.game, names, false, return_screen, entry);
     }
 
-    fn open_board_inner(
+    pub(super) fn open_board_inner(
         &mut self,
         match_id: Uuid,
         game: DailyGame,
@@ -1392,6 +1392,8 @@ impl DailyState {
             cue_geometry: Cell::new(None),
             pool_animated: None,
             timeline_rx: None,
+            replay_worker: None,
+            pool_shot_pending: false,
             pool_shared: None,
             pool_shared_at: None,
             pool_eye: false,
@@ -1497,7 +1499,9 @@ impl DailyState {
                         board.detail = Some(detail);
                         board.load_error = None;
                         self.drop_stale_board_selection();
-                        self.start_pool_playback();
+                        if let Some(board) = &mut self.board {
+                            pool_draft::start_pool_playback(board);
+                        }
                     }
                     Err(message) => board.load_error = Some(message),
                 }
@@ -2359,124 +2363,11 @@ impl DailyState {
         }
     }
 
-    /// Start playing back any shot this session has not shown yet.
-    ///
-    /// Both sides run through here on reload, which is why there is only one
-    /// code path: your own shot animates when the canonical row comes back,
-    /// and so does the opponent's. Simulating locally the moment you fire
-    /// would be faster by a round trip and would put a second copy of the
-    /// physics in the loop, which is exactly what the server-as-referee split
-    /// exists to avoid.
-    fn start_pool_playback(&mut self) {
-        let Some(board) = &mut self.board else {
-            return;
-        };
-        let Some(detail) = &mut board.detail else {
-            return;
-        };
-        let (DailyGameDetail::EightBall(pool)
-        | DailyGameDetail::NineBall(pool)
-        | DailyGameDetail::Snooker(pool)) = &mut detail.game
-        else {
-            return;
-        };
-        let played = pool.state.move_count();
-        // The canonical row is back, so whatever was in flight has landed.
-        if board.pool_animated.is_some_and(|seen| played > seen) {
-            pool.shot_in_flight = false;
-        }
-        match board.pool_animated {
-            // First load: take the history as already seen. Opening a match
-            // should show you the table as it stands, not replay the shot that
-            // happened before you arrived.
-            None => board.pool_animated = Some(played),
-            Some(seen) if played > seen => {
-                board.pool_animated = Some(played);
-                // Gathering the inputs is local memory; running the shot is
-                // not, so it goes to a blocking thread and comes back through
-                // `poll_pool_timeline`. A newer shot landing first simply
-                // replaces the receiver and the older animation is dropped,
-                // which is the same thing the board would do anyway.
-                if let Some((spec, start, strike)) = pool.state.last_shot_sim() {
-                    let (tx, rx) = oneshot::channel();
-                    tokio::task::spawn_blocking(move || {
-                        let geom = spec.geometry();
-                        let _ = tx.send(sim::simulate(spec, &geom, &start, &strike).timeline);
-                    });
-                    board.timeline_rx = Some(rx);
-                }
-            }
-            Some(_) => {}
-        }
-    }
-
-    /// Collect a shot that finished re-simulating and start it playing.
-    /// Returns whether anything changed, like the other tick drains.
-    fn poll_pool_timeline(&mut self) -> bool {
-        let Some(board) = &mut self.board else {
-            return false;
-        };
-        let Some(rx) = &mut board.timeline_rx else {
-            return false;
-        };
-        let timeline = match rx.try_recv() {
-            Ok(timeline) => timeline,
-            Err(oneshot::error::TryRecvError::Empty) => return false,
-            // The worker is gone, so no animation is coming. The board still
-            // shows the settled rack, which is the truth either way.
-            Err(oneshot::error::TryRecvError::Closed) => {
-                board.timeline_rx = None;
-                return false;
-            }
-        };
-        board.timeline_rx = None;
-        let Some(detail) = &mut board.detail else {
-            return false;
-        };
-        let (DailyGameDetail::EightBall(pool)
-        | DailyGameDetail::NineBall(pool)
-        | DailyGameDetail::Snooker(pool)) = &mut detail.game
-        else {
-            return false;
-        };
-        pool.playback = Some(PoolPlayback::new(timeline));
-        true
-    }
-
-    /// Retire a finished playback. Returns whether the board is animating, so
-    /// the render loop keeps repainting while it is.
-    fn drive_pool_playback(&mut self) -> bool {
-        let Some(board) = &mut self.board else {
-            return false;
-        };
-        let Some(detail) = &mut board.detail else {
-            return false;
-        };
-        let (DailyGameDetail::EightBall(pool)
-        | DailyGameDetail::NineBall(pool)
-        | DailyGameDetail::Snooker(pool)) = &mut detail.game
-        else {
-            return false;
-        };
-        match &pool.playback {
-            Some(playback) if playback.finished() => {
-                pool.playback = None;
-                // The last frame differs from the settled rack, so the swap
-                // back is itself a repaint.
-                true
-            }
-            Some(_) => true,
-            None => false,
-        }
-    }
-
     /// Whether the open board is mid-shot. Drives the render loop's hot tick.
     pub fn pool_is_animating(&self) -> bool {
         self.board
             .as_ref()
-            .and_then(|board| board.detail.as_ref())
-            .and_then(DailyMatchDetail::pool)
-            .is_some_and(|pool| pool.playback.is_some())
+            .is_some_and(pool_draft::pool_is_animating)
     }
 
     // ── Pool input ─────────────────────────────────────────────
@@ -2488,6 +2379,7 @@ impl DailyState {
         if board.spectating {
             return None;
         }
+        let shot_pending = board.pool_shot_pending;
         let detail = board.detail.as_mut()?;
         if !detail.is_active() || detail.row.turn_user_id != Some(user_id) {
             return None;
@@ -2498,9 +2390,7 @@ impl DailyState {
         else {
             return None;
         };
-        // Nothing is adjustable while the last shot is still rolling or the
-        // next one is already on its way to the server.
-        if pool.shot_in_flight || pool.playback.is_some() {
+        if pool.is_busy(shot_pending) {
             return None;
         }
         Some((&mut pool.draft, &pool.state))
@@ -2591,6 +2481,7 @@ impl DailyState {
             return;
         };
         let match_id = board.match_id;
+        let shot_pending = board.pool_shot_pending;
         let Some(detail) = &mut board.detail else {
             return;
         };
@@ -2600,7 +2491,7 @@ impl DailyState {
         else {
             return;
         };
-        if pool.shot_in_flight || pool.playback.is_some() {
+        if pool.is_busy(shot_pending) {
             return;
         }
         pool.shot_in_flight = true;

@@ -6,6 +6,9 @@ use uuid::Uuid;
 
 use super::chips::INITIAL_CHIP_BALANCE;
 use super::message_translation::TranslateLang;
+use super::statusline::{
+    StatusComponentSetting, default_statusline_components, statusline_components_json,
+};
 use super::user::{
     ArtSplashMode, LandingPage, RightSidebarComponentSetting, RightSidebarMode, RoomListMode,
     TerminalImagesMode, User, extract_art_splash_mode, extract_auto_translate, extract_bio,
@@ -15,9 +18,9 @@ use super::user::{
     extract_notify_cooldown_mins, extract_notify_format, extract_notify_kinds, extract_os,
     extract_paper_at_login, extract_right_sidebar_components, extract_right_sidebar_mode,
     extract_room_list_mode, extract_show_flag_fallback, extract_show_right_sidebar,
-    extract_show_room_list_sidebar, extract_start_with_music_muted, extract_terminal,
-    extract_terminal_images, extract_text_brightness_adjustment, extract_theme_id,
-    extract_timezone, extract_translate_mine_to_en, extract_translate_to,
+    extract_show_room_list_sidebar, extract_start_with_music_muted, extract_statusline_components,
+    extract_terminal, extract_terminal_images, extract_text_brightness_adjustment,
+    extract_theme_id, extract_timezone, extract_translate_mine_to_en, extract_translate_to,
     normalize_right_sidebar_components, normalize_text_brightness_adjustment,
 };
 
@@ -45,6 +48,11 @@ pub struct Profile {
     /// Ordered list of sidebar panels with their on/off state. List order is
     /// the render order (top to bottom); the clock is pinned above it.
     pub right_sidebar_components: Vec<RightSidebarComponentSetting>,
+    /// Ordered list of user-configurable bottom status bar segments with their
+    /// per-component dials. List order is the paint order, left to right along
+    /// the app frame's bottom border row. The top bar (pot, chips) is fixed UI
+    /// policy and is not stored here.
+    pub statusline_components: Vec<StatusComponentSetting>,
     /// Legacy mirror of `room_list_mode`, kept in sync on write so an older
     /// binary rolled back onto new data still shows the right rail.
     pub show_room_list_sidebar: bool,
@@ -105,6 +113,7 @@ impl Default for Profile {
             show_right_sidebar: true,
             right_sidebar_mode: RightSidebarMode::On,
             right_sidebar_components: super::user::default_right_sidebar_components(),
+            statusline_components: default_statusline_components(),
             show_room_list_sidebar: true,
             room_list_mode: RoomListMode::On,
             keep_composer_focused: false,
@@ -144,6 +153,7 @@ pub struct ProfileParams {
     pub show_right_sidebar: bool,
     pub right_sidebar_mode: RightSidebarMode,
     pub right_sidebar_components: Vec<RightSidebarComponentSetting>,
+    pub statusline_components: Vec<StatusComponentSetting>,
     pub show_room_list_sidebar: bool,
     pub room_list_mode: RoomListMode,
     pub keep_composer_focused: bool,
@@ -241,6 +251,7 @@ impl Profile {
                 })
                 .collect::<Vec<_>>(),
         )?;
+        let statusline_components_json = statusline_components_json(&params.statusline_components);
         let cooldown = params.notify_cooldown_mins.max(0);
         let bio = params.bio.trim().to_string();
         let country = params
@@ -316,10 +327,11 @@ impl Profile {
                          'paper_at_login', $30::bool,
                          'terminal_images', $31::text,
                          'hidden_award_categories', $32::jsonb,
-                         'art_splash_mode', $33::text
+                         'statusline_components', $33::jsonb,
+                         'art_splash_mode', $34::text
                      ),
                      updated = current_timestamp
-                 WHERE id = $34
+                 WHERE id = $35
                  RETURNING *",
                 &[
                     &params.username,
@@ -354,6 +366,7 @@ impl Profile {
                     &params.paper_at_login,
                     &params.terminal_images.as_str(),
                     &hidden_award_categories_json,
+                    &statusline_components_json,
                     &params.art_splash_mode.as_str(),
                     &user_id,
                 ],
@@ -384,6 +397,7 @@ impl Profile {
             show_right_sidebar: extract_show_right_sidebar(&user.settings),
             right_sidebar_mode: extract_right_sidebar_mode(&user.settings),
             right_sidebar_components: extract_right_sidebar_components(&user.settings),
+            statusline_components: extract_statusline_components(&user.settings),
             show_room_list_sidebar: extract_show_room_list_sidebar(&user.settings),
             room_list_mode: extract_room_list_mode(&user.settings),
             keep_composer_focused: extract_keep_composer_focused(&user.settings),

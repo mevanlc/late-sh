@@ -335,6 +335,7 @@ use late_core::models::{
     chat_message_reaction::ChatMessageReaction,
     chat_room::ChatRoom,
     chat_room_member::ChatRoomMember,
+    statusline::StatusComponent,
     user::User,
 };
 use late_core::test_utils::create_test_user;
@@ -494,6 +495,11 @@ async fn backtick_detaches_a_running_roguelike_and_hops_back_in() {
     // Ordinary keys are forwarded raw to the game, not interpreted.
     app.handle_input(b"j");
     assert_eq!(app.screen, Screen::Nethack);
+
+    // Ctrl+S belongs to the running door too, not the global Shop shortcut.
+    app.handle_input(b"\x13");
+    assert_eq!(app.screen, Screen::Nethack);
+    assert!(!app.show_hub_modal);
 
     // Backtick detaches: with no other workspace stops the cycle wraps to
     // Home chat, and the running state survives for resume.
@@ -845,7 +851,7 @@ async fn account_delete_confirmation_rejects_wrong_username_in_dialog() {
     app.handle_input(b"\x0f");
     wait_for_render_contains(&mut app, "Account").await;
     wait_for_render_contains(&mut app, "account-delete-flow").await;
-    for _ in 0..4 {
+    for _ in 0..5 {
         app.handle_input(b"\t");
     }
     app.handle_input(b"jj");
@@ -1325,7 +1331,7 @@ async fn global_ctrl_o_opens_settings_on_dashboard() {
 }
 
 #[tokio::test]
-async fn global_ctrl_g_toggles_lobby_and_slash_shop_opens_shop() {
+async fn global_ctrl_g_toggles_lobby_and_ctrl_s_or_slash_shop_opens_shop() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "ctrl-g-it").await;
     let client = test_db.db.get().await.expect("db client");
@@ -1350,7 +1356,25 @@ async fn global_ctrl_g_toggles_lobby_and_slash_shop_opens_shop() {
         "expected Ctrl+G to close the lobby; frame={frame:?}"
     );
 
-    // The Shop has no chord: /shop in the composer opens it, Esc closes.
+    app.handle_input(b"\x13");
+    wait_for_render_contains(&mut app, "-- Shop --").await;
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "-- Shop --").await;
+    assert!(!app.show_hub_modal);
+
+    // Ctrl+S also opens Shop while composing and preserves the draft.
+    wait_for_render_contains(&mut app, "lounge").await;
+    app.handle_input(b"iunfinished draft");
+    app.handle_input(b"\x13");
+    wait_for_render_contains(&mut app, "-- Shop --").await;
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "-- Shop --").await;
+    wait_for_render_contains(&mut app, "unfinished draft").await;
+    app.handle_input(b"\x15");
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "Compose (press i)").await;
+
+    // /shop in the composer opens the same modal, Esc closes.
     // Composing needs a selected room, so wait for the lounge row first.
     wait_for_render_contains(&mut app, "lounge").await;
     app.handle_input(b"i");
@@ -1364,6 +1388,159 @@ async fn global_ctrl_g_toggles_lobby_and_slash_shop_opens_shop() {
         !frame.contains("-- Shop --"),
         "expected Esc to close the shop; frame={frame:?}"
     );
+}
+
+#[tokio::test]
+async fn ctrl_s_stays_in_arcade_games_but_opens_shop_from_the_menu() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-arcade-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-arcade-flow-it");
+    app.set_screen(Screen::Arcade);
+    app.game_selection = crate::app::state::GAME_SELECTION_2048;
+    app.handle_input(b"\r");
+    assert!(app.is_playing_game);
+
+    app.handle_input(b"\x13");
+    assert!(!app.show_hub_modal);
+    assert!(app.is_playing_game);
+    assert_eq!(app.screen, Screen::Arcade);
+
+    // Leaving the board restores the Shop shortcut on the game menu.
+    app.handle_input(b"q");
+    assert!(!app.is_playing_game);
+    app.handle_input(b"\x13");
+    assert!(app.show_hub_modal);
+}
+
+#[tokio::test]
+async fn ctrl_s_stays_in_native_games() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::lobby::house::tables::HouseTable;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-native-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-native-flow-it");
+
+    for screen in [
+        Screen::Lateania,
+        Screen::GreenDragon,
+        Screen::Darkroom,
+        Screen::DailyMatch,
+        Screen::HouseTable,
+        Screen::City,
+    ] {
+        app.set_screen(screen);
+        match screen {
+            Screen::Lateania => app.enter_lateania(),
+            Screen::GreenDragon => app.enter_greendragon(),
+            Screen::Darkroom => app.enter_darkroom(),
+            Screen::HouseTable => assert!(app.house.enter(
+                HouseTable::Blackjack,
+                Screen::Dashboard,
+                app.chip_balance
+            )),
+            _ => {}
+        }
+        app.handle_input(b"\x13");
+        assert!(!app.show_hub_modal, "Ctrl+S must stay in {screen:?}");
+        assert_eq!(app.screen, screen);
+    }
+
+    // Live sessions left behind must not swallow Ctrl+S on other pages.
+    app.set_screen(Screen::Games);
+    app.handle_input(b"\x13");
+    assert!(app.show_hub_modal);
+}
+
+#[tokio::test]
+async fn ctrl_s_opens_shop_from_door_launchers() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-launchers-it").await;
+    for screen in [
+        Screen::Lateania,
+        Screen::GreenDragon,
+        Screen::Darkroom,
+        Screen::Nethack,
+    ] {
+        let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-launchers-flow-it");
+        app.set_screen(screen);
+        app.handle_input(b"\x13");
+        assert!(
+            app.show_hub_modal,
+            "Shop is available on the {screen:?} launcher"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ctrl_s_keeps_profile_save_and_job_post_bindings() {
+    use crate::app::directory::editor::{input, state::Page};
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "ctrl-s-editors-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "ctrl-s-editors-flow-it");
+    wait_for_render_contains(&mut app, " Home ").await;
+
+    input::open_own(&mut app, Page::About);
+    assert!(app.directory_editor.is_open());
+    app.handle_input(b"\x13");
+    assert!(
+        !app.directory_editor.is_open(),
+        "save closes an unchanged profile"
+    );
+    assert!(!app.show_hub_modal);
+
+    app.jobs.post.open();
+    app.handle_input(b"\x13");
+    assert!(
+        app.jobs.post.error().is_some(),
+        "posting validates the empty form"
+    );
+    assert!(app.jobs.post.is_open());
+    assert!(!app.show_hub_modal);
+}
+
+/// A Settings text field being edited holds typing that is not saved yet, so
+/// the chords that would close or reopen the modal leave it alone. Ctrl+S
+/// matters most: it is a save habit.
+#[tokio::test]
+async fn modal_chords_leave_a_settings_text_editor_alone() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "chords-bio-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "chords-bio-flow-it");
+    wait_for_render_contains(&mut app, " Home ").await;
+
+    app.handle_input(b"\x0f"); // Settings
+    app.handle_input(b"\t"); // Bio tab
+    app.handle_input(b"\r"); // start editing
+    assert!(app.settings_modal_state.editing_bio());
+    app.handle_input(b"late night coder");
+
+    for (chord, name) in [
+        (b"\x0f", "Ctrl+O"),
+        (b"\x07", "Ctrl+G"),
+        (b"\x06", "Ctrl+F"),
+        (b"\x13", "Ctrl+S"),
+    ] {
+        app.handle_input(chord);
+        assert!(app.show_settings, "{name} leaves Settings open");
+        assert!(
+            app.settings_modal_state.editing_bio(),
+            "{name} leaves the bio editor open"
+        );
+        assert!(!app.show_lobby_modal, "{name} opens no Lobby");
+        assert!(!app.show_hub_modal, "{name} opens no Shop");
+        assert_ne!(app.screen, Screen::Zen, "{name} opens no Zen");
+    }
+
+    app.handle_input(b"\r"); // Enter leaves edit mode and saves
+    assert_eq!(app.settings_modal_state.draft().bio, "late night coder");
 }
 
 /// `/lobby`, `/zen`, and `/guide` are the typed fallbacks for Ctrl+G, Ctrl+F,
@@ -1597,6 +1774,9 @@ async fn artboard_view_help_and_active_input_share_one_lifecycle() {
         !frame.contains(" Home "),
         "active mode should block screen switching; frame={frame:?}"
     );
+
+    app.handle_input(b"\x13");
+    assert!(!app.show_hub_modal, "Artboard retains Ctrl+S for slot 2");
 
     app.handle_input(b"\x03");
     let frame = render_plain(&mut app);
@@ -2750,7 +2930,219 @@ async fn the_lounge_renders_its_own_topic_header() {
 }
 
 #[tokio::test]
-async fn clicking_the_mentions_hud_text_opens_mentions() {
+async fn default_bottom_bar_shows_every_default_component_even_while_idle() {
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "bottom-status-default").await;
+    let mut app = make_app(test_db.db.clone(), viewer.id, "bottom-status-default-it");
+
+    let enabled = app
+        .profile_state
+        .profile()
+        .statusline_components
+        .iter()
+        .filter(|setting| setting.enabled)
+        .map(|setting| setting.component)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        enabled,
+        vec![
+            StatusComponent::Shortcuts,
+            StatusComponent::Station,
+            StatusComponent::Voice,
+            StatusComponent::Mentions,
+            StatusComponent::Turns,
+            StatusComponent::Care,
+        ]
+    );
+
+    // Every default stays on the bar while idle. A new account's bonsai has
+    // not been watered today, so care is due. Wide enough for all of it
+    // beside the sponsor line.
+    app.resize(160, 40).expect("resize test terminal");
+    let frame = render_plain(&mut app);
+    for reading in [
+        "🎵 chillsynth",
+        "mic -",
+        "unread 0",
+        "your move 0",
+        "care 1",
+    ] {
+        assert!(
+            frame.contains(reading),
+            "{reading:?} shows by default: {frame:?}"
+        );
+    }
+    assert!(
+        frame.contains("Settings ^O")
+            && frame.contains("Zen ^F")
+            && frame.contains("Shop ^S")
+            && frame.contains("Exit qq"),
+        "Keyhints should render from the default component: {frame:?}"
+    );
+}
+
+#[tokio::test]
+async fn keyhints_brief_property_toggles_and_persists_in_settings() {
+    use crate::app::settings_modal::state::{StatuslinePane, Tab};
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "brief-keyhints-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "brief-keyhints-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, " Home ").await;
+
+    app.handle_input(b"\x0f");
+    wait_for_render_contains(&mut app, "brief-keyhints-it").await;
+    app.handle_input(b"\t\t\t\t");
+    wait_for_render_contains(&mut app, "Brief").await;
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Statusline);
+    wait_for_render_contains(
+        &mut app,
+        "Keyboard shortcuts for navigation and common actions.",
+    )
+    .await;
+    // Both directions leave the list, and returning preserves its selection.
+    app.handle_input(b"\t");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Account);
+    app.handle_input(b"\x1b[Z");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Statusline);
+    app.handle_input(b"\x1b[C\x1b[D");
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::List
+    );
+    app.handle_input(b"\r"); // Open Keyhints' detail pane.
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::Detail
+    );
+    // Tab must switch tabs even while editing a component's options.
+    app.handle_input(b"\t");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Account);
+    app.handle_input(b"\x1b[Z");
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Statusline);
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::Detail
+    );
+
+    for brief in [true, false] {
+        // Right and Left edit Brief while staying in the properties pane.
+        app.handle_input(if brief { b"\x1b[C" } else { b"\x1b[D" });
+        assert_eq!(
+            app.settings_modal_state.statusline_pane(),
+            StatuslinePane::Detail
+        );
+        // Let each asynchronous save finish before the next edit.
+        let db = test_db.db.clone();
+        wait_until(
+            || {
+                let db = db.clone();
+                async move {
+                    let client = db.get().await.expect("db client");
+                    let stored = User::get(&client, user.id)
+                        .await
+                        .expect("load user")
+                        .expect("user exists");
+                    stored.settings["statusline_components"]
+                        .as_array()
+                        .is_some_and(|entries| {
+                            let enabled: Vec<_> = entries
+                                .iter()
+                                .filter(|entry| entry["enabled"] == true)
+                                .collect();
+                            let keys: Vec<_> =
+                                enabled.iter().map(|entry| entry["key"].as_str()).collect();
+                            keys == [
+                                Some("shortcuts"),
+                                Some("station"),
+                                Some("voice"),
+                                Some("mentions"),
+                                Some("turns"),
+                                Some("care"),
+                            ] && enabled[0]["brief"] == brief
+                        })
+                }
+            },
+            "Keyhints Brief property saved",
+        )
+        .await;
+
+        let hint = if brief {
+            "⚙ ^o · ⚄ ^g · ◉ ^s"
+        } else {
+            "Settings ^O"
+        };
+        wait_for_render_contains(&mut app, hint).await;
+        let mut reloaded = make_app(test_db.db.clone(), user.id, "keyhints-reloaded-it");
+        wait_for_render_contains(&mut reloaded, hint).await;
+        assert_eq!(
+            reloaded.profile_state.profile().statusline_components[0].brief,
+            brief
+        );
+    }
+    app.handle_input(b"\x1b");
+    wait_for_render_contains(&mut app, "Enter options").await;
+    assert!(app.show_settings);
+    assert_eq!(
+        app.settings_modal_state.statusline_pane(),
+        StatuslinePane::List
+    );
+    app.handle_input(b"q");
+    assert!(!app.show_settings);
+    wait_for_render_contains(&mut app, "Settings ^O").await;
+}
+
+#[tokio::test]
+async fn runner_stays_off_the_fixed_bar_and_zen_clears_bar_hits() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::deadchannel::fight::state::Sheet;
+
+    let render_top_row = |app: &mut crate::app::state::App| {
+        app.tick();
+        app.reset_render();
+        let mut terminal = vt100::Parser::new(40, 200, 0);
+        terminal.process(&app.render().expect("render"));
+        terminal
+            .screen()
+            .contents()
+            .lines()
+            .next()
+            .expect("top border row")
+            .to_string()
+    };
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "status-zen-viewer").await;
+    let mut app = make_app(test_db.db.clone(), viewer.id, "status-zen-flow-it");
+    app.resize(200, 40).expect("resize test terminal");
+    app.fight.sheet = Some(Sheet::fresh(viewer.id, chrono::Utc::now().date_naive()));
+    let top_row = render_top_row(&mut app);
+    assert!(top_row.contains("chips"));
+    assert!(!top_row.contains("rations"));
+    assert!(!top_row.contains("signal"));
+    assert!(!app.last_status_hits.borrow().is_empty());
+
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+    let frame = render_plain(&mut app);
+    assert!(!frame.contains("Settings ^O"));
+    assert!(app.last_status_hits.borrow().is_empty());
+
+    app.handle_input(b"\x06");
+    let top_row = render_top_row(&mut app);
+    assert!(top_row.contains("chips"));
+    assert!(!top_row.contains("rations"));
+    assert!(!top_row.contains("signal"));
+    assert!(!app.last_status_hits.borrow().is_empty());
+}
+
+/// Each status bar segment routes to its own destination, on whichever border
+/// it sits: chips on the fixed top bar, the unread counter on the bottom one.
+/// The rects come from measured span widths, which is what this exercises end
+/// to end.
+#[tokio::test]
+async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "hud-mention-viewer").await;
     let author = create_test_user(&test_db.db, "hud-mention-author").await;
@@ -2775,30 +3167,47 @@ async fn clicking_the_mentions_hud_text_opens_mentions() {
         Uuid::now_v7(),
         false,
     );
-    wait_for_render_contains(&mut app, "unread mention").await;
-
-    // The HUD sits on the top border row as `1 unread mention | N chips`.
-    // Border glyphs are multi-byte, so translate byte offsets into display
-    // columns by char count (every glyph on this row is single-width).
-    let frame = render_plain(&mut app);
-    let top_row = frame.lines().next().expect("top border row").to_string();
-    let char_col = |needle: &str| {
-        let byte = top_row.find(needle).expect("needle on the top border");
-        top_row[..byte].chars().count()
+    // Chips sit on the top border row and the unread counter on the bottom
+    // one. Wide enough that the counter fits beside the sponsor's link; a
+    // segment with no room is dropped whole.
+    const COLS: u16 = 160;
+    const ROWS: u16 = 40;
+    app.resize(COLS, ROWS).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "unread 1").await;
+    app.tick();
+    app.reset_render();
+    let mut terminal = vt100::Parser::new(ROWS, COLS, 0);
+    terminal.process(&app.render().expect("render"));
+    let screen = terminal.screen().contents();
+    let top_row = screen.lines().next().expect("top border row");
+    let bottom_row = screen.lines().last().expect("bottom border row");
+    // Display columns, not chars: the station's note ahead of the counter is
+    // two cells wide.
+    let display_col = |row: &str, needle: &str| {
+        let byte = row.find(needle).expect("needle on the border row");
+        unicode_width::UnicodeWidthStr::width(&row[..byte])
     };
-    let mentions_col = char_col("unread mention");
-    let chips_col = char_col("chips");
+    let chips_col = display_col(top_row, "chips");
+    let mentions_col = display_col(bottom_row, "unread");
+    assert!(
+        !top_row.contains("unread"),
+        "the unread counter lives on the bottom bar only: {top_row:?}"
+    );
 
-    // Clicking the chips text, right of the mentions text, must not open
-    // Mentions. SGR mouse coords are 1-indexed.
+    // Chips go to the Shop, so a click there must not reach Mentions. SGR
+    // mouse coords are 1-indexed.
     app.handle_input(format!("\x1b[<0;{};1M", chips_col + 1).as_bytes());
+    wait_for_render_contains(&mut app, "-- Shop --").await;
     assert_render_not_contains_for(&mut app, "mentioned you in", Duration::from_millis(120)).await;
+    // Close the Shop that click opened before aiming at the next segment.
+    app.handle_input(b"q");
+    assert_render_not_contains_for(&mut app, "-- Shop --", Duration::from_millis(120)).await;
 
     // Clicking inside the mentions text opens the Mentions view, and a
     // composer that was open closes: Mentions has nothing to type into.
     app.handle_input(b"i");
     assert!(app.chat.composing, "i opens the lounge composer");
-    app.handle_input(format!("\x1b[<0;{};1M", mentions_col + 1).as_bytes());
+    app.handle_input(format!("\x1b[<0;{};{ROWS}M", mentions_col + 1).as_bytes());
     assert!(
         !app.chat.composing,
         "the jump to Mentions closes the composer"
@@ -4650,6 +5059,7 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "badge-picker-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "badge-picker-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
 
     app.handle_input(b"\x0f");
     wait_for_render_contains(&mut app, "badge-picker-it").await;
@@ -4690,6 +5100,13 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
 
     app.handle_input(b"\x1b");
     wait_for_render_contains(&mut app, "1 hidden").await;
+    // Closing the picker restores top-level tab navigation.
+    app.handle_input(b"\t");
+    wait_for_render_contains(&mut app, "Keyhints").await;
+    assert_eq!(
+        app.settings_modal_state.selected_tab(),
+        crate::app::settings_modal::state::Tab::Statusline
+    );
 }
 
 /// Ctrl+H / Ctrl+L and the wheel over the rail scroll it without changing

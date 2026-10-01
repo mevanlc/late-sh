@@ -15,7 +15,8 @@ use super::{
     gem::{GemPosition, GemState, MoveDirection},
     state::{
         AccountRow, BIO_MAX_LEN, IrcTokenFocus, LinkAccountEnterCodeFocus, LinkAccountStep,
-        PickerKind, Row, SettingsModalState, Tab, ThemeTreeRow, TweakRow,
+        PickerKind, Row, SettingsModalState, StatuslineDial, StatuslinePane, Tab, ThemeTreeRow,
+        TweakRow,
     },
 };
 
@@ -60,13 +61,14 @@ pub(crate) fn draw(
     match state.selected_tab() {
         Tab::Settings => draw_settings_tab(frame, layout[3], state),
         Tab::Tweaks => draw_tweaks_tab(frame, layout[3], state),
+        Tab::Statusline => draw_statusline_tab(frame, layout[3], state),
         Tab::Themes => draw_themes_tab(frame, layout[3], state),
         Tab::Bio => draw_bio_tab(frame, layout[3], state),
         Tab::Account => draw_account_tab(frame, layout[3], state),
         Tab::Feeds => draw_feeds_tab(frame, layout[3], state),
     }
 
-    draw_footer(frame, layout[4], state.selected_tab(), state.editing_bio());
+    draw_footer(frame, layout[4], state);
 
     if state.picker_open() {
         draw_picker(frame, popup, state);
@@ -104,7 +106,7 @@ fn draw_tabs(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
             Style::default().fg(theme::TEXT_DIM())
         };
         let label = format!(" {} ", tab.label());
-        let width = label.chars().count() as u16;
+        let width = Span::raw(&label).width() as u16;
         let cell_end = cursor_x.saturating_add(width).min(area.x + area.width);
         if let Some(slot_idx) = Tab::ALL.iter().position(|t| *t == tab) {
             rects[slot_idx] = Some(Rect::new(
@@ -122,9 +124,9 @@ fn draw_tabs(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn draw_footer(frame: &mut Frame, area: Rect, tab: Tab, editing_bio: bool) {
+fn draw_footer(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
     let mut spans = vec![Span::raw("  ")];
-    match (tab, editing_bio) {
+    match (state.selected_tab(), state.editing_bio()) {
         (Tab::Bio, true) => {
             spans.extend([
                 Span::styled("Esc", Style::default().fg(theme::AMBER_DIM())),
@@ -184,6 +186,19 @@ fn draw_footer(frame: &mut Frame, area: Rect, tab: Tab, editing_bio: bool) {
                 Span::styled(" switch tabs  ", Style::default().fg(theme::TEXT_DIM())),
                 Span::styled("Esc/q", Style::default().fg(theme::AMBER_DIM())),
                 Span::styled(" close", Style::default().fg(theme::TEXT_DIM())),
+            ]);
+        }
+        (Tab::Statusline, _) => {
+            let close_label = if state.statusline_pane() == StatuslinePane::Detail {
+                " back to components"
+            } else {
+                " close"
+            };
+            spans.extend([
+                Span::styled("Tab/S+Tab", Style::default().fg(theme::AMBER_DIM())),
+                Span::styled(" switch tabs  ", Style::default().fg(theme::TEXT_DIM())),
+                Span::styled("Esc/q", Style::default().fg(theme::AMBER_DIM())),
+                Span::styled(close_label, Style::default().fg(theme::TEXT_DIM())),
             ]);
         }
         (Tab::Account, _) => {
@@ -1737,6 +1752,192 @@ fn draw_right_sidebar_components_dialog(
     ]);
     frame.render_widget(Paragraph::new(footer_top), layout[layout.len() - 2]);
     frame.render_widget(Paragraph::new(footer_bottom), layout[layout.len() - 1]);
+}
+
+/// Bottom status bar customizer: the ordered segment list on the left, the
+/// selected segment's description and dials on the right.
+///
+/// The list is ordered top-to-bottom the way the bar reads left-to-right, so
+/// "move up" and "move left" are the same gesture and the user never has to
+/// hold the mapping in their head.
+fn draw_statusline_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    /// Columns given to the segment list; the dials take what's left.
+    const LIST_WIDTH: u16 = 28;
+
+    let inner = area.inner(Margin::new(2, 0));
+    let layout = Layout::vertical([
+        Constraint::Length(1), // heading
+        Constraint::Length(1), // blank
+        Constraint::Min(0),    // list + dials
+        Constraint::Length(1), // component controls
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new("Segments paint left to right along the bottom border.")
+            .style(Style::default().fg(theme::TEXT_DIM())),
+        layout[0],
+    );
+
+    let body =
+        Layout::horizontal([Constraint::Length(LIST_WIDTH), Constraint::Min(0)]).split(layout[2]);
+    draw_statusline_list(frame, body[0], state);
+    draw_statusline_dials(frame, body[1], state);
+
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let key = Style::default().fg(theme::AMBER_DIM());
+    let mut controls = vec![
+        Span::styled("↑↓ j/k", key),
+        Span::styled(" select  ", dim),
+        Span::styled("⇧↑↓ / []", key),
+        Span::styled(" reorder  ", dim),
+    ];
+    match state.statusline_pane() {
+        StatuslinePane::List => controls.extend([
+            Span::styled("Space", key),
+            Span::styled(" toggle  ", dim),
+            Span::styled("Enter", key),
+            Span::styled(" options", dim),
+        ]),
+        StatuslinePane::Detail => controls.extend([
+            Span::styled("←→/Space", key),
+            Span::styled(" change option", dim),
+        ]),
+    }
+    frame.render_widget(Paragraph::new(Line::from(controls)), layout[3]);
+}
+
+fn draw_statusline_list(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    let components = state.statusline_components();
+    let focused = state.statusline_pane() == StatuslinePane::List;
+    let width = area.width as usize;
+
+    for (idx, setting) in components.iter().enumerate() {
+        if idx as u16 >= area.height {
+            break;
+        }
+        let selected = state.statusline_index() == idx;
+        let marker = if selected { ">" } else { " " };
+        let checkbox = if setting.enabled { "[x]" } else { "[ ]" };
+        let text = format!(" {marker} {checkbox} {}", setting.component.label());
+        let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                pad_to_width(&text, width, selected),
+                statusline_row_style(selected, focused, setting.enabled),
+            ))),
+            row,
+        );
+    }
+}
+
+/// The description and dials for the selected segment. Renders nothing when
+/// the list is empty, which only happens if the roster itself is empty.
+fn draw_statusline_dials(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
+    let Some(setting) = state
+        .statusline_components()
+        .get(state.statusline_index())
+        .copied()
+    else {
+        return;
+    };
+    let focused = state.statusline_pane() == StatuslinePane::Detail;
+    let width = area.width as usize;
+    let description = Paragraph::new(setting.component.description())
+        .style(Style::default().fg(theme::TEXT_DIM()))
+        .wrap(Wrap { trim: true });
+    let description_height = description.line_count(area.width) as u16;
+    let layout = Layout::vertical([
+        Constraint::Length(1), // component name
+        Constraint::Length(1), // blank
+        Constraint::Length(description_height),
+        Constraint::Length(1), // blank
+        Constraint::Min(0),    // dials
+    ])
+    .split(area);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            setting.component.label(),
+            Style::default()
+                .fg(theme::AMBER())
+                .add_modifier(Modifier::BOLD),
+        ))),
+        layout[0],
+    );
+    frame.render_widget(description, layout[2]);
+
+    let area = layout[4];
+    let dials = state.statusline_dials();
+    if dials.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "Toggle this component from the list.",
+                Style::default().fg(theme::TEXT_DIM()),
+            ))),
+            area,
+        );
+        return;
+    }
+
+    for (idx, dial) in dials.into_iter().enumerate() {
+        let y = idx as u16;
+        if y >= area.height {
+            break;
+        }
+        let selected = focused && state.statusline_dial_index() == idx;
+        let marker = if selected { "›" } else { " " };
+        let title = dial.title(&setting);
+        let value = statusline_dial_value(dial, &setting);
+        let text = format!("{marker} {title:<13}{value}");
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                pad_to_width(&text, width, selected),
+                statusline_row_style(selected, focused, true),
+            ))),
+            Rect::new(area.x, area.y + y, area.width, 1),
+        );
+    }
+}
+
+fn statusline_dial_value(
+    dial: StatuslineDial,
+    setting: &late_core::models::statusline::StatusComponentSetting,
+) -> String {
+    match dial {
+        StatuslineDial::Brief => on_off(setting.brief),
+        StatuslineDial::Label => setting.label.label().to_string(),
+        StatuslineDial::AutoHide => on_off(setting.auto_hide),
+        StatuslineDial::Variant => setting
+            .variant
+            .or_else(|| setting.component.variants().first().copied())
+            .map(|variant| variant.label().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+fn on_off(enabled: bool) -> String {
+    if enabled { "● on" } else { "○ off" }.to_string()
+}
+
+/// Row styling shared by both panes. Only the focused pane paints a selection
+/// background; the other keeps its cursor visible as brightened text, so it's
+/// always clear which segment the dials belong to.
+fn statusline_row_style(selected: bool, focused: bool, enabled: bool) -> Style {
+    if selected && focused {
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .bg(theme::BG_SELECTION())
+            .add_modifier(Modifier::BOLD)
+    } else if selected {
+        Style::default()
+            .fg(theme::TEXT_BRIGHT())
+            .add_modifier(Modifier::BOLD)
+    } else if enabled {
+        Style::default().fg(theme::TEXT())
+    } else {
+        Style::default().fg(theme::TEXT_FAINT())
+    }
 }
 
 /// Every badge a chat label can carry, one row each (a game's ladder is one
