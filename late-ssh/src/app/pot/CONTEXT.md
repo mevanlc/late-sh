@@ -130,14 +130,17 @@ needed.
 
 ## 7b. The status HUD badge
 
-`render.rs::status_hud_title` carries the open pot as `pot 84,200 · 3h12m`,
-placed right before the chips segment so the prize reads against the viewer's
-own balance (`... | pot 84,200 · 3h12m | 1500 chips`). It reads the same
-`App.pot_view` `/pot` does, so it costs no query and repaints on the same
-~1s edge. The HUD is painted over the left title, so under a tight border it
-degrades: countdown first (`pot 84,200`), then the whole badge, and it yields
-before the status badge does because it is ambient and `/pot` still answers.
-Absent before the first refresh and in a process with no pot service.
+The fixed top-right status bar (`statusline/bar.rs::build_top_status_bar`)
+carries the open pot as `pot 84,200 · 3h12m`, placed right before the chips
+segment so the prize reads against the viewer's own balance
+(`pot 84,200 · 3h12m ─ chips 1500 ─`). It reads the same `App.pot_view` `/pot`
+does, through `StatusData`, so it costs no query and repaints on the same ~1s
+edge. The bar shares its border row with the page tabs, so under a tight
+border the pot degrades: countdown first (`pot 84,200`), then the whole badge,
+and it yields before the chips do because it is ambient and `/pot` still
+answers. Absent before the first refresh and in a process with no pot service.
+A user who turns the pot on in their bottom status bar moves it there
+(`late-ssh/src/app/statusline/CONTEXT.md`).
 
 ## 8. Feed lines
 

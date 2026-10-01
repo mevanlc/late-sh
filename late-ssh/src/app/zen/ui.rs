@@ -944,6 +944,16 @@ pub(crate) struct PulseView {
     pub care: Care,
 }
 
+impl Care {
+    /// How many owned companions still wait on today's care.
+    pub(crate) fn due_count(&self) -> usize {
+        [self.bonsai, self.tank, self.pet]
+            .into_iter()
+            .filter(|chore| *chore == Chore::Due)
+            .count()
+    }
+}
+
 /// Today's care for one companion: tended, still due, or not owned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Chore {

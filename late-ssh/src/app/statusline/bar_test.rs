@@ -5,8 +5,8 @@ use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 
 use super::bar::{
-    Placement, StatusClick, build_status_bar, build_top_status_bar, click_action,
-    fixed_topbar_components,
+    Placement, StatusClick, build_bottom_status_bar, build_status_bar, build_top_status_bar,
+    click_action, fixed_topbar_components,
 };
 use super::data::{StatusData, clock_icon};
 
@@ -26,7 +26,7 @@ fn data() -> StatusData<'static> {
         station_track: Some("Artist - A Very Long Track Title"),
         quests_open_daily: 1,
         quests_open_weekly: 1,
-        invites: 1,
+        care_due: 1,
         voice: Some("lounge [talking]"),
     }
 }
@@ -87,17 +87,14 @@ fn every_icon_measures_two_cells() {
     }
 }
 
+/// The top-right bar is fixed policy: the two ambient readings, the pot
+/// ahead of the balance and first to give way.
 #[test]
-fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
+fn fixed_topbar_is_the_pot_and_the_chips() {
     let topbar = fixed_topbar_components();
     assert_eq!(
         topbar.map(|setting| setting.component),
-        [
-            StatusComponent::Voice,
-            StatusComponent::Mentions,
-            StatusComponent::Pot,
-            StatusComponent::Chips,
-        ]
+        [StatusComponent::Pot, StatusComponent::Chips]
     );
     assert!(topbar.iter().all(|setting| setting.enabled));
     assert!(
@@ -105,7 +102,6 @@ fn fixed_topbar_reproduces_the_upstream_hud_independently_of_user_defaults() {
             .iter()
             .all(|setting| { setting.low_priority == (setting.component == StatusComponent::Pot) })
     );
-    assert!(!StatusComponentSetting::new(StatusComponent::Voice).enabled);
 }
 
 #[test]
@@ -114,18 +110,21 @@ fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
         build_top_status_bar(
             &StatusData {
                 chip_balance: 1_500,
+                // Mentions and voice are bottom-bar signals: never painted here.
                 mentions_unread: 2,
+                voice: Some("#lounge [muted]"),
                 pot_size: Some(84_200),
                 pot_draws_in: Some("3h12m"),
                 ..StatusData::default()
             },
             Rect::new(0, 0, border_width, 24),
             0,
+            &[],
         )
     };
-    let full = " unread 2 ─ pot 84,200 · 3h12m ─ chips 1500 ─";
-    let compact = " unread 2 ─ pot 84,200 ─ chips 1500 ─";
-    let without_pot = " unread 2 ─ chips 1500 ─";
+    let full = " pot 84,200 · 3h12m ─ chips 1500 ─";
+    let compact = " pot 84,200 ─ chips 1500 ─";
+    let without_pot = " chips 1500 ─";
     let width = |text: &str| Span::raw(text).width() as u16 + 2;
 
     assert_eq!(hud(200).expect("hud").line.to_string(), full);
@@ -142,7 +141,55 @@ fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
     assert_eq!(
         hud(width(compact) - 1).map(|hud| hud.line.to_string()),
         Some(without_pot.to_string()),
-        "the pot sheds before mentions or chips"
+        "the pot sheds before the chips"
+    );
+}
+
+/// Placing the pot or the chips on the bottom bar moves the reading there:
+/// the top bar skips what the bottom one painted, and only that. A segment
+/// the bottom bar had to drop for width stays on the top.
+#[test]
+fn a_reading_painted_on_the_bottom_bar_leaves_the_top_one() {
+    let data = StatusData {
+        chip_balance: 1_500,
+        pot_size: Some(84_200),
+        pot_draws_in: Some("3h12m"),
+        ..StatusData::default()
+    };
+    let components = [
+        StatusComponentSetting::new(StatusComponent::Shortcuts),
+        on(StatusComponent::Chips, LabelMode::Text),
+    ];
+    let top = |area: Rect, painted_on_bottom: &[StatusComponent]| {
+        build_top_status_bar(&data, area, 0, painted_on_bottom).map(|bar| bar.line.to_string())
+    };
+
+    let roomy = Rect::new(0, 0, 200, 24);
+    let bottom = build_bottom_status_bar(&components, &data, roomy, 0).expect("bottom bar");
+    assert_eq!(
+        bottom.painted,
+        vec![StatusComponent::Shortcuts, StatusComponent::Chips]
+    );
+    assert_eq!(
+        top(roomy, &bottom.painted).as_deref(),
+        Some(" pot 84,200 · 3h12m ─"),
+        "chips moved down, the pot stayed up"
+    );
+
+    // Room for the hints only: the chips never made it onto the bottom bar.
+    let hints_only = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ";
+    let tight = Rect::new(0, 0, Span::raw(hints_only).width() as u16 + 2, 24);
+    let bottom = build_bottom_status_bar(&components, &data, tight, 0).expect("bottom bar");
+    assert_eq!(bottom.painted, vec![StatusComponent::Shortcuts]);
+    assert_eq!(
+        top(roomy, &bottom.painted).as_deref(),
+        Some(" pot 84,200 · 3h12m ─ chips 1500 ─")
+    );
+
+    assert_eq!(
+        top(roomy, &[StatusComponent::Pot, StatusComponent::Chips]),
+        None,
+        "nothing left for the top bar to say"
     );
 }
 
@@ -150,7 +197,7 @@ fn fixed_topbar_renders_the_pot_before_chips_and_sheds_it_first() {
 /// handed must be the bare body. Fed from the real badge function so the two
 /// cannot drift apart again.
 #[test]
-fn fixed_topbar_labels_the_voice_badge_once() {
+fn the_voice_badge_is_labelled_once() {
     use crate::app::voice::svc::{VoiceParticipant, VoiceSnapshot};
 
     let room_id = uuid::Uuid::from_u128(42);
@@ -176,39 +223,121 @@ fn fixed_topbar_labels_the_voice_badge_once() {
         Some("#lounge".to_string())
     });
 
-    let hud = build_top_status_bar(
+    let bar = build_bottom_status_bar(
+        &[
+            StatusComponentSetting::new(StatusComponent::Shortcuts),
+            StatusComponentSetting::new(StatusComponent::Voice),
+        ],
         &StatusData {
-            chip_balance: 1_500,
             voice: badge.as_deref(),
             ..StatusData::default()
         },
         Rect::new(0, 0, 200, 24),
         0,
     )
-    .expect("hud");
-    assert_eq!(hud.line.to_string(), " mic #lounge [muted] ─ chips 1500 ─");
+    .expect("bar");
+    assert_eq!(
+        bar.line.to_string(),
+        "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ mic #lounge [muted] "
+    );
 }
 
+/// Keyhints have one rendering, caret notation, and no tighter fallback.
 #[test]
-fn keyhints_keeps_its_styled_bottom_left_copy_and_both_compactions() {
+fn keyhints_paint_caret_notation_or_nothing() {
     let components = [StatusComponentSetting::new(StatusComponent::Shortcuts)];
-    let area_for = |text: &str| Rect::new(0, 0, Span::raw(text).width() as u16 + 2, 24);
-    let render_in = |area| {
-        build_status_bar(&components, &data(), Placement::BottomLeft, area, 0)
-            .expect("shortcut bar")
-            .line
-            .spans
-            .iter()
-            .map(|span| span.content.as_ref())
-            .collect::<String>()
-    };
-    let full = "─ Settings Ctrl+O · Lobby Ctrl+G · Zen Ctrl+F · Shop Ctrl+S · Guide ? · Exit qq ";
-    let spaced = "─ Settings Ctrl+O  Lobby Ctrl+G  Zen Ctrl+F  Shop Ctrl+S  Guide ?  Exit qq ";
     let caret = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ";
+    let width = Span::raw(caret).width() as u16 + 2;
+    let render_in = |width: u16| {
+        build_status_bar(
+            &components,
+            &data(),
+            Placement::BottomLeft,
+            Rect::new(0, 0, width, 24),
+            0,
+        )
+        .map(|bar| bar.line.to_string())
+    };
 
-    assert_eq!(render_in(area_for(full)), full);
-    assert_eq!(render_in(area_for(spaced)), spaced);
-    assert_eq!(render_in(area_for(caret)), caret);
+    assert_eq!(render_in(200).as_deref(), Some(caret));
+    assert_eq!(render_in(width).as_deref(), Some(caret));
+    assert_eq!(render_in(width - 1), None);
+}
+
+/// Voice and mentions are shown nowhere else on the frame, so when the row
+/// cannot hold everything it is the hints that go, not the signal's wording.
+#[test]
+fn signals_outlast_the_keyhints() {
+    let components = [
+        StatusComponentSetting::new(StatusComponent::Shortcuts),
+        StatusComponentSetting::new(StatusComponent::Mentions),
+    ];
+    let data = StatusData {
+        mentions_unread: 3,
+        ..StatusData::default()
+    };
+    let both = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ unread 3 ";
+    let width = Span::raw(both).width() as u16 + 2;
+    let render_in = |width: u16| {
+        build_status_bar(
+            &components,
+            &data,
+            Placement::BottomLeft,
+            Rect::new(0, 0, width, 24),
+            0,
+        )
+        .map(|bar| bar.line.to_string())
+    };
+
+    assert_eq!(render_in(width).as_deref(), Some(both));
+    assert_eq!(render_in(width - 1).as_deref(), Some("─ unread 3 "));
+}
+
+/// The sponsor line has first claim on the bottom row, except against the
+/// Keyhints and the two signals: an opt-in reading gives way to it, those do
+/// not.
+#[test]
+fn the_sponsor_outranks_opt_in_readings_but_not_keyhints_or_signals() {
+    const SPONSOR: u16 = 28;
+    let data = StatusData {
+        clock_24: "14:32",
+        mentions_unread: 3,
+        ..StatusData::default()
+    };
+    let components = [
+        StatusComponentSetting::new(StatusComponent::Shortcuts),
+        StatusComponentSetting::new(StatusComponent::Mentions),
+        on(StatusComponent::Time, LabelMode::None),
+    ];
+    let protected = "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ unread 3 ";
+    let with_clock =
+        "─ Settings ^O  Lobby ^G  Zen ^F  Shop ^S  Guide ?  Exit qq ─ unread 3 ─ 14:32 ";
+    let protected_width = Span::raw(protected).width() as u16;
+    let render_in = |row_cols: u16| {
+        build_bottom_status_bar(
+            &components,
+            &data,
+            Rect::new(0, 0, row_cols + 2, 24),
+            SPONSOR,
+        )
+        .map(|bar| bar.line.to_string())
+    };
+
+    assert_eq!(
+        render_in(200).as_deref(),
+        Some(with_clock),
+        "room for everything beside the sponsor"
+    );
+    assert_eq!(
+        render_in(protected_width + SPONSOR).as_deref(),
+        Some(protected),
+        "the clock gives way to the sponsor"
+    );
+    assert_eq!(
+        render_in(protected_width + SPONSOR - 1).as_deref(),
+        Some(with_clock),
+        "the sponsor would cost a protected segment, so the bar takes the row"
+    );
 }
 
 #[test]
@@ -408,6 +537,29 @@ fn auto_hide_drops_a_component_reading_zero() {
         18,
     );
     assert!(bar.is_none(), "an empty bar is no bar at all");
+}
+
+/// Care counts the companions still waiting on today's care and leaves the
+/// bar once they are all tended.
+#[test]
+fn care_shows_what_is_still_due_and_hides_when_tended() {
+    let components = [StatusComponentSetting::new(StatusComponent::Care)];
+    let render = |care_due: usize| {
+        build_status_bar(
+            &components,
+            &StatusData {
+                care_due,
+                ..StatusData::default()
+            },
+            Placement::BottomLeft,
+            Rect::new(0, 0, 120, 24),
+            0,
+        )
+        .map(|bar| bar.line.to_string())
+    };
+
+    assert_eq!(render(2).as_deref(), Some("─ care 2 "));
+    assert_eq!(render(0), None);
 }
 
 /// Auto-hide is offered exactly where it can do something: on an idle frame a
@@ -728,6 +880,7 @@ fn click_actions_cover_exactly_the_actionable_components() {
         click_action(StatusComponent::Chips),
         Some(StatusClick::Shop)
     );
+    assert_eq!(click_action(StatusComponent::Care), Some(StatusClick::Zen));
     assert_eq!(click_action(StatusComponent::Time), None);
     assert_eq!(click_action(StatusComponent::Shortcuts), None);
     assert_eq!(click_action(StatusComponent::Voice), None);

@@ -209,8 +209,10 @@ fn sponsor_line_keeps_its_place_however_full_the_status_bar_is() {
 
     let (bar, sponsor) = app_frame_bottom_titles(&everything_on, &data, area);
 
+    // Which sponsor form fits depends on which segments the bar kept; that it
+    // is there at all is the point.
     let sponsor = sponsor.expect("the sponsor line survives a full bar");
-    assert_eq!(line_text(&sponsor), " ko-fi.com/mateuszpiorowski ");
+    assert!(line_text(&sponsor).contains("ko-fi.com/mateuszpiorowski"));
     let bar = bar.expect("the bar keeps what fits beside the sponsor");
     assert!(
         line_width(&bar.line) + line_width(&sponsor) <= usize::from(area.width - 2),
@@ -254,6 +256,6 @@ fn keyhints_keep_a_row_too_narrow_to_share_with_the_sponsor() {
     );
 
     let bar = bar.expect("keyhints survive an 80-column terminal");
-    assert!(line_text(&bar.line).contains("Settings Ctrl+O"));
+    assert!(line_text(&bar.line).contains("Settings ^O"));
     assert!(sponsor.is_none(), "no room is left for the sponsor line");
 }

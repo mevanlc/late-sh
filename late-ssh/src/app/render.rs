@@ -1536,7 +1536,7 @@ impl App {
                             station_track: status_station_track,
                             quests_open_daily: status_quests_daily,
                             quests_open_weekly: status_quests_weekly,
-                            invites: self.daily.my_invite_count(),
+                            care_due: zen_care.due_count(),
                             voice: voice_badge.as_deref(),
                         },
                         status_hits: &self.last_status_hits,
@@ -1746,24 +1746,27 @@ impl App {
                 .title(title)
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+            // Bottom first: the top bar skips whatever the bottom one painted.
             let mut status_hits = Vec::new();
-            if let Some(bar) = crate::app::statusline::bar::build_top_status_bar(
-                &ctx.status_data,
-                area,
-                title_width,
-            ) {
-                status_hits.extend(bar.hits);
-                block = block.title_top(bar.line);
-            }
-
+            let mut painted_on_bottom = Vec::new();
             let (bottom_bar, sponsor_title) =
                 app_frame_bottom_titles(&ctx.statusline_components, &ctx.status_data, area);
             if let Some(bar) = bottom_bar {
+                painted_on_bottom = bar.painted;
                 status_hits.extend(bar.hits);
                 block = block.title_bottom(bar.line);
             }
             if let Some(sponsor_title) = sponsor_title {
                 block = block.title_bottom(sponsor_title);
+            }
+            if let Some(bar) = crate::app::statusline::bar::build_top_status_bar(
+                &ctx.status_data,
+                area,
+                title_width,
+                &painted_on_bottom,
+            ) {
+                status_hits.extend(bar.hits);
+                block = block.title_top(bar.line);
             }
             *ctx.status_hits.borrow_mut() = status_hits;
 
@@ -2872,8 +2875,8 @@ fn line_width(line: &Line<'_>) -> usize {
 /// The sponsor line has priority. Its shortest form is set aside first, the
 /// bar compacts and drops segments to fit in what is left, and the sponsor
 /// then grows into the richest form the fitted bar leaves room for. The bar
-/// keeps the whole row only when it is too narrow for the sponsor beside the
-/// Keyhints (`build_bottom_status_bar`).
+/// keeps the whole row only when the sponsor would cost it the Keyhints, the
+/// voice badge, or the unread counter (`build_bottom_status_bar`).
 fn app_frame_bottom_titles(
     components: &[StatusComponentSetting],
     data: &crate::app::statusline::data::StatusData<'_>,

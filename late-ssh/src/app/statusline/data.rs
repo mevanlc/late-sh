@@ -36,8 +36,8 @@ pub(crate) struct StatusData<'a> {
     pub station_track: Option<&'a str>,
     pub quests_open_daily: usize,
     pub quests_open_weekly: usize,
-    /// Challenges addressed to this user and not yet answered.
-    pub invites: usize,
+    /// Owned companions (bonsai, tank, pet) still waiting on today's care.
+    pub care_due: usize,
     /// The voice badge body, `channel [status]`; `None` when not in a room.
     pub voice: Option<&'a str>,
 }
@@ -111,7 +111,7 @@ impl<'a> StatusData<'a> {
                 };
                 (count > 0).then(|| count.to_string())
             }
-            StatusComponent::Invites => (self.invites > 0).then(|| self.invites.to_string()),
+            StatusComponent::Care => (self.care_due > 0).then(|| self.care_due.to_string()),
             StatusComponent::Voice => self.voice.map(str::to_string),
         }
     }
@@ -146,7 +146,7 @@ impl<'a> StatusData<'a> {
             | StatusComponent::Users
             | StatusComponent::Turns
             | StatusComponent::Quests
-            | StatusComponent::Invites => None,
+            | StatusComponent::Care => None,
         }
     }
 }
@@ -178,8 +178,8 @@ fn clock_format(variant: Option<StatusVariant>) -> ClockFormat {
 
 fn counts_dms(variant: Option<StatusVariant>) -> bool {
     match variant {
-        Some(StatusVariant::MentionsAndDms) => true,
-        Some(StatusVariant::MentionsOnly) | None => false,
+        Some(StatusVariant::MentionsAndDms) | None => true,
+        Some(StatusVariant::MentionsOnly) => false,
         Some(
             StatusVariant::Clock24
             | StatusVariant::ClockAmPm

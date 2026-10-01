@@ -3120,6 +3120,7 @@ fn handle_status_bar_click(app: &mut App, mouse: MouseEvent) -> bool {
         }
         StatusClick::Arcade => app.set_screen(Screen::Arcade),
         StatusClick::Profiles => app.set_screen(Screen::Profiles),
+        StatusClick::Zen => open_zen_globally(app),
     }
     true
 }

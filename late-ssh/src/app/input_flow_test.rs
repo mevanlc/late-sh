@@ -2610,7 +2610,7 @@ async fn the_lounge_renders_its_own_topic_header() {
 }
 
 #[tokio::test]
-async fn keyhints_is_the_default_bottom_left_component() {
+async fn default_bottom_bar_is_keyhints_station_and_the_auto_hiding_readings() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "bottom-status-default").await;
     let mut app = make_app(test_db.db.clone(), viewer.id, "bottom-status-default-it");
@@ -2623,19 +2623,36 @@ async fn keyhints_is_the_default_bottom_left_component() {
         .filter(|setting| setting.enabled)
         .map(|setting| setting.component)
         .collect::<Vec<_>>();
-    assert_eq!(enabled, vec![StatusComponent::Shortcuts]);
+    assert_eq!(
+        enabled,
+        vec![
+            StatusComponent::Shortcuts,
+            StatusComponent::Station,
+            StatusComponent::Voice,
+            StatusComponent::Mentions,
+            StatusComponent::Turns,
+            StatusComponent::Care,
+        ]
+    );
 
-    // Wide enough for the full hints beside the sponsor line, which has first
-    // claim on the row and would otherwise compact them.
+    // Voice, mentions and your-move auto-hide. A new account's bonsai has not
+    // been watered today, so care is due. Wide enough for all of it beside
+    // the sponsor line.
     app.resize(160, 40).expect("resize test terminal");
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains("Settings Ctrl+O")
-            && frame.contains("Zen Ctrl+F")
-            && frame.contains("Shop Ctrl+S")
+        frame.contains("🎵 chillsynth") && frame.contains("care 1"),
+        "the station and today's care show by default: {frame:?}"
+    );
+    assert!(!frame.contains("your move"));
+    assert!(
+        frame.contains("Settings ^O")
+            && frame.contains("Zen ^F")
+            && frame.contains("Shop ^S")
             && frame.contains("Exit qq"),
         "Keyhints should render from the default component: {frame:?}"
     );
+    assert!(!frame.contains("unread") && !frame.contains(" mic "));
 }
 
 #[tokio::test]
@@ -2708,9 +2725,16 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
                                 .iter()
                                 .filter(|entry| entry["enabled"] == true)
                                 .collect();
-                            enabled.len() == 1
-                                && enabled[0]["key"] == "shortcuts"
-                                && enabled[0]["brief"] == brief
+                            let keys: Vec<_> =
+                                enabled.iter().map(|entry| entry["key"].as_str()).collect();
+                            keys == [
+                                Some("shortcuts"),
+                                Some("station"),
+                                Some("voice"),
+                                Some("mentions"),
+                                Some("turns"),
+                                Some("care"),
+                            ] && enabled[0]["brief"] == brief
                         })
                 }
             },
@@ -2721,11 +2745,10 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
         let hint = if brief {
             "⚙ ^o · ⚄ ^g · ◉ ^s"
         } else {
-            "Settings Ctrl+O"
+            "Settings ^O"
         };
         wait_for_render_contains(&mut app, hint).await;
         let mut reloaded = make_app(test_db.db.clone(), user.id, "keyhints-reloaded-it");
-        reloaded.resize(160, 40).expect("resize test terminal");
         wait_for_render_contains(&mut reloaded, hint).await;
         assert_eq!(
             reloaded.profile_state.profile().statusline_components[0].brief,
@@ -2741,7 +2764,7 @@ async fn keyhints_brief_property_toggles_and_persists_in_settings() {
     );
     app.handle_input(b"q");
     assert!(!app.show_settings);
-    wait_for_render_contains(&mut app, "Settings Ctrl+O").await;
+    wait_for_render_contains(&mut app, "Settings ^O").await;
 }
 
 #[tokio::test]
@@ -2777,7 +2800,7 @@ async fn runner_stays_off_the_fixed_bar_and_zen_clears_bar_hits() {
     app.handle_input(b"\x06");
     assert_eq!(app.screen, Screen::Zen);
     let frame = render_plain(&mut app);
-    assert!(!frame.contains("Settings Ctrl+O"));
+    assert!(!frame.contains("Settings ^O"));
     assert!(app.last_status_hits.borrow().is_empty());
 
     app.handle_input(b"\x06");
@@ -2788,9 +2811,10 @@ async fn runner_stays_off_the_fixed_bar_and_zen_clears_bar_hits() {
     assert!(!app.last_status_hits.borrow().is_empty());
 }
 
-/// Each fixed top-bar segment routes to its own destination, so a click has to
-/// land in that segment's rect and no other. The rects come from measured span
-/// widths, which is what this exercises end to end.
+/// Each status bar segment routes to its own destination, on whichever border
+/// it sits: chips on the fixed top bar, the unread counter on the bottom one.
+/// The rects come from measured span widths, which is what this exercises end
+/// to end.
 #[tokio::test]
 async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     let test_db = new_test_db().await;
@@ -2819,20 +2843,32 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     );
     wait_for_render_contains(&mut app, "unread 1").await;
 
-    // The fixed bar sits on the top border row as `unread 1 ─ chips N`. Border
-    // glyphs are multi-byte, so translate byte offsets into display columns by
-    // char count (every glyph on this row is single-width).
-    let frame = render_plain(&mut app);
-    let top_row = frame.lines().next().expect("top border row").to_string();
-    let char_col = |needle: &str| {
-        let byte = top_row.find(needle).expect("needle on the top border");
-        top_row[..byte].chars().count()
+    // Chips sit on the top border row and the unread counter on the bottom
+    // one. Every glyph on both rows is single-width, so a char count is a
+    // display column.
+    const COLS: u16 = 120;
+    const ROWS: u16 = 40;
+    app.resize(COLS, ROWS).expect("resize test terminal");
+    app.tick();
+    app.reset_render();
+    let mut terminal = vt100::Parser::new(ROWS, COLS, 0);
+    terminal.process(&app.render().expect("render"));
+    let screen = terminal.screen().contents();
+    let top_row = screen.lines().next().expect("top border row");
+    let bottom_row = screen.lines().last().expect("bottom border row");
+    let char_col = |row: &str, needle: &str| {
+        let byte = row.find(needle).expect("needle on the border row");
+        row[..byte].chars().count()
     };
-    let mentions_col = char_col("unread");
-    let chips_col = char_col("chips");
+    let chips_col = char_col(top_row, "chips");
+    let mentions_col = char_col(bottom_row, "unread");
+    assert!(
+        !top_row.contains("unread"),
+        "the unread counter lives on the bottom bar only: {top_row:?}"
+    );
 
-    // Chips sits immediately right of mentions and goes to the Shop, so a
-    // click there must not reach Mentions. SGR mouse coords are 1-indexed.
+    // Chips go to the Shop, so a click there must not reach Mentions. SGR
+    // mouse coords are 1-indexed.
     app.handle_input(format!("\x1b[<0;{};1M", chips_col + 1).as_bytes());
     wait_for_render_contains(&mut app, "-- Shop --").await;
     assert_render_not_contains_for(&mut app, "mentioned you in", Duration::from_millis(120)).await;
@@ -2844,7 +2880,7 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
     // composer that was open closes: Mentions has nothing to type into.
     app.handle_input(b"i");
     assert!(app.chat.composing, "i opens the lounge composer");
-    app.handle_input(format!("\x1b[<0;{};1M", mentions_col + 1).as_bytes());
+    app.handle_input(format!("\x1b[<0;{};{ROWS}M", mentions_col + 1).as_bytes());
     assert!(
         !app.chat.composing,
         "the jump to Mentions closes the composer"

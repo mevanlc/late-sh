@@ -160,7 +160,7 @@ Cross-module touchpoints (outside this folder):
 - `app/live/`: owns the live strip: the pick, what is shown, the frame, and the `o` key and click that open a match through `open_board` (`input.rs`). This domain only offers candidates and paints its body.
 - `app/notify/mod.rs`: `Notification::daily_your_turn(game_label, opponent)` (`Kind::GameEvents`).
 - `app/help_modal/data.rs`: `Ctrl+G` + challenge-picker help entries.
-- `app/statusline/bar.rs`: the default bottom-left `Shortcuts` component advertises `Lobby Ctrl+G` in the outer frame footer.
+- `app/statusline/bar.rs`: the default bottom-left `Shortcuts` component advertises `Lobby ^G` in the outer frame footer.
 
 ---
 

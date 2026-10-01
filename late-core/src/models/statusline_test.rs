@@ -30,27 +30,55 @@ fn default_list_covers_every_component_exactly_once() {
     }
 }
 
-/// A user without a stored list keeps the longstanding bottom-left keyboard
-/// hint. Status readings are opt-in because the fixed top bar already carries
-/// the upstream HUD.
+/// A user without a stored list gets the keyboard hint and the station, then
+/// four readings that auto-hide: the two signals the frame shows nowhere else,
+/// and what is waiting on them today. Every other reading is opt-in.
 #[test]
-fn default_bottom_bar_is_keyhints() {
-    let enabled: Vec<StatusComponent> = default_statusline_components()
-        .into_iter()
+fn default_bottom_bar_is_keyhints_station_and_four_auto_hiding_readings() {
+    let defaults = default_statusline_components();
+    let enabled: Vec<StatusComponent> = defaults
+        .iter()
         .filter(|s| s.enabled)
         .map(|s| s.component)
         .collect();
-    assert_eq!(enabled, vec![StatusComponent::Shortcuts]);
+    assert_eq!(
+        enabled,
+        vec![
+            StatusComponent::Shortcuts,
+            StatusComponent::Station,
+            StatusComponent::Voice,
+            StatusComponent::Mentions,
+            StatusComponent::Turns,
+            StatusComponent::Care,
+        ]
+    );
+    for component in [
+        StatusComponent::Voice,
+        StatusComponent::Mentions,
+        StatusComponent::Turns,
+        StatusComponent::Care,
+    ] {
+        assert!(find(&defaults, component).auto_hide);
+    }
+    assert_eq!(
+        find(&defaults, StatusComponent::Mentions).variant,
+        Some(StatusVariant::MentionsAndDms),
+        "the unread counter includes DMs unless the user narrows it"
+    );
+    assert_eq!(
+        find(&defaults, StatusComponent::Station).label,
+        LabelMode::Icon
+    );
 }
 
-/// The keyboard hint keeps its established place while every opt-in status
+/// What ships enabled keeps normal priority while every opt-in status
 /// component starts in the low-priority tier.
 #[test]
 fn opt_in_status_components_start_low_priority() {
     for setting in default_statusline_components() {
         assert_eq!(
             setting.low_priority,
-            setting.component != StatusComponent::Shortcuts,
+            !setting.enabled,
             "{} priority tier",
             setting.component.as_str()
         );
@@ -104,9 +132,9 @@ fn normalize_drops_duplicates_and_keeps_stored_order() {
     assert!(!normalized[2].enabled);
 }
 
-/// Backfill diverges from the sidebar's blanket enable. Only the longstanding
-/// keyboard hint is required; optional status components stay off in an
-/// existing custom roster.
+/// Backfill diverges from the sidebar's blanket enable. Only what the frame
+/// shows nowhere else is forced on (the keyboard hint, voice, mentions);
+/// optional status components stay off in an existing custom roster.
 #[test]
 fn normalize_backfills_each_component_at_its_own_policy() {
     let stored = vec![StatusComponentSetting::new(StatusComponent::Chips)];
@@ -123,9 +151,14 @@ fn normalize_backfills_each_component_at_its_own_policy() {
             "{} backfilled at its own policy",
             setting.component.as_str()
         );
-        assert!(
-            !setting.enabled,
-            "only the keyboard shortcuts force themselves on"
+        assert_eq!(
+            setting.enabled,
+            matches!(
+                setting.component,
+                StatusComponent::Voice | StatusComponent::Mentions
+            ),
+            "{} only forces itself on when it is shown nowhere else",
+            setting.component.as_str()
         );
     }
 }
@@ -213,13 +246,19 @@ fn parse_of_an_empty_array_yields_the_full_default_list() {
     // normalize backfills rather than leaving the user with no roster at all.
     let parsed = parse_statusline_components(&[] as &[Value]);
     assert_eq!(parsed.len(), STATUS_COMPONENT_COUNT);
-    assert!(find(&parsed, StatusComponent::Shortcuts).enabled);
-    assert!(
-        parsed
-            .iter()
-            .filter(|setting| setting.component != StatusComponent::Shortcuts)
-            .all(|setting| !setting.enabled),
-        "optional backfilled entries stay off"
+    let enabled: Vec<StatusComponent> = parsed
+        .iter()
+        .filter(|setting| setting.enabled)
+        .map(|setting| setting.component)
+        .collect();
+    assert_eq!(
+        enabled,
+        vec![
+            StatusComponent::Shortcuts,
+            StatusComponent::Voice,
+            StatusComponent::Mentions,
+        ],
+        "what the frame shows nowhere else comes back on; optional entries stay off"
     );
 }
 

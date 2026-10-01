@@ -29,7 +29,7 @@ pub enum StatusComponent {
     Turns,
     Station,
     Quests,
-    Invites,
+    Care,
     Voice,
 }
 
@@ -37,20 +37,24 @@ impl StatusComponent {
     /// Default paint order, left to right. `ALL` is also the backfill order for
     /// components missing from a stored list.
     ///
-    /// Keyboard shortcuts retain the bottom-left frame hint by default. Status
-    /// readouts are opt-in here because the fixed top bar already carries the
-    /// upstream HUD; users can add whichever duplicate or supplemental readings
-    /// they want along the bottom border.
+    /// Most valuable first. Keyhints lead, then the station, which is always
+    /// there, then the two signals shown nowhere else on the frame (voice and
+    /// mentions), which appear to its right so nothing shifts when they pop
+    /// in. After them comes what is waiting on the user today: games to move
+    /// in and daily care. Those six ship enabled; the rest are opt-in: quests,
+    /// then the pot and the chips, which live on the fixed top bar until a
+    /// user places them here (that moves them down rather than showing them
+    /// twice), then the ambient readings.
     pub const ALL: [StatusComponent; STATUS_COMPONENT_COUNT] = [
         Self::Shortcuts,
+        Self::Station,
         Self::Voice,
         Self::Mentions,
+        Self::Turns,
+        Self::Care,
+        Self::Quests,
         Self::Pot,
         Self::Chips,
-        Self::Turns,
-        Self::Invites,
-        Self::Quests,
-        Self::Station,
         Self::Users,
         Self::Time,
     ];
@@ -66,7 +70,7 @@ impl StatusComponent {
             Self::Turns => "turns",
             Self::Station => "station",
             Self::Quests => "quests",
-            Self::Invites => "invites",
+            Self::Care => "care",
             Self::Voice => "voice",
         }
     }
@@ -82,7 +86,7 @@ impl StatusComponent {
             "turns" => Some(Self::Turns),
             "station" => Some(Self::Station),
             "quests" => Some(Self::Quests),
-            "invites" => Some(Self::Invites),
+            "care" => Some(Self::Care),
             "voice" => Some(Self::Voice),
             _ => None,
         }
@@ -100,7 +104,7 @@ impl StatusComponent {
             Self::Turns => "Your move",
             Self::Station => "Station",
             Self::Quests => "Quests",
-            Self::Invites => "Invites",
+            Self::Care => "Care",
             Self::Voice => "Voice",
         }
     }
@@ -111,13 +115,13 @@ impl StatusComponent {
             Self::Shortcuts => "Keyboard shortcuts for navigation and common actions.",
             Self::Time => "Current time in your chosen timezone.",
             Self::Chips => "Your chip balance.",
-            Self::Mentions => "Unread mentions, optionally including direct messages.",
+            Self::Mentions => "Unread mentions and direct messages, or mentions alone.",
             Self::Pot => "Raffle pot size and time until the next draw.",
             Self::Users => "People online, excluding bots.",
             Self::Turns => "Correspondence games waiting for your move.",
             Self::Station => "Your selected audio source or its current track.",
             Self::Quests => "Unfinished daily quests, optionally including weekly quests.",
-            Self::Invites => "Game challenges awaiting your response.",
+            Self::Care => "Daily care still due today: bonsai, tank, and pet.",
             Self::Voice => "Your voice channel: speaking, listening, muted or deafened.",
         }
     }
@@ -135,7 +139,7 @@ impl StatusComponent {
             Self::Turns => "your move",
             Self::Station => "on air",
             Self::Quests => "quests",
-            Self::Invites => "invites",
+            Self::Care => "care",
             Self::Voice => "mic",
         }
     }
@@ -162,7 +166,7 @@ impl StatusComponent {
             Self::Turns => "🎲",
             Self::Station => "🎵",
             Self::Quests => "❕",
-            Self::Invites => "❔",
+            Self::Care => "🌱",
             Self::Voice => "🔊",
         }
     }
@@ -175,33 +179,27 @@ impl StatusComponent {
     pub fn can_auto_hide(self) -> bool {
         match self {
             Self::Shortcuts | Self::Time | Self::Chips | Self::Users | Self::Station => false,
-            Self::Mentions
-            | Self::Pot
-            | Self::Turns
-            | Self::Quests
-            | Self::Invites
-            | Self::Voice => true,
+            Self::Mentions | Self::Pot | Self::Turns | Self::Quests | Self::Care | Self::Voice => {
+                true
+            }
         }
     }
 
     /// Whether the component starts enabled for a user with no stored list.
     ///
-    /// The bottom-left keyboard hint is the only shipped segment. Status
-    /// readouts remain discoverable in the customizer rather than duplicating
-    /// the fixed top bar until a user asks for them.
+    /// Keyhints and the station, plus four readings that auto-hide and so
+    /// take space only while they have something to say: voice and mentions,
+    /// which the frame shows nowhere else, and what is waiting on the user
+    /// today (games to move in, daily care). Every other reading is opt-in.
     pub fn default_enabled(self) -> bool {
         match self {
-            Self::Shortcuts => true,
-            Self::Time
-            | Self::Chips
-            | Self::Mentions
-            | Self::Pot
-            | Self::Users
-            | Self::Turns
+            Self::Shortcuts
             | Self::Station
-            | Self::Quests
-            | Self::Invites
-            | Self::Voice => false,
+            | Self::Voice
+            | Self::Mentions
+            | Self::Turns
+            | Self::Care => true,
+            Self::Time | Self::Chips | Self::Pot | Self::Users | Self::Quests => false,
         }
     }
 
@@ -209,14 +207,16 @@ impl StatusComponent {
         match self {
             // The clock reads as a clock; a label would only cost columns.
             Self::Shortcuts | Self::Time => LabelMode::None,
+            // A station name says what it is; the note costs four columns
+            // fewer than `on air`, and the station is always on the bar.
+            Self::Station => LabelMode::Icon,
             Self::Chips
             | Self::Mentions
             | Self::Pot
             | Self::Users
             | Self::Turns
-            | Self::Station
             | Self::Quests
-            | Self::Invites
+            | Self::Care
             | Self::Voice => LabelMode::Text,
         }
     }
@@ -225,36 +225,33 @@ impl StatusComponent {
         self.can_auto_hide()
     }
 
-    /// Whether the component starts in the low-priority drop tier. The existing
-    /// keyboard hint keeps normal priority; every opt-in status reading starts
-    /// low priority until the user promotes it.
+    /// Whether the component starts in the low-priority drop tier. What ships
+    /// enabled keeps normal priority; every opt-in status reading starts low
+    /// priority until the user promotes it.
     pub fn default_low_priority(self) -> bool {
         !self.default_enabled()
     }
 
-    /// What happens when this component is added to the roster *after* a user
-    /// has already saved a bar. `false` (the default for anything cosmetic or
-    /// niche) backfills it disabled, leaving a customized bar untouched;
-    /// `true` forces it on, and is reserved for the keyboard hint so an existing
-    /// saved component list does not make the longstanding bottom-left help
-    /// disappear. Diverges on purpose from
-    /// `normalize_right_sidebar_components`, which backfills everything
-    /// enabled: a sidebar panel that appears costs a user rows in a rail
-    /// built to hold panels, while a bar segment that appears costs horizontal
-    /// frame space.
+    /// What happens when this component is missing from a list a user has
+    /// already saved. `false` (the default for anything cosmetic or niche)
+    /// backfills it disabled, leaving a customized bar untouched; `true`
+    /// forces it on, and is reserved for what the frame shows nowhere else:
+    /// the keyboard hint, the voice badge, and the unread counter. Diverges on
+    /// purpose from `normalize_right_sidebar_components`, which backfills
+    /// everything enabled: a sidebar panel that appears costs a user rows in a
+    /// rail built to hold panels, while a bar segment that appears costs
+    /// horizontal frame space.
     pub fn backfill_existing(self) -> bool {
         match self {
-            Self::Shortcuts => true,
+            Self::Shortcuts | Self::Voice | Self::Mentions => true,
             Self::Time
             | Self::Chips
-            | Self::Mentions
             | Self::Pot
             | Self::Users
             | Self::Turns
             | Self::Station
             | Self::Quests
-            | Self::Invites
-            | Self::Voice => false,
+            | Self::Care => false,
         }
     }
 
@@ -264,7 +261,7 @@ impl StatusComponent {
     pub fn variants(self) -> &'static [StatusVariant] {
         match self {
             Self::Time => &[StatusVariant::Clock24, StatusVariant::ClockAmPm],
-            Self::Mentions => &[StatusVariant::MentionsOnly, StatusVariant::MentionsAndDms],
+            Self::Mentions => &[StatusVariant::MentionsAndDms, StatusVariant::MentionsOnly],
             Self::Quests => &[StatusVariant::QuestsDaily, StatusVariant::QuestsDailyWeekly],
             Self::Station => &[StatusVariant::StationName, StatusVariant::StationTrack],
             Self::Shortcuts
@@ -272,7 +269,7 @@ impl StatusComponent {
             | Self::Pot
             | Self::Users
             | Self::Turns
-            | Self::Invites
+            | Self::Care
             | Self::Voice => &[],
         }
     }
@@ -289,7 +286,7 @@ impl StatusComponent {
             | Self::Pot
             | Self::Users
             | Self::Turns
-            | Self::Invites
+            | Self::Care
             | Self::Voice => None,
         }
     }
@@ -424,7 +421,8 @@ pub struct StatusComponentSetting {
     /// Drop tier. The bottom bar shares its row with the sponsor title, so when
     /// space runs out every low-priority segment is given up before any
     /// normal-priority one yields; within a tier the rightmost segment goes
-    /// first.
+    /// first. Voice and mentions at normal priority outlast the rest of the
+    /// bar (`Tier::Signal` in `late-ssh/src/app/statusline/bar.rs`).
     pub low_priority: bool,
     /// Resolved against `component.variants()`; `None` for components with no
     /// dial. A stored value that is absent or foreign resolves to the first
