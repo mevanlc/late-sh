@@ -134,6 +134,57 @@ with clearly marked sample text and enables the paper. Use
 `make seed-paper PAPER_PARAGRAPHS=5` for a shorter edition (default: 100;
 range: 1–1000). Close and reopen `/paper` after reseeding; no restart is needed.
 
+To test the Artboard gallery, run `make seed-artboard` after the current stack
+has applied its migrations. It creates 11 test accounts and 12 distinguishable,
+numbered ASCII pieces with applause and community/owner/moderator/admin rating
+scenarios, and enables the gallery. The first three have enough applause for
+monthly awards. Pieces 01–11 predate today UTC and qualify for the daily splash
+queue. Piece 01 is selected for today, unless a non-fixture piece owns the day.
+Use `make seed-artboard ART_SPLASH_PIECE=3` for an NSFW-rated splash (the drawing
+itself is harmless), or choose any piece 1–11. Restart the SSH service with
+`docker compose restart service-ssh` and reconnect to refresh its splash cache.
+
+Open Artboard (`4`), choose **Newest** in the gallery rail, and press `n` on a
+piece to vote. Fixture SSH identities are retained in the gitignored
+`tmp/artboard-seed-keys/` directory. For example:
+
+```bash
+ssh -o IdentitiesOnly=yes -i tmp/artboard-seed-keys/art_artist1 -p 2222 localhost
+```
+
+Accounts are `art_artist1`–`art_artist3`, `art_voter1`–`art_voter4`, `art_mod1`/
+`art_mod2`, and `art_admin1`/`art_admin2`, each with a matching key filename.
+Their tutorial is already marked completed, including when reseeding existing
+fixture accounts.
+They join the normal public auto-join rooms, including `#lounge`. From Home,
+select `#lounge` and enter `/mod` in its composer to open the staff console.
+Rerunning restores these fixture pieces, applause, votes, marks, and staff
+roles; it preserves account preferences and all other users and art. Changes
+made while testing these pieces are reset by the next seed. Existing
+leaderboard seeding is separate, so art seeding does not rewrite game scores.
+The dev profile grants admin privileges to every session; set `force_admin`
+to `false` in `late-ssh/src/config.rs` when testing role-based permissions.
+Plain safety commands write moderator marks even for admin accounts; the
+`admin` keyword explicitly selects the admin tier.
+
+Inside the `/mod` console:
+
+```text
+artboard safety help
+artboard safety view
+artboard safety view @art_artist1
+artboard safety view 0e77a39a
+artboard safety nsfw 0e77a39a
+artboard safety admin sfw 0e77a39a reviewed
+artboard safety admin none 0e77a39a
+artboard safety none 0e77a39a by @art_mod1
+```
+
+`view` shows a summary and review candidates; `@user` lists their hanging art,
+and an ID shows one piece's full safety record. `none` clears your mark at the
+selected tier. Removing another user's moderator mark with `by` is admin-only.
+Each account has one staff mark per piece; marking again replaces its mark and tier.
+
 ## Verification
 
 Run the local gate before opening a PR:

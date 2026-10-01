@@ -107,32 +107,33 @@ pub(crate) enum TweakRow {
     TextBrightness,
     RightSidebar,
     RoomListSidebar,
-    // Compose / Display / Startup groups. There is deliberately no music-mute
+    // Input / Display / Startup groups. There is deliberately no music-mute
     // row: mute and volume are owned by `m` and `+`/`-`, persisted per device,
     // and a second control here would be a second source of truth for them.
     ComposerKeepFocused,
+    InteractionMode,
     FlagFallback,
     TerminalImages,
     ChatBadges,
     LandingPage,
     PaperAtLogin,
-    // Input group.
-    InteractionMode,
+    ArtSplash,
 }
 
 impl TweakRow {
-    pub(crate) const ALL: [TweakRow; 11] = [
+    pub(crate) const ALL: [TweakRow; 12] = [
         TweakRow::BackgroundColor,
         TweakRow::TextBrightness,
         TweakRow::RightSidebar,
         TweakRow::RoomListSidebar,
         TweakRow::ComposerKeepFocused,
+        TweakRow::InteractionMode,
         TweakRow::FlagFallback,
         TweakRow::TerminalImages,
         TweakRow::ChatBadges,
         TweakRow::LandingPage,
         TweakRow::PaperAtLogin,
-        TweakRow::InteractionMode,
+        TweakRow::ArtSplash,
     ];
 }
 
@@ -913,6 +914,9 @@ impl SettingsModalState {
             TweakRow::LandingPage => {
                 self.draft.landing_page = self.draft.landing_page.cycle(true);
             }
+            TweakRow::ArtSplash => {
+                self.draft.art_splash_mode = self.draft.art_splash_mode.cycle(true);
+            }
             TweakRow::PaperAtLogin => {
                 self.draft.paper_at_login ^= true;
             }
@@ -930,6 +934,10 @@ impl SettingsModalState {
             TweakRow::TextBrightness => self.cycle_text_brightness_adjustment(forward),
             TweakRow::LandingPage => {
                 self.draft.landing_page = self.draft.landing_page.cycle(forward);
+                self.save();
+            }
+            TweakRow::ArtSplash => {
+                self.draft.art_splash_mode = self.draft.art_splash_mode.cycle(forward);
                 self.save();
             }
             TweakRow::TerminalImages => {
@@ -2287,6 +2295,7 @@ impl SettingsModalState {
                 start_with_music_muted: self.draft.start_with_music_muted,
                 landing_page: self.draft.landing_page,
                 paper_at_login: self.draft.paper_at_login,
+                art_splash_mode: self.draft.art_splash_mode,
                 terminal_images: self.draft.terminal_images,
                 hidden_award_categories: self.draft.hidden_award_categories.clone(),
                 show_flag_fallback: self.draft.show_flag_fallback,

@@ -236,7 +236,7 @@ impl App {
         changed |= self.chat.poll_terminal_images();
         for output in self.chat.take_mod_outputs() {
             self.mod_modal_state
-                .append_result(output.success, output.lines);
+                .append_result(output.request_id, output.success, output.lines);
             changed = true;
         }
         self.sync_visible_chat_room();

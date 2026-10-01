@@ -1,5 +1,154 @@
 //! App input integration tests against a real ephemeral DB.
 
+#[tokio::test]
+async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode() {
+    use late_core::models::user::{ArtSplashMode, extract_art_splash_mode};
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "splash-tweak-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "splash-tweak-flow-it");
+    app.handle_input(b"\x0f");
+    wait_for_render_contains(&mut app, "splash-tweak-it").await;
+    app.resize(80, 24).unwrap();
+    app.handle_input(b"\t\t\t");
+    for _ in 0..11 {
+        app.handle_input(b"j");
+    }
+    wait_for_render_contains(&mut app, "Show Gallery Art on Splash").await;
+    assert!(render_plain(&mut app).contains("< SFW >"));
+    for (key, expected) in [
+        (b"\r".as_slice(), ArtSplashMode::Always),
+        (b"\x1b[C".as_slice(), ArtSplashMode::Never),
+        (b"\x1b[C".as_slice(), ArtSplashMode::Sfw),
+        (b"\x1b[D".as_slice(), ArtSplashMode::Never),
+    ] {
+        app.handle_input(key);
+        let db = test_db.db.clone();
+        wait_until(
+            || {
+                let db = db.clone();
+                async move {
+                    let client = db.get().await.unwrap();
+                    let stored = User::get(&client, user.id).await.unwrap().unwrap();
+                    extract_art_splash_mode(&stored.settings) == expected
+                }
+            },
+            "art splash mode to persist",
+        )
+        .await;
+        // The profile snapshot refresh follows the database commit; wait for
+        // that round trip before advancing or reopening from the snapshot.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            app.tick();
+            if app.profile_state.profile().art_splash_mode == expected {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "profile snapshot did not refresh"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(render_plain(&mut app).contains(&format!("< {} >", expected.label())));
+    }
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "Show Gallery Art on Splash").await;
+    app.handle_input(b"\x0f");
+    wait_for_render_contains(&mut app, "Theme").await;
+    app.handle_input(b"\t\t\t");
+    for _ in 0..11 {
+        app.handle_input(b"j");
+    }
+    wait_for_render_contains(&mut app, "< Never >").await;
+}
+
+#[tokio::test]
+async fn art_content_dialog_routes_owner_votes_mouse_and_close_keys() {
+    use crate::app::common::primitives::Screen;
+    use late_core::models::artboard_piece::{ArtboardPiece, HangOutcome, HangParams};
+    use late_core::models::artboard_piece_rating::ArtboardPieceRating;
+    let test_db = new_test_db().await;
+    let owner = create_test_user(&test_db.db, "content-owner-it").await;
+    let viewer = create_test_user(&test_db.db, "content-voter-it").await;
+    let client = test_db.db.get().await.unwrap();
+    let HangOutcome::Hung(piece) = ArtboardPiece::hang(&client, HangParams {
+        user_id: owner.id, title: "content dialog piece".to_string(), width: 12, height: 4,
+        canvas: serde_json::json!({"width":12,"height":4,"cells":[[{"x":0,"y":0},{"Narrow":"#"}]],"colors":[]}),
+        provenance: serde_json::json!({"cells":[[{"x":0,"y":0},"painter"]]}), glyph_count: 40,
+        own_share_percent: 100, content_hash: "content-dialog-test".to_string(),
+    }).await.unwrap() else { panic!("hang"); };
+    let mut painter = make_app(test_db.db.clone(), owner.id, "content-owner-flow-it");
+    painter.handle_input(b"4");
+    wait_for_render_contains(&mut painter, "GALLERY").await;
+    painter.handle_input(b"j\r");
+    wait_for_render_contains(&mut painter, "content dialog piece").await;
+    painter.handle_input(b"n");
+    wait_for_render_not_contains(&mut painter, "Updating content rating").await;
+    wait_for_render_contains(&mut painter, "Artists cannot vote on their own pieces").await;
+    assert!(!render_plain(&mut painter).contains("Vote NSFW"));
+    painter.handle_input(b"\r");
+    wait_for_render_contains(&mut painter, "Remove my NSFW flag").await;
+    painter.handle_input(b"q");
+    wait_for_render_not_contains(&mut painter, " Content rating ").await;
+    assert!(painter.is_running());
+
+    let mut voter = make_app(test_db.db.clone(), viewer.id, "content-voter-flow-it");
+    voter.resize(80, 24).unwrap();
+    voter.handle_input(b"4");
+    wait_for_render_contains(&mut voter, "GALLERY").await;
+    voter.handle_input(b"j\r");
+    wait_for_render_contains(&mut voter, "content dialog piece").await;
+    voter.handle_input(b"\r");
+    voter.handle_input(b"n");
+    wait_for_render_not_contains(&mut voter, "Updating content rating").await;
+    wait_for_render_contains(&mut voter, "Vote NSFW").await;
+    voter.handle_input(b"1?vx");
+    assert_eq!(
+        voter.screen,
+        Screen::Artboard,
+        "dialog owns page and gallery hotkeys"
+    );
+    // Use the exact row published by rendering: mouse and keyboard share actions.
+    render_plain(&mut voter);
+    let dialog = voter
+        .dartboard_state
+        .as_ref()
+        .unwrap()
+        .gallery()
+        .rating_dialog
+        .as_ref()
+        .unwrap();
+    let areas = dialog.action_areas.take();
+    let nsfw = areas[1];
+    dialog.action_areas.set(areas);
+    voter.handle_input(format!("\x1b[<0;{};{}M", nsfw.x + 2, nsfw.y + 1).as_bytes());
+    wait_for_render_contains(&mut voter, "Your vote: NSFW").await;
+    // Votes stay open under the owner's NSFW flag, and can be replaced or withdrawn.
+    voter.handle_input(b"k\r");
+    wait_for_render_contains(&mut voter, "Your vote: SFW").await;
+    voter.handle_input(b"k\r");
+    wait_for_render_contains(&mut voter, "Your vote: none").await;
+    voter.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut voter, " Content rating ").await;
+    let rating = ArtboardPieceRating::read(&client, piece.id, viewer.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(rating.owner_marked_nsfw);
+    assert_eq!((rating.sfw_votes, rating.nsfw_votes), (0, 0));
+    painter.handle_input(b"n");
+    wait_for_render_not_contains(&mut painter, "Updating content rating").await;
+    painter.handle_input(b"\r");
+    wait_for_render_contains(&mut painter, "Mark my piece NSFW").await;
+    assert!(
+        !ArtboardPieceRating::read(&client, piece.id, owner.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .owner_marked_nsfw
+    );
+}
+
 use crate::authz::Permissions;
 use crate::test_helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_in_world,
@@ -4203,8 +4352,8 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     wait_for_render_contains(&mut app, "Chat badges").await;
     wait_for_render_contains(&mut app, "all shown").await;
     // Tweaks rows: background, brightness, right rail, room rail, composer,
-    // plain glyphs, terminal images, then Chat badges.
-    app.handle_input(b"jjjjjjj\r");
+    // interaction mode, plain glyphs, terminal images, then Chat badges.
+    app.handle_input(b"jjjjjjjj\r");
     // The heading fits the dialog whole, not cut at its border.
     wait_for_render_contains(&mut app, "Earn it, hide it. Games show their top badge.").await;
     wait_for_render_contains(&mut app, "LMG LKN LYS LKA").await;

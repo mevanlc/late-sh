@@ -8,6 +8,7 @@ use chrono::{Datelike, NaiveDate, Utc};
 use late_core::models::artboard_piece::{
     ApplauseOutcome, ListingCounts, PIECE_TITLE_MAX_CHARS, PieceListing, TakeDownOutcome,
 };
+use late_core::models::artboard_piece_rating::ArtContentRating;
 use late_core::models::profile_award::gallery_prize_chips;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -17,7 +18,9 @@ use crate::app::artboard::svc::ArtboardSnapshotKind;
 use crate::app::common::primitives::thousands;
 
 use super::frame::FramedPiece;
-use super::svc::{GalleryPiece, GalleryResult, GalleryService, HangRefusal, applause_label};
+use super::svc::{
+    ContentRatingAction, GalleryPiece, GalleryResult, GalleryService, HangRefusal, applause_label,
+};
 
 /// The gallery's listings, in rail order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -181,7 +184,18 @@ struct SectionState {
     scroll: usize,
 }
 
+pub struct RatingDialog {
+    pub piece_id: Uuid,
+    pub selected: usize,
+    pub pending: bool,
+    pub error: Option<String>,
+    pub action_areas: Cell<Vec<Rect>>,
+}
+
 pub struct GalleryState {
+    pub rating_dialog: Option<RatingDialog>,
+    rating_generation: u64,
+    pending_rating: bool,
     service: GalleryService,
     viewer_id: Uuid,
     results_tx: mpsc::UnboundedSender<GalleryResult>,
@@ -217,6 +231,9 @@ impl GalleryState {
         let (results_tx, results_rx) = mpsc::unbounded_channel();
         service.counts_task(viewer_id, results_tx.clone());
         Self {
+            rating_dialog: None,
+            rating_generation: 0,
+            pending_rating: false,
             service,
             viewer_id,
             results_tx,
@@ -278,7 +295,8 @@ impl GalleryState {
     /// True while a key press must not be read as a global hotkey: typing
     /// a title, or framing on the board.
     pub fn captures_typing(&self) -> bool {
-        matches!(self.hang, HangFlow::Framing | HangFlow::Confirm { .. })
+        self.rating_dialog.is_some()
+            || matches!(self.hang, HangFlow::Framing | HangFlow::Confirm { .. })
     }
 
     /// True when Esc has somewhere to go on this page: out of a pane to the
@@ -525,6 +543,128 @@ impl GalleryState {
         self.forget_take_down_question();
     }
 
+    pub fn open_rating_dialog(&mut self) {
+        if self.pending_rating {
+            return;
+        }
+        let Some(piece) = self.selected_piece() else {
+            return;
+        };
+        let piece_id = piece.id;
+        self.forget_take_down_question();
+        self.rating_generation += 1;
+        self.pending_rating = true;
+        self.rating_dialog = Some(RatingDialog {
+            piece_id,
+            selected: 0,
+            pending: true,
+            error: None,
+            action_areas: Cell::new(Vec::new()),
+        });
+        self.service.content_rating_task(
+            piece_id,
+            self.viewer_id,
+            self.rating_generation,
+            None,
+            self.results_tx.clone(),
+        );
+    }
+
+    pub fn close_rating_dialog(&mut self) {
+        // An in-flight write still lands on all loaded copies of the piece.
+        self.rating_dialog = None;
+    }
+
+    pub fn rating_piece(&self) -> Option<&GalleryPiece> {
+        let dialog = self.rating_dialog.as_ref()?;
+        self.sections
+            .iter()
+            .flat_map(|section| &section.pieces)
+            .find(|piece| piece.id == dialog.piece_id)
+    }
+
+    pub fn rating_action_at(&self, x: u16, y: u16) -> Option<usize> {
+        let dialog = self.rating_dialog.as_ref()?;
+        let areas = dialog.action_areas.take();
+        let hit = areas
+            .iter()
+            .position(|rect| rect.contains(ratatui::layout::Position { x, y }));
+        dialog.action_areas.set(areas);
+        hit
+    }
+
+    pub fn rating_actions(&self) -> Vec<(&'static str, ContentRatingAction)> {
+        let Some(dialog) = &self.rating_dialog else {
+            return Vec::new();
+        };
+        let Some(piece) = self
+            .sections
+            .iter()
+            .flat_map(|section| &section.pieces)
+            .find(|piece| piece.id == dialog.piece_id)
+        else {
+            return Vec::new();
+        };
+        if piece.user_id == self.viewer_id {
+            vec![(
+                if piece.content_rating.owner_marked_nsfw {
+                    "Remove my NSFW flag"
+                } else {
+                    "Mark my piece NSFW"
+                },
+                ContentRatingAction::OwnerFlag(!piece.content_rating.owner_marked_nsfw),
+            )]
+        } else {
+            vec![
+                (
+                    "Vote SFW",
+                    ContentRatingAction::Vote(Some(ArtContentRating::Sfw)),
+                ),
+                (
+                    "Vote NSFW",
+                    ContentRatingAction::Vote(Some(ArtContentRating::Nsfw)),
+                ),
+                ("Withdraw my vote", ContentRatingAction::Vote(None)),
+            ]
+        }
+    }
+
+    pub fn rating_move(&mut self, delta: isize) {
+        let count = self.rating_actions().len();
+        if let Some(dialog) = &mut self.rating_dialog
+            && count > 0
+        {
+            dialog.selected =
+                (dialog.selected as isize + delta).rem_euclid(count as isize) as usize;
+        }
+    }
+
+    pub fn submit_rating_action(&mut self) {
+        let Some(dialog) = &self.rating_dialog else {
+            return;
+        };
+        if self.pending_rating {
+            return;
+        }
+        let Some((_, action)) = self.rating_actions().get(dialog.selected).copied() else {
+            return;
+        };
+        let piece_id = dialog.piece_id;
+        self.rating_generation += 1;
+        self.pending_rating = true;
+        if let Some(dialog) = &mut self.rating_dialog {
+            dialog.pending = true;
+            dialog.error = None;
+        }
+        self.service.content_rating_task(
+            piece_id,
+            self.viewer_id,
+            self.rating_generation,
+            Some(action),
+            self.results_tx.clone(),
+        );
+    }
+
     /// Applaud the selected piece, or take the applause back. One in
     /// flight at a time per session. What the row would refuse is refused
     /// here first, so the notice is immediate and the round trip saved.
@@ -660,6 +800,42 @@ impl GalleryState {
         while let Ok(result) = self.results_rx.try_recv() {
             changed = true;
             match result {
+                GalleryResult::ContentRating {
+                    piece_id,
+                    generation,
+                    result,
+                } => {
+                    if generation != self.rating_generation {
+                        continue;
+                    }
+                    self.pending_rating = false;
+                    match result {
+                        Ok(summary) => {
+                            self.update_piece(piece_id, |piece| piece.content_rating = summary);
+                            // An older listing must not put its old verdict back.
+                            for section in GallerySection::ALL {
+                                if self.sections[section.index()].loading {
+                                    self.reload(section);
+                                }
+                            }
+                            if let Some(dialog) = &mut self.rating_dialog
+                                && dialog.piece_id == piece_id
+                            {
+                                dialog.pending = false;
+                                dialog.error = None;
+                            }
+                        }
+                        Err(error) => {
+                            self.notice = Some(error.clone());
+                            if let Some(dialog) = &mut self.rating_dialog
+                                && dialog.piece_id == piece_id
+                            {
+                                dialog.pending = false;
+                                dialog.error = Some(error);
+                            }
+                        }
+                    }
+                }
                 GalleryResult::Counts(counts) => {
                     self.counts = Some(counts);
                 }
@@ -793,6 +969,11 @@ impl GalleryState {
                     self.notice = Some(error);
                 }
             }
+        }
+        if self.rating_dialog.is_some() && self.rating_piece().is_none() {
+            self.close_rating_dialog();
+            self.notice = Some("The piece is no longer in this listing.".to_string());
+            changed = true;
         }
         changed
     }

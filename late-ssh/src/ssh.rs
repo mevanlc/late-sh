@@ -892,7 +892,13 @@ impl russh::server::Handler for ClientHandler {
             }
         };
         // The door: the day's wall piece, or the cup.
-        let splash_piece = self.state.gallery_service.splash_piece();
+        let splash_piece = self
+            .state
+            .gallery_service
+            .splash_piece_for_mode(late_core::models::user::extract_art_splash_mode(
+                &user.settings,
+            ))
+            .await;
         let key_fingerprint = self.auth_fingerprint.clone();
         let device = crate::session_bootstrap::load_device_state(
             &self.state,

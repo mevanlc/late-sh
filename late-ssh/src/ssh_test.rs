@@ -46,6 +46,78 @@ async fn emits_ssh_banner_when_client_connects_over_tcp() {
 
 struct TestClient;
 
+#[tokio::test]
+async fn ssh_bootstrap_applies_saved_splash_mode_after_authentication() {
+    use late_core::models::user::{ArtSplashMode, User, UserParams};
+    let test_db = new_test_db().await;
+    let state = test_app_state(test_db.db.clone(), test_config(test_db.db.config().clone()));
+    let piece = crate::test_helpers::publish_test_splash(&state).await;
+    let db_client = test_db.db.get().await.unwrap();
+    db_client
+        .execute(
+            "UPDATE artboard_pieces SET owner_marked_nsfw = true WHERE id = $1",
+            &[&piece],
+        )
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let _ = run_with_listener(listener, state, None).await;
+    });
+    for (mode, expect_art) in [
+        (ArtSplashMode::Sfw, false),
+        (ArtSplashMode::Always, true),
+        (ArtSplashMode::Never, false),
+    ] {
+        let key = new_client_key();
+        User::create(
+            &db_client,
+            UserParams {
+                fingerprint: key.public_key().fingerprint(HashAlg::Sha256).to_string(),
+                username: format!("splash-{}", mode.as_str()),
+                settings: serde_json::json!({"art_splash_mode": mode.as_str()}),
+            },
+        )
+        .await
+        .unwrap();
+        let mut connection = client::connect(Arc::new(client::Config::default()), addr, TestClient)
+            .await
+            .unwrap();
+        assert!(authenticate(&mut connection, "splash-test", key).await);
+        let mut shell = connection.channel_open_session().await.unwrap();
+        shell
+            .request_pty(true, "xterm-256color", 160, 40, 0, 0, &[])
+            .await
+            .unwrap();
+        shell.request_shell(true).await.unwrap();
+        let mut received = Vec::new();
+        timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(ChannelMsg::Data { data }) = shell.wait().await {
+                    received.extend_from_slice(&data);
+                    let plain = String::from_utf8_lossy(&received);
+                    if plain.contains("login splash fixture") || plain.contains(".------.") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("splash frame");
+        assert_eq!(
+            String::from_utf8_lossy(&received).contains("login splash fixture"),
+            expect_art,
+            "{mode:?}"
+        );
+        connection
+            .disconnect(russh::Disconnect::ByApplication, "", "en")
+            .await
+            .unwrap();
+    }
+    server.abort();
+}
+
 impl client::Handler for TestClient {
     type Error = russh::Error;
 

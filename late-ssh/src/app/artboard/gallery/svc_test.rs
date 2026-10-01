@@ -4,10 +4,12 @@ use late_core::test_utils::create_test_user;
 use serde_json::json;
 use uuid::Uuid;
 
-use super::{GalleryService, SplashRefresh};
+use super::{ContentRatingAction, GalleryResult, GalleryService, SplashRefresh};
 use crate::test_helpers::{new_test_db, test_app_flags_rx};
+use late_core::models::artboard_piece_rating::{ArtContentRating, ArtboardPieceRating};
+use late_core::models::user::ArtSplashMode;
 
-fn hang_params(user_id: Uuid, title: &str) -> HangParams {
+pub(crate) fn hang_params(user_id: Uuid, title: &str) -> HangParams {
     HangParams {
         user_id,
         title: title.to_string(),
@@ -24,6 +26,218 @@ fn hang_params(user_id: Uuid, title: &str) -> HangParams {
         own_share_percent: 100,
         content_hash: format!("hash-{title}"),
     }
+}
+
+async fn today_piece(db: &late_core::db::Db, service: &GalleryService, owner: Uuid) -> Uuid {
+    let client = db.get().await.unwrap();
+    let HangOutcome::Hung(piece) =
+        ArtboardPiece::hang(&client, hang_params(owner, "today's splash"))
+            .await
+            .unwrap()
+    else {
+        panic!("hang");
+    };
+    client.execute("UPDATE artboard_pieces SET created = CURRENT_TIMESTAMP - INTERVAL '1 day' WHERE id = $1", &[&piece.id]).await.unwrap();
+    service
+        .refresh_splash(chrono::Utc::now().date_naive())
+        .await
+        .unwrap();
+    assert_eq!(service.splash_piece().unwrap().piece.id, piece.id);
+    piece.id
+}
+
+#[tokio::test]
+async fn splash_uses_fresh_ratings_removal_day_and_fuse_without_refreshing_canvas() {
+    let test_db = new_test_db().await;
+    let service = GalleryService::new(test_db.db.clone(), test_app_flags_rx());
+    let owner = create_test_user(&test_db.db, "splash-owner").await;
+    let voters = [
+        create_test_user(&test_db.db, "splash-voter-a").await,
+        create_test_user(&test_db.db, "splash-voter-b").await,
+    ];
+    let piece = today_piece(&test_db.db, &service, owner.id).await;
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Sfw)
+            .await
+            .is_some()
+    );
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Never)
+            .await
+            .is_none()
+    );
+    for voter in &voters {
+        let mut client = test_db.db.get().await.unwrap();
+        let tx = client.transaction().await.unwrap();
+        ArtboardPieceRating::set_vote(&tx, piece, voter.id, Some(ArtContentRating::Nsfw))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+    }
+    assert!(
+        !service
+            .splash_piece()
+            .unwrap()
+            .piece
+            .content_rating
+            .determination()
+            .0
+            .is_nsfw(),
+        "canvas cache still holds old rating"
+    );
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Sfw)
+            .await
+            .is_none()
+    );
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Always)
+            .await
+            .unwrap()
+            .piece
+            .content_rating
+            .determination()
+            .0
+            .is_nsfw()
+    );
+    let mut client = test_db.db.get().await.unwrap();
+    let tx = client.transaction().await.unwrap();
+    ArtboardPieceRating::set_vote(&tx, piece, voters[0].id, None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Sfw)
+            .await
+            .is_some()
+    );
+    assert!(
+        service
+            .splash_piece_for_day(
+                ArtSplashMode::Always,
+                chrono::Utc::now().date_naive() + chrono::Duration::days(1)
+            )
+            .await
+            .is_none()
+    );
+    client
+        .execute(
+            "UPDATE app_flags SET enabled = false WHERE key = 'artboard_gallery_enabled'",
+            &[],
+        )
+        .await
+        .unwrap();
+    assert!(service.is_enabled(), "watch intentionally lags database");
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Always)
+            .await
+            .is_none()
+    );
+    client
+        .execute(
+            "UPDATE app_flags SET enabled = true WHERE key = 'artboard_gallery_enabled'",
+            &[],
+        )
+        .await
+        .unwrap();
+    client
+        .execute(
+            "UPDATE artboard_pieces SET removed_at = CURRENT_TIMESTAMP WHERE id = $1",
+            &[&piece],
+        )
+        .await
+        .unwrap();
+    assert!(
+        service
+            .splash_piece_for_mode(ArtSplashMode::Always)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn failed_fresh_splash_check_falls_back_to_the_cup() {
+    let test_db = new_test_db().await;
+    let owner = create_test_user(&test_db.db, "splash-failure-owner").await;
+    let service = GalleryService::new(test_db.db.clone(), test_app_flags_rx());
+    today_piece(&test_db.db, &service, owner.id).await;
+    test_db
+        .db
+        .get()
+        .await
+        .unwrap()
+        .batch_execute("DROP VIEW artboard_piece_content_ratings")
+        .await
+        .unwrap();
+    for mode in [
+        ArtSplashMode::Sfw,
+        ArtSplashMode::Always,
+        ArtSplashMode::Never,
+    ] {
+        assert!(service.splash_piece_for_mode(mode).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn rating_task_rejects_self_votes_and_a_disabled_gallery_without_changing_it() {
+    let test_db = new_test_db().await;
+    let owner = create_test_user(&test_db.db, "rating-owner").await;
+    let viewer = create_test_user(&test_db.db, "rating-viewer").await;
+    let service = GalleryService::new(test_db.db.clone(), test_app_flags_rx());
+    let piece = today_piece(&test_db.db, &service, owner.id).await;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    service.content_rating_task(
+        piece,
+        owner.id,
+        1,
+        Some(ContentRatingAction::Vote(Some(ArtContentRating::Nsfw))),
+        tx.clone(),
+    );
+    assert!(matches!(
+        rx.recv().await.unwrap(),
+        GalleryResult::ContentRating { result: Err(_), .. }
+    ));
+    service.content_rating_task(
+        piece,
+        owner.id,
+        2,
+        Some(ContentRatingAction::OwnerFlag(true)),
+        tx.clone(),
+    );
+    assert!(
+        matches!(rx.recv().await.unwrap(), GalleryResult::ContentRating { result: Ok(summary), .. } if summary.owner_marked_nsfw)
+    );
+    let client = test_db.db.get().await.unwrap();
+    client
+        .execute(
+            "UPDATE app_flags SET enabled = false WHERE key = 'artboard_gallery_enabled'",
+            &[],
+        )
+        .await
+        .unwrap();
+    service.content_rating_task(
+        piece,
+        viewer.id,
+        3,
+        Some(ContentRatingAction::Vote(Some(ArtContentRating::Nsfw))),
+        tx,
+    );
+    assert!(matches!(
+        rx.recv().await.unwrap(),
+        GalleryResult::ContentRating { result: Err(_), .. }
+    ));
+    let summary = ArtboardPieceRating::read(&client, piece, viewer.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(summary.nsfw_votes, 0);
+    assert!(summary.owner_marked_nsfw);
 }
 
 /// The refresh publishes the day's piece into the watch and every login

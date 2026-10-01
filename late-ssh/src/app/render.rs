@@ -2702,13 +2702,17 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 ],
                 Some((crate::app::artboard::gallery::state::Focus::List, _)) => &[
                     ("gallery", "j/k"),
+                    ("n", "rating"),
                     ("v", "applaud"),
                     ("Enter", "full frame"),
                     ("Esc", "rail"),
                 ],
-                Some((crate::app::artboard::gallery::state::Focus::Piece, _)) => {
-                    &[("piece", "j/k next"), ("v", "applaud"), ("Esc", "back")]
-                }
+                Some((crate::app::artboard::gallery::state::Focus::Piece, _)) => &[
+                    ("piece", "j/k next"),
+                    ("n", "rating"),
+                    ("v", "applaud"),
+                    ("Esc", "back"),
+                ],
                 Some((crate::app::artboard::gallery::state::Focus::Canvas, _)) | None => &[
                     ("view", "pan"),
                     ("Alt+arrows/R-drag", "pan"),

@@ -1536,7 +1536,7 @@ fn settings_help_lines() -> Vec<String> {
         "  Bio               multiline markdown bio".to_string(),
         "  Themes            expanded theme browser; / searches it, f stars a theme into Favorites"
             .to_string(),
-        "  Tweaks            power-user toggles for appearance, compose, music, display, and startup"
+        "  Tweaks            power-user toggles for appearance, input, display, and startup"
             .to_string(),
         "  Account           link SSH keys across accounts, reset/revoke your IRC access token, or delete your account"
             .to_string(),
@@ -1599,15 +1599,19 @@ fn settings_help_lines() -> Vec<String> {
         "                            both rows apply to this device (this SSH key) only, never the"
             .to_string(),
         "                            account default; `\\` on Home cycles the same two".to_string(),
-        "  Compose".to_string(),
+        "  Input".to_string(),
         "    Send and keep open on Enter   Enter sends without closing the composer; while on, Alt+S becomes a no-op"
             .to_string(),
+        "    Interaction mode              keyboard / mouse / hybrid".to_string(),
         "  Display".to_string(),
         "    Plain glyphs                  for fonts without flags or Nerd Font: text labels instead of flag emoji in chat badges and Shop Flags, and Nerd Font icons left out of chat messages and reactions"
             .to_string(),
         "  Startup".to_string(),
         "    Land on                       where a session starts: Clubhouse (default), Home, or Zen; first sessions always start in the Clubhouse"
             .to_string(),
+        "    Show Gallery Art on Splash    SFW (default) / Always / Never; Never uses the coffee cup".to_string(),
+        "                                  SFW hides art determined NSFW; unmarked art is allowed".to_string(),
+        "    Daily paper at login          show or skip the daily paper pop after login".to_string(),
         "".to_string(),
         "RSS tab".to_string(),
         "  j / k or arrows move through RSS rows".to_string(),

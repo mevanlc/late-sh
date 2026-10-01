@@ -1,0 +1,330 @@
+//! Durable content classification, separate from applause and monthly awards.
+
+use anyhow::{Result, bail};
+use chrono::{DateTime, NaiveDate, Utc};
+use deadpool_postgres::GenericClient;
+use tokio_postgres::Row;
+use uuid::Uuid;
+
+use super::app_flag::AppFlag;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ArtContentRating {
+    #[default]
+    Sfw,
+    Nsfw,
+}
+
+impl ArtContentRating {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sfw => "SFW",
+            Self::Nsfw => "NSFW",
+        }
+    }
+
+    pub fn is_nsfw(self) -> bool {
+        self == Self::Nsfw
+    }
+
+    pub fn from_nsfw(nsfw: bool) -> Self {
+        if nsfw { Self::Nsfw } else { Self::Sfw }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RatingSource {
+    Admin,
+    Moderator,
+    Owner,
+    Community,
+    Default,
+}
+
+impl RatingSource {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Admin => "admin marks",
+            Self::Moderator => "moderator marks",
+            Self::Owner => "owner flag",
+            Self::Community => "community votes",
+            Self::Default => "unmarked",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ContentRatingSummary {
+    pub owner_marked_nsfw: bool,
+    pub sfw_votes: i64,
+    pub nsfw_votes: i64,
+    pub mod_sfw: i64,
+    pub mod_nsfw: i64,
+    pub admin_sfw: i64,
+    pub admin_nsfw: i64,
+    pub viewer_vote: Option<ArtContentRating>,
+}
+
+impl ContentRatingSummary {
+    pub(crate) fn from_row(row: &Row) -> Self {
+        Self {
+            owner_marked_nsfw: row.get("owner_marked_nsfw"),
+            sfw_votes: row.get("sfw_votes"),
+            nsfw_votes: row.get("nsfw_votes"),
+            mod_sfw: row.get("mod_sfw"),
+            mod_nsfw: row.get("mod_nsfw"),
+            admin_sfw: row.get("admin_sfw"),
+            admin_nsfw: row.get("admin_nsfw"),
+            viewer_vote: row
+                .get::<_, Option<bool>>("viewer_content_vote")
+                .map(ArtContentRating::from_nsfw),
+        }
+    }
+
+    pub fn determination(self) -> (ArtContentRating, RatingSource) {
+        let (nsfw, source) = if self.admin_sfw + self.admin_nsfw > 0 {
+            (self.admin_nsfw > 0, RatingSource::Admin)
+        } else if self.mod_sfw + self.mod_nsfw > 0 {
+            (self.mod_nsfw >= self.mod_sfw, RatingSource::Moderator)
+        } else if self.owner_marked_nsfw {
+            (true, RatingSource::Owner)
+        } else if self.sfw_votes + self.nsfw_votes > 0 {
+            (
+                self.nsfw_votes >= 2 && self.nsfw_votes > self.sfw_votes,
+                RatingSource::Community,
+            )
+        } else {
+            (false, RatingSource::Default)
+        };
+        (ArtContentRating::from_nsfw(nsfw), source)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaffAuthority {
+    Moderator,
+    Admin,
+}
+
+impl StaffAuthority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Moderator => "moderator",
+            Self::Admin => "admin",
+        }
+    }
+}
+
+pub struct StaffMark {
+    pub actor_user_id: Uuid,
+    pub username: Option<String>,
+    pub authority: String,
+    pub rating: ArtContentRating,
+    pub reason: String,
+    pub updated: DateTime<Utc>,
+}
+
+pub struct ArtboardPieceRating;
+
+pub struct ArtSafetyPiece {
+    pub id: Uuid,
+    pub title: String,
+    pub username: String,
+    pub splash_on: Option<NaiveDate>,
+    pub summary: ContentRatingSummary,
+}
+
+impl ArtboardPieceRating {
+    /// Staff overview: metadata and ratings in one query, without canvases.
+    pub async fn list_safety(
+        client: &impl GenericClient,
+        owner: Option<Uuid>,
+    ) -> Result<Vec<ArtSafetyPiece>> {
+        Ok(client
+            .query(
+                "SELECT p.id, p.title, u.username, p.splash_on, r.*,
+                        NULL::boolean AS viewer_content_vote
+                 FROM artboard_pieces p
+                 JOIN users u ON u.id = p.user_id
+                 JOIN artboard_piece_content_ratings r ON r.piece_id = p.id
+                 WHERE p.removed_at IS NULL AND ($1::uuid IS NULL OR p.user_id = $1)
+                 ORDER BY p.created DESC, p.id DESC",
+                &[&owner],
+            )
+            .await?
+            .into_iter()
+            .map(|row| ArtSafetyPiece {
+                id: row.get("id"),
+                title: row.get("title"),
+                username: row.get("username"),
+                splash_on: row.get("splash_on"),
+                summary: ContentRatingSummary::from_row(&row),
+            })
+            .collect())
+    }
+
+    pub async fn read(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+        viewer_id: Uuid,
+    ) -> Result<Option<ContentRatingSummary>> {
+        Self::read_for_day(client, piece_id, viewer_id, None).await
+    }
+
+    /// Login reads metadata only, checking the day, removal and gallery fuse
+    /// in the same statement as the classification. The canvas stays cached.
+    pub async fn read_for_day(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+        viewer_id: Uuid,
+        day: Option<NaiveDate>,
+    ) -> Result<Option<ContentRatingSummary>> {
+        let row = client
+            .query_opt(
+                "SELECT r.*, (SELECT nsfw FROM artboard_piece_content_votes
+                          WHERE piece_id = p.id AND user_id = $2) AS viewer_content_vote
+             FROM artboard_pieces p JOIN artboard_piece_content_ratings r ON r.piece_id = p.id
+             WHERE p.id = $1 AND p.removed_at IS NULL
+               AND ($3::date IS NULL OR (p.splash_on = $3 AND EXISTS (
+                    SELECT 1 FROM app_flags WHERE key = $4 AND enabled)))",
+                &[
+                    &piece_id,
+                    &viewer_id,
+                    &day,
+                    &AppFlag::ArtboardGalleryEnabled.key(),
+                ],
+            )
+            .await?;
+        Ok(row.as_ref().map(ContentRatingSummary::from_row))
+    }
+
+    /// Call inside a transaction; serializes classification writers with
+    /// removal so a stale session cannot write to a piece already taken down.
+    pub async fn lock_piece(client: &impl GenericClient, piece_id: Uuid) -> Result<Uuid> {
+        let row = client.query_opt(
+            "SELECT user_id FROM artboard_pieces WHERE id = $1 AND removed_at IS NULL FOR UPDATE",
+            &[&piece_id],
+        ).await?.ok_or_else(|| anyhow::anyhow!("The piece is no longer hanging."))?;
+        Ok(row.get("user_id"))
+    }
+
+    pub async fn set_vote(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+        user_id: Uuid,
+        rating: Option<ArtContentRating>,
+    ) -> Result<()> {
+        let owner = Self::lock_piece(client, piece_id).await?;
+        if owner == user_id {
+            bail!("Artists cannot vote on their own pieces.");
+        }
+        if let Some(rating) = rating {
+            client.execute(
+                "INSERT INTO artboard_piece_content_votes (piece_id, user_id, author_user_id, nsfw)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (piece_id, user_id) DO UPDATE SET nsfw = EXCLUDED.nsfw",
+                &[&piece_id, &user_id, &owner, &rating.is_nsfw()],
+            ).await?;
+        } else {
+            client
+                .execute(
+                    "DELETE FROM artboard_piece_content_votes WHERE piece_id = $1 AND user_id = $2",
+                    &[&piece_id, &user_id],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_owner_flag(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+        user_id: Uuid,
+        nsfw: bool,
+    ) -> Result<()> {
+        if Self::lock_piece(client, piece_id).await? != user_id {
+            bail!("Only the owner may change the owner's NSFW flag.");
+        }
+        client
+            .execute(
+                "UPDATE artboard_pieces SET owner_marked_nsfw = $3 WHERE id = $1 AND user_id = $2",
+                &[&piece_id, &user_id, &nsfw],
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_staff_mark(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+        actor_user_id: Uuid,
+        authority: StaffAuthority,
+        rating: Option<ArtContentRating>,
+        reason: &str,
+    ) -> Result<()> {
+        Self::lock_piece(client, piece_id).await?;
+        if let Some(rating) = rating {
+            client.execute(
+                "INSERT INTO artboard_piece_staff_marks (piece_id, actor_user_id, authority, nsfw, reason)
+                 VALUES ($1, $2, $3, $4, $5)
+                 ON CONFLICT (piece_id, actor_user_id) DO UPDATE
+                 SET authority = EXCLUDED.authority, nsfw = EXCLUDED.nsfw,
+                     reason = EXCLUDED.reason, updated = current_timestamp",
+                &[&piece_id, &actor_user_id, &authority.as_str(), &rating.is_nsfw(), &reason],
+            ).await?;
+        } else {
+            client
+                .execute(
+                    "DELETE FROM artboard_piece_staff_marks
+                WHERE piece_id = $1 AND actor_user_id = $2 AND authority = $3",
+                    &[&piece_id, &actor_user_id, &authority.as_str()],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn remove_moderator_mark(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+        actor_user_id: Uuid,
+    ) -> Result<bool> {
+        Self::lock_piece(client, piece_id).await?;
+        Ok(client
+            .execute(
+                "DELETE FROM artboard_piece_staff_marks
+             WHERE piece_id = $1 AND actor_user_id = $2 AND authority = 'moderator'",
+                &[&piece_id, &actor_user_id],
+            )
+            .await?
+            > 0)
+    }
+
+    pub async fn staff_marks(
+        client: &impl GenericClient,
+        piece_id: Uuid,
+    ) -> Result<Vec<StaffMark>> {
+        Ok(client
+            .query(
+                "SELECT m.*, u.username FROM artboard_piece_staff_marks m
+             LEFT JOIN users u ON u.id = m.actor_user_id
+             WHERE m.piece_id = $1 ORDER BY m.authority, m.updated, m.actor_user_id",
+                &[&piece_id],
+            )
+            .await?
+            .into_iter()
+            .map(|row| StaffMark {
+                actor_user_id: row.get("actor_user_id"),
+                username: row.get("username"),
+                authority: row.get("authority"),
+                rating: ArtContentRating::from_nsfw(row.get("nsfw")),
+                reason: row.get("reason"),
+                updated: row.get("updated"),
+            })
+            .collect())
+    }
+}
+
+#[cfg(test)]
+#[path = "artboard_piece_rating_test.rs"]
+mod tests;

@@ -1,4 +1,5 @@
 use anyhow::Result;
+use late_core::models::artboard_piece_rating::ArtContentRating;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ModCommand {
@@ -92,6 +93,20 @@ pub(crate) enum ModCommand {
     ArtboardGallery {
         enabled: bool,
     },
+    ArtboardMark {
+        id_prefix: String,
+        admin: bool,
+        rating: Option<ArtContentRating>,
+        reason: String,
+    },
+    ArtboardUnmarkMod {
+        id_prefix: String,
+        actor: String,
+        reason: String,
+    },
+    ArtboardSafetyView {
+        target: ArtboardSafetyViewTarget,
+    },
     Audio {
         action: AudioAction,
         username: String,
@@ -116,6 +131,13 @@ pub(crate) enum ModCommand {
     AdminUltimateCast {
         ultimate_id: String,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ArtboardSafetyViewTarget {
+    Summary,
+    User { username: String },
+    Piece { id_prefix: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -347,7 +369,7 @@ pub(crate) fn parse_mod_command(input: &str) -> Result<ModCommand> {
 }
 
 fn parse_view_mod_command(parts: &[&str]) -> Result<ModCommand> {
-    const USAGE: &str = "usage: view <@user|#room|bans|slows|audit|artboard|help> [pagenumber]";
+    const USAGE: &str = "usage: view <@user|#room|bans|slows|audit|art|help> [pagenumber]";
     let Some(target) = parts.first().copied() else {
         anyhow::bail!(USAGE);
     };
@@ -363,9 +385,9 @@ fn parse_view_mod_command(parts: &[&str]) -> Result<ModCommand> {
         "bans" => parse_bans_mod_command(&parts[1..]),
         "slows" => parse_slows_mod_command(&parts[1..]),
         "audit" => parse_audit_mod_command(&parts[1..]),
-        "artboard" => {
+        "art" | "artboard" => {
             if parts.len() > 2 {
-                anyhow::bail!("usage: view artboard [pagenumber]");
+                anyhow::bail!("usage: view art [pagenumber]");
             }
             Ok(ModCommand::ArtboardSnapshots {
                 page: optional_page(parts.get(1).copied())?,
@@ -401,7 +423,7 @@ fn parse_bans_mod_command(parts: &[&str]) -> Result<ModCommand> {
 
     if let Some(page) = parse_page(first)? {
         if parts.len() > 1 {
-            anyhow::bail!("usage: view bans [server|artboard|audio|stream|#roomname] [pagenumber]");
+            anyhow::bail!("usage: view bans [server|art|audio|stream|#roomname] [pagenumber]");
         }
         return Ok(ModCommand::Bans {
             scope: BanListScope::All,
@@ -419,9 +441,9 @@ fn parse_bans_mod_command(parts: &[&str]) -> Result<ModCommand> {
                 page: optional_page(parts.get(1).copied())?,
             })
         }
-        "artboard" => {
+        "art" | "artboard" => {
             if parts.len() > 2 {
-                anyhow::bail!("usage: view bans artboard [pagenumber]");
+                anyhow::bail!("usage: view bans art [pagenumber]");
             }
             Ok(ModCommand::Bans {
                 scope: BanListScope::Artboard,
@@ -596,7 +618,7 @@ fn parse_kick_mod_command(parts: &[&str]) -> Result<ModCommand> {
 
 fn parse_ban_mod_command(parts: &[&str]) -> Result<ModCommand> {
     const USAGE: &str =
-        "usage: ban <server|#roomname|artboard|audio|stream> @name [duration] [reason...]";
+        "usage: ban <server|#roomname|art|audio|stream> @name [duration] [reason...]";
     let Some(target) = parts.first().copied() else {
         anyhow::bail!(USAGE);
     };
@@ -610,7 +632,7 @@ fn parse_ban_mod_command(parts: &[&str]) -> Result<ModCommand> {
             duration,
             reason,
         }),
-        "artboard" => Ok(ModCommand::Artboard {
+        "art" | "artboard" => Ok(ModCommand::Artboard {
             action: ArtboardAction::Ban,
             username,
             duration,
@@ -640,8 +662,7 @@ fn parse_ban_mod_command(parts: &[&str]) -> Result<ModCommand> {
 }
 
 fn parse_unban_mod_command(parts: &[&str]) -> Result<ModCommand> {
-    const USAGE: &str =
-        "usage: unban <server|#roomname|artboard|audio|voice|stream> @name [reason...]";
+    const USAGE: &str = "usage: unban <server|#roomname|art|audio|voice|stream> @name [reason...]";
     let Some(target) = parts.first().copied() else {
         anyhow::bail!(USAGE);
     };
@@ -654,7 +675,7 @@ fn parse_unban_mod_command(parts: &[&str]) -> Result<ModCommand> {
             duration: None,
             reason,
         }),
-        "artboard" => Ok(ModCommand::Artboard {
+        "art" | "artboard" => Ok(ModCommand::Artboard {
             action: ArtboardAction::Unban,
             username,
             duration: None,
@@ -690,7 +711,7 @@ fn parse_unban_mod_command(parts: &[&str]) -> Result<ModCommand> {
 
 fn parse_slow_mod_command(parts: &[&str]) -> Result<ModCommand> {
     const USAGE: &str =
-        "usage: slow <server|#roomname> @name <interval> <duration|permanent> [reason...]";
+        "usage: slow <server|#roomname> @name <interval> <duration|perma> [reason...]";
     let Some(target) = parts.first().copied() else {
         anyhow::bail!(USAGE);
     };
@@ -700,14 +721,15 @@ fn parse_slow_mod_command(parts: &[&str]) -> Result<ModCommand> {
     let Some(expiry) = parts.get(3).copied() else {
         anyhow::bail!(USAGE);
     };
-    let (expires_in, reason_start) = if expiry.eq_ignore_ascii_case("permanent") {
-        (None, 4)
-    } else {
-        let Some(duration) = parse_mod_duration(expiry)? else {
-            anyhow::bail!(USAGE);
+    let (expires_in, reason_start) =
+        if expiry.eq_ignore_ascii_case("perma") || expiry.eq_ignore_ascii_case("permanent") {
+            (None, 4)
+        } else {
+            let Some(duration) = parse_mod_duration(expiry)? else {
+                anyhow::bail!(USAGE);
+            };
+            (Some(duration), 4)
         };
-        (Some(duration), 4)
-    };
     let reason = parts.get(reason_start..).unwrap_or_default().join(" ");
     Ok(ModCommand::Slow {
         scope,
@@ -743,7 +765,7 @@ fn required_slow_scope(value: &str, usage: &str) -> Result<SlowScope> {
 }
 
 fn parse_artboard_mod_command(parts: &[&str]) -> Result<ModCommand> {
-    const USAGE: &str = "usage: artboard <restore|curate|remove|feature|gallery> ...";
+    const USAGE: &str = "usage: artboard <restore|curate|remove|feature|gallery|safety> ...";
     let Some(first) = parts.first().copied() else {
         anyhow::bail!(USAGE);
     };
@@ -753,8 +775,57 @@ fn parse_artboard_mod_command(parts: &[&str]) -> Result<ModCommand> {
         "remove" => parse_artboard_remove_mod_command(&parts[1..]),
         "feature" => parse_artboard_feature_mod_command(&parts[1..]),
         "gallery" => parse_artboard_gallery_mod_command(&parts[1..]),
+        "safety" => parse_artboard_safety_mod_command(&parts[1..]),
         _ => anyhow::bail!(USAGE),
     }
+}
+
+fn parse_artboard_safety_mod_command(parts: &[&str]) -> Result<ModCommand> {
+    const USAGE: &str = "usage: artboard safety view [@user|piece-id-prefix] | artboard safety [admin] <nsfw|sfw|none> <piece-id-prefix> [by <@user|user-id>] [reason...]";
+    if parts == ["help"] {
+        return Ok(ModCommand::Help {
+            topic: Some("artboard safety".into()),
+        });
+    }
+    if parts.first().copied() == Some("view") {
+        let target = match &parts[1..] {
+            [] => ArtboardSafetyViewTarget::Summary,
+            [user] if user.starts_with('@') => ArtboardSafetyViewTarget::User {
+                username: required_username(Some(user), USAGE)?,
+            },
+            [id] => ArtboardSafetyViewTarget::Piece {
+                id_prefix: piece_id_prefix(Some(id), USAGE)?,
+            },
+            _ => anyhow::bail!(USAGE),
+        };
+        return Ok(ModCommand::ArtboardSafetyView { target });
+    }
+    let (admin, parts) = match parts.split_first() {
+        Some((&"admin", rest)) => (true, rest),
+        _ => (false, parts),
+    };
+    let rating = match parts.first().copied() {
+        Some("nsfw") => Some(ArtContentRating::Nsfw),
+        Some("sfw") => Some(ArtContentRating::Sfw),
+        Some("none") => None,
+        _ => anyhow::bail!(USAGE),
+    };
+    let id_prefix = piece_id_prefix(parts.get(1).copied(), USAGE)?;
+    if parts.get(2).copied() == Some("by") {
+        anyhow::ensure!(rating.is_none(), "by is only supported with safety none");
+        let actor = parts.get(3).ok_or_else(|| anyhow::anyhow!(USAGE))?;
+        return Ok(ModCommand::ArtboardUnmarkMod {
+            id_prefix,
+            actor: actor.to_string(),
+            reason: parts.get(4..).unwrap_or_default().join(" "),
+        });
+    }
+    Ok(ModCommand::ArtboardMark {
+        id_prefix,
+        admin,
+        rating,
+        reason: parts.get(2..).unwrap_or_default().join(" "),
+    })
 }
 
 fn parse_artboard_remove_mod_command(parts: &[&str]) -> Result<ModCommand> {
@@ -1030,28 +1101,29 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
         .filter(|topic| !topic.is_empty())
     else {
         return help_lines(&[
-            "--- lounge ---",
+            "======== Lounge ====================================================",
             "rename-room <#oldname> <#newname>",
             "rename-user <@oldname> <@newname>",
-            "room-voice <#room> <on|off>",
-            "view   <@user|#room|bans|slows|audit|artboard|help> [pagenumber]",
-            "artboard curate <live|YYYY-MM-DD> [reason...]",
+            "room-voice  <#room> <on|off>",
+            "view        <@user|#room|bans|slows|audit|art|help> [pagenumber]",
+            "======== Artboard ==================================================",
+            "artboard curate  <live|YYYY-MM-DD> [reason...]",
             "artboard restore [YYYY-MM-DD] [reason...]",
-            "artboard remove <piece-id-prefix> [reason...]",
+            "artboard remove  <piece-id-prefix> [reason...]",
             "artboard feature <piece-id-prefix>",
             "artboard gallery <on|off>",
-            "",
-            "--- bans, etc. ---",
+            "artboard safety help          - view help for art nsfw/sfw commands",
+            "======== Bans, kicks, etc. =========================================",
             "kick   <server|voice|stream|#room> @name [reason...]",
-            "ban    <server|#room|artboard|audio|stream> @name [duration] [reason...]",
-            "unban  <server|#room|artboard|audio|voice|stream> @name [reason...]",
-            "slow   <server|#room> @name <interval> <duration|permanent> [reason...]",
+            "ban    <server|#room|art|audio|stream> @name [duration] [reason...]",
+            "unban  <server|#room|art|audio|voice|stream> @name [reason...]",
+            "slow   <server|#room> @name <interval> <duration|perma> [reason...]",
             "unslow <server|#room> @name [reason...]",
-            "",
-            "--- help & admin ---",
-            "admin           - show admin commands",
-            "admin <command> - run admin commands",
-            "help <command>  - get help with command",
+            "======== Help & Admin ==============================================",
+            "admin                                - show admin commands and help",
+            "admin <command>                      - run admin commands",
+            "help  <command>                      - get help with any command",
+            "====================================================================",
         ]);
     };
 
@@ -1085,9 +1157,9 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "Moderator or admin only. Writes a moderation audit entry.",
         ],
         "view" => &[
-            "view <@user|#room|bans|slows|audit|artboard|help> [pagenumber]",
+            "view <@user|#room|bans|slows|audit|art|help> [pagenumber]",
             "Views moderation data.",
-            "Subtopics: help view user, help view room, help view bans, help view slows, help view audit, help view artboard.",
+            "Subtopics: help view user, help view room, help view bans, help view slows, help view audit, help view art.",
         ],
         "view user" => &[
             "view @name",
@@ -1099,7 +1171,7 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "Shows room id, type, visibility, flags, and member count.",
         ],
         "view bans" => &[
-            "view bans [server|artboard|audio|stream|#roomname] [pagenumber]",
+            "view bans [server|art|audio|stream|#roomname] [pagenumber]",
             "Lists current active bans. Without a scope, shows server, artboard, audio, stream, and room bans.",
             "pagenumber: optional positive page number; 15 rows per page.",
         ],
@@ -1107,8 +1179,8 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "view bans server [pagenumber]",
             "Lists active server bans with actor, expiry, and reason.",
         ],
-        "view bans artboard" => &[
-            "view bans artboard [pagenumber]",
+        "view bans art" | "view bans artboard" => &[
+            "view bans art [pagenumber]",
             "Lists active artboard bans with actor, expiry, and reason.",
         ],
         "view bans audio" => &[
@@ -1133,8 +1205,8 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "Lists recent moderation audit log entries.",
             "pagenumber: optional positive page number; 15 rows per page.",
         ],
-        "view artboard" => &[
-            "view artboard [pagenumber]",
+        "view art" | "view artboard" => &[
+            "view art [pagenumber]",
             "Lists special, daily, and monthly Artboard snapshots.",
             "pagenumber: optional positive page number; 15 rows per page.",
         ],
@@ -1165,13 +1237,13 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "Removes one user from one room.",
         ],
         "ban" => &[
-            "ban <server|#room|artboard|audio|stream> @name [duration] [reason...]",
+            "ban <server|#room|art|audio|stream> @name [duration] [reason...]",
             "Creates a server, artboard, audio, stream, or room ban. Room bans also remove membership.",
             "#roomname is required for room operations, e.g. #lounge.",
             "@name: username; bare name is also accepted.",
             "duration: optional positive number plus s/m/h/d, e.g. 30m or 7d; omit for permanent.",
             "reason: optional audit text after duration.",
-            "Subtopics: help ban server, help ban room, help ban artboard, help ban audio, help ban stream.",
+            "Subtopics: help ban server, help ban room, help ban art, help ban audio, help ban stream.",
         ],
         "ban server" => &[
             "ban server @name [duration] [reason...]",
@@ -1181,8 +1253,8 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "ban #roomname @name [duration] [reason...]",
             "Creates a room ban and removes membership.",
         ],
-        "ban artboard" => &[
-            "ban artboard @name [duration] [reason...]",
+        "ban art" | "ban artboard" => &[
+            "ban art @name [duration] [reason...]",
             "Creates an Artboard editing ban.",
         ],
         "ban audio" => &[
@@ -1196,11 +1268,11 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "server restart and leaves CLI voice alone.",
         ],
         "unban" => &[
-            "unban <server|#room|artboard|audio|voice|stream> @name [reason...]",
+            "unban <server|#room|art|audio|voice|stream> @name [reason...]",
             "Removes active server, artboard, audio, stream, or room bans, or lifts a voice block.",
             "#roomname is required for room operations, e.g. #lounge.",
             "@name: username; bare name is also accepted. reason: optional audit text.",
-            "Subtopics: help unban server, help unban room, help unban artboard, help unban audio, help unban voice, help unban stream.",
+            "Subtopics: help unban server, help unban room, help unban art, help unban audio, help unban voice, help unban stream.",
         ],
         "unban stream" => &[
             "unban stream @name [reason...]",
@@ -1218,8 +1290,8 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "unban #roomname @name [reason...]",
             "Removes active room bans for one user in one room.",
         ],
-        "unban artboard" => &[
-            "unban artboard @name [reason...]",
+        "unban art" | "unban artboard" => &[
+            "unban art @name [reason...]",
             "Removes active Artboard editing bans for one user.",
         ],
         "unban audio" => &[
@@ -1227,11 +1299,11 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "Removes the active audio ban for one user.",
         ],
         "slow" => &[
-            "slow <server|#roomname> @name <interval> <duration|permanent> [reason...]",
+            "slow <server|#roomname> @name <interval> <duration|perma> [reason...]",
             "Throttles one user's sends without removing membership.",
             "server applies to non-DM chat rooms; #roomname applies to one room.",
             "interval: positive number plus s/m/h/d, max 1d, e.g. 90s or 5m.",
-            "duration: positive number plus s/m/h/d, or literal permanent.",
+            "duration: positive number plus s/m/h/d, or literal perma.",
             "reason: optional audit text after duration.",
         ],
         "unslow" => &[
@@ -1244,12 +1316,29 @@ pub(crate) fn mod_help_lines(topic: Option<&str>) -> Vec<String> {
             "artboard restore [YYYY-MM-DD] [reason...]",
             "artboard remove <piece-id-prefix> [reason...]",
             "artboard feature <piece-id-prefix>",
+            "artboard safety help          - view help for art nsfw/sfw commands",
             "artboard gallery <on|off>",
             "Curates live or daily Artboard snapshots, restores live Artboard from daily snapshots,",
             "takes a gallery piece down (copied work, etc.), pins a piece as today's Sliding Puzzle",
-            "art, or flips the gallery's switch (admin).",
+            "art, classifies gallery art with safety, or flips the gallery's switch (admin).",
             "Subtopics: help artboard curate, help artboard restore, help artboard remove,",
-            "help artboard feature.",
+            "help artboard feature, artboard safety help, help artboard gallery.",
+        ],
+        "artboard safety" => &[
+            "artboard safety view [@user|piece-id-prefix]",
+            "artboard safety [admin] <nsfw|sfw|none> <piece-id-prefix> [reason...]",
+            "artboard safety none <piece-id-prefix> by <@user|user-id> [reason...]",
+            "view alone shows hanging-piece counts, today's splash and up to 20 review candidates.",
+            "Candidates have staff disagreement or owner/community NSFW signals with no staff mark.",
+            "view @user lists their newest 20 hanging pieces, ratings, owner flags and vote counts.",
+            "view <id> shows one piece's rating, counts, staff marks and reasons.",
+            "Without admin, staff (including admins) mark as moderators. admin selects the admin tier.",
+            "Each account has one mark per piece; a new mark replaces its previous mark and tier.",
+            "SFW is an explicit override. none removes your mark only at the selected tier.",
+            "Admins outrank moderators: any admin NSFW wins; moderator ties are NSFW.",
+            "Staff may classify their own art. Community votes remain open under overrides.",
+            "none ... by is admin-only and removes that actor's moderator mark, never an admin mark.",
+            "A user UUID also identifies marks whose author's account was deleted.",
         ],
         "artboard feature" => &[
             "artboard feature <piece-id-prefix>",

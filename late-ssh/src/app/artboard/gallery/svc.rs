@@ -29,6 +29,10 @@ use late_core::models::artboard_piece::{
     ApplauseOutcome, ArtboardPiece, HangOutcome, HangParams, ListingCounts, PieceListing,
     TakeDownOutcome,
 };
+use late_core::models::artboard_piece_rating::{
+    ArtContentRating, ArtboardPieceRating, ContentRatingSummary,
+};
+use late_core::models::user::ArtSplashMode;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
@@ -90,6 +94,7 @@ pub struct GalleryPiece {
     pub applauded_by_viewer: bool,
     pub created: DateTime<Utc>,
     pub period_month: NaiveDate,
+    pub content_rating: ContentRatingSummary,
 }
 
 impl GalleryPiece {
@@ -116,6 +121,7 @@ impl GalleryPiece {
             applauded_by_viewer: piece.applauded_by_viewer,
             created: piece.created,
             period_month: piece.period_month,
+            content_rating: piece.content_rating,
         })
     }
 
@@ -160,6 +166,11 @@ impl HangRefusal {
 /// What a spawned gallery task reports back.
 #[derive(Debug)]
 pub enum GalleryResult {
+    ContentRating {
+        piece_id: Uuid,
+        generation: u64,
+        result: Result<ContentRatingSummary, String>,
+    },
     Counts(ListingCounts),
     CountsFailed(String),
     /// `generation` is the section's request counter at the time this
@@ -202,6 +213,12 @@ pub struct GalleryService {
     flags_rx: watch::Receiver<Option<AppFlags>>,
     splash_tx: Arc<watch::Sender<Option<SplashPiece>>>,
     splash_rx: watch::Receiver<Option<SplashPiece>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContentRatingAction {
+    Vote(Option<ArtContentRating>),
+    OwnerFlag(bool),
 }
 
 impl GalleryService {
@@ -247,6 +264,88 @@ impl GalleryService {
             return None;
         }
         self.splash_rx.borrow().clone()
+    }
+
+    /// The authenticated login gate. A cache holds the canvas, never the
+    /// authority to show it: committed marks take effect on the next login.
+    pub async fn splash_piece_for_mode(&self, mode: ArtSplashMode) -> Option<SplashPiece> {
+        self.splash_piece_for_day(mode, Utc::now().date_naive())
+            .await
+    }
+
+    async fn splash_piece_for_day(
+        &self,
+        mode: ArtSplashMode,
+        day: NaiveDate,
+    ) -> Option<SplashPiece> {
+        if mode == ArtSplashMode::Never {
+            return None;
+        }
+        let mut splash = self.splash_piece()?;
+        if splash.shown_on != day {
+            return None;
+        }
+        let db = self.db.as_ref()?;
+        let result = async {
+            let client = db.get().await?;
+            ArtboardPieceRating::read_for_day(&client, splash.piece.id, Uuid::nil(), Some(day))
+                .await
+        }
+        .await;
+        match result {
+            Ok(Some(rating)) => {
+                if mode == ArtSplashMode::Sfw && rating.determination().0.is_nsfw() {
+                    return None;
+                }
+                splash.piece.content_rating = rating;
+                Some(splash)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(error = ?error, piece_id = %splash.piece.id, "artboard splash classification check failed");
+                None
+            }
+        }
+    }
+
+    pub fn content_rating_task(
+        &self,
+        piece_id: Uuid,
+        viewer_id: Uuid,
+        generation: u64,
+        action: Option<ContentRatingAction>,
+        tx: mpsc::UnboundedSender<GalleryResult>,
+    ) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            let result: Result<ContentRatingSummary> = async {
+                let db = service.db.as_ref().ok_or_else(|| anyhow::anyhow!("The gallery is closed."))?;
+                let mut client = db.get().await?;
+                let transaction = client.transaction().await?;
+                if let Some(action) = action {
+                    let enabled: bool = transaction.query_one(
+                        "SELECT EXISTS (SELECT 1 FROM app_flags WHERE key = 'artboard_gallery_enabled' AND enabled)", &[]
+                    ).await?.get(0);
+                    anyhow::ensure!(enabled, "The gallery is closed.");
+                    match action {
+                        ContentRatingAction::Vote(rating) => ArtboardPieceRating::set_vote(&transaction, piece_id, viewer_id, rating).await?,
+                        ContentRatingAction::OwnerFlag(nsfw) => ArtboardPieceRating::set_owner_flag(&transaction, piece_id, viewer_id, nsfw).await?,
+                    }
+                }
+                let summary = ArtboardPieceRating::read(&transaction, piece_id, viewer_id).await?
+                    .ok_or_else(|| anyhow::anyhow!("The piece is no longer hanging."))?;
+                transaction.commit().await?;
+                Ok(summary)
+            }.await;
+            if let Err(error) = &result {
+                tracing::warn!(?error, %piece_id, %viewer_id, "artboard content rating request failed");
+            }
+            let _ = tx.send(GalleryResult::ContentRating {
+                piece_id,
+                generation,
+                result: result.map_err(|error| error.to_string()),
+            });
+        });
     }
 
     /// Hourly re-read of the splash wall, assigning the day's piece when
@@ -429,7 +528,7 @@ impl GalleryService {
             }
             .await;
             let msg = match result {
-                Ok(HangOutcome::Hung(piece)) => match GalleryPiece::decode(piece) {
+                Ok(HangOutcome::Hung(piece)) => match GalleryPiece::decode(*piece) {
                     Ok(piece) => {
                         metrics::record_gallery_hang(GalleryHangResult::Hung);
                         tracing::info!(

@@ -10,6 +10,7 @@ mod arcade_handle_test;
 pub mod artboard;
 pub mod artboard_ban;
 pub mod artboard_piece;
+pub mod artboard_piece_rating;
 #[cfg(test)]
 mod artboard_piece_test;
 #[cfg(test)]

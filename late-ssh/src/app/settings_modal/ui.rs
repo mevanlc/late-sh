@@ -776,178 +776,132 @@ fn shortcuts_hint_line(width: usize) -> Line<'static> {
 }
 
 fn draw_tweaks_tab(frame: &mut Frame, area: Rect, state: &SettingsModalState) {
-    // Reserve a 7-line strip at the bottom for the shining grand gem:
-    // 5-line body + 1 row of sparkles above + 1 row of padding off the
-    // dialog's bottom border.
-    const GEM_STRIP_HEIGHT: u16 = 7;
-    let gem_strip_height = GEM_STRIP_HEIGHT.min(area.height.saturating_sub(8));
-
-    let sections = Layout::vertical([
-        Constraint::Length(1),                // Appearance subsection heading
-        Constraint::Length(1),                // terminal background sync row
-        Constraint::Length(1),                // text brightness row
-        Constraint::Length(1),                // right sidebar row
-        Constraint::Length(1),                // room list row
-        Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // Compose subsection heading
-        Constraint::Length(1),                // composer keep-focused row
-        Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // Display subsection heading
-        Constraint::Length(1),                // plain glyphs row
-        Constraint::Length(1),                // terminal images row
-        Constraint::Length(1),                // chat badges row
-        Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // Startup subsection heading
-        Constraint::Length(1),                // land on home row
-        Constraint::Length(1),                // daily paper row
-        Constraint::Length(1),                // breathing
-        Constraint::Length(1),                // Input subsection heading
-        Constraint::Length(1),                // interaction mode row
-        Constraint::Min(0),                   // flex spacer
-        Constraint::Length(gem_strip_height), // gem
-    ])
-    .split(area);
-
     let width = area.width as usize;
-
-    frame.render_widget(Paragraph::new(section_heading("Appearance")), sections[0]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
+    let mut lines = Vec::new();
+    let mut rows = Vec::new();
+    let mut heading = |title: &str| {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+            rows.push(None);
+        }
+        lines.push(section_heading(title));
+        rows.push(None);
+    };
+    heading("Appearance");
+    let appearance = [
+        (
             TweakRow::BackgroundColor,
-            width,
             "Sync terminal background",
             toggle_span(state.draft().enable_background_color),
-        )),
-        sections[1],
-    );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
+        ),
+        (
             TweakRow::TextBrightness,
-            width,
             "Text Brightness",
             text_brightness_span(state.draft().text_brightness_adjustment),
-        )),
-        sections[2],
-    );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
+        ),
+        (
             TweakRow::RightSidebar,
-            width,
             "Right sidebar",
             right_sidebar_mode_span(state.device_rails().1),
-        )),
-        sections[3],
-    );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
+        ),
+        (
             TweakRow::RoomListSidebar,
-            width,
             "Room list",
             room_list_mode_span(state.device_rails().0),
-        )),
-        sections[4],
-    );
-    frame.render_widget(Paragraph::new(section_heading("Compose")), sections[6]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::ComposerKeepFocused,
-            width,
-            "Send and keep open on Enter",
-            toggle_span(state.draft().keep_composer_focused),
-        )),
-        sections[7],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Display")), sections[9]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::FlagFallback,
-            width,
-            "Plain glyphs",
-            toggle_span(state.draft().show_flag_fallback),
-        )),
-        sections[10],
-    );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::TerminalImages,
-            width,
-            "Terminal images",
-            terminal_images_span(state.draft().terminal_images),
-        )),
-        sections[11],
-    );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::ChatBadges,
-            width,
-            "Chat badges",
-            chat_badges_span(state),
-        )),
-        sections[12],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Startup")), sections[14]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::LandingPage,
-            width,
-            "Land on",
-            landing_page_span(state.draft().landing_page),
-        )),
-        sections[15],
-    );
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::PaperAtLogin,
-            width,
-            "Daily paper at login",
-            toggle_span(state.draft().paper_at_login),
-        )),
-        sections[16],
-    );
-
-    frame.render_widget(Paragraph::new(section_heading("Input")), sections[18]);
-    frame.render_widget(
-        Paragraph::new(tweak_row_line(
-            state,
-            TweakRow::InteractionMode,
-            width,
-            "Interaction mode",
-            interaction_mode_span(state.interaction_mode()),
-        )),
-        sections[19],
-    );
-
-    if gem_strip_height > 0 {
-        // Pad 2 cols off each side and lift the gem 1 row off the bottom
-        // border so it doesn't crowd the dialog frame.
-        const PAD_X: u16 = 2;
-        const PAD_BOTTOM: u16 = 1;
-        let strip = sections[20];
-        let pad_x = PAD_X.min(strip.width / 2);
-        let pad_bottom = PAD_BOTTOM.min(strip.height);
-        let gem_area = Rect::new(
-            strip.x + pad_x,
-            strip.y,
-            strip.width.saturating_sub(pad_x * 2),
-            strip.height.saturating_sub(pad_bottom),
-        );
-        if gem_area.width > 0 && gem_area.height > 0 {
-            draw_gem(frame, gem_area, state.gem());
-        } else {
-            state.gem().hit_area.set(None);
+        ),
+    ];
+    for (row, label, value) in appearance {
+        lines.push(tweak_row_line(state, row, width, label, value));
+        rows.push(Some(row));
+    }
+    for (title, controls) in [
+        (
+            "Input",
+            vec![
+                (
+                    TweakRow::ComposerKeepFocused,
+                    "Send and keep open on Enter",
+                    toggle_span(state.draft().keep_composer_focused),
+                ),
+                (
+                    TweakRow::InteractionMode,
+                    "Interaction mode",
+                    interaction_mode_span(state.interaction_mode()),
+                ),
+            ],
+        ),
+        (
+            "Display",
+            vec![
+                (
+                    TweakRow::FlagFallback,
+                    "Plain glyphs",
+                    toggle_span(state.draft().show_flag_fallback),
+                ),
+                (
+                    TweakRow::TerminalImages,
+                    "Terminal images",
+                    terminal_images_span(state.draft().terminal_images),
+                ),
+                (TweakRow::ChatBadges, "Chat badges", chat_badges_span(state)),
+            ],
+        ),
+        (
+            "Startup",
+            vec![
+                (
+                    TweakRow::LandingPage,
+                    "Land on",
+                    landing_page_span(state.draft().landing_page),
+                ),
+                (
+                    TweakRow::PaperAtLogin,
+                    "Daily paper at login",
+                    toggle_span(state.draft().paper_at_login),
+                ),
+                (
+                    TweakRow::ArtSplash,
+                    "Show Gallery Art on Splash",
+                    value_span(
+                        format!("< {} >", state.draft().art_splash_mode.label()),
+                        theme::AMBER_GLOW(),
+                    ),
+                ),
+            ],
+        ),
+    ] {
+        lines.push(Line::default());
+        rows.push(None);
+        lines.push(section_heading(title));
+        rows.push(None);
+        for (row, label, value) in controls {
+            lines.push(tweak_row_line(state, row, width, label, value));
+            rows.push(Some(row));
         }
+    }
+    // Controls take priority over decoration. On short terminals, scroll the
+    // selected control into view rather than clipping an inaccessible row.
+    let gem_height = 7.min(area.height.saturating_sub(lines.len() as u16));
+    let body_height = area.height.saturating_sub(gem_height);
+    let selected = rows
+        .iter()
+        .position(|row| *row == Some(state.selected_tweak_row()))
+        .unwrap_or(0);
+    let scroll = selected
+        .saturating_sub(body_height.saturating_sub(1) as usize)
+        .min(lines.len().saturating_sub(body_height as usize));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((scroll as u16, 0)),
+        Rect::new(area.x, area.y, area.width, body_height),
+    );
+    let gem_area = Rect::new(
+        area.x + 2.min(area.width / 2),
+        area.y + body_height,
+        area.width.saturating_sub(4),
+        gem_height.saturating_sub(1),
+    );
+    if gem_area.width > 0 && gem_area.height > 0 {
+        draw_gem(frame, gem_area, state.gem());
     } else {
         state.gem().hit_area.set(None);
     }

@@ -3,6 +3,7 @@ use ratatui_textarea::{Input, Key};
 use crate::app::common::readline::ctrl_byte_to_input;
 use crate::app::input::{ParsedInput, insert_pasted_text};
 use crate::app::{mod_modal::state::ModModalState, state::App};
+use crate::moderation::command::{ModCommand, parse_mod_command};
 
 pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
     if let ParsedInput::Paste(pasted) = event {
@@ -125,8 +126,9 @@ fn submit(app: &mut App) {
         return;
     }
     app.mod_modal_state.append_input(&command);
+    let is_help = matches!(parse_mod_command(&command), Ok(ModCommand::Help { .. }));
     let request_id = app.chat.submit_mod_command(command);
-    app.mod_modal_state.append_pending(request_id);
+    app.mod_modal_state.append_pending(request_id, is_help);
     app.mod_modal_state.clear_command();
 }
 

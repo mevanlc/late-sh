@@ -12,6 +12,10 @@ use crate::authz::Permissions;
 use crate::session::SessionMessage;
 use crate::state::State;
 
+#[cfg(test)]
+#[path = "session_bootstrap_test.rs"]
+mod tests;
+
 pub struct SessionBootstrapInputs {
     pub user: User,
     pub is_new_user: bool,
@@ -391,7 +395,12 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         }
     };
     // The door: the day's wall piece, or the cup.
-    let splash_piece = state.gallery_service.splash_piece();
+    let splash_piece = state
+        .gallery_service
+        .splash_piece_for_mode(late_core::models::user::extract_art_splash_mode(
+            &user.settings,
+        ))
+        .await;
     let initial_door_rcs = match state.door_rc_service.list(user_id).await {
         Ok(rcs) => rcs,
         Err(e) => {

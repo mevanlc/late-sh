@@ -1216,3 +1216,27 @@ pub fn test_app_flags_rx()
     }));
     rx
 }
+
+/// Hang yesterday's canvas and publish it as today's login splash.
+pub async fn publish_test_splash(state: &State) -> Uuid {
+    use late_core::models::artboard_piece::{ArtboardPiece, HangOutcome, HangParams};
+    let owner = late_core::test_utils::create_test_user(&state.db, "login-splash-artist").await;
+    let client = state.db.get().await.unwrap();
+    let HangOutcome::Hung(piece) = ArtboardPiece::hang(&client, HangParams {
+        user_id: owner.id, title: "login splash fixture".to_string(), width: 12, height: 4,
+        canvas: serde_json::json!({"width":12,"height":4,"cells":[[{"x":0,"y":0},{"Narrow":"#"}]],"colors":[]}),
+        provenance: serde_json::json!({"cells":[[{"x":0,"y":0},"painter"]]}), glyph_count: 40,
+        own_share_percent: 100, content_hash: "login-splash-fixture".to_string(),
+    }).await.unwrap() else { panic!("hang"); };
+    client.execute("UPDATE artboard_pieces SET created = CURRENT_TIMESTAMP - INTERVAL '1 day' WHERE id = $1", &[&piece.id]).await.unwrap();
+    state
+        .gallery_service
+        .refresh_splash(chrono::Utc::now().date_naive())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.gallery_service.splash_piece().unwrap().piece.id,
+        piece.id
+    );
+    piece.id
+}

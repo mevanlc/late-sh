@@ -95,6 +95,9 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, interacting: bool
     if state.is_help_open() {
         draw_help(frame, area, state);
     }
+    if state.gallery().rating_dialog.is_some() {
+        super::gallery::ui::draw_rating_dialog(frame, area, state.gallery());
+    }
     if state.is_glyph_picker_open()
         && let Some(catalog) = state.glyph_catalog()
     {

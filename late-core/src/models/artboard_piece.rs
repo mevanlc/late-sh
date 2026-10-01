@@ -35,6 +35,7 @@ use tokio_postgres::{Row, error::SqlState};
 use uuid::Uuid;
 
 use super::app_flag::AppFlag;
+use super::artboard_piece_rating::ContentRatingSummary;
 
 /// Fewest non-blank glyphs a frame may hold. A smiley is not a piece.
 pub const PIECE_MIN_GLYPHS: usize = 40;
@@ -75,6 +76,7 @@ pub struct ArtboardPiece {
     pub period_month: NaiveDate,
     pub applause: i64,
     pub applauded_by_viewer: bool,
+    pub content_rating: ContentRatingSummary,
 }
 
 impl From<Row> for ArtboardPiece {
@@ -94,6 +96,7 @@ impl From<Row> for ArtboardPiece {
             period_month: row.get("period_month"),
             applause: row.get("applause"),
             applauded_by_viewer: row.get("applauded_by_viewer"),
+            content_rating: ContentRatingSummary::from_row(&row),
         }
     }
 }
@@ -115,7 +118,7 @@ pub struct HangParams {
 /// everything the hanger checks itself (size, share) never reaches here.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HangOutcome {
-    Hung(ArtboardPiece),
+    Hung(Box<ArtboardPiece>),
     DailyCapReached,
     Duplicate,
 }
@@ -230,9 +233,14 @@ const PIECE_VIEW_SQL: &str =
             EXISTS (
                 SELECT 1 FROM artboard_piece_votes v
                 WHERE v.piece_id = p.id AND v.user_id = $1
-            ) AS applauded_by_viewer
+            ) AS applauded_by_viewer,
+            r.owner_marked_nsfw, r.sfw_votes, r.nsfw_votes, r.mod_sfw, r.mod_nsfw,
+            r.admin_sfw, r.admin_nsfw,
+            (SELECT nsfw FROM artboard_piece_content_votes
+             WHERE piece_id = p.id AND user_id = $1) AS viewer_content_vote
      FROM (SELECT * FROM artboard_pieces WHERE removed_at IS NULL) p
-     JOIN users u ON u.id = p.user_id";
+     JOIN users u ON u.id = p.user_id
+     JOIN artboard_piece_content_ratings r ON r.piece_id = p.id";
 
 impl ArtboardPiece {
     /// Hang a piece. The per-month duplicate is the unique index, so two
@@ -287,7 +295,7 @@ impl ArtboardPiece {
         };
         let id: Uuid = row.get("id");
         match Self::find(client, params.user_id, id).await? {
-            Some(piece) => Ok(HangOutcome::Hung(piece)),
+            Some(piece) => Ok(HangOutcome::Hung(Box::new(piece))),
             None => anyhow::bail!("hung artboard piece {id} vanished before it could be read back"),
         }
     }

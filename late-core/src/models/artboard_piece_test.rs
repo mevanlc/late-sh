@@ -29,7 +29,7 @@ pub(crate) fn hang_params(user_id: Uuid, title: &str, content_hash: &str) -> Han
 
 async fn hang(client: &impl deadpool_postgres::GenericClient, params: HangParams) -> ArtboardPiece {
     match ArtboardPiece::hang(client, params).await.expect("hang") {
-        HangOutcome::Hung(piece) => piece,
+        HangOutcome::Hung(piece) => *piece,
         other => panic!("expected the piece to hang, got {other:?}"),
     }
 }
