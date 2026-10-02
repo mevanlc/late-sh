@@ -26,9 +26,11 @@ pub(crate) enum Target {
     Close,
     Tab(Tab),
     Row(Row),
+    RowCycle(Row, bool),
     Tweak(TweakRow),
     TweakCycle(TweakRow, bool),
     SidebarMode,
+    SidebarPanels,
     Account(AccountRow),
     Theme(usize),
     Star(usize),
@@ -37,6 +39,7 @@ pub(crate) enum Target {
     StatusToggle(usize),
     StatusMove(usize, isize),
     Dial(usize),
+    DialCycle(usize, bool),
     Sidebar(usize),
     SidebarMove(usize, isize),
     Badge(usize),
@@ -108,6 +111,13 @@ impl MouseState {
 
     pub(crate) fn reveal_selection(&self) {
         self.reveal.set(true);
+        self.invalidate();
+    }
+
+    pub(crate) fn reset_pane(&self, pane: Pane) {
+        let mut offsets = self.offsets.get();
+        offsets[pane as usize] = 0;
+        self.offsets.set(offsets);
         self.invalidate();
     }
 

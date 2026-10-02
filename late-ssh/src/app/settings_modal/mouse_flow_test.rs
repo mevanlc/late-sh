@@ -19,6 +19,8 @@ async fn fixture() -> (TestDb, App) {
     let profile = Profile::load(&client, user.id).await.unwrap();
     app.settings_modal_state
         .open_from_profile(&profile, app.rail_modes());
+    app.settings_modal_state
+        .set_interaction_mode_display(app.interaction_mode);
     app.show_settings = true;
     (db, app)
 }
@@ -831,4 +833,412 @@ async fn settings_mouse_link_confirmation_choices_fields_and_submit_on_short_ter
         "disposable peer to be linked",
     )
     .await;
+}
+
+fn rect_for(app: &App, target: Target) -> ratatui::layout::Rect {
+    hits(app)
+        .into_iter()
+        .rev()
+        .find_map(|(rect, hit)| (hit == target).then_some(rect))
+        .unwrap()
+}
+
+fn rendered_row(buffer: &Buffer, rect: ratatui::layout::Rect) -> String {
+    let mut text = String::new();
+    let mut x = rect.x;
+    while x < rect.right() {
+        let symbol = buffer[(x, rect.y)].symbol();
+        text.push_str(symbol);
+        x += ratatui::text::Span::raw(symbol).width().max(1) as u16;
+    }
+    text
+}
+
+#[tokio::test]
+async fn notification_choices_render_every_value_with_stable_directional_targets() {
+    let (_db, mut app) = fixture().await;
+    let full_width = text(&paint(&app));
+    assert!(full_width.contains("Auto-translate new messages"));
+    assert!(full_width.contains("Translate my messages to English"));
+    assert!(full_width.contains("Streams (friends live, your viewers)"));
+    for size in [(120, 40), (48, 14)] {
+        app.resize(size.0, size.1).unwrap();
+        for (row, count) in [(Row::Cooldown, 10), (Row::NotifyFormat, 3)] {
+            app.settings_modal_state
+                .select_mouse_target(Target::Row(row));
+            app.settings_modal_state.mouse.reveal_selection();
+            paint(&app);
+            let left = rect_for(&app, Target::RowCycle(row, false));
+            let right = rect_for(&app, Target::RowCycle(row, true));
+            let original = (
+                app.settings_modal_state.draft().notify_cooldown_mins,
+                app.settings_modal_state.draft().notify_format.clone(),
+            );
+            for forward in [true, false] {
+                for _ in 0..count {
+                    let buffer = paint(&app);
+                    assert_eq!(rect_for(&app, Target::RowCycle(row, false)), left);
+                    assert_eq!(rect_for(&app, Target::RowCycle(row, true)), right);
+                    assert_eq!(buffer[(left.x, left.y)].symbol(), "◂");
+                    assert_eq!(buffer[(right.x + 1, right.y)].symbol(), "▸");
+                    let label = if row == Row::Cooldown {
+                        let mins = app.settings_modal_state.draft().notify_cooldown_mins;
+                        if mins == 0 {
+                            "off".to_string()
+                        } else {
+                            format!("{mins} min")
+                        }
+                    } else {
+                        match app.settings_modal_state.draft().notify_format.as_deref() {
+                            Some("osc777") => "OSC 777",
+                            Some("osc9") => "OSC 9",
+                            _ => "Both (777 + 9)",
+                        }
+                        .to_string()
+                    };
+                    assert!(
+                        rendered_row(&buffer, rect_for(&app, Target::Row(row))).contains(&label)
+                    );
+                    let before = (
+                        app.settings_modal_state.draft().notify_cooldown_mins,
+                        app.settings_modal_state.draft().notify_format.clone(),
+                    );
+                    wheel(&mut app, Target::Row(row), false);
+                    assert_eq!(
+                        (
+                            app.settings_modal_state.draft().notify_cooldown_mins,
+                            app.settings_modal_state.draft().notify_format.clone()
+                        ),
+                        before
+                    );
+                    app.settings_modal_state.mouse.reveal_selection();
+                    click(&mut app, Target::RowCycle(row, forward));
+                    assert_eq!(app.settings_modal_state.selected_row(), row);
+                }
+            }
+            assert_eq!(
+                app.settings_modal_state.draft().notify_cooldown_mins,
+                original.0
+            );
+            if original.1.is_some() {
+                assert_eq!(app.settings_modal_state.draft().notify_format, original.1);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn language_chooser_selects_current_filters_native_names_and_codes_and_cancels() {
+    use late_core::models::message_translation::TranslateLang;
+    let (_db, mut app) = fixture().await;
+    for size in [(120, 40), (48, 14)] {
+        app.resize(size.0, size.1).unwrap();
+        for (index, lang) in TranslateLang::ALL.into_iter().enumerate() {
+            app.settings_modal_state
+                .select_mouse_target(Target::Row(Row::TranslateTo));
+            app.settings_modal_state.mouse.reveal_selection();
+            let buffer = paint(&app);
+            assert!(
+                rendered_row(&buffer, rect_for(&app, Target::Row(Row::TranslateTo)))
+                    .contains(app.settings_modal_state.draft().translate_to.label())
+            );
+            let current = app.settings_modal_state.draft().translate_to;
+            click(&mut app, Target::Row(Row::TranslateTo));
+            assert_eq!(
+                app.settings_modal_state.picker().selected_index,
+                TranslateLang::ALL
+                    .iter()
+                    .position(|lang| *lang == current)
+                    .unwrap()
+            );
+            app.handle_input(lang.as_str().as_bytes());
+            let chosen = app
+                .settings_modal_state
+                .filtered_languages()
+                .iter()
+                .position(|value| *value == lang)
+                .unwrap();
+            click(&mut app, Target::Pick(chosen));
+            assert_eq!(app.settings_modal_state.draft().translate_to, lang);
+            assert!(!app.settings_modal_state.picker_open());
+            app.handle_input(b" ");
+            assert_eq!(app.settings_modal_state.picker().selected_index, index);
+            paint(&app);
+            assert!(
+                hits(&app)
+                    .iter()
+                    .all(|(_, target)| matches!(target, Target::Close | Target::Pick(_)))
+            );
+            click(&mut app, Target::Close);
+            assert_eq!(app.settings_modal_state.draft().translate_to, lang);
+        }
+    }
+    app.settings_modal_state
+        .open_picker(super::state::PickerKind::Language);
+    for ch in "日本語".chars() {
+        app.settings_modal_state.picker_push(ch);
+    }
+    assert_eq!(
+        app.settings_modal_state.filtered_languages(),
+        vec![TranslateLang::Ja]
+    );
+    app.handle_input(b"\r");
+    assert_eq!(
+        app.settings_modal_state.draft().translate_to,
+        TranslateLang::Ja
+    );
+    app.handle_input(b" ");
+    app.handle_input(b"no-such-language");
+    assert_eq!(app.settings_modal_state.picker_len(), 0);
+    assert!(text(&paint(&app)).contains("no results"));
+    app.handle_input(b"\r");
+    assert_eq!(
+        app.settings_modal_state.draft().translate_to,
+        TranslateLang::Ja
+    );
+    app.handle_input(b"\x1b[D");
+    assert_eq!(
+        app.settings_modal_state.draft().translate_to,
+        TranslateLang::Ko
+    );
+    app.handle_input(b"\x1b[C");
+    app.handle_input(b" ");
+    app.handle_input(b"en");
+    super::input::handle_escape(&mut app);
+    assert!(!app.settings_modal_state.picker_open());
+    assert_eq!(
+        app.settings_modal_state.draft().translate_to,
+        TranslateLang::Ja
+    );
+}
+
+#[tokio::test]
+async fn interaction_chooser_applies_explicit_modes_and_terminal_reporting_once() {
+    let (db, mut app) = fixture().await;
+    app.settings_modal_state.select_tab(Tab::Tweaks);
+    app.settings_modal_state
+        .select_mouse_target(Target::Tweak(TweakRow::InteractionMode));
+    app.resize(48, 14).unwrap();
+    app.settings_modal_state.mouse.reveal_selection();
+    click(&mut app, Target::Tweak(TweakRow::InteractionMode));
+    assert_eq!(app.settings_modal_state.picker().selected_index, 2);
+    assert_eq!(app.interaction_mode, InteractionMode::Hybrid);
+    let buffer = paint(&app);
+    assert!(text(&buffer).contains("Keyboard disables clicks and wheel"));
+    click(&mut app, Target::Close);
+    assert!(app.pending_terminal_commands.is_empty());
+    app.handle_input(b" ");
+    click(&mut app, Target::Pick(0));
+    assert_eq!(app.interaction_mode, InteractionMode::Keyboard);
+    assert!(!app.settings_modal_state.picker_open());
+    assert_eq!(
+        app.pending_terminal_commands,
+        vec![b"\x1b[?1006l\x1b[?1003l\x1b[?1000l".to_vec()]
+    );
+    app.pending_terminal_commands.clear();
+    app.handle_input(b"\r");
+    app.handle_input(b"mouse");
+    app.handle_input(b"\r");
+    assert_eq!(app.interaction_mode, InteractionMode::Mouse);
+    assert_eq!(
+        app.settings_modal_state.interaction_mode(),
+        InteractionMode::Mouse
+    );
+    assert_eq!(
+        app.pending_terminal_commands,
+        vec![b"\x1b[?1000h\x1b[?1003h\x1b[?1006h".to_vec()]
+    );
+    app.pending_terminal_commands.clear();
+    app.handle_input(b" ");
+    click(&mut app, Target::Pick(2));
+    assert_eq!(app.interaction_mode, InteractionMode::Hybrid);
+    assert!(app.pending_terminal_commands.is_empty());
+    app.handle_input(b" ");
+    app.handle_input(b"xyz");
+    app.handle_input(b"\r");
+    assert_eq!(app.interaction_mode, InteractionMode::Hybrid);
+    app.handle_input(b"\x1b[D");
+    assert_eq!(app.interaction_mode, InteractionMode::Mouse);
+    app.handle_input(b"\x1b[C");
+    assert_eq!(app.interaction_mode, InteractionMode::Hybrid);
+    let user_id = app.user_id;
+    crate::test_helpers::wait_until(
+        || {
+            let db = db.db.clone();
+            async move {
+                let client = db.get().await.unwrap();
+                let user = late_core::models::user::User::get(&client, user_id)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                late_core::models::user::extract_interaction_mode(&user.settings)
+                    == Some(InteractionMode::Hybrid)
+            }
+        },
+        "interaction mode persistence",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sidebar_arrows_preserve_device_only_persistence_and_always_offer_panels() {
+    use late_core::models::user_ssh_key::{UserSshKey, extract_key_layout};
+    let (db, mut app) = fixture().await;
+    let client = db.db.get().await.unwrap();
+    UserSshKey::ensure(&client, app.user_id, "settings-device")
+        .await
+        .unwrap();
+    UserSshKey::ensure(&client, app.user_id, "other-device")
+        .await
+        .unwrap();
+    app.key_fingerprint = Some("settings-device".to_string());
+    let original = app.rail_modes();
+    app.settings_modal_state.select_tab(Tab::Tweaks);
+    for size in [(120, 40), (48, 14)] {
+        app.resize(size.0, size.1).unwrap();
+        for row in [TweakRow::RightSidebar, TweakRow::RoomListSidebar] {
+            app.settings_modal_state
+                .select_mouse_target(Target::Tweak(row));
+            app.settings_modal_state.mouse.reveal_selection();
+            paint(&app);
+            let left = rect_for(&app, Target::TweakCycle(row, false));
+            let right = rect_for(&app, Target::TweakCycle(row, true));
+            for forward in [true, true, true, false, false, false] {
+                click(&mut app, Target::TweakCycle(row, forward));
+                let expected = app.device_rails.unwrap();
+                let db = db.db.clone();
+                let user_id = app.user_id;
+                crate::test_helpers::wait_until(
+                    || {
+                        let db = db.clone();
+                        async move {
+                            let client = db.get().await.unwrap();
+                            let key = UserSshKey::find_by_fingerprint(
+                                &client,
+                                user_id,
+                                "settings-device",
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                            extract_key_layout(&key.settings) == Some(expected)
+                        }
+                    },
+                    "Settings sidebar device persistence",
+                )
+                .await;
+                let buffer = paint(&app);
+                assert_eq!(rect_for(&app, Target::TweakCycle(row, false)), left);
+                assert_eq!(rect_for(&app, Target::TweakCycle(row, true)), right);
+                assert_eq!(buffer[(left.x, left.y)].symbol(), "◂");
+                assert_eq!(buffer[(right.x + 1, right.y)].symbol(), "▸");
+                assert_eq!(app.rail_modes(), app.settings_modal_state.device_rails());
+                if row == TweakRow::RightSidebar {
+                    assert_eq!(
+                        rendered_row(&buffer, rect_for(&app, Target::SidebarPanels)),
+                        "[Panels]"
+                    );
+                    click(&mut app, Target::SidebarPanels);
+                    assert!(app.settings_modal_state.right_sidebar_components_open());
+                    click(&mut app, Target::Close);
+                }
+            }
+        }
+        assert_eq!(app.rail_modes(), original);
+    }
+    assert!(
+        extract_key_layout(
+            &UserSshKey::find_by_fingerprint(&client, app.user_id, "other-device")
+                .await
+                .unwrap()
+                .unwrap()
+                .settings
+        )
+        .is_none()
+    );
+    let stored = Profile::load(&client, app.user_id).await.unwrap();
+    assert_eq!((stored.room_list_mode, stored.right_sidebar_mode), original);
+    click(&mut app, Target::Tweak(TweakRow::RightSidebar));
+    assert!(app.settings_modal_state.right_sidebar_components_open());
+}
+
+#[tokio::test]
+async fn statusline_compaction_keeps_names_and_distinct_checkbox_reorder_targets() {
+    let (_db, mut app) = fixture().await;
+    app.settings_modal_state.select_tab(Tab::Statusline);
+    for size in [(120, 40), (48, 14), (60, 14)] {
+        app.resize(size.0, size.1).unwrap();
+        for index in 0..app.settings_modal_state.statusline_components().len() {
+            app.settings_modal_state
+                .select_mouse_target(Target::Status(index));
+            app.settings_modal_state.mouse.reveal_selection();
+            let buffer = paint(&app);
+            let row = rect_for(&app, Target::Status(index));
+            let label = app.settings_modal_state.statusline_components()[index]
+                .component
+                .label();
+            assert!(rendered_row(&buffer, row).contains(label));
+            let toggle = rect_for(&app, Target::StatusToggle(index));
+            let up = rect_for(&app, Target::StatusMove(index, -1));
+            let down = rect_for(&app, Target::StatusMove(index, 1));
+            assert_eq!(toggle.x, row.x + 1);
+            assert_eq!(up.right(), down.x);
+            assert_eq!(
+                up.x,
+                row.x + ratatui::text::Span::raw(format!(">[ ] {label} ")).width() as u16
+            );
+            assert!(!toggle.intersects(up));
+            assert!(!toggle.intersects(down));
+        }
+    }
+    app.resize(120, 40).unwrap();
+    for index in 0..app.settings_modal_state.statusline_components().len() {
+        app.settings_modal_state
+            .select_mouse_target(Target::Status(index));
+        app.settings_modal_state
+            .focus_statusline_pane(StatuslinePane::Detail);
+        for dial_index in 0..app.settings_modal_state.statusline_dials().len() {
+            app.settings_modal_state
+                .select_mouse_target(Target::Dial(dial_index));
+            let dial = app.settings_modal_state.statusline_dials()[dial_index];
+            if !matches!(
+                dial,
+                super::state::StatuslineDial::Label | super::state::StatuslineDial::Variant
+            ) {
+                continue;
+            }
+            let original = app.settings_modal_state.statusline_components()[index];
+            paint(&app);
+            let left = rect_for(&app, Target::DialCycle(dial_index, false));
+            let right = rect_for(&app, Target::DialCycle(dial_index, true));
+            let count = if dial == super::state::StatuslineDial::Label {
+                if original.component.text_label().is_empty() {
+                    2
+                } else {
+                    3
+                }
+            } else {
+                original.component.variants().len()
+            };
+            for forward in [true, false] {
+                for _ in 0..count {
+                    let buffer = paint(&app);
+                    assert_eq!(rect_for(&app, Target::DialCycle(dial_index, false)), left);
+                    assert_eq!(rect_for(&app, Target::DialCycle(dial_index, true)), right);
+                    assert_eq!(buffer[(left.x, left.y)].symbol(), "◂");
+                    assert_eq!(buffer[(right.x + 1, right.y)].symbol(), "▸");
+                    let before = app.settings_modal_state.statusline_components()[index];
+                    click(&mut app, Target::DialCycle(dial_index, forward));
+                    assert_ne!(
+                        app.settings_modal_state.statusline_components()[index],
+                        before
+                    );
+                }
+            }
+            assert_eq!(
+                app.settings_modal_state.statusline_components()[index],
+                original
+            );
+        }
+    }
 }

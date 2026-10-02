@@ -178,3 +178,15 @@ fn variant_cycle_wraps_and_recovers_from_an_unset_variant() {
         None
     );
 }
+
+#[test]
+fn notification_cycles_keep_order_and_reverse_at_both_ends() {
+    assert_eq!(cycle_cooldown_value(0, false), 240);
+    assert_eq!(cycle_cooldown_value(240, true), 0);
+    assert_eq!(cycle_cooldown_value(5, false), 2);
+    assert_eq!(cycle_cooldown_value(5, true), 10);
+    assert_eq!(cycle_notify_format(None, false), "osc9");
+    assert_eq!(cycle_notify_format(Some("osc9"), true), "both");
+    assert_eq!(cycle_notify_format(Some("osc777"), false), "both");
+    assert_eq!(cycle_notify_format(Some("both"), true), "osc777");
+}

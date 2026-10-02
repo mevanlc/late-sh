@@ -2,6 +2,7 @@ use std::cell::Cell;
 
 use super::mouse::{Field, MouseState, Target};
 use chrono::{DateTime, Utc};
+use late_core::models::message_translation::TranslateLang;
 use late_core::models::profile::{Profile, ProfileParams};
 use late_core::models::profile_award::{ChatBadgeRow, chat_badge_rows};
 use late_core::models::rss_feed::RssFeed;
@@ -9,7 +10,7 @@ use late_core::models::statusline::{
     LabelMode, StatusComponent, StatusComponentSetting, StatusVariant,
 };
 use late_core::models::user::{
-    RightSidebarComponentSetting, RightSidebarMode, RoomListMode,
+    InteractionMode, RightSidebarComponentSetting, RightSidebarMode, RoomListMode,
     normalize_text_brightness_adjustment, sanitize_username_input,
 };
 use ratatui::style::{Modifier, Style};
@@ -41,6 +42,22 @@ pub(crate) const LINK_CONFIRM_MISMATCH: &str = "Typed username does not match th
 pub(crate) enum PickerKind {
     Country,
     Timezone,
+    Language,
+    InteractionMode,
+}
+
+pub(crate) const INTERACTION_MODES: [InteractionMode; 3] = [
+    InteractionMode::Keyboard,
+    InteractionMode::Mouse,
+    InteractionMode::Hybrid,
+];
+
+pub(crate) fn interaction_mode_label(mode: InteractionMode) -> &'static str {
+    match mode {
+        InteractionMode::Keyboard => "Keyboard",
+        InteractionMode::Mouse => "Mouse",
+        InteractionMode::Hybrid => "Hybrid",
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1129,6 +1146,8 @@ impl SettingsModalState {
 
     pub(crate) fn cycle_selected_tweak(&mut self, forward: bool) {
         match self.selected_tweak_row() {
+            TweakRow::RightSidebar => self.device_rails.1 = self.device_rails.1.cycle(forward),
+            TweakRow::RoomListSidebar => self.device_rails.0 = self.device_rails.0.cycle(forward),
             TweakRow::TextBrightness => self.cycle_text_brightness_adjustment(forward),
             TweakRow::LandingPage => {
                 self.draft.landing_page = self.draft.landing_page.cycle(forward);
@@ -2061,14 +2080,27 @@ impl SettingsModalState {
     }
 
     pub(crate) fn open_picker(&mut self, kind: PickerKind) {
+        self.mouse.reset_pane(super::mouse::Pane::Picker);
+        self.mouse.reveal_selection();
         self.picker.kind = Some(kind);
         self.picker.query.clear();
-        self.picker.selected_index = 0;
+        self.picker.selected_index = match kind {
+            PickerKind::Language => TranslateLang::ALL
+                .iter()
+                .position(|lang| *lang == self.draft.translate_to)
+                .unwrap_or(0),
+            PickerKind::InteractionMode => INTERACTION_MODES
+                .iter()
+                .position(|mode| *mode == self.interaction_mode)
+                .unwrap_or(0),
+            _ => 0,
+        };
         self.picker.scroll_offset = 0;
     }
 
     pub(crate) fn close_picker(&mut self) {
         self.picker = PickerState::default();
+        self.mouse.invalidate();
     }
 
     /// The tag picker closed on the langs row: canonical language tags,
@@ -2093,8 +2125,42 @@ impl SettingsModalState {
         match self.picker.kind {
             Some(PickerKind::Country) => self.filtered_countries().len(),
             Some(PickerKind::Timezone) => self.filtered_timezones().len(),
+            Some(PickerKind::Language) => self.filtered_languages().len(),
+            Some(PickerKind::InteractionMode) => self.filtered_interaction_modes().len(),
             None => 0,
         }
+    }
+
+    pub(crate) fn filtered_languages(&self) -> Vec<TranslateLang> {
+        let query = self.picker.query.trim().to_lowercase();
+        TranslateLang::ALL
+            .into_iter()
+            .filter(|lang| {
+                lang.label().to_lowercase().contains(&query) || lang.as_str().contains(&query)
+            })
+            .collect()
+    }
+
+    pub(crate) fn filtered_interaction_modes(&self) -> Vec<InteractionMode> {
+        let query = self.picker.query.trim().to_lowercase();
+        INTERACTION_MODES
+            .into_iter()
+            .filter(|mode| {
+                interaction_mode_label(*mode)
+                    .to_lowercase()
+                    .contains(&query)
+            })
+            .collect()
+    }
+
+    pub(crate) fn picker_interaction_mode(&self) -> Option<InteractionMode> {
+        (self.picker.kind == Some(PickerKind::InteractionMode))
+            .then(|| {
+                self.filtered_interaction_modes()
+                    .get(self.picker.selected_index)
+                    .copied()
+            })
+            .flatten()
     }
 
     pub(crate) fn picker_move(&mut self, delta: isize) {
@@ -2115,12 +2181,16 @@ impl SettingsModalState {
     }
 
     pub(crate) fn picker_push(&mut self, ch: char) {
+        self.mouse.reset_pane(super::mouse::Pane::Picker);
+        self.mouse.reveal_selection();
         self.picker.query.push(ch);
         self.picker.selected_index = 0;
         self.picker.scroll_offset = 0;
     }
 
     pub(crate) fn picker_backspace(&mut self) {
+        self.mouse.reset_pane(super::mouse::Pane::Picker);
+        self.mouse.reveal_selection();
         self.picker.query.pop();
         self.picker.selected_index = 0;
         self.picker.scroll_offset = 0;
@@ -2143,6 +2213,17 @@ impl SettingsModalState {
                     mutated = true;
                 }
             }
+            Some(PickerKind::Language) => {
+                if let Some(lang) = self
+                    .filtered_languages()
+                    .get(self.picker.selected_index)
+                    .copied()
+                {
+                    self.draft.translate_to = lang;
+                    mutated = true;
+                }
+            }
+            Some(PickerKind::InteractionMode) => {} // Applied through App's setter by input.rs.
             None => {}
         }
         self.close_picker();
@@ -2574,7 +2655,7 @@ impl SettingsModalState {
 
     pub(crate) fn select_mouse_target(&mut self, target: Target) {
         match target {
-            Target::Row(row) => {
+            Target::Row(row) | Target::RowCycle(row, _) => {
                 self.row_index = Row::ALL.iter().position(|r| *r == row).unwrap_or(0)
             }
             Target::Tweak(row) | Target::TweakCycle(row, _) => {
@@ -2597,7 +2678,7 @@ impl SettingsModalState {
                     index.min(self.statusline_components().len().saturating_sub(1));
                 self.clamp_statusline_dial();
             }
-            Target::Dial(index) => {
+            Target::Dial(index) | Target::DialCycle(index, _) => {
                 self.statusline_dial_index =
                     index.min(self.statusline_dials().len().saturating_sub(1))
             }

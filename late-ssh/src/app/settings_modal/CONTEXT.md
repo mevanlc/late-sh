@@ -21,17 +21,32 @@ rows and never move selection, apply a theme, toggle a setting, or edit text.
 Keyboard input reveals selection/caret again. Tabs wrap on narrow terminals.
 
 Settings/Tweaks clicks reuse keyboard actions, including per-device rail and
-interaction-mode updates. The Right sidebar mode value cycles this device's mode;
-its label/panels affordance opens the panel chooser. Terminal images, Land on, and
-Gallery Art on Splash, plus Text Brightness, share bold amber arrows. Left/right
-arrows decrease/increase or cycle backward/forward. Each reserves its longest
-choice's width for stable arrows and row hitboxes; labels shorten to keep both
-arrows visible on narrow terminals. Theme labels apply, headings
-fold, stars favorite, and search starts filtering. Statusline labels open options and checkboxes toggle;
-its options cycle on click. Statusline and Sidebar panels expose up/down buttons.
-Country/timezone results apply and close; the shared tag picker toggles clicked
-tags and Done returns them to its caller. RSS exposes Add, Remove, and Refresh;
-subscription selection follows its UUID across asynchronous list replacement.
+interaction-mode updates. Cooldown, notification format, both sidebar modes,
+Terminal images, Land on, Gallery Art on Splash, and Text Brightness share bold
+amber arrows. Only the arrows choose direction; other row/value clicks cycle
+forward. Every cycle reserves its longest option width. Ratatui measures both
+rendered spans and clipped hitboxes, and labels shorten at grapheme boundaries
+before complete controls. Right sidebar's label and always-visible `[Panels]`
+button open its panel editor, including when Off.
+
+Target language and Interaction mode open the shared picker on click or
+Enter/Space; Left/Right keyboard cycling stays available. Opening selects the
+current value without applying it. Enter or a result click applies once and
+closes; Esc/[x] cancels. Language filtering matches English/native names and
+stored codes in the existing 17-language order. Interaction mode offers
+Keyboard, Mouse, and Hybrid, explains that Keyboard disables clicks/wheel, and
+uses App's setter for terminal reporting and persistence.
+
+Statusline keeps its existing split layout. Its compact list column fits the
+widest `>[ ] Name [↑][↓]` entry, with adjacent reorder buttons and no gap between
+cursor and checkbox. Option titles sit two cells from their controls; Label and
+component-specific options have directional arrows, while Brief/Auto-hide are
+simple toggles. Labels open options; checkboxes toggle. Pane offsets and wheel
+behavior stay independent. Responsive single-pane switching is deferred.
+Theme labels apply, headings fold, stars favorite, and search filters.
+Country/timezone results apply and close; the shared profile Langs tag picker
+toggles clicked tags and Done returns them to its caller. RSS exposes Add,
+Remove, and Refresh; selection follows its UUID across asynchronous replacement.
 
 Mouse navigation away from an ordinary text edit retains its buffer and queues
 one typed destination until a private oneshot result arrives. Profile saves and

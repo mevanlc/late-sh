@@ -1328,7 +1328,8 @@ Left clicks on the frame's `0`–`6` screen numbers run before page-specific inp
 | `Tab` / `Shift+Tab` | Settings modal | Switch tabs: Settings, Bio, Themes, Tweaks, Statusline, Account, RSS |
 | `↑` / `↓` / `j` / `k` | Settings modal | Move within the active tab. Settings rows include Username, IDE, Terminal, OS, Langs, Theme, Background, Text Brightness, Right sidebar, Room list, Country, Timezone, DMs, @mentions, Game events, Bell, Cooldown, Format |
 | `←` / `→` | Settings modal | Cycle the current row's setting (theme, toggles, cooldown, notification format) |
-| `Space` / `Enter` / `e` | Settings modal | Activate row: edit username/system fields/bio, cycle a setting, or open the country/timezone picker |
+| `◂` / `▸` clicks | Settings choice controls | Cycle backward/forward with stable arrow positions; ordinary row/value clicks cycle forward. Target language and Interaction mode open choosers; language search matches names/native names/codes. Right sidebar label or `[Panels]` opens panels even when Off. Statusline keeps the split layout with compact list rows and directional options |
+| `Space` / `Enter` / `e` | Settings modal | Activate row: edit username/system fields/bio, cycle a setting, or open the country/timezone/translation-language/interaction-mode chooser |
 | `Shift+↑` / `Shift+↓` / `Space` / `Enter` | Settings modal Statusline tab | Move the selected segment along the bar (`[`/`]` alias), turn it on/off, or step into its options; Keyhints offers a Brief on/off option. `Left`/`Right` change the focused option. `Esc` backs out of the options, then closes |
 | `a` / `d` / `r` | Settings modal RSS tab | Add, delete, or refresh private RSS/Atom subscriptions |
 | `Alt+Enter` / `Ctrl+J` | Settings modal (bio editing) | Insert newline |

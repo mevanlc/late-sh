@@ -738,7 +738,9 @@ fn draw_settings_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalS
 
     for row in Row::ALL {
         let rect = sections[settings_row_y(row)];
-        state.mouse.hit(rect, Target::Row(row));
+        if !matches!(row, Row::Cooldown | Row::NotifyFormat) {
+            state.mouse.hit(rect, Target::Row(row));
+        }
     }
     let width = area.width as usize;
 
@@ -946,36 +948,29 @@ fn draw_settings_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalS
         )),
         sections[22],
     );
-    frame.render_widget(
-        Paragraph::new(row_line(
-            state,
+    for (row, label, value) in [
+        (
             Row::Cooldown,
-            width,
             "Cooldown",
-            if state.draft().notify_cooldown_mins == 0 {
-                value_span("off", theme::TEXT_FAINT())
-            } else {
-                value_span(
-                    format!("{} min", state.draft().notify_cooldown_mins),
-                    theme::TEXT_BRIGHT(),
-                )
-            },
-        )),
-        sections[23],
-    );
-    frame.render_widget(
-        Paragraph::new(row_line(
-            state,
+            cooldown_span(state.draft().notify_cooldown_mins),
+        ),
+        (
             Row::NotifyFormat,
-            width,
             "Format",
-            value_span(
-                notify_format_label(state.draft().notify_format.as_deref()),
-                theme::TEXT_BRIGHT(),
-            ),
-        )),
-        sections[24],
-    );
+            notify_format_span(state.draft().notify_format.as_deref()),
+        ),
+    ] {
+        let line = row_line(state, row, width, label, value);
+        choice_hits(
+            state,
+            sections[settings_row_y(row)],
+            &line,
+            Target::Row(row),
+            Target::RowCycle(row, false),
+            Target::RowCycle(row, true),
+        );
+        frame.render_widget(Paragraph::new(line), sections[settings_row_y(row)]);
+    }
 
     if state.editing_username() {
         draw_text_field(
@@ -1151,6 +1146,8 @@ fn draw_tweaks_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalSta
                     | TweakRow::TerminalImages
                     | TweakRow::LandingPage
                     | TweakRow::ArtSplash
+                    | TweakRow::RightSidebar
+                    | TweakRow::RoomListSidebar
             );
             let hit_width = if cycling {
                 // The value reserves its longest option, so changing it never
@@ -1163,28 +1160,37 @@ fn draw_tweaks_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalSta
                 Rect::new(area.x, area.y + idx as u16, hit_width.min(width) as u16, 1),
                 Target::Tweak(*row),
             );
+            let row_rect = Rect::new(area.x, area.y + idx as u16, area.width, 1);
             if cycling {
-                let value_x = line.spans.iter().take(2).map(Span::width).sum::<usize>();
-                let value_width = line.spans[2].width();
-                let row_rect = Rect::new(area.x, area.y + idx as u16, area.width, 1);
-                for (x, forward) in [(value_x, false), (value_x + value_width - 2, true)] {
-                    state.mouse.hit(
-                        Rect::new(area.x + x as u16, row_rect.y, 2, 1).intersection(row_rect),
-                        Target::TweakCycle(*row, forward),
-                    );
-                }
+                choice_hits(
+                    state,
+                    row_rect,
+                    line,
+                    if *row == TweakRow::RightSidebar {
+                        Target::SidebarMode
+                    } else {
+                        Target::Tweak(*row)
+                    },
+                    Target::TweakCycle(*row, false),
+                    Target::TweakCycle(*row, true),
+                );
             }
             if *row == TweakRow::RightSidebar {
-                let x = line.spans.iter().take(2).map(Span::width).sum::<usize>();
-                let mode = line.spans[2].content.split("  ").next().unwrap_or("");
+                let label_width = line.spans.iter().take(2).map(Span::width).sum::<usize>() as u16;
+                state.mouse.hit(
+                    Rect::new(row_rect.x, row_rect.y, label_width, 1).intersection(row_rect),
+                    Target::Tweak(*row),
+                );
+                let x = line.spans.iter().take(3).map(Span::width).sum::<usize>();
                 state.mouse.hit(
                     Rect::new(
-                        area.x + x as u16,
-                        area.y + idx as u16,
-                        Span::raw(mode).width() as u16,
+                        area.x + x as u16 + 2,
+                        row_rect.y,
+                        Span::raw("[Panels]").width() as u16,
                         1,
-                    ),
-                    Target::SidebarMode,
+                    )
+                    .intersection(row_rect),
+                    Target::SidebarPanels,
                 );
             }
         }
@@ -1253,23 +1259,23 @@ fn tweak_row_line(
     };
 
     let prefix = format!(" {marker} ");
+    let panels = if row == TweakRow::RightSidebar {
+        "  [Panels]"
+    } else {
+        ""
+    };
     let label_width = width
-        .saturating_sub(3 + Span::raw("◂ +5 lighter ▸").width())
+        .saturating_sub(
+            Span::raw(&prefix).width()
+                + Span::raw(&value.text).width().max(5)
+                + Span::raw(panels).width(),
+        )
         .min(32);
-    let mut label_text = String::new();
-    let mut used = 0;
-    for grapheme in Line::raw(label).styled_graphemes(Style::default()) {
-        let grapheme_width = Span::raw(grapheme.symbol).width();
-        if used + grapheme_width > label_width {
-            break;
-        }
-        label_text.push_str(grapheme.symbol);
-        used += grapheme_width;
-    }
-    label_text.push_str(&" ".repeat(label_width.saturating_sub(used)));
+    let label_text = fit_label(label, label_width);
     let mut used = Span::raw(&prefix).width()
         + Span::raw(&label_text).width()
-        + Span::raw(&value.text).width();
+        + Span::raw(&value.text).width()
+        + Span::raw(panels).width();
     if used > width {
         used = width;
     }
@@ -1285,6 +1291,7 @@ fn tweak_row_line(
         Span::styled(prefix, prefix_style),
         Span::styled(label_text, label_style),
         Span::styled(value.text, value_style),
+        Span::styled(panels, value_style),
         Span::styled(trailing, trailing_style),
     ])
 }
@@ -1845,7 +1852,7 @@ fn notify_format_label(format: Option<&str>) -> &'static str {
     match format.unwrap_or("both") {
         "osc777" => "OSC 777",
         "osc9" => "OSC 9",
-        _ => "both (OSC 777 + OSC 9)",
+        _ => "Both (777 + 9)",
     }
 }
 
@@ -2044,6 +2051,8 @@ fn draw_picker(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) 
     let title = match state.picker().kind {
         Some(PickerKind::Country) => " Pick Country ",
         Some(PickerKind::Timezone) => " Pick Timezone ",
+        Some(PickerKind::Language) => " Target language ",
+        Some(PickerKind::InteractionMode) => " Interaction mode ",
         None => " Picker ",
     };
     let block = Block::default()
@@ -2059,14 +2068,32 @@ fn draw_picker(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) 
     frame.render_widget(block, popup);
     close_button(frame, popup, state);
 
+    let explanation = if state.picker().kind == Some(PickerKind::InteractionMode) {
+        "Keyboard disables clicks and wheel input."
+    } else {
+        ""
+    };
+    let explanation_rows = if explanation.is_empty() {
+        1
+    } else {
+        Paragraph::new(explanation)
+            .wrap(Wrap { trim: true })
+            .line_count(inner.width) as u16
+    };
     let layout = Layout::vertical([
-        Constraint::Length(1),
+        Constraint::Length(explanation_rows),
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
     ])
     .split(inner);
 
+    frame.render_widget(
+        Paragraph::new(explanation)
+            .style(Style::default().fg(theme::TEXT_DIM()))
+            .wrap(Wrap { trim: true }),
+        layout[0],
+    );
     let search = Line::from(vec![
         Span::raw(" "),
         Span::styled("search ", Style::default().fg(theme::TEXT_DIM())),
@@ -2092,6 +2119,16 @@ fn draw_picker(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) 
             .filtered_timezones()
             .into_iter()
             .map(ToString::to_string)
+            .collect(),
+        Some(PickerKind::Language) => state
+            .filtered_languages()
+            .into_iter()
+            .map(|lang| format!("{} [{}]", lang.label(), lang.as_str()))
+            .collect(),
+        Some(PickerKind::InteractionMode) => state
+            .filtered_interaction_modes()
+            .into_iter()
+            .map(|mode| super::state::interaction_mode_label(mode).to_string())
             .collect(),
         None => Vec::new(),
     };
@@ -2254,8 +2291,7 @@ fn draw_right_sidebar_components_dialog(
 /// "move up" and "move left" are the same gesture and the user never has to
 /// hold the mapping in their head.
 fn draw_statusline_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
-    /// Columns given to the segment list; the dials take what's left.
-    const LIST_WIDTH: u16 = 34;
+    let list_width = statusline_list_width();
 
     let inner = area.inner(Margin::new(2, 0));
     let layout = Layout::vertical([
@@ -2273,7 +2309,7 @@ fn draw_statusline_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModa
     );
 
     let body = Layout::horizontal([
-        Constraint::Length(LIST_WIDTH.min(layout[2].width / 2)),
+        Constraint::Length(list_width.min(layout[2].width)),
         Constraint::Length(2),
         Constraint::Min(0),
     ])
@@ -2340,15 +2376,17 @@ fn draw_statusline_list(frame: &mut Surface<'_>, area: Rect, state: &SettingsMod
         let selected = state.statusline_index() == idx;
         let marker = if selected { ">" } else { " " };
         let checkbox = if setting.enabled { "[x]" } else { "[ ]" };
-        let text = format!(" {marker} {checkbox} {}", setting.component.label());
+        let text = format!("{marker}{checkbox} {}", setting.component.label());
         let row = Rect::new(area.x, area.y + idx as u16, area.width, 1);
         let style = statusline_row_style(selected, focused, setting.enabled);
         frame.buffer.set_style(row, style);
         let mut label_area = row;
-        label_area.width = label_area.width.saturating_sub(8);
+        label_area.width = Span::raw(&text)
+            .width()
+            .min(row.width.saturating_sub(7) as usize) as u16;
         state.mouse.hit(row, Target::Status(idx));
         state.mouse.hit(
-            Rect::new(row.x + 3, row.y, 3.min(row.width.saturating_sub(3)), 1),
+            Rect::new(row.x + 1, row.y, 3.min(row.width.saturating_sub(1)), 1),
             Target::StatusToggle(idx),
         );
         frame.render_widget(
@@ -2358,11 +2396,19 @@ fn draw_statusline_list(frame: &mut Surface<'_>, area: Rect, state: &SettingsMod
             ))),
             label_area,
         );
-        reorder_buttons(
+        let x = row.x + label_area.width + 1;
+        button(
             frame,
-            row,
+            Rect::new(x, row.y, 3, 1).intersection(row),
             state,
+            "[↑]",
             Target::StatusMove(idx, -1),
+        );
+        button(
+            frame,
+            Rect::new(x + 3, row.y, 3, 1).intersection(row),
+            state,
+            "[↓]",
             Target::StatusMove(idx, 1),
         );
     }
@@ -2430,36 +2476,72 @@ fn draw_statusline_dials(frame: &mut Surface<'_>, area: Rect, state: &SettingsMo
         let marker = if selected { "›" } else { " " };
         let title = dial.title(&setting);
         let value = statusline_dial_value(dial, &setting);
-        let title_width = width.saturating_sub(Span::raw(&value).width() + 3).min(13);
-        let text = format!("{marker} {title:<title_width$} {value}");
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                pad_to_width(&text, width, selected),
-                statusline_row_style(selected, focused, true),
-            ))),
-            Rect::new(area.x, area.y + y, area.width, 1),
-        );
+        let title_width = width
+            .saturating_sub(Span::raw(&value.text).width().max(5) + 4)
+            .min(Span::raw(title).width());
+        let style = statusline_row_style(selected, focused, true);
+        let line = Line::from(vec![
+            Span::styled(format!("{marker} "), style),
+            Span::styled(
+                format!("{}  ", fit_label(title, title_width + 1).trim_end()),
+                style,
+            ),
+            Span::styled(value.text, style.patch(value.style)),
+        ]);
+        let row = Rect::new(area.x, area.y + y, area.width, 1);
+        if matches!(dial, StatuslineDial::Label | StatuslineDial::Variant) {
+            choice_hits(
+                state,
+                row,
+                &line,
+                Target::Dial(idx),
+                Target::DialCycle(idx, false),
+                Target::DialCycle(idx, true),
+            );
+        }
+        frame.render_widget(Paragraph::new(line), row);
     }
 }
 
 fn statusline_dial_value(
     dial: StatuslineDial,
     setting: &late_core::models::statusline::StatusComponentSetting,
-) -> String {
+) -> ValueSpan {
+    use late_core::models::statusline::LabelMode;
     match dial {
-        StatuslineDial::Brief => on_off(setting.brief),
-        StatuslineDial::Label => setting.label.label().to_string(),
-        StatuslineDial::AutoHide => on_off(setting.auto_hide),
-        StatuslineDial::Variant => setting
-            .variant
-            .or_else(|| setting.component.variants().first().copied())
-            .map(|variant| variant.label().to_string())
-            .unwrap_or_default(),
+        StatuslineDial::Brief => toggle_span(setting.brief),
+        StatuslineDial::AutoHide => toggle_span(setting.auto_hide),
+        StatuslineDial::Label => cycle_value_span(
+            setting.label.label(),
+            &[
+                LabelMode::Icon.label(),
+                LabelMode::Text.label(),
+                LabelMode::None.label(),
+            ],
+        ),
+        StatuslineDial::Variant => {
+            let choices: Vec<_> = setting
+                .component
+                .variants()
+                .iter()
+                .map(|variant| variant.label())
+                .collect();
+            let label = setting
+                .variant
+                .or_else(|| setting.component.variants().first().copied())
+                .map(|variant| variant.label())
+                .unwrap_or("");
+            cycle_value_span(label, &choices)
+        }
     }
 }
 
-fn on_off(enabled: bool) -> String {
-    if enabled { "● on" } else { "○ off" }.to_string()
+fn statusline_list_width() -> u16 {
+    late_core::models::statusline::StatusComponent::ALL
+        .into_iter()
+        .map(|component| Span::raw(format!(">[ ] {} [↑][↓]", component.label())).width() as u16)
+        .max()
+        .unwrap_or(0)
 }
 
 /// Row styling shared by both panes. Only the focused pane paints a selection
@@ -3539,54 +3621,62 @@ fn toggle_span(enabled: bool) -> ValueSpan {
 }
 
 fn interaction_mode_span(mode: late_core::models::user::InteractionMode) -> ValueSpan {
-    use late_core::models::user::InteractionMode;
-    match mode {
-        InteractionMode::Keyboard => ValueSpan {
-            text: "○ keyboard".to_string(),
-            style: Style::default().fg(theme::AMBER()),
-        },
-        InteractionMode::Mouse => ValueSpan {
-            text: "● mouse".to_string(),
-            style: Style::default()
-                .fg(theme::SUCCESS())
-                .add_modifier(Modifier::BOLD),
-        },
-        InteractionMode::Hybrid => ValueSpan {
-            text: "◐ hybrid".to_string(),
-            style: Style::default()
-                .fg(theme::SUCCESS())
-                .add_modifier(Modifier::BOLD),
-        },
-    }
+    picker_value_span(
+        super::state::interaction_mode_label(mode),
+        &["Keyboard", "Mouse", "Hybrid"],
+    )
 }
 
 fn right_sidebar_mode_span(mode: RightSidebarMode) -> ValueSpan {
-    match mode {
-        RightSidebarMode::On => ValueSpan {
-            // The trailing affordance hints that Enter opens the panel editor.
-            text: "● on  ⏎ panels".to_string(),
-            style: Style::default()
-                .fg(theme::SUCCESS())
-                .add_modifier(Modifier::BOLD),
+    cycle_value_span(
+        match mode {
+            RightSidebarMode::On => "On",
+            RightSidebarMode::Off => "Off",
+            RightSidebarMode::Auto => "Auto",
         },
-        RightSidebarMode::Off => ValueSpan {
-            text: "○ off".to_string(),
-            style: Style::default().fg(theme::TEXT_FAINT()),
-        },
-        RightSidebarMode::Auto => ValueSpan {
-            text: "◐ auto  ⏎ panels".to_string(),
-            style: Style::default().fg(theme::AMBER()),
-        },
-    }
+        &["On", "Off", "Auto"],
+    )
 }
 
 fn translate_to_span(lang: late_core::models::message_translation::TranslateLang) -> ValueSpan {
+    let choices: Vec<_> = late_core::models::message_translation::TranslateLang::ALL
+        .iter()
+        .map(|lang| lang.label())
+        .collect();
+    picker_value_span(lang.label(), &choices)
+}
+
+fn picker_value_span(label: &str, choices: &[&str]) -> ValueSpan {
+    let width = choices
+        .iter()
+        .map(|label| Span::raw(*label).width())
+        .max()
+        .unwrap_or(0);
     ValueSpan {
-        text: lang.label().to_string(),
+        text: format!(
+            "{label}{}  …",
+            " ".repeat(width.saturating_sub(Span::raw(label).width()))
+        ),
         style: Style::default()
-            .fg(theme::SUCCESS())
+            .fg(theme::AMBER())
             .add_modifier(Modifier::BOLD),
     }
+}
+
+fn cooldown_span(mins: i32) -> ValueSpan {
+    let label = if mins == 0 {
+        "off".to_string()
+    } else {
+        format!("{mins} min")
+    };
+    cycle_value_span(&label, &["off", "240 min"])
+}
+
+fn notify_format_span(format: Option<&str>) -> ValueSpan {
+    cycle_value_span(
+        notify_format_label(format),
+        &["Both (777 + 9)", "OSC 777", "OSC 9"],
+    )
 }
 
 /// The "Chat badges" row: how many badge rows are hidden, Enter to edit.
@@ -3648,22 +3738,14 @@ fn cycle_value_span(label: &str, choices: &[&str]) -> ValueSpan {
 /// The room-list rail row. Mirrors `right_sidebar_mode_span` without the panel
 /// editor affordance: the rail has no panel list of its own.
 fn room_list_mode_span(mode: RoomListMode) -> ValueSpan {
-    match mode {
-        RoomListMode::On => ValueSpan {
-            text: "● on".to_string(),
-            style: Style::default()
-                .fg(theme::SUCCESS())
-                .add_modifier(Modifier::BOLD),
+    cycle_value_span(
+        match mode {
+            RoomListMode::On => "On",
+            RoomListMode::Off => "Off",
+            RoomListMode::Auto => "Auto",
         },
-        RoomListMode::Off => ValueSpan {
-            text: "○ off".to_string(),
-            style: Style::default().fg(theme::TEXT_FAINT()),
-        },
-        RoomListMode::Auto => ValueSpan {
-            text: "◐ auto".to_string(),
-            style: Style::default().fg(theme::AMBER()),
-        },
-    }
+        &["On", "Off", "Auto"],
+    )
 }
 
 fn text_brightness_span(adjustment: i32) -> ValueSpan {
@@ -3728,12 +3810,21 @@ fn row_line(
     };
 
     let prefix = format!(" {marker} ");
-    let label_text = if label.chars().count() >= 16 {
-        format!("{label} ")
+    let desired = (Span::raw(label).width() + 1).max(16);
+    let label_width = if (row == Row::Username && state.editing_username())
+        || (state.editing_system_field().is_some() && state.editing_system_row(row))
+    {
+        16 // Editable fields render their horizontally scrolled viewport at column 19.
     } else {
-        format!("{label:<16}")
+        desired.min(
+            width
+                .saturating_sub(Span::raw(&prefix).width() + Span::raw(&value.text).width().max(5)),
+        )
     };
-    let mut used = prefix.chars().count() + label_text.chars().count() + value.text.chars().count();
+    let label_text = fit_label(label, label_width);
+    let mut used = Span::raw(&prefix).width()
+        + Span::raw(&label_text).width()
+        + Span::raw(&value.text).width();
     if used > width {
         used = width;
     }
@@ -3753,8 +3844,49 @@ fn row_line(
     ])
 }
 
+/// Labels yield cells before complete controls do. Ratatui supplies both the
+/// grapheme boundaries and the same display measurements used for mouse hits.
+fn fit_label(label: &str, width: usize) -> String {
+    let mut result = String::new();
+    let mut used = 0;
+    for grapheme in Line::raw(label).styled_graphemes(Style::default()) {
+        let cells = Span::raw(grapheme.symbol).width();
+        if used + cells > width.saturating_sub(1) {
+            break;
+        }
+        result.push_str(grapheme.symbol);
+        used += cells;
+    }
+    result.push_str(&" ".repeat(width.saturating_sub(used)));
+    result
+}
+
+fn choice_hits(
+    state: &SettingsModalState,
+    row: Rect,
+    line: &Line<'_>,
+    ordinary: Target,
+    backward: Target,
+    forward: Target,
+) {
+    let x = line.spans.iter().take(2).map(Span::width).sum::<usize>() as u16;
+    let width = line.spans[2].width() as u16;
+    let ordinary_rect = if ordinary == Target::SidebarMode {
+        Rect::new(row.x + x + 2, row.y, width.saturating_sub(4), 1)
+    } else {
+        Rect::new(row.x, row.y, x + width, 1)
+    };
+    state.mouse.hit(ordinary_rect.intersection(row), ordinary);
+    for (offset, target) in [(x, backward), (x + width.saturating_sub(2), forward)] {
+        state.mouse.hit(
+            Rect::new(row.x + offset, row.y, 2, 1).intersection(row),
+            target,
+        );
+    }
+}
+
 fn pad_to_width(text: &str, width: usize, _has_bg: bool) -> String {
-    let len = text.chars().count();
+    let len = Span::raw(text).width();
     if len >= width {
         return text.to_string();
     }
