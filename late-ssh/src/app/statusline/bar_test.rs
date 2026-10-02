@@ -568,6 +568,38 @@ fn the_track_variant_falls_back_to_the_station_name() {
     );
 }
 
+/// Every title on the bar (the station's track, the live line) is cut to the
+/// one cap, so a long track or headline shortens instead of dropping the
+/// segment it rides.
+#[test]
+fn titles_are_cut_to_the_one_cap() {
+    let track = StatusComponentSetting {
+        variant: Some(StatusVariant::StationTrack),
+        ..on(StatusComponent::Station, LabelMode::None)
+    };
+    let live = on(StatusComponent::Live, LabelMode::None);
+    let data = StatusData {
+        station_track: Some("No High Scores Here - Secret of Mana OST"),
+        live: Some("youtube @mat · No High Scores Here - Secret of Mana"),
+        ..data()
+    };
+
+    assert_eq!(
+        data.value(StatusComponent::Station, track.variant)
+            .as_deref(),
+        Some("No High Scores Here…")
+    );
+    assert_eq!(
+        data.value(StatusComponent::Live, live.variant).as_deref(),
+        Some("youtube @mat · No H…")
+    );
+    assert_eq!(
+        data.value(StatusComponent::Station, Some(StatusVariant::StationName))
+            .as_deref(),
+        Some("chillsynth")
+    );
+}
+
 // --- fitting -------------------------------------------------------------
 
 /// A segment with no room is dropped whole: its wording is never shortened
@@ -883,7 +915,7 @@ fn live_reads_the_strip_and_rests_or_hides_when_it_is_down() {
 
     assert_eq!(
         render(always, &data()).as_deref(),
-        Some("─ live stream mat · late night rust ")
+        Some("─ live stream mat · late n… ")
     );
     assert_eq!(render(always, &quiet).as_deref(), Some("─ live - "));
     assert_eq!(render(auto_hiding, &quiet), None);

@@ -27,6 +27,7 @@ use crate::app::{
     common::theme,
     games::pool_core::canvas::Rgb,
     lobby::daily::{live_board::canvas_background, live_strip as match_strip},
+    statusline::data::TITLE_COLS,
     stream::live as stream_live,
 };
 
@@ -309,16 +310,12 @@ fn compact_body_spans(rest: u16, strip: &LiveStripView<'_>) -> Vec<Span<'static>
     }
 }
 
-/// Columns the status line's Live segment gives what the strip says in a
-/// line: enough for the kind, who, and the start of what. Kept short on
-/// purpose: a segment fits whole or is dropped, and one that grew wide
-/// exactly when something went live would be the one dropped.
-const STATUS_COLS: u16 = 20;
-
 /// What the strip shows, as the status line's Live segment reads it
-/// (`statusline/`): the source's own one-row form, cut to `STATUS_COLS`.
+/// (`statusline/`): the source's own one-row form, laid out for the bar's
+/// one title cap, `statusline::data::TITLE_COLS` (the kind, who, and the
+/// start of what).
 pub(crate) fn status_text(strip: &LiveStripView<'_>) -> String {
-    compact_body_spans(STATUS_COLS, strip)
+    compact_body_spans(TITLE_COLS as u16, strip)
         .iter()
         .map(|span| span.content.as_ref())
         .collect()

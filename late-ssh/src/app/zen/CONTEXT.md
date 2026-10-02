@@ -136,7 +136,9 @@ pair to the title.
 message, and otherwise does nothing: it never leaves. Backtick runs the
 workspace cycle as on Home: it hops into the games waiting on you, and the
 chain comes home here. With a chat tile focused: `[`
-`]` rebind it to the previous or next joined room (a layout edit, saved),
+`]` rebind it to the previous or next room in the Home rail's order, top
+to bottom, wrapping (real rooms only, a collapsed section's skipped, as the
+rail skips them; a layout edit, saved),
 and a room picked in `Ctrl+/` binds it the same way,
 `i` / Enter compose in its room, `j` `k` select in it, and the message
 actions (`d` `r` `e` `p` `c` `t` `G`, Enter, the reaction leader) act on

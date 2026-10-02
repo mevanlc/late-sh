@@ -810,20 +810,27 @@ fn selector_row_line(width: u16, name: &str, key: &str, selected: bool) -> Line<
 /// `fallback stream` when nothing is submitted (the fallback is the steady
 /// state, never "queue empty").
 fn youtube_track_text(queue: &QueueSnapshot) -> String {
-    let Some(current) = &queue.current else {
-        return "fallback stream".to_string();
-    };
+    match youtube_track(queue) {
+        Some(track) => track,
+        None => "fallback stream".to_string(),
+    }
+}
+
+/// `Channel - Title` for the current YouTube queue item; `None` while the
+/// fallback plays, which has no track of its own to name.
+pub(crate) fn youtube_track(queue: &QueueSnapshot) -> Option<String> {
+    let current = queue.current.as_ref()?;
     let title = current
         .title
         .clone()
         .unwrap_or_else(|| format!("yt:{}", current.video_id));
-    match current.channel.as_deref() {
+    Some(match current.channel.as_deref() {
         Some(channel) if !channel.trim().is_empty() => {
             format!("{} - {}", channel.trim(), title)
         }
         _ if !current.submitter.is_empty() => format!("by {} - {}", current.submitter, title),
         _ => title,
-    }
+    })
 }
 
 /// Combined `Artist - Title` row for the Icecast now-playing track.

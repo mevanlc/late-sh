@@ -10,7 +10,9 @@ use uuid::Uuid;
 
 use super::rows::InboxRow;
 use super::state::{Dir, KindPick, MAX_TILES, TileKind};
-use crate::app::{common::primitives::Banner, input::ParsedInput, state::App};
+use crate::app::{
+    chat::state::RoomSlot, common::primitives::Banner, input::ParsedInput, state::App,
+};
 
 pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
     // A pressed `v` owns the next key everywhere; the page must not eat the
@@ -385,10 +387,30 @@ fn focused_tile_is_wide(app: &App) -> bool {
         .unwrap_or(true)
 }
 
-/// Walk the joined rooms in rail order and bind the focused chat tile to
-/// the one landed on; the binding is part of the layout, so it is saved.
+/// Walk the rooms in rail order, top to bottom, and bind the focused chat
+/// tile to the one landed on; the binding is part of the layout, so it is
+/// saved. The rail's synthetic rows (mentions, rss, voice, browse) are not
+/// rooms a tile can show and are stepped over, and so are the rooms of a
+/// collapsed section, which the rail does not show either.
 fn cycle_room(app: &mut App, delta: isize) {
-    let ids: Vec<Uuid> = app.chat.rooms.iter().map(|(room, _)| room.id).collect();
+    let ids: Vec<Uuid> = app
+        .chat
+        .visual_order()
+        .into_iter()
+        .filter_map(|slot| match slot {
+            RoomSlot::Room(room_id) => Some(room_id),
+            RoomSlot::Feeds
+            | RoomSlot::News
+            | RoomSlot::Cyberspace
+            | RoomSlot::CyberspaceNotifications
+            | RoomSlot::CyberspaceMail(_)
+            | RoomSlot::CyberspaceRoom(_)
+            | RoomSlot::Notifications
+            | RoomSlot::Discover
+            | RoomSlot::Showcase
+            | RoomSlot::Work => None,
+        })
+        .collect();
     if ids.is_empty() {
         return;
     }

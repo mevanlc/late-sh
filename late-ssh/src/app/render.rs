@@ -713,12 +713,19 @@ impl App {
             }
             late_core::models::user::AudioSource::Youtube => "youtube",
         };
+        let status_youtube_track = match self.paired_source {
+            late_core::models::user::AudioSource::Youtube => {
+                crate::app::common::sidebar::youtube_track(&self.audio.queue_snapshot())
+            }
+            late_core::models::user::AudioSource::Radio
+            | late_core::models::user::AudioSource::Icecast => None,
+        };
         let status_station_track = match self.paired_source {
             late_core::models::user::AudioSource::Radio => radio_now_playing.as_deref(),
             late_core::models::user::AudioSource::Icecast => {
                 now_playing.as_ref().map(|np| np.track.title.as_str())
             }
-            late_core::models::user::AudioSource::Youtube => None,
+            late_core::models::user::AudioSource::Youtube => status_youtube_track.as_deref(),
         };
         let dashboard_view = chat::ui::DashboardChatView {
             activity_ticker: self.chat.activity_ticker(),

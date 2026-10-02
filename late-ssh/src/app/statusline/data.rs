@@ -7,7 +7,13 @@
 
 use late_core::models::statusline::{StatusComponent, StatusVariant};
 
-use crate::app::common::primitives::thousands;
+use crate::app::{chat::ui::truncate_cells, common::primitives::thousands};
+
+/// Columns any title on the bar gets: the station's track and the live
+/// strip's line alike, cut with an ellipsis past it. A segment fits whole or
+/// is dropped, so one that grew with whatever happens to be playing would be
+/// the one dropped exactly when it has something to say.
+pub(crate) const TITLE_COLS: usize = 20;
 
 /// Everything the bar can show this frame, gathered once in `App::render`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -38,7 +44,9 @@ pub(crate) struct StatusData<'a> {
     /// Display name of the audio source the user is listening to. Every
     /// source has one, which is why the station segment never reads inactive.
     pub station_name: &'a str,
-    /// Live `Artist - Title` for that source, when the metadata feed has one.
+    /// The track playing on that source (`Artist - Title`, or `Channel -
+    /// Title` for the YouTube booth), when it has one. Uncut: `value` cuts
+    /// it to `TITLE_COLS`.
     pub station_track: Option<&'a str>,
     pub quests_open_daily: usize,
     pub quests_open_weekly: usize,
@@ -46,8 +54,8 @@ pub(crate) struct StatusData<'a> {
     pub care_due: usize,
     /// The voice badge body, `channel [status]`; `None` when not in a room.
     pub voice: Option<&'a str>,
-    /// What the live strip shows, in a line (`live::ui::status_text`);
-    /// `None` while the strip is down.
+    /// What the live strip shows, in a line (`live::ui::status_text`, laid
+    /// out for `TITLE_COLS`); `None` while the strip is down.
     pub live: Option<&'a str>,
 }
 
@@ -102,15 +110,15 @@ impl<'a> StatusData<'a> {
             StatusComponent::Turns => {
                 (self.turns_waiting > 0).then(|| self.turns_waiting.to_string())
             }
-            StatusComponent::Station => Some(
+            StatusComponent::Station => Some(truncate_cells(
                 match shows_track(variant) {
                     // Track first, station as the fallback: a source with no
                     // live metadata still names itself rather than going blank.
                     true => self.station_track.unwrap_or(self.station_name),
                     false => self.station_name,
-                }
-                .to_string(),
-            ),
+                },
+                TITLE_COLS,
+            )),
             StatusComponent::Quests => {
                 let count = match counts_weekly(variant) {
                     true => self
@@ -122,7 +130,7 @@ impl<'a> StatusData<'a> {
             }
             StatusComponent::Care => (self.care_due > 0).then(|| self.care_due.to_string()),
             StatusComponent::Voice => self.voice.map(str::to_string),
-            StatusComponent::Live => self.live.map(str::to_string),
+            StatusComponent::Live => self.live.map(|live| truncate_cells(live, TITLE_COLS)),
             StatusComponent::Date => Some(
                 match date_format(variant) {
                     DateFormat::Short => self.date_short,

@@ -4991,6 +4991,63 @@ async fn zen_every_chat_tile_keeps_its_composer_whatever_is_focused() {
     );
 }
 
+/// `[` `]` on a Zen chat tile walk the rooms in the rail's order, top to
+/// bottom, not the order they were loaded in: Core's fixed order puts
+/// suggestions before bugs, though bugs loads first alphabetically.
+#[tokio::test]
+async fn zen_brackets_cycle_rooms_in_rail_order() {
+    use crate::app::zen::state::TileKind;
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-cycle-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let mut rooms = Vec::new();
+    rooms.push(ChatRoom::ensure_lounge(&client).await.expect("lounge"));
+    rooms.push(
+        ChatRoom::ensure_permanent(&client, "suggestions")
+            .await
+            .expect("suggestions"),
+    );
+    rooms.push(
+        ChatRoom::ensure_permanent(&client, "bugs")
+            .await
+            .expect("bugs"),
+    );
+    rooms.push(
+        ChatRoom::get_or_create_public_room(&client, "zen-cycle")
+            .await
+            .expect("channel"),
+    );
+    for room in &rooms {
+        ChatRoomMember::join(&client, room.id, viewer.id)
+            .await
+            .expect("join room");
+    }
+    let [lounge, suggestions, bugs, channel] = [rooms[0].id, rooms[1].id, rooms[2].id, rooms[3].id];
+
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-cycle-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_render_contains(&mut app, "zen-cycle").await;
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "w tend").await;
+    assert_eq!(app.zen.focused_kind(), Some(TileKind::Chat));
+    assert_eq!(app.zen_chat_room_id(), Some(lounge));
+
+    let mut forward = Vec::new();
+    for _ in 0..4 {
+        app.handle_input(b"]");
+        forward.push(app.zen_chat_room_id().expect("bound room"));
+    }
+    assert_eq!(forward, vec![suggestions, bugs, channel, lounge]);
+
+    app.handle_input(b"[");
+    assert_eq!(
+        app.zen_chat_room_id(),
+        Some(channel),
+        "[ wraps to the bottom"
+    );
+}
+
 #[tokio::test]
 async fn zen_room_picker_binds_the_focused_chat_tile_and_slash_picker_opens_it() {
     use crate::app::common::primitives::Screen;
