@@ -2577,7 +2577,7 @@ impl SettingsModalState {
             Target::Row(row) => {
                 self.row_index = Row::ALL.iter().position(|r| *r == row).unwrap_or(0)
             }
-            Target::Tweak(row) => {
+            Target::Tweak(row) | Target::TweakCycle(row, _) => {
                 self.tweak_row_index = TweakRow::ALL.iter().position(|r| *r == row).unwrap_or(0)
             }
             Target::SidebarMode => {

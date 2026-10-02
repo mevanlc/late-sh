@@ -1125,9 +1125,9 @@ fn draw_tweaks_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalSta
                 (
                     TweakRow::ArtSplash,
                     "Show Gallery Art on Splash",
-                    value_span(
-                        format!("< {} >", state.draft().art_splash_mode.label()),
-                        theme::AMBER_GLOW(),
+                    cycle_value_span(
+                        state.draft().art_splash_mode.label(),
+                        &["SFW", "Always", "Never"],
                     ),
                 ),
             ],
@@ -1144,12 +1144,37 @@ fn draw_tweaks_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalSta
     }
     for (idx, row) in rows.iter().enumerate() {
         if let Some(row) = row {
+            let line = &lines[idx];
+            let cycling = matches!(
+                row,
+                TweakRow::TextBrightness
+                    | TweakRow::TerminalImages
+                    | TweakRow::LandingPage
+                    | TweakRow::ArtSplash
+            );
+            let hit_width = if cycling {
+                // The value reserves its longest option, so changing it never
+                // moves the arrows or changes the row's clickable extent.
+                line.spans.iter().take(3).map(Span::width).sum::<usize>()
+            } else {
+                width
+            };
             state.mouse.hit(
-                Rect::new(area.x, area.y + idx as u16, area.width, 1),
+                Rect::new(area.x, area.y + idx as u16, hit_width.min(width) as u16, 1),
                 Target::Tweak(*row),
             );
+            if cycling {
+                let value_x = line.spans.iter().take(2).map(Span::width).sum::<usize>();
+                let value_width = line.spans[2].width();
+                let row_rect = Rect::new(area.x, area.y + idx as u16, area.width, 1);
+                for (x, forward) in [(value_x, false), (value_x + value_width - 2, true)] {
+                    state.mouse.hit(
+                        Rect::new(area.x + x as u16, row_rect.y, 2, 1).intersection(row_rect),
+                        Target::TweakCycle(*row, forward),
+                    );
+                }
+            }
             if *row == TweakRow::RightSidebar {
-                let line = &lines[idx];
                 let x = line.spans.iter().take(2).map(Span::width).sum::<usize>();
                 let mode = line.spans[2].content.split("  ").next().unwrap_or("");
                 state.mouse.hit(
@@ -1228,8 +1253,23 @@ fn tweak_row_line(
     };
 
     let prefix = format!(" {marker} ");
-    let label_text = format!("{label:<32}");
-    let mut used = prefix.chars().count() + label_text.chars().count() + value.text.chars().count();
+    let label_width = width
+        .saturating_sub(3 + Span::raw("◂ +5 lighter ▸").width())
+        .min(32);
+    let mut label_text = String::new();
+    let mut used = 0;
+    for grapheme in Line::raw(label).styled_graphemes(Style::default()) {
+        let grapheme_width = Span::raw(grapheme.symbol).width();
+        if used + grapheme_width > label_width {
+            break;
+        }
+        label_text.push_str(grapheme.symbol);
+        used += grapheme_width;
+    }
+    label_text.push_str(&" ".repeat(label_width.saturating_sub(used)));
+    let mut used = Span::raw(&prefix).width()
+        + Span::raw(&label_text).width()
+        + Span::raw(&value.text).width();
     if used > width {
         used = width;
     }
@@ -3571,29 +3611,34 @@ fn chat_badges_span(state: &SettingsModalState) -> ValueSpan {
 /// The "Terminal images" row: auto-detect, or force previews off or to sixel.
 fn terminal_images_span(mode: late_core::models::user::TerminalImagesMode) -> ValueSpan {
     use late_core::models::user::TerminalImagesMode;
-    let text = match mode {
-        TerminalImagesMode::Auto => "◂ Auto ▸",
-        TerminalImagesMode::Off => "◂ Off ▸",
-        TerminalImagesMode::Sixel => "◂ Sixel ▸",
+    let label = match mode {
+        TerminalImagesMode::Auto => "Auto",
+        TerminalImagesMode::Off => "Off",
+        TerminalImagesMode::Sixel => "Sixel",
     };
-    ValueSpan {
-        text: text.to_string(),
-        style: Style::default()
-            .fg(theme::AMBER())
-            .add_modifier(Modifier::BOLD),
-    }
+    cycle_value_span(label, &["Auto", "Off", "Sixel"])
 }
 
 /// The "Land on" row: the page a session opens on, cycled with the arrows.
 fn landing_page_span(page: late_core::models::user::LandingPage) -> ValueSpan {
     use late_core::models::user::LandingPage;
-    let text = match page {
-        LandingPage::Clubhouse => "◂ Clubhouse ▸",
-        LandingPage::Home => "◂ Home ▸",
-        LandingPage::Zen => "◂ Zen ▸",
+    let label = match page {
+        LandingPage::Clubhouse => "Clubhouse",
+        LandingPage::Home => "Home",
+        LandingPage::Zen => "Zen",
     };
+    cycle_value_span(label, &["Clubhouse", "Home", "Zen"])
+}
+
+fn cycle_value_span(label: &str, choices: &[&str]) -> ValueSpan {
+    let width = choices
+        .iter()
+        .map(|label| Span::raw(*label).width())
+        .max()
+        .unwrap_or(0);
+    let padding = " ".repeat(width.saturating_sub(Span::raw(label).width()));
     ValueSpan {
-        text: text.to_string(),
+        text: format!("◂ {label}{padding} ▸"),
         style: Style::default()
             .fg(theme::AMBER())
             .add_modifier(Modifier::BOLD),
@@ -3637,14 +3682,7 @@ fn text_brightness_span(adjustment: i32) -> ValueSpan {
         5 => "+5 lighter",
         _ => unreachable!(),
     };
-    let color = if adjustment > 0 {
-        theme::TEXT_BRIGHT()
-    } else if adjustment < 0 {
-        theme::TEXT_DIM()
-    } else {
-        theme::TEXT_FAINT()
-    };
-    value_span(text, color)
+    cycle_value_span(text, &["-5 darker", "neutral", "+5 lighter"])
 }
 
 fn value_with_picker_hint(text: String) -> ValueSpan {

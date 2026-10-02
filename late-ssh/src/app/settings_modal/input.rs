@@ -361,6 +361,7 @@ pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
         Target::Row(_) => activate_selected_row(app),
         Target::Tweak(TweakRow::RightSidebar) => state.open_right_sidebar_components(),
         Target::Tweak(_) => toggle_tweak(app),
+        Target::TweakCycle(_, forward) => cycle_tweak(app, forward),
         Target::SidebarMode => cycle_tweak(app, true),
         Target::Account(row) => match row {
             AccountRow::LinkAccounts => state.open_link_account_dialog(),

@@ -27,6 +27,7 @@ pub(crate) enum Target {
     Tab(Tab),
     Row(Row),
     Tweak(TweakRow),
+    TweakCycle(TweakRow, bool),
     SidebarMode,
     Account(AccountRow),
     Theme(usize),

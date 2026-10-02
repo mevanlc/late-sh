@@ -100,6 +100,154 @@ fn text(buffer: &Buffer) -> String {
 }
 
 #[tokio::test]
+async fn settings_cycle_values_share_arrows_color_and_weight() {
+    use ratatui::{style::Modifier, text::Span};
+
+    use crate::app::common::theme;
+
+    let (_db, mut app) = fixture().await;
+    app.settings_modal_state.select_tab(Tab::Tweaks);
+    for theme_id in ["contrast", "latte"] {
+        theme::set_current_by_id(theme_id);
+        for size in [(120, 40), (48, 14)] {
+            app.resize(size.0, size.1).unwrap();
+            for row in [
+                TweakRow::TextBrightness,
+                TweakRow::TerminalImages,
+                TweakRow::LandingPage,
+                TweakRow::ArtSplash,
+            ] {
+                app.settings_modal_state
+                    .select_mouse_target(Target::Tweak(row));
+                for selected in [true, false] {
+                    if !selected {
+                        app.settings_modal_state
+                            .select_mouse_target(Target::Tweak(TweakRow::PaperAtLogin));
+                    } else {
+                        app.settings_modal_state.mouse.reveal_selection();
+                    }
+                    let buffer = paint(&app);
+                    let rect = hits(&app)
+                        .into_iter()
+                        .find_map(|(rect, target)| (target == Target::Tweak(row)).then_some(rect))
+                        .unwrap();
+                    let expected = match row {
+                        TweakRow::TextBrightness => "◂ neutral    ▸",
+                        TweakRow::TerminalImages => "◂ Auto  ▸",
+                        TweakRow::LandingPage => "◂ Clubhouse ▸",
+                        TweakRow::ArtSplash => "◂ SFW    ▸",
+                        _ => unreachable!(),
+                    };
+                    let x = (rect.x..rect.right())
+                        .find(|x| buffer[(*x, rect.y)].symbol() == "◂")
+                        .unwrap();
+                    let end = x + Span::raw(expected).width() as u16;
+                    assert_eq!(rect.right(), x + Span::raw(expected).width() as u16);
+                    let rendered: String = (x..end).map(|x| buffer[(x, rect.y)].symbol()).collect();
+                    assert_eq!(rendered, expected);
+                    let expected_style = ratatui::style::Style::default()
+                        .fg(theme::AMBER())
+                        .add_modifier(Modifier::BOLD);
+                    let expected_style = if selected {
+                        expected_style.patch(theme::selection_style())
+                    } else {
+                        expected_style
+                    };
+                    for x in x..end {
+                        let cell = &buffer[(x, rect.y)];
+                        assert_eq!(cell.fg, expected_style.fg.unwrap());
+                        assert!(cell.modifier.contains(Modifier::BOLD));
+                    }
+                }
+                let before = hits(&app)
+                    .into_iter()
+                    .find_map(|(rect, target)| (target == Target::Tweak(row)).then_some(rect))
+                    .unwrap();
+                for forward in [true, true, true, false, false, false] {
+                    let current_value = |app: &App| match row {
+                        TweakRow::TextBrightness => app
+                            .settings_modal_state
+                            .draft()
+                            .text_brightness_adjustment
+                            .to_string(),
+                        TweakRow::TerminalImages => app
+                            .settings_modal_state
+                            .draft()
+                            .terminal_images
+                            .as_str()
+                            .to_string(),
+                        TweakRow::LandingPage => app
+                            .settings_modal_state
+                            .draft()
+                            .landing_page
+                            .as_str()
+                            .to_string(),
+                        TweakRow::ArtSplash => app
+                            .settings_modal_state
+                            .draft()
+                            .art_splash_mode
+                            .as_str()
+                            .to_string(),
+                        _ => unreachable!(),
+                    };
+                    let value_before = current_value(&app);
+                    click(&mut app, Target::TweakCycle(row, forward));
+                    assert_ne!(current_value(&app), value_before);
+                    paint(&app);
+                    let after = hits(&app)
+                        .into_iter()
+                        .find_map(|(rect, target)| (target == Target::Tweak(row)).then_some(rect))
+                        .unwrap();
+                    assert_eq!(before, after);
+                }
+            }
+        }
+    }
+    theme::set_current_by_id(theme::DEFAULT_ID);
+}
+
+#[tokio::test]
+async fn settings_mouse_brightness_arrows_clamp_and_wheel_preserves_value() {
+    let (_db, mut app) = fixture().await;
+    app.resize(48, 14).unwrap();
+    app.settings_modal_state.select_tab(Tab::Tweaks);
+    app.settings_modal_state
+        .select_mouse_target(Target::Tweak(TweakRow::TextBrightness));
+    app.settings_modal_state.mouse.reveal_selection();
+    for expected in [-1, -2, -3, -4, -5, -5] {
+        click(
+            &mut app,
+            Target::TweakCycle(TweakRow::TextBrightness, false),
+        );
+        assert_eq!(
+            app.settings_modal_state.draft().text_brightness_adjustment,
+            expected
+        );
+    }
+    for expected in -4..=6 {
+        click(&mut app, Target::TweakCycle(TweakRow::TextBrightness, true));
+        assert_eq!(
+            app.settings_modal_state.draft().text_brightness_adjustment,
+            expected.min(5)
+        );
+    }
+    wheel(&mut app, Target::Tweak(TweakRow::TextBrightness), true);
+    assert_eq!(
+        app.settings_modal_state.draft().text_brightness_adjustment,
+        5
+    );
+    assert_eq!(
+        app.settings_modal_state.selected_tweak_row(),
+        TweakRow::TextBrightness
+    );
+    app.handle_input(b"\x1b[D");
+    assert_eq!(
+        app.settings_modal_state.draft().text_brightness_adjustment,
+        4
+    );
+}
+
+#[tokio::test]
 async fn settings_mouse_rendering_covers_every_tab_and_short_scrolled_rows() {
     let (_db, mut app) = fixture().await;
     for size in [(120, 40), (48, 14)] {

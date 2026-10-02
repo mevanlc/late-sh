@@ -1616,7 +1616,7 @@ fn settings_help_lines() -> Vec<String> {
         "  Appearance".to_string(),
         "    Sync terminal background  paint your terminal's background to match the theme; off (or the Terminal theme) leaves your terminal's own background alone. Selections and highlights inside the app are part of the theme itself, not this toggle"
             .to_string(),
-        "    Text Brightness         nudge overall text brightness up or down".to_string(),
+        "    Text Brightness         nudge overall text brightness up or down; click ◂ / ▸ to decrease / increase".to_string(),
         "    Right sidebar           on / off / auto for Home and Arcade; Enter opens a panel checklist"
             .to_string(),
         "    Room list               on / off / auto for the Home room-list rail".to_string(),

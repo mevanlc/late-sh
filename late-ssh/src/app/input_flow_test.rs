@@ -14,7 +14,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
         app.handle_input(b"j");
     }
     wait_for_render_contains(&mut app, "Show Gallery Art on Splash").await;
-    assert!(render_plain(&mut app).contains("< SFW >"));
+    assert!(render_plain(&mut app).contains("◂ SFW    ▸"));
     for (key, expected) in [
         (b"\r".as_slice(), ArtSplashMode::Always),
         (b"\x1b[C".as_slice(), ArtSplashMode::Never),
@@ -49,7 +49,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(render_plain(&mut app).contains(&format!("< {} >", expected.label())));
+        assert!(render_plain(&mut app).contains(&format!("◂ {:<6} ▸", expected.label())));
     }
     app.handle_input(b"\x1b");
     wait_for_render_not_contains(&mut app, "Show Gallery Art on Splash").await;
@@ -59,7 +59,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
     for _ in 0..11 {
         app.handle_input(b"j");
     }
-    wait_for_render_contains(&mut app, "< Never >").await;
+    wait_for_render_contains(&mut app, "◂ Never  ▸").await;
 }
 
 #[tokio::test]

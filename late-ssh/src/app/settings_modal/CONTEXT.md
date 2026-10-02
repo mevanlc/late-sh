@@ -22,7 +22,11 @@ Keyboard input reveals selection/caret again. Tabs wrap on narrow terminals.
 
 Settings/Tweaks clicks reuse keyboard actions, including per-device rail and
 interaction-mode updates. The Right sidebar mode value cycles this device's mode;
-its label/panels affordance opens the panel chooser. Theme labels apply, headings
+its label/panels affordance opens the panel chooser. Terminal images, Land on, and
+Gallery Art on Splash, plus Text Brightness, share bold amber arrows. Left/right
+arrows decrease/increase or cycle backward/forward. Each reserves its longest
+choice's width for stable arrows and row hitboxes; labels shorten to keep both
+arrows visible on narrow terminals. Theme labels apply, headings
 fold, stars favorite, and search starts filtering. Statusline labels open options and checkboxes toggle;
 its options cycle on click. Statusline and Sidebar panels expose up/down buttons.
 Country/timezone results apply and close; the shared tag picker toggles clicked
