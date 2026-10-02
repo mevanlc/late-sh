@@ -36,11 +36,17 @@ closes; Esc/[x] cancels. Language filtering matches English/native names and
 stored codes in the existing 17-language order. Interaction mode offers
 Keyboard, Mouse, and Hybrid, explains that Keyboard disables clicks/wheel, and
 uses App's setter for terminal reporting and persistence.
+Interaction-mode persistence coalesces rapid choices through one writer per
+account, so an older asynchronous write cannot overwrite the final choice.
+Chooser values show `…` two spaces after the current label. Width padding follows
+the hint so their hitboxes stay consistent across choices.
 
 Statusline keeps its existing split layout. Its compact list column fits the
-widest `>[ ] Name [↑][↓]` entry, with adjacent reorder buttons and no gap between
-cursor and checkbox. Option titles sit two cells from their controls; Label and
-component-specific options have directional arrows, while Brief/Auto-hide are
+widest `>[ ] Name [↑↓]` entry, with reorder controls aligned after the widest name
+and no gap between cursor and checkbox. Each half of `[↑↓]` independently moves
+the row in its arrow's direction, including in Sidebar panels. Option titles sit
+two cells from their controls; Label and component-specific options have
+directional arrows, while Brief/Auto-hide are
 simple toggles. Labels open options; checkboxes toggle. Pane offsets and wheel
 behavior stay independent. Responsive single-pane switching is deferred.
 Theme labels apply, headings fold, stars favorite, and search filters.

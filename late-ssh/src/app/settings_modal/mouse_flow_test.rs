@@ -383,6 +383,12 @@ async fn settings_mouse_toggles_reorders_and_scrolls_status_panes_independently(
         app.settings_modal_state.right_sidebar_components()[1],
         components[0]
     );
+    click(&mut app, Target::SidebarMove(1, -1));
+    assert_eq!(
+        app.settings_modal_state.right_sidebar_components(),
+        components
+    );
+    click(&mut app, Target::SidebarMove(0, 1));
     click(&mut app, Target::Sidebar(1));
     assert_ne!(
         app.settings_modal_state.right_sidebar_components()[1].enabled,
@@ -399,6 +405,9 @@ async fn settings_mouse_toggles_reorders_and_scrolls_status_panes_independently(
         app.settings_modal_state.statusline_components()[1],
         components[0]
     );
+    click(&mut app, Target::StatusMove(1, -1));
+    assert_eq!(app.settings_modal_state.statusline_components(), components);
+    click(&mut app, Target::StatusMove(0, 1));
     click(&mut app, Target::StatusToggle(1));
     assert_ne!(
         app.settings_modal_state.statusline_components()[1].enabled,
@@ -939,8 +948,12 @@ async fn language_chooser_selects_current_filters_native_names_and_codes_and_can
             app.settings_modal_state.mouse.reveal_selection();
             let buffer = paint(&app);
             assert!(
-                rendered_row(&buffer, rect_for(&app, Target::Row(Row::TranslateTo)))
-                    .contains(app.settings_modal_state.draft().translate_to.label())
+                rendered_row(&buffer, rect_for(&app, Target::Row(Row::TranslateTo))).contains(
+                    &format!(
+                        "{}  …",
+                        app.settings_modal_state.draft().translate_to.label()
+                    )
+                )
             );
             let current = app.settings_modal_state.draft().translate_to;
             click(&mut app, Target::Row(Row::TranslateTo));
@@ -1020,6 +1033,14 @@ async fn interaction_chooser_applies_explicit_modes_and_terminal_reporting_once(
         .select_mouse_target(Target::Tweak(TweakRow::InteractionMode));
     app.resize(48, 14).unwrap();
     app.settings_modal_state.mouse.reveal_selection();
+    let buffer = paint(&app);
+    assert!(
+        rendered_row(
+            &buffer,
+            rect_for(&app, Target::Tweak(TweakRow::InteractionMode))
+        )
+        .contains("Hybrid  …")
+    );
     click(&mut app, Target::Tweak(TweakRow::InteractionMode));
     assert_eq!(app.settings_modal_state.picker().selected_index, 2);
     assert_eq!(app.interaction_mode, InteractionMode::Hybrid);
@@ -1183,10 +1204,11 @@ async fn statusline_compaction_keeps_names_and_distinct_checkbox_reorder_targets
             let down = rect_for(&app, Target::StatusMove(index, 1));
             assert_eq!(toggle.x, row.x + 1);
             assert_eq!(up.right(), down.x);
-            assert_eq!(
-                up.x,
-                row.x + ratatui::text::Span::raw(format!(">[ ] {label} ")).width() as u16
-            );
+            assert_eq!(up.x, row.right() - 4);
+            assert_eq!(down.right(), row.right());
+            assert_eq!((up.width, down.width), (2, 2));
+            assert_eq!(rendered_row(&buffer, up), "[↑");
+            assert_eq!(rendered_row(&buffer, down), "↓]");
             assert!(!toggle.intersects(up));
             assert!(!toggle.intersects(down));
         }

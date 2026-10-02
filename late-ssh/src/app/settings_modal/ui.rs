@@ -1868,16 +1868,16 @@ fn reorder_buttons(
     up: Target,
     down: Target,
 ) {
-    if row.width < 8 {
+    if row.width < 4 {
         return;
     }
-    let x = row.right() - 7;
-    button(frame, Rect::new(x, row.y, 3, row.height), state, "[↑]", up);
+    let x = row.right() - 4;
+    button(frame, Rect::new(x, row.y, 2, row.height), state, "[↑", up);
     button(
         frame,
-        Rect::new(x + 4, row.y, 3, row.height),
+        Rect::new(x + 2, row.y, 2, row.height),
         state,
-        "[↓]",
+        "↓]",
         down,
     );
 }
@@ -2381,9 +2381,7 @@ fn draw_statusline_list(frame: &mut Surface<'_>, area: Rect, state: &SettingsMod
         let style = statusline_row_style(selected, focused, setting.enabled);
         frame.buffer.set_style(row, style);
         let mut label_area = row;
-        label_area.width = Span::raw(&text)
-            .width()
-            .min(row.width.saturating_sub(7) as usize) as u16;
+        label_area.width = row.width.saturating_sub(5);
         state.mouse.hit(row, Target::Status(idx));
         state.mouse.hit(
             Rect::new(row.x + 1, row.y, 3.min(row.width.saturating_sub(1)), 1),
@@ -2396,19 +2394,11 @@ fn draw_statusline_list(frame: &mut Surface<'_>, area: Rect, state: &SettingsMod
             ))),
             label_area,
         );
-        let x = row.x + label_area.width + 1;
-        button(
+        reorder_buttons(
             frame,
-            Rect::new(x, row.y, 3, 1).intersection(row),
+            row,
             state,
-            "[↑]",
             Target::StatusMove(idx, -1),
-        );
-        button(
-            frame,
-            Rect::new(x + 3, row.y, 3, 1).intersection(row),
-            state,
-            "[↓]",
             Target::StatusMove(idx, 1),
         );
     }
@@ -2539,7 +2529,7 @@ fn statusline_dial_value(
 fn statusline_list_width() -> u16 {
     late_core::models::statusline::StatusComponent::ALL
         .into_iter()
-        .map(|component| Span::raw(format!(">[ ] {} [↑][↓]", component.label())).width() as u16)
+        .map(|component| Span::raw(format!(">[ ] {} [↑↓]", component.label())).width() as u16)
         .max()
         .unwrap_or(0)
 }
@@ -3654,7 +3644,7 @@ fn picker_value_span(label: &str, choices: &[&str]) -> ValueSpan {
         .unwrap_or(0);
     ValueSpan {
         text: format!(
-            "{label}{}  …",
+            "{label}  …{}",
             " ".repeat(width.saturating_sub(Span::raw(label).width()))
         ),
         style: Style::default()

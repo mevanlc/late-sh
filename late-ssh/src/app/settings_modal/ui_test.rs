@@ -15,6 +15,6 @@ fn labels_shorten_at_grapheme_boundaries_using_rendered_widths() {
     assert_eq!(fit_label("Label", 0), "");
     assert_eq!(
         statusline_list_width(),
-        Span::raw(">[ ] Users online [↑][↓]").width() as u16
+        Span::raw(">[ ] Users online [↑↓]").width() as u16
     );
 }
