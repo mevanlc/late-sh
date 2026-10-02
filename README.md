@@ -21,6 +21,7 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 ## What It Includes
 
 - SSH TUI with dashboard, chat, profile, news, and arcade screens
+- Calendars on `7`: server, personal and public calendars, five views, flexible date entry, timezone-aware editing, and upcoming panels on Home and Calendars
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire
@@ -190,6 +191,12 @@ is admin-only. Each account has one staff mark per piece; marking again
 replaces its mark and tier.
 
 ## Verification
+
+For calendar development, run `make seed-calendar` after starting the current
+stack. Fixture accounts include ordinary users, a moderator, an admin, and
+public/private calendars; SSH keys live in `tmp/calendar-seed-keys/`. Press `7`,
+then `s` to choose a source, `v` to choose a view, or `c` for Calendar Settings.
+See [CALENDAR.md](CALENDAR.md) for controls, permissions, timing and the fixture.
 
 Run the local gate before opening a PR:
 

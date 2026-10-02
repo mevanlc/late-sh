@@ -99,6 +99,7 @@ fn is_game_side(screen: Screen) -> bool {
         | Screen::Usurper
         | Screen::Artboard
         | Screen::Profiles
+        | Screen::Calendars
         | Screen::Leaderboard
         | Screen::Clubhouse
         | Screen::Nightcap

@@ -4,6 +4,9 @@ pub mod arcade;
 pub mod artboard;
 pub mod audio;
 pub mod bonsai;
+pub mod calendar;
+#[cfg(test)]
+mod calendar_flow_test;
 pub mod chat;
 pub mod clubhouse;
 pub mod common;

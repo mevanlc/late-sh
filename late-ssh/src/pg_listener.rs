@@ -56,6 +56,7 @@ pub enum Refresh {
     Articles,
     ActiveQuestBoards,
     ShopFlairDirectory,
+    CalendarNotices,
 }
 
 impl Refresh {
@@ -70,6 +71,7 @@ impl Refresh {
             Refresh::Articles => "articles",
             Refresh::ActiveQuestBoards => "active quest boards",
             Refresh::ShopFlairDirectory => "shop flair directory",
+            Refresh::CalendarNotices => "calendar server notices",
         }
     }
 }
@@ -109,6 +111,7 @@ where
 /// breaks the build here until it has a name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
+    CalendarChanged,
     AppFlagChanged,
     ArticlesChanged,
     BonsaiChanged,
@@ -127,7 +130,8 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub const ALL: [Channel; 15] = [
+    pub const ALL: [Channel; 16] = [
+        Channel::CalendarChanged,
         Channel::AppFlagChanged,
         Channel::ArticlesChanged,
         Channel::BonsaiChanged,
@@ -148,6 +152,7 @@ impl Channel {
     /// The Postgres channel name, owned by the model that sends it.
     pub fn name(self) -> &'static str {
         match self {
+            Channel::CalendarChanged => late_core::models::calendar::CALENDAR_CHANGED_CHANNEL,
             Channel::AppFlagChanged => APP_FLAG_CHANGED_CHANNEL,
             Channel::ArticlesChanged => ARTICLES_CHANGED_CHANNEL,
             Channel::BonsaiChanged => BONSAI_CHANGED_CHANNEL,

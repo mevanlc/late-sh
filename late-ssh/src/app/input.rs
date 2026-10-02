@@ -885,7 +885,6 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         handle_image_modal_input(app, &event);
         return;
     }
-
     // Reserved global chords have already had first claim. Otherwise the
     // existing modal stack owns input.
     if app.show_help {
@@ -962,6 +961,11 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         return;
     }
 
+    if app.calendar.modal.is_some() {
+        crate::app::calendar::input::handle_event(app, &event);
+        return;
+    }
+
     let ctx = InputContext::from_app(app);
 
     if handle_voice_global_chord(app, ctx, &event) {
@@ -977,6 +981,10 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     }
 
     if handle_dedicated_screen_input(app, ctx, &event) {
+        return;
+    }
+
+    if crate::app::calendar::input::handle_event(app, &event) {
         return;
     }
 
@@ -2163,6 +2171,13 @@ fn dispatch_escape(app: &mut App) {
     if handle_modal_input(app, ctx, 0x1B) {
         return;
     }
+    if app.calendar.modal.is_some() {
+        crate::app::calendar::input::escape(&mut app.calendar);
+        return;
+    }
+    if ctx.screen == Screen::Calendars {
+        app.calendar.cancel_open();
+    }
     if screen_has_chat_pane(ctx.screen) && app.chat.is_reaction_leader_active() {
         app.chat.cancel_reaction_leader();
         return;
@@ -2532,7 +2547,7 @@ fn topbar_screen_hit_test(x: u16, y: u16) -> Option<Screen> {
 
     match x {
         // Top title text starts immediately after the left border. The digit
-        // cells in " late.sh | 0 1 2 3 4 5 6 | ..." land on these columns.
+        // cells in " late.sh | 0 1 2 3 4 5 6 7 | ..." land on these columns.
         12 => Some(Screen::Clubhouse),
         14 => Some(Screen::Dashboard),
         16 => Some(Screen::Arcade),
@@ -2540,6 +2555,7 @@ fn topbar_screen_hit_test(x: u16, y: u16) -> Option<Screen> {
         20 => Some(Screen::Artboard),
         22 => Some(Screen::Profiles),
         24 => Some(Screen::Leaderboard),
+        26 => Some(Screen::Calendars),
         _ => None,
     }
 }
@@ -3184,6 +3200,7 @@ fn handle_arrow_for_screen(app: &mut App, screen: Screen, key: u8) -> bool {
         Screen::Codekeep => false,
         Screen::Arcade => crate::app::arcade::input::handle_arrow(app, key),
         Screen::Leaderboard => crate::app::leaderboard::input::handle_arrow(app, key),
+        Screen::Calendars => false,
         Screen::Artboard => crate::app::artboard::page::handle_arrow(app, key),
         Screen::Profiles => {
             // Arrows handled via handle_dedicated_screen_input
@@ -3596,6 +3613,7 @@ fn game_owns_ctrl_s(app: &App) -> bool {
         | Screen::Usurper
         | Screen::Artboard
         | Screen::Profiles
+        | Screen::Calendars
         | Screen::Leaderboard
         | Screen::Clubhouse
         | Screen::Nightcap
@@ -3657,7 +3675,14 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
             if !game_owns_ctrl_s(app)
                 && !app.directory_editor.is_open()
                 && !app.jobs.post.is_open()
-                && !app.tag_picker.is_open() =>
+                && !app.tag_picker.is_open()
+                && !matches!(
+                    app.calendar.modal,
+                    Some(
+                        crate::app::calendar::state::Modal::Editor(_)
+                            | crate::app::calendar::state::Modal::Settings { .. }
+                    )
+                ) =>
         {
             open_shop_modal_globally(app);
             true
@@ -3781,6 +3806,7 @@ fn zen_return_screen(app: &App) -> Option<Screen> {
         | Screen::Usurper
         | Screen::Artboard
         | Screen::Profiles
+        | Screen::Calendars
         | Screen::Leaderboard
         | Screen::Clubhouse
         | Screen::Nightcap
@@ -3851,7 +3877,7 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
     // While the reaction leader is armed, every digit belongs to it: `1`-`9`
     // are the quick reactions and `0` opens the custom icon picker. Let them
     // fall through to the chat message-action handler instead of the global
-    // page switch (`0` now lands on the Clubhouse, `1`-`6` on other pages).
+    // page switch (`0` now lands on the Clubhouse, `1`-`7` on other pages).
     if matches!(
         byte,
         b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9'
@@ -4067,6 +4093,11 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
             app.set_screen(Screen::Leaderboard);
             true
         }
+        b'7' if !artboard_blocks_page_switch => {
+            reset_composers_for_page_change(app);
+            app.set_screen(Screen::Calendars);
+            true
+        }
         // `0` is the clubhouse. Pressed again on the clubhouse it goes
         // down to the undercity (deadchannel's street), runners only;
         // from the undercity it comes back up. A descent always lands on
@@ -4161,6 +4192,7 @@ fn dispatch_screen_key(app: &mut App, screen: Screen, byte: u8) {
         Screen::Dashboard => {
             dashboard::input::handle_key(app, byte);
         }
+        Screen::Calendars => {}
         Screen::Games => {
             // Games hub keys are handled in handle_dedicated_screen_input.
         }
