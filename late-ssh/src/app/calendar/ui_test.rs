@@ -1,4 +1,9 @@
-use super::{state::*, svc::CalendarService, ui::*};
+use super::{
+    navigation::{ClickTarget, ContextMenu, MenuAction, Selection},
+    state::*,
+    svc::CalendarService,
+    ui::*,
+};
 use crate::app::common::theme;
 use chrono::{Datelike, Duration, TimeZone, Utc};
 use late_core::{
@@ -54,6 +59,290 @@ fn calendar_overlaps_use_separate_lanes_and_continue_overnight() {
     let pieces = segments(&[overnight], date + Duration::days(1), chrono_tz::UTC);
     assert!(pieces[0].before);
     assert_eq!(pieces[0].start, 0);
+}
+
+#[test]
+fn calendar_adjacent_short_events_use_distinct_rendered_rows_or_lanes() {
+    let mut first = event(9, 10);
+    let mut second = event(9, 10);
+    let start = Utc.with_ymd_and_hms(2026, 10, 2, 9, 0, 0).unwrap();
+    first.timing = EventTiming::Timed {
+        start,
+        end: Some(start + Duration::minutes(15)),
+    };
+    second.timing = EventTiming::Timed {
+        start: start + Duration::minutes(15),
+        end: Some(start + Duration::minutes(30)),
+    };
+    let pieces = segments(&[first, second], start.date_naive(), chrono_tz::UTC);
+    assert_ne!(pieces[0].lane, pieces[1].lane);
+}
+
+#[tokio::test]
+async fn calendar_day_cards_fill_width_and_preserve_both_short_events() {
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.view = CalendarView::Day;
+    s.selected = "2026-10-02".parse().unwrap();
+    let mut first = event(9, 10);
+    first.title = "First quarter hour".into();
+    let mut second = event(9, 10);
+    second.title = "Second quarter hour".into();
+    let start = Utc.with_ymd_and_hms(2026, 10, 2, 9, 0, 0).unwrap();
+    first.timing = EventTiming::Timed {
+        start,
+        end: Some(start + Duration::minutes(15)),
+    };
+    second.timing = EventTiming::Timed {
+        start: start + Duration::minutes(15),
+        end: Some(start + Duration::minutes(30)),
+    };
+    s.events = vec![first.clone(), second.clone()];
+    s.selection = Selection::Event(first.id);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| draw(frame, frame.area(), &s))
+        .unwrap();
+    let first_rect = action_area(&s, Action::EventAt(first.id, s.selected));
+    let second_rect = action_area(&s, Action::EventAt(second.id, s.selected));
+    assert!(first_rect.width > 40);
+    assert_eq!(first_rect.intersection(second_rect).area(), 0);
+    for (rect, title) in [(first_rect, &first.title), (second_rect, &second.title)] {
+        assert!(rendered_text(terminal.backend().buffer(), rect).contains(title));
+    }
+    assert!(
+        s.hits
+            .borrow()
+            .iter()
+            .any(|hit| matches!(hit.action, Action::Slot(_, 540)))
+    );
+
+    s.events.truncate(1);
+    terminal
+        .draw(|frame| draw(frame, frame.area(), &s))
+        .unwrap();
+    assert!(action_area(&s, Action::EventAt(first.id, s.selected)).width > 100);
+}
+
+#[tokio::test]
+async fn calendar_all_palettes_have_visible_legible_selection() {
+    let _restore = RestoreTheme::new();
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.selected = "2026-10-02".parse().unwrap();
+    for option in theme::OPTIONS {
+        theme::set_current_by_id(option.id);
+        let style = selection_style();
+        if theme::BG_CANVAS() == Color::Reset {
+            assert!(style.add_modifier.contains(Modifier::REVERSED));
+        } else {
+            let ratio = theme::contrast_ratio(style.fg.unwrap(), style.bg.unwrap()).unwrap();
+            assert!(ratio >= 4.5, "{}: {ratio}", option.id);
+            if option.kind != theme::ThemeKind::Contrast {
+                assert_eq!(style.bg, Some(theme::BG_SELECTION()), "{}", option.id);
+            }
+        }
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &s))
+            .unwrap();
+        let selected = action_area(&s, Action::Date(s.selected));
+        let text = rendered_text(
+            terminal.backend().buffer(),
+            Rect::new(selected.x, selected.y, selected.width, 1),
+        );
+        assert!(text.starts_with('▸'), "{}: {text}", option.id);
+    }
+}
+
+#[test]
+fn calendar_high_contrast_selection_distinguishes_surface_and_text() {
+    let _restore = RestoreTheme::new();
+    theme::set_current_by_id("contrast");
+    let palette_fill = theme::BG_SELECTION();
+    let style = selection_style();
+    let fill = style.bg.unwrap();
+    assert!(theme::contrast_ratio(fill, theme::BG_CANVAS()).unwrap() >= 3.0);
+    assert!(theme::contrast_ratio(style.fg.unwrap(), fill).unwrap() >= 4.5);
+    assert_eq!(theme::BG_SELECTION(), palette_fill);
+}
+
+#[tokio::test]
+async fn calendar_picker_scroll_and_close_follow_the_visible_viewport() {
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.public = (0..12)
+        .map(|index| PublicCalendar {
+            owner_id: Uuid::now_v7(),
+            username: format!("calendar{index}"),
+        })
+        .collect();
+    s.modal = Some(Modal::Source(0));
+    s.picker_reveal.set(false);
+    s.picker_scroll.set(4);
+    let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+    terminal
+        .draw(|frame| draw_modal(frame, frame.area(), &s))
+        .unwrap();
+    assert_eq!(s.picker_scroll.get(), 4);
+    assert!(s.max_picker.get() > 0);
+    assert!(
+        s.hits
+            .borrow()
+            .iter()
+            .any(|hit| hit.action == Action::Choice(4))
+    );
+    assert!(
+        !s.hits
+            .borrow()
+            .iter()
+            .any(|hit| hit.action == Action::Choice(0))
+    );
+    assert!(
+        s.hits
+            .borrow()
+            .iter()
+            .any(|hit| hit.action == Action::Cancel)
+    );
+    assert!(
+        s.panes
+            .borrow()
+            .iter()
+            .any(|pane| pane.pane == Pane::Picker)
+    );
+
+    s.modal = Some(Modal::Source(13));
+    s.picker_reveal.set(true);
+    terminal
+        .draw(|frame| draw_modal(frame, frame.area(), &s))
+        .unwrap();
+    assert!(
+        s.hits
+            .borrow()
+            .iter()
+            .any(|hit| hit.action == Action::Choice(13))
+    );
+}
+
+#[tokio::test]
+async fn calendar_agenda_timing_row_and_close_are_mouse_targets() {
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.selected = "2026-10-02".parse().unwrap();
+    let event = event(9, 10);
+    s.events = vec![event.clone()];
+    s.modal = Some(Modal::Agenda);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| draw_modal(frame, frame.area(), &s))
+        .unwrap();
+    assert_eq!(action_area(&s, Action::Event(event.id)).height, 2);
+    assert!(
+        s.hits
+            .borrow()
+            .iter()
+            .any(|hit| hit.action == Action::Cancel)
+    );
+}
+
+#[tokio::test]
+async fn calendar_spanning_event_hits_retain_each_visible_segment_date() {
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.selected = "2026-10-02".parse().unwrap();
+    let mut spanning = event(9, 10);
+    let start = s.selected - Duration::days(1);
+    spanning.timing = EventTiming::AllDay {
+        start,
+        end_exclusive: s.selected + Duration::days(2),
+    };
+    s.events = vec![spanning.clone()];
+    for view in [CalendarView::Month, CalendarView::Week] {
+        s.view = view;
+        let mut terminal = Terminal::new(TestBackend::new(140, 45)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &s))
+            .unwrap();
+        for day in 0..3 {
+            assert!(
+                s.hits.borrow().iter().any(|hit| {
+                    hit.action == Action::EventAt(spanning.id, start + Duration::days(day))
+                }),
+                "missing {view:?} segment {day}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn calendar_timeline_resize_clamps_hours_and_labels_read_only_slots() {
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.view = CalendarView::Day;
+    s.hour_scroll = 47;
+    s.selection = Selection::Slot(1410);
+    let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+    terminal
+        .draw(|frame| draw(frame, frame.area(), &s))
+        .unwrap();
+    let first = s
+        .hits
+        .borrow()
+        .iter()
+        .find_map(|hit| match hit.action {
+            Action::Slot(_, minute) => Some(minute),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(first as usize, (48 - s.hour_rows.get()) * 30);
+    let selected = action_area(&s, Action::Slot(s.selected, 1410));
+    assert!(rendered_text(terminal.backend().buffer(), selected).starts_with("▸ 23:30"));
+}
+
+#[tokio::test]
+async fn calendar_context_menu_clamps_to_content_and_replaces_underlying_hits() {
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.context_menu = Some(ContextMenu {
+        target: ClickTarget::Date(s.selected),
+        anchor: (79, 23),
+        selected: 1,
+        items: vec![MenuAction::Open, MenuAction::New],
+        area: std::cell::Cell::new(Rect::default()),
+    });
+    let area = Rect::new(1, 1, 78, 22);
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+    terminal
+        .draw(|frame| {
+            draw(frame, area, &s);
+            draw_modal(frame, area, &s);
+        })
+        .unwrap();
+    let menu_area = s.context_menu.as_ref().unwrap().area.get();
+    assert_eq!(menu_area.intersection(area), menu_area);
+    assert_eq!(s.hits.borrow().len(), 2);
+    assert!(
+        s.hits
+            .borrow()
+            .iter()
+            .all(|hit| matches!(hit.action, Action::MenuChoice(_)))
+    );
+    let selected = action_area(&s, Action::MenuChoice(1));
+    assert!(rendered_text(terminal.backend().buffer(), selected).starts_with('▸'));
 }
 
 #[tokio::test]
@@ -195,7 +484,7 @@ async fn calendar_editor_controls_remain_visible_and_clipped_after_resize() {
         chrono_tz::UTC,
     );
     for (w, h) in [(140, 45), (80, 24), (48, 16), (22, 9)] {
-        for focus in 0..14 {
+        for focus in editor.visible_controls(s.today(), s.tz) {
             let mut editor = editor.clone();
             editor.focus = focus;
             s.modal = Some(Modal::Editor(Box::new(editor)));
@@ -238,7 +527,7 @@ async fn calendar_narrow_week_reveals_selected_day_and_every_overlap_lane() {
         .borrow()
         .iter()
         .filter_map(|h| {
-            if let Action::Event(id) = h.action {
+            if let Action::EventAt(id, _) = h.action {
                 Some(id)
             } else {
                 None
@@ -250,7 +539,7 @@ async fn calendar_narrow_week_reveals_selected_day_and_every_overlap_lane() {
         .draw(|frame| draw(frame, frame.area(), &s))
         .unwrap();
     ids.extend(s.hits.borrow().iter().filter_map(|h| {
-        if let Action::Event(id) = h.action {
+        if let Action::EventAt(id, _) = h.action {
             Some(id)
         } else {
             None
@@ -356,13 +645,8 @@ async fn calendar_theme_hierarchy_preserves_controls_and_geometry() {
             let source = action_area(&s, Action::Source);
             for word in ["s", "Server"] {
                 let cell = &buffer[label_position(buffer, source, word)];
-                if theme::BG_CANVAS() == Color::Reset {
-                    assert_eq!(cell.fg, Color::Reset);
-                    assert_eq!(cell.bg, Color::Reset);
-                    assert!(cell.modifier.contains(Modifier::REVERSED));
-                } else {
-                    assert_eq!(cell.bg, theme::BG_SELECTION());
-                }
+                assert_eq!(cell.bg, theme::BG_CANVAS());
+                assert!(!cell.modifier.contains(Modifier::REVERSED));
             }
             let grid_corner = buffer
                 .content()
@@ -481,11 +765,12 @@ async fn calendar_timed_cards_reserve_selection_for_the_selected_event() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         for selected in 0..2 {
             s.event_index = selected;
+            s.selection = Selection::Event(s.events[selected].id);
             s.invalidate_geometry();
             terminal.draw(|frame| draw(frame, area, &s)).unwrap();
             let buffer = terminal.backend().buffer();
             for (index, event) in [&first, &second].into_iter().enumerate() {
-                let rect = action_area(&s, Action::Event(event.id));
+                let rect = action_area(&s, Action::EventAt(event.id, s.selected));
                 assert_eq!(rect.intersection(area), rect);
                 let cells = (rect.y..rect.bottom())
                     .flat_map(|y| (rect.x..rect.right()).map(move |x| &buffer[(x, y)]));
@@ -499,7 +784,12 @@ async fn calendar_timed_cards_reserve_selection_for_the_selected_event() {
                             assert_eq!(cell.bg, Color::Reset, "{id}: {}", event.title);
                             assert!(cell.modifier.contains(Modifier::REVERSED));
                         } else {
-                            assert_eq!(cell.bg, theme::BG_SELECTION(), "{id}: {}", event.title);
+                            assert_eq!(
+                                cell.bg,
+                                selection_style().bg.unwrap(),
+                                "{id}: {}",
+                                event.title
+                            );
                             assert_ne!(cell.fg, cell.bg, "{id}: invisible selected glyph");
                         }
                     } else {

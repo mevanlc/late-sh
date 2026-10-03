@@ -1,4 +1,5 @@
 use super::{
+    editor::EditorControl,
     state::*,
     svc::{CalendarService, Reply, Snapshot},
 };
@@ -88,8 +89,8 @@ fn calendar_editor_normalizes_human_dates_on_blur_and_save() {
     e.fields[0].insert_str("Trip");
     e.ever_assigned = true;
     e.fields[2] = ratatui_textarea::TextArea::from(vec!["2 months ago".to_string()]);
-    e.focus = 2;
-    e.focus(3, today, chrono_tz::UTC);
+    e.focus = EditorControl::StartDate;
+    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
     assert_eq!(e.text(2), "2026-08-02");
     assert!(e.error.is_none());
     e.fields[4] = ratatui_textarea::TextArea::from(vec!["Oct 3rd, 2026".to_string()]);
@@ -106,19 +107,19 @@ fn calendar_editor_normalizes_human_dates_on_blur_and_save() {
     );
     assert_eq!(draft.notice_lead_seconds, Some(26 * 3600));
     e.fields[2] = ratatui_textarea::TextArea::from(vec!["02/03/2026".to_string()]);
-    e.focus = 2;
-    e.focus(3, today, chrono_tz::UTC);
+    e.focus = EditorControl::StartDate;
+    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
     assert!(e.error.as_deref().unwrap().contains("Ambiguous"));
     assert_eq!(e.text(2), "02/03/2026");
     assert!(e.draft(today, chrono_tz::UTC).is_err());
     assert_eq!(e.text(0), "Trip");
     e.fields[2] = ratatui_textarea::TextArea::from(vec!["Oct 2".to_string()]);
-    e.focus = 2;
-    e.focus(3, today, chrono_tz::UTC);
+    e.focus = EditorControl::StartDate;
+    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
     assert!(e.error.is_none());
     e.error = Some("Revision conflict; reload before saving".into());
-    e.focus = 2;
-    e.focus(3, today, chrono_tz::UTC);
+    e.focus = EditorControl::StartDate;
+    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
     assert!(e.error.as_deref().unwrap().contains("Revision conflict"));
 }
 

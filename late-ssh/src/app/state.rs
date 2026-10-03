@@ -2269,6 +2269,8 @@ impl App {
     pub(crate) fn set_screen(&mut self, screen: Screen) {
         self.calendar.cancel_open();
         self.calendar.invalidate_geometry();
+        self.calendar.clear_click();
+        self.calendar.context_menu = None;
         if screen == Screen::Calendars {
             self.calendar.refresh();
         }
@@ -2603,6 +2605,8 @@ impl App {
 
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), io::Error> {
         self.calendar.invalidate_geometry();
+        self.calendar.clear_click();
+        self.calendar.context_menu = None;
         self.profile_modal_state
             .calendar_link
             .set(ratatui::layout::Rect::default());

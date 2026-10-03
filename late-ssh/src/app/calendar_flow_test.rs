@@ -1,17 +1,22 @@
 use crate::{
     app::{
         calendar::{
+            editor::EditorControl,
             input::act,
+            navigation::Selection,
             state::{Action, Modal},
         },
         common::primitives::Screen,
+        state::App,
     },
     test_helpers::{make_app, new_test_db, render_plain, wait_for_app},
 };
 use late_core::models::calendar::{
-    CalendarPreferences, CalendarSource, CalendarStore, CalendarView,
+    CalendarPreferences, CalendarSource, CalendarStore, CalendarView, EventDraft, EventTiming,
 };
 use late_core::test_utils::create_test_user;
+use ratatui::layout::Rect;
+use uuid::Uuid;
 #[tokio::test]
 async fn calendar_go_date_human_input_preview_validation_and_mouse_submit() {
     let db = new_test_db().await;
@@ -60,11 +65,12 @@ async fn calendar_go_date_human_input_preview_validation_and_mouse_submit() {
     .await;
     assert_eq!(app.calendar.selected, app.calendar.today());
 
-    app.handle_input(b"s\x1b[B\rnTrip\t\t\x152 Oct 2028\t");
+    app.handle_input(b"s\x1b[B\rnTrip\t\t\t\x152 Oct 2028\t");
     let Some(Modal::Editor(e)) = &app.calendar.modal else {
         panic!()
     };
     assert_eq!(e.text(2), "2028-10-02");
+    assert_eq!(e.focus, EditorControl::EndDate);
     assert!(e.ever_assigned);
     app.handle_input(b"\x13");
     wait_for_app(&mut app, "human calendar date save", |a| {
@@ -155,6 +161,7 @@ async fn calendar_app_navigation_modal_priority_and_editor_text() {
     let before = app.calendar.hour_scroll;
     app.handle_input(format!("\x1b[<65;{};{}M", grid.x + 1, grid.y + 1).as_bytes());
     assert_eq!(app.calendar.hour_scroll, before + 3);
+    app.calendar.view = CalendarView::Month;
     app.handle_input(b"n");
     app.handle_input(b"Mouse Save 2028-03-01");
     render_plain(&mut app);
@@ -184,6 +191,244 @@ async fn calendar_app_navigation_modal_priority_and_editor_text() {
     })
     .await;
     assert!(app.calendar.modal.is_none());
+}
+
+fn event_hit(app: &mut App, id: Uuid) -> Rect {
+    render_plain(app);
+    app.calendar
+        .hits
+        .borrow()
+        .iter()
+        .find(|hit| matches!(hit.action, Action::Event(event) | Action::EventAt(event, _) if event == id))
+        .unwrap()
+        .area
+}
+
+fn mouse_click(app: &mut App, rect: Rect, button: u8) {
+    app.handle_input(
+        format!(
+            "\x1b[<{button};{};{}M\x1b[<{button};{};{}m",
+            rect.x + 1,
+            rect.y + 1,
+            rect.x + 1,
+            rect.y + 1,
+        )
+        .as_bytes(),
+    );
+}
+
+#[tokio::test]
+async fn calendar_mouse_select_open_context_and_keyboard_menu_priority() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_pointer").await;
+    let mut app = make_app(db.db.clone(), user.id, "calendar-pointer-flow");
+    app.show_splash = false;
+    app.handle_input(b"7s\x1b[B\r");
+    wait_for_app(&mut app, "personal calendar", |a| !a.calendar.loading).await;
+    let date = app.calendar.selected;
+    let event = CalendarStore::new(db.db.clone())
+        .save(
+            user.id,
+            CalendarSource::Personal(user.id),
+            None,
+            &EventDraft {
+                title: "Pointer appointment".into(),
+                description: String::new(),
+                timing: EventTiming::AllDay {
+                    start: date,
+                    end_exclusive: date.succ_opt().unwrap(),
+                },
+                notice_lead_seconds: None,
+                mod_editable: false,
+            },
+        )
+        .await
+        .unwrap();
+    app.calendar.view = CalendarView::List;
+    app.calendar.refresh();
+    wait_for_app(&mut app, "pointer event loaded", |a| {
+        a.calendar.events.iter().any(|e| e.id == event.id)
+    })
+    .await;
+    let target = event_hit(&mut app, event.id);
+    app.interaction_mode = late_core::models::user::InteractionMode::Keyboard;
+    mouse_click(&mut app, target, 0);
+    mouse_click(&mut app, target, 2);
+    assert!(app.calendar.modal.is_none());
+    assert!(app.calendar.context_menu.is_none());
+    assert_ne!(app.calendar.selection, Selection::Event(event.id));
+    app.interaction_mode = late_core::models::user::InteractionMode::Hybrid;
+    mouse_click(&mut app, target, 0);
+    assert_eq!(app.calendar.selection, Selection::Event(event.id));
+    assert!(app.calendar.modal.is_none());
+    mouse_click(&mut app, target, 0);
+    wait_for_app(
+        &mut app,
+        "double-click details",
+        |a| matches!(&a.calendar.modal, Some(Modal::Details(e)) if e.id == event.id),
+    )
+    .await;
+    act(&mut app.calendar, Action::Cancel);
+    assert!(app.calendar.modal.is_none());
+    let target = event_hit(&mut app, event.id);
+    mouse_click(&mut app, target, 2);
+    assert!(app.calendar.context_menu.is_some());
+    app.handle_input(b"n7v");
+    assert_eq!(app.screen, Screen::Calendars);
+    assert!(app.calendar.modal.is_none());
+    assert!(app.calendar.context_menu.is_some());
+    app.handle_input(b"\x1b[B\r");
+    assert!(app.calendar.context_menu.is_none());
+    assert!(matches!(app.calendar.modal, Some(Modal::Editor(_))));
+    render_plain(&mut app);
+    let cancel = app
+        .calendar
+        .hits
+        .borrow()
+        .iter()
+        .find(|hit| hit.action == Action::Cancel)
+        .unwrap()
+        .area;
+    app.interaction_mode = late_core::models::user::InteractionMode::Keyboard;
+    mouse_click(&mut app, cancel, 0);
+    assert!(matches!(app.calendar.modal, Some(Modal::Editor(_))));
+    app.interaction_mode = late_core::models::user::InteractionMode::Hybrid;
+    app.handle_input(b" revised");
+    act(&mut app.calendar, Action::Cancel);
+    assert!(matches!(&app.calendar.modal, Some(Modal::Editor(e)) if e.discard_prompt));
+    app.handle_input(b"\x1b");
+    wait_for_app(
+        &mut app,
+        "discard confirmation escape",
+        |a| matches!(&a.calendar.modal, Some(Modal::Editor(e)) if !e.discard_prompt),
+    )
+    .await;
+    assert!(
+        matches!(&app.calendar.modal, Some(Modal::Editor(e)) if e.text(0) == "Pointer appointment revised")
+    );
+    act(&mut app.calendar, Action::Cancel);
+    app.handle_input(b"d");
+    assert!(app.calendar.modal.is_none());
+    app.calendar.view = CalendarView::Month;
+    app.calendar.select_date(date);
+    app.handle_input(b"e\x1b[3~");
+    assert!(
+        app.calendar.modal.is_none(),
+        "Date focus must not edit/delete an implicit first event"
+    );
+}
+
+#[tokio::test]
+async fn calendar_nested_details_edit_save_cancel_and_delete_return_to_agenda() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_nested").await;
+    let mut app = make_app(db.db.clone(), user.id, "calendar-nested-flow");
+    app.show_splash = false;
+    app.handle_input(b"7s\x1b[B\r");
+    wait_for_app(&mut app, "nested personal calendar", |a| {
+        !a.calendar.loading
+    })
+    .await;
+    let date = app.calendar.selected;
+    app.handle_input(b"nNested appointment\x13");
+    wait_for_app(&mut app, "nested event saved", |a| !a.calendar.pending).await;
+    let Some(Modal::Details(event)) = &app.calendar.modal else {
+        panic!()
+    };
+    let id = event.id;
+    act(&mut app.calendar, Action::Cancel);
+    wait_for_app(&mut app, "nested event loaded", |a| {
+        !a.calendar.loading && a.calendar.events.iter().any(|e| e.id == id)
+    })
+    .await;
+    app.calendar.select_date(date);
+    app.handle_input(b"\r");
+    assert!(matches!(app.calendar.modal, Some(Modal::Agenda)));
+    app.handle_input(b"j\r");
+    wait_for_app(
+        &mut app,
+        "nested details",
+        |a| matches!(&a.calendar.modal, Some(Modal::Details(e)) if e.id == id),
+    )
+    .await;
+    app.handle_input(b"e");
+    assert!(matches!(app.calendar.modal, Some(Modal::Editor(_))));
+    act(&mut app.calendar, Action::Cancel);
+    assert!(matches!(&app.calendar.modal, Some(Modal::Details(e)) if e.id == id));
+    app.handle_input(b"e revised\x13");
+    wait_for_app(&mut app, "nested edit saved", |a| !a.calendar.pending).await;
+    assert!(
+        matches!(&app.calendar.modal, Some(Modal::Details(e)) if e.id == id && e.title == "Nested appointment revised")
+    );
+    app.handle_input(b"\x1b[3~");
+    assert!(matches!(app.calendar.modal, Some(Modal::Delete(_))));
+    app.handle_input(b"n");
+    assert!(matches!(&app.calendar.modal, Some(Modal::Details(e)) if e.id == id));
+    app.handle_input(b"\x1b[3~y");
+    wait_for_app(&mut app, "nested event deleted", |a| !a.calendar.pending).await;
+    assert!(matches!(app.calendar.modal, Some(Modal::Agenda)));
+    assert_ne!(app.calendar.selection, Selection::Event(id));
+    assert_eq!(app.calendar.selected, date);
+    act(&mut app.calendar, Action::Cancel);
+    assert!(app.calendar.modal.is_none());
+    assert_eq!(app.calendar.selected, date);
+}
+
+#[tokio::test]
+async fn calendar_timed_slot_keyboard_and_double_click_create_at_selected_time() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_slots").await;
+    let mut app = make_app(db.db.clone(), user.id, "calendar-slot-flow");
+    app.show_splash = false;
+    app.handle_input(b"7s\x1b[B\r");
+    wait_for_app(&mut app, "slot personal calendar", |a| !a.calendar.loading).await;
+    app.calendar.view = CalendarView::Day;
+    let date = app.calendar.selected;
+    app.calendar.select_slot(date, 9 * 60);
+    app.handle_input(b"\x1b[B\r");
+    let Some(Modal::Editor(e)) = &app.calendar.modal else {
+        panic!()
+    };
+    assert!(!e.all_day);
+    assert_eq!(e.text(3), "09:30");
+    assert_eq!(e.text(2), date.to_string());
+    app.handle_input(b"Review tomorrow at 4pm\t");
+    let Some(Modal::Editor(e)) = &app.calendar.modal else {
+        panic!()
+    };
+    assert_eq!(e.text(0), "Review tomorrow at 4pm");
+    assert_eq!(
+        e.text(3),
+        "09:30",
+        "Explicit slot selection prevents title inference from changing the chosen time"
+    );
+    act(&mut app.calendar, Action::Cancel);
+    app.handle_input(b"d");
+    assert!(app.calendar.modal.is_none());
+    render_plain(&mut app);
+    let (target, selected_date, minute) = app
+        .calendar
+        .hits
+        .borrow()
+        .iter()
+        .find_map(|hit| {
+            if let Action::Slot(date, minute) = hit.action {
+                Some((hit.area, date, minute))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    mouse_click(&mut app, target, 0);
+    assert_eq!(app.calendar.selection, Selection::Slot(minute));
+    assert!(app.calendar.modal.is_none());
+    mouse_click(&mut app, target, 0);
+    let Some(Modal::Editor(e)) = &app.calendar.modal else {
+        panic!()
+    };
+    assert!(!e.all_day);
+    assert_eq!(e.text(2), selected_date.to_string());
+    assert_eq!(e.text(3), format!("{:02}:{:02}", minute / 60, minute % 60));
 }
 
 #[tokio::test]

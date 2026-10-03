@@ -2527,6 +2527,7 @@ impl App {
 
 fn foreground_terminal_overlay_open(ctx: &DrawContext<'_>) -> bool {
     ctx.calendar.modal.is_some()
+        || ctx.calendar.context_menu.is_some()
         || ctx.show_settings
         || ctx.show_quit_confirm
         || ctx.show_mod_modal
