@@ -96,6 +96,14 @@ Rendering and synchronous ticks do no database I/O. Geometry is recorded during
 render and cleared on resize; styles resolve in the active theme and widths use
 Ratatui.
 
+Controls follow the shared TUI hint style: accented keys, quieter descriptions
+and faint separators. Event titles and field values stand above muted timing and
+source metadata; subdued grid rules separate dates without competing with them.
+Upcoming rows put titles before full timing so titles remain visible at narrow
+widths. Only the selected hourly event receives selection styling, including
+terminal-owned foreground/background colors. Modal titles use an accent that
+remains readable on light canvases.
+
 ## Development fixture and verification
 
 `make seed-calendar` creates `cal_user`, `cal_public`, `cal_private`, `cal_mod` and
@@ -125,6 +133,14 @@ workflow, plus native checking with tests/`otel`, formatting and diff checks.
 Nine additional real SSH captures verify Go to date previews, month-end clamping,
 ambiguous-date errors, normalized editor dates and human lead-time entry across
 the same three sizes and four themes. Fixture themes were restored afterward.
+
+Readability updates passed 31 focused checks through Linux `make test-llm`,
+including style/selection and geometry coverage across five themes. Native checking
+with tests/`otel`, formatting and diff checks passed. Nineteen real SSH captures
+cover all five views, modal/editor controls, Home and resizing at the same three
+sizes, with dark, light, contrast, monochrome and terminal-owned themes. Light-theme
+cell inspection confirms readable accent headings; hour rules stay outside event
+cards. Fixture theme preferences were restored afterward.
 
 ## Future (parked, unplanned but noted for future consideration)
 
