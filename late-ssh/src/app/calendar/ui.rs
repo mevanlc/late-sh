@@ -71,6 +71,27 @@ fn patch_line(mut line: Line<'static>, style: Style) -> Line<'static> {
     }
     line
 }
+fn today_background() -> Color {
+    theme::blend_toward(theme::BG_CANVAS(), theme::BORDER_ACTIVE(), 0.16)
+}
+/// Tint the day's canvas after its contents are drawn, preserving event cards
+/// and the stronger selection fill. Terminal-owned backgrounds remain untouched.
+fn shade_today(frame: &mut Frame, area: Rect, date: NaiveDate, s: &CalendarState) {
+    let canvas = theme::BG_CANVAS();
+    if date != s.today() || canvas == Color::Reset {
+        return;
+    }
+    let fill = today_background();
+    let buffer = frame.buffer_mut();
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            let cell = &mut buffer[(x, y)];
+            if cell.bg == canvas {
+                cell.set_bg(fill);
+            }
+        }
+    }
+}
 /// Selection is a visible marker as well as a fill. Keep text readable even
 /// when a palette uses its accent itself as the selection background.
 pub(super) fn selection_style() -> Style {
@@ -486,7 +507,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 let style = if date == s.selected {
                     selection_style()
                 } else if date == s.today() {
-                    accent().add_modifier(Modifier::UNDERLINED)
+                    accent()
                 } else if date.month() != s.selected.month() {
                     dim()
                 } else {
@@ -515,6 +536,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                     ));
                 }
                 styled_row(frame, rect, selected_line(line, date == s.selected));
+                shade_today(frame, rect, date, s);
                 hit(s, rect, Action::Date(date));
                 x += w;
             }
@@ -566,7 +588,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 let style = if date == s.selected {
                     selection_style()
                 } else if date == today {
-                    accent().add_modifier(Modifier::UNDERLINED)
+                    accent()
                 } else if date.month() != s.selected.month() {
                     dim()
                 } else {
@@ -615,6 +637,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                     );
                     hit(s, rect, Action::Agenda(date));
                 }
+                shade_today(frame, cell, date, s);
             }
             for line in 1..*height {
                 row(frame, Rect::new(x, y + line, 1, 1), "│", rule());
@@ -646,7 +669,13 @@ fn draw_agenda(frame: &mut Frame, area: Rect, s: &CalendarState) {
     let mut title = vec![
         Span::styled(
             format!(" {}", s.selected),
-            bright().add_modifier(Modifier::BOLD),
+            bright()
+                .add_modifier(Modifier::BOLD)
+                .bg(if s.selected == s.today() {
+                    today_background()
+                } else {
+                    theme::BG_CANVAS()
+                }),
         ),
         separator(),
     ];
@@ -902,9 +931,7 @@ fn draw_hours(frame: &mut Frame, area: Rect, s: &CalendarState) {
             )
         };
         let head = clip(origin, area.y + 1, width - 1, 1);
-        let style = if date == s.today() {
-            accent().add_modifier(Modifier::UNDERLINED)
-        } else if date == s.selected {
+        let style = if date == s.today() || date == s.selected {
             accent()
         } else {
             muted()
@@ -1014,6 +1041,12 @@ fn draw_hours(frame: &mut Frame, area: Rect, s: &CalendarState) {
             );
             hit(s, rect, Action::EventAt(e.id, date));
         }
+        shade_today(
+            frame,
+            clip(origin, viewport.y, width - 1, viewport.height),
+            date,
+            s,
+        );
         virtual_x += width as i32;
     }
     s.max_days
@@ -1034,7 +1067,14 @@ fn list_lines<'a>(
         });
         if last != Some(date) {
             rows.push((
-                Line::styled(date.format("%A, %B %d, %Y").to_string(), accent()),
+                Line::styled(
+                    date.format("%A, %B %d, %Y").to_string(),
+                    accent().bg(if date == s.today() {
+                        today_background()
+                    } else {
+                        theme::BG_CANVAS()
+                    }),
+                ),
                 None,
                 n,
             ));

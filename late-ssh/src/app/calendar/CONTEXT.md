@@ -15,6 +15,8 @@ grid rules. Selection adds a marker and patches every span last, using at least
 4.5:1 text contrast against fixed fills or terminal-owned inversion. High Contrast
 derives a calendar-local selection fill at least 3:1 against its canvas. Hourly cards
 reserve selection for the selected event; source buttons do not suggest focus.
+Account-local today has a subtle background tint in month cells, hourly columns
+and date headings, with event cards and selection fills taking precedence.
 Modal headings use the
 canvas-safe accent rather than the glow color, which is white in some light themes.
 `date_entry.rs` handles explicit date fields separately: flexible absolute forms,
