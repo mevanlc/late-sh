@@ -968,7 +968,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         return;
     }
 
-    if app.calendar.modal.is_some() {
+    if app.calendar.modal.is_some() || app.calendar.context_menu.is_some() {
         crate::app::calendar::input::handle_event(app, &event);
         return;
     }
@@ -2294,7 +2294,7 @@ fn dispatch_escape(app: &mut App) {
     if handle_modal_input(app, ctx, 0x1B) {
         return;
     }
-    if app.calendar.modal.is_some() {
+    if app.calendar.modal.is_some() || app.calendar.context_menu.is_some() {
         crate::app::calendar::input::escape(&mut app.calendar);
         return;
     }

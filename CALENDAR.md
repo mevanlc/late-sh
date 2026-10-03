@@ -6,18 +6,40 @@ calendar, and complete personal calendars their owners publish read-only.
 
 Month, Week, 3-day, Day and Event List share Today, date selection, and past/future
 navigation. Month uses six civil weeks with selected-day agendas, previews and
-explicit counts. Short layouts show a compact grid; Enter or clicking a day opens
-its agenda. Timed views partition overlaps into lanes, clip spanning events with
-continuation arrows, and scroll both hours and columns. Event List groups the
-selected month chronologically; its order is fixed.
+explicit counts. Short layouts show a compact grid. Timed views share available
+width between days and event lanes, keep events occupying the same half-hour row
+in separate lanes, and clip spanning events with continuation arrows. Hours and
+columns scroll independently. Event List groups the selected month chronologically;
+its order is fixed.
+
+A single click selects a day, event, or empty timed slot. Double-clicking a day
+opens its agenda; double-clicking an event opens details; double-clicking an empty
+slot starts a timed draft there when the calendar is writable. Overflow counts
+open the day's agenda directly. Event rows include their timing line in the mouse
+target. Right-click opens the permitted Agenda/Open/New/Edit/Delete actions;
+Escape or an outside click closes the menu. Source/view choices and buttons
+activate on one click. Selection and opening behave consistently in compact and
+wide layouts.
 
 Keys: `s` source, `v` view, `[`/`]` period, `t` today, `g` date, `n` new,
-`e` edit, Delete (confirmation), `u` upcoming, `c` Calendar Settings. Arrows select
-dates, `j`/`k` select events, Enter opens details, PageUp/PageDown scroll hours or
-lists, and Ctrl+Left/Right scroll timed columns. The wheel scrolls the pane under
-the pointer. Editors take text before page/global letters; Tab changes fields,
-Enter adds description newlines, Ctrl+S saves, and Esc offers to discard a changed
-draft. Save/Cancel controls are also clickable. Global Ctrl+O opens account Settings.
+`e` edit, Delete (confirmation), `u` upcoming, `c` Calendar Settings. Month arrows
+move by day/week; timed-view Left/Right changes day and Up/Down moves a half-hour
+slot. `j`/`k` selects events and reveals the selection; list arrows also select
+events. Enter opens the selected event or date agenda, or starts a draft in the
+selected timed slot. `n` uses the selected date and, in timed views, the current
+slot. PageUp/PageDown scroll hours, the month agenda, or lists; Ctrl+Left/Right
+scrolls timed columns. The wheel scrolls the pane under the pointer, including
+source/view pickers. Escape/Close returns to the previous dialog and preserves
+its selection and scroll position. Agenda offers a New control when writable.
+
+Editors take text before page/global letters. Tab/Shift+Tab visits relevant
+fields; timed fields, enabled notification lead time, staff delegation and DST
+occurrence choices appear only when applicable. The focused field stays visible
+on short terminals. PageUp/PageDown, the wheel and scrollbar move the form;
+clicking field text places its caret. Enter adds description newlines, Ctrl+S
+saves, and Escape offers to discard a changed draft. Keep editing is the safe
+default; Escape in that prompt returns to the draft. Save/Cancel stay visible and
+clickable. Global Ctrl+O opens account Settings.
 
 ## Timing and inference
 
@@ -44,7 +66,8 @@ and the effective zone is displayed. All-day notification boundaries use the
 creator's captured account zone. Nonexistent local times are errors; repeated
 local times require choosing Earlier or Later separately for the start and end.
 Repeated-hour labels include the timezone abbreviation, and overlap lanes check
-absolute instants as well as their rendered hour ranges.
+absolute instants as well as occupied half-hour cells. Clicking a spanning event
+keeps the day of the clicked segment selected.
 
 On title blur, including Save, an unassigned new draft can infer a trailing ISO
 or English month-name date, today/tomorrow, weekday/next weekday, or 12/24-hour
@@ -99,10 +122,15 @@ Ratatui.
 Controls follow the shared TUI hint style: accented keys, quieter descriptions
 and faint separators. Event titles and field values stand above muted timing and
 source metadata; subdued grid rules separate dates without competing with them.
-Upcoming rows put titles before full timing so titles remain visible at narrow
-widths. Only the selected hourly event receives selection styling, including
-terminal-owned foreground/background colors. Modal titles use an accent that
-remains readable on light canvases.
+Upcoming rows and hourly cards put titles before timing/source metadata. Selected
+rows, dates and cards have a visible marker as well as a background fill; their
+foreground is adjusted to at least 4.5:1 contrast against fixed palette fills.
+High Contrast also gives its calendar selection fill at least 3:1 contrast against
+the canvas.
+The Terminal theme uses the terminal's own inverted foreground/background pair.
+Only the selected hourly event receives selection styling. The source control uses
+regular toolbar styling. Modal titles use an accent that remains readable on light
+canvases.
 
 ## Development fixture and verification
 
@@ -116,7 +144,10 @@ overnight event. No service restart is needed after seeding.
 
 Adjacent model/parser/state/render tests and App flow tests cover ranges, DST,
 permissions, sharing changes, immutable creation tiers, conflicts, notice windows,
-input priority, hit geometry and compact layouts. Run targeted Linux checks with
+input priority, hit geometry and compact layouts. Selection tests cover every
+built-in palette; targeted cases cover short adjacent events, adaptive card widths,
+mouse context, picker scrolling, editor focus/caret geometry and modal return paths.
+Run targeted Linux checks with
 `make test-llm ARGS="-p late-core -p late-ssh -E 'test(calendar)'"`. The complete
 `make check` gate belongs to the human-owned workflow.
 
