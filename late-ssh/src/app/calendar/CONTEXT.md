@@ -6,6 +6,11 @@ performs async database work. `state.rs` drains private session replies and shar
 server-notice/invalidation watches. `input.rs` owns page letters and editor focus;
 `ui.rs` resolves theme styles and records hit/scroll geometry at render time.
 `parser.rs` performs deterministic title-suffix inference once per new draft.
+Calendar controls use the shared accent-key/dim-label hints. Bright titles and
+values contrast with muted timing, dim metadata, faint separators and subdued
+grid rules. Selection patches every span last, including terminal-owned colors;
+hourly cards reserve selection for the selected event. Modal headings use the
+canvas-safe accent rather than the glow color, which is white in some light themes.
 `date_entry.rs` handles explicit date fields separately: flexible absolute forms,
 unambiguous numeric dates and signed/ago/in offsets. Go-to-date offsets start from
 the selection; editor offsets use account-local today. Today/weekday words and

@@ -1,10 +1,17 @@
 use super::{state::*, svc::CalendarService, ui::*};
+use crate::app::common::theme;
 use chrono::{Datelike, Duration, TimeZone, Utc};
 use late_core::{
     db::{Db, DbConfig},
     models::calendar::*,
 };
-use ratatui::{Terminal, backend::TestBackend};
+use ratatui::{
+    Terminal,
+    backend::TestBackend,
+    buffer::Buffer,
+    layout::Rect,
+    style::{Color, Modifier},
+};
 use uuid::Uuid;
 fn event(start: u32, end: u32) -> CalendarEvent {
     let start = Utc.with_ymd_and_hms(2026, 10, 2, start, 0, 0).unwrap();
@@ -258,4 +265,258 @@ async fn calendar_narrow_week_reveals_selected_day_and_every_overlap_lane() {
             .iter()
             .any(|h| h.action == Action::Date(s.selected))
     );
+}
+
+const READABILITY_THEMES: [&str; 5] = ["late", "github-light", "contrast", "mono-ink", "terminal"];
+
+/// Themes are thread-local; restore the calling test's palette even on panic.
+struct RestoreTheme(&'static str);
+
+impl RestoreTheme {
+    fn new() -> Self {
+        Self(
+            theme::OPTIONS
+                .iter()
+                .find(|option| option.kind == theme::current_kind())
+                .unwrap()
+                .id,
+        )
+    }
+}
+
+impl Drop for RestoreTheme {
+    fn drop(&mut self) {
+        theme::set_current_by_id(self.0);
+    }
+}
+
+fn rendered_text(buffer: &Buffer, area: Rect) -> String {
+    (area.y..area.bottom())
+        .map(|y| {
+            (area.x..area.right())
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Locate ASCII labels by cells, keeping coordinates correct after wide glyphs.
+fn label_position(buffer: &Buffer, area: Rect, text: &str) -> (u16, u16) {
+    assert!(text.is_ascii());
+    let width = text.len() as u16;
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right().saturating_sub(width).saturating_add(1) {
+            if text
+                .chars()
+                .enumerate()
+                .all(|(i, c)| buffer[(x + i as u16, y)].symbol() == c.to_string())
+            {
+                return (x, y);
+            }
+        }
+    }
+    panic!("Missing {text:?} in {}", rendered_text(buffer, area));
+}
+
+fn action_area(s: &CalendarState, action: Action) -> Rect {
+    s.hits
+        .borrow()
+        .iter()
+        .find(|hit| hit.action == action)
+        .unwrap()
+        .area
+}
+
+#[tokio::test]
+async fn calendar_theme_hierarchy_preserves_controls_and_geometry() {
+    let _restore = RestoreTheme::new();
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.selected = "2026-10-02".parse().unwrap();
+    for id in READABILITY_THEMES {
+        theme::set_current_by_id(id);
+        for (w, h) in [(140, 45), (80, 24), (48, 16)] {
+            s.modal = None;
+            s.invalidate_geometry();
+            let area = Rect::new(0, 0, w, h);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            terminal.draw(|frame| draw(frame, area, &s)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let view = action_area(&s, Action::View);
+            let key = &buffer[label_position(buffer, view, "v")];
+            let label = &buffer[label_position(buffer, view, "Month")];
+            assert_eq!(key.fg, theme::AMBER_DIM(), "{id} {w}x{h}");
+            assert!(key.modifier.contains(Modifier::BOLD));
+            assert_ne!(key.fg, label.fg, "{id}: key and label merge");
+            assert!(!label.modifier.contains(Modifier::BOLD));
+
+            let source = action_area(&s, Action::Source);
+            for word in ["s", "Server"] {
+                let cell = &buffer[label_position(buffer, source, word)];
+                if theme::BG_CANVAS() == Color::Reset {
+                    assert_eq!(cell.fg, Color::Reset);
+                    assert_eq!(cell.bg, Color::Reset);
+                    assert!(cell.modifier.contains(Modifier::REVERSED));
+                } else {
+                    assert_eq!(cell.bg, theme::BG_SELECTION());
+                }
+            }
+            let grid_corner = buffer
+                .content()
+                .iter()
+                .find(|cell| cell.symbol() == "╭")
+                .unwrap();
+            assert_eq!(grid_corner.fg, theme::BORDER_DIM(), "{id}");
+            for hit in s.hits.borrow().iter() {
+                assert_eq!(hit.area.intersection(area), hit.area);
+            }
+
+            s.modal = Some(Modal::Go(Box::new(ratatui_textarea::TextArea::from(vec![
+                "+1 month".to_string(),
+            ]))));
+            terminal.draw(|frame| draw_modal(frame, area, &s)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let title = &buffer[label_position(buffer, area, "Go to date")];
+            assert_eq!(title.fg, theme::AMBER(), "{id}");
+            if title.fg != Color::Reset {
+                assert_ne!(title.fg, title.bg, "{id}: invisible modal title");
+            }
+            assert!(title.modifier.contains(Modifier::BOLD));
+            let corner = buffer
+                .content()
+                .iter()
+                .find(|cell| cell.symbol() == "╭")
+                .unwrap();
+            assert_eq!(corner.fg, theme::BORDER_ACTIVE(), "{id}");
+            let go = action_area(&s, Action::Save);
+            let enter = &buffer[label_position(buffer, go, "Enter")];
+            assert_eq!(enter.fg, theme::AMBER_DIM(), "{id}");
+            assert!(enter.modifier.contains(Modifier::BOLD));
+            for action in [Action::Save, Action::Cancel] {
+                let rect = action_area(&s, action);
+                assert_eq!(rect.intersection(area), rect);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn calendar_upcoming_titles_remain_visible_before_quiet_metadata() {
+    let _restore = RestoreTheme::new();
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    let mut notice = event(9, 12);
+    let now = Utc::now();
+    notice.title = "日本語 café 🗓 Calendar gathering with guest musicians".into();
+    notice.timing = EventTiming::Timed {
+        start: now + Duration::hours(2),
+        end: Some(now + Duration::hours(4)),
+    };
+    notice.notice_lead_seconds = Some(86400);
+    notice.notice_start = now - Duration::hours(1);
+    notice.notice_end = now + Duration::hours(4);
+    s.notices = vec![notice.clone()];
+    for id in READABILITY_THEMES {
+        theme::set_current_by_id(id);
+        for w in [140, 80, 48] {
+            s.invalidate_geometry();
+            let area = Rect::new(0, 0, w, 5);
+            let mut terminal = Terminal::new(TestBackend::new(w, 5)).unwrap();
+            terminal
+                .draw(|frame| draw_upcoming_panel(frame, area, &s))
+                .unwrap();
+            let event_area = action_area(&s, Action::Event(notice.id));
+            let buffer = terminal.backend().buffer();
+            let text = rendered_text(buffer, event_area);
+            // Buffer padding after double-width glyphs is not part of the title.
+            assert!(
+                text.replace(' ', "").contains("日本語café"),
+                "{id} {w}: title hidden by metadata: {text}"
+            );
+            assert!(text.starts_with("[Server]"), "{text}");
+            let source = &buffer[label_position(buffer, event_area, "Server")];
+            let title = &buffer[label_position(buffer, event_area, "caf")];
+            assert_ne!(title.fg, source.fg, "{id}: title and source merge");
+            if title.fg != Color::Reset {
+                assert_ne!(title.fg, title.bg, "{id}: invisible title");
+            }
+            if w == 140 {
+                let time = timing_label(&notice, s.tz);
+                assert!(text.contains(&time), "{text}");
+                let time_cell = &buffer[label_position(buffer, event_area, &time[..10])];
+                assert_ne!(title.fg, time_cell.fg, "{id}: title and time merge");
+                let separator = (event_area.x..event_area.right())
+                    .map(|x| &buffer[(x, event_area.y)])
+                    .find(|cell| cell.symbol() == "·")
+                    .unwrap();
+                assert_eq!(separator.fg, theme::TEXT_FAINT(), "{id}");
+            }
+            assert_eq!(event_area.intersection(area), event_area);
+        }
+    }
+}
+
+#[tokio::test]
+async fn calendar_timed_cards_reserve_selection_for_the_selected_event() {
+    let _restore = RestoreTheme::new();
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.view = CalendarView::Day;
+    s.selected = "2026-10-02".parse().unwrap();
+    let mut first = event(9, 12);
+    first.title = "Sapphire".into();
+    let mut second = event(10, 11);
+    second.title = "Maple".into();
+    s.events = vec![first.clone(), second.clone()];
+    let area = Rect::new(0, 0, 80, 24);
+    for id in READABILITY_THEMES {
+        theme::set_current_by_id(id);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        for selected in 0..2 {
+            s.event_index = selected;
+            s.invalidate_geometry();
+            terminal.draw(|frame| draw(frame, area, &s)).unwrap();
+            let buffer = terminal.backend().buffer();
+            for (index, event) in [&first, &second].into_iter().enumerate() {
+                let rect = action_area(&s, Action::Event(event.id));
+                assert_eq!(rect.intersection(area), rect);
+                let cells = (rect.y..rect.bottom())
+                    .flat_map(|y| (rect.x..rect.right()).map(move |x| &buffer[(x, y)]));
+                let mut glyphs = 0;
+                for cell in cells.filter(|cell| !cell.symbol().trim().is_empty()) {
+                    glyphs += 1;
+                    assert_ne!(cell.symbol(), "─", "{id}: hour rule crosses event card");
+                    if index == selected {
+                        if theme::BG_CANVAS() == Color::Reset {
+                            assert_eq!(cell.fg, Color::Reset, "{id}: {}", event.title);
+                            assert_eq!(cell.bg, Color::Reset, "{id}: {}", event.title);
+                            assert!(cell.modifier.contains(Modifier::REVERSED));
+                        } else {
+                            assert_eq!(cell.bg, theme::BG_SELECTION(), "{id}: {}", event.title);
+                            assert_ne!(cell.fg, cell.bg, "{id}: invisible selected glyph");
+                        }
+                    } else {
+                        assert!(!cell.modifier.contains(Modifier::REVERSED));
+                        let background = if theme::BG_CANVAS() == Color::Reset {
+                            Color::Reset
+                        } else {
+                            theme::BG_HIGHLIGHT()
+                        };
+                        assert_eq!(cell.bg, background, "{id}: {}", event.title);
+                        if cell.fg != Color::Reset {
+                            assert_ne!(cell.fg, cell.bg, "{id}: invisible event glyph");
+                        }
+                    }
+                }
+                assert!(glyphs > 0, "{id}: missing card {}", event.title);
+            }
+        }
+    }
 }
