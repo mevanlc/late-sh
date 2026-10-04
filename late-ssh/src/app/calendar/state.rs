@@ -28,7 +28,9 @@ pub enum Pane {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     Source,
+    CycleSource(i8),
     View,
+    CycleView(i8),
     Previous,
     Next,
     Today,
