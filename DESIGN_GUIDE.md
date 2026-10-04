@@ -1,117 +1,203 @@
 # `late.sh` TUI Design Guide
 
-This guide establishes the visual, layout, and interaction standards for `late.sh`. It serves as the single source of truth for human developers and AI coding agents implementing screens, dialogs, forms, and games within the terminal.
+## Status and provenance
 
----
+We did not develop a design guide alongside the app, so this document had to be
+reconstructed from the existing interface and code. That explains why the first
+draft included descriptions of the app as it is, and why some inconsistencies in
+the document reflect inconsistencies in the app itself.
 
-## 1. Core Design Philosophy
+The initial draft covered a large surface area with limited review and testing.
+Its provenance is therefore uneven, and its caution about prescribing a single
+design is deliberate. This is a working reference: as we review the interface in
+use, we can distinguish useful conventions from accidental behavior and become
+more confident about which guidance deserves to be firmer.
 
-1. **Information Density with Breathing Room**: Keep interfaces compact and functional without letting elements run together. Density does not mean cramped; spacious areas receive deliberate padding, while constrained viewports gracefully shed secondary chrome.
-2. **Predictable Grid & Columnar Alignment**: Align controls, labels, and statistics along uniform column gutters. Outlier-long elements should sacrifice columnar lockstep rather than blow out neighboring columns.
-3. **Contrast Over Hierarchy**: Terminal emulators lack subpixel font weights, letter spacing, and CSS drop-shadows. Visual hierarchy must be created through distinct foreground/background tint steps, character glyphs, bold accents, and deliberate contrast pairings.
-4. **Keyboard-First, Mouse-Accessible**: Every action must be immediately bindable to a clear key mnemonic or chord. Mouse hitboxes (`Cell<Rect>`) complement keyboard workflows without replacing them.
-5. **Universal Portability**: Layouts must degrade cleanly from ultra-wide 500×200 desktop monitors down to a minimum 44×22 phone screen (Termux).
+### How to read this guide
 
----
+| Status | Meaning |
+| :--- | :--- |
+| **Observed** | A convention or implementation found in the current app. Its scope matters; describing it does not endorse every detail. |
+| **Suggested** | A reasonable starting point for new or revised UI, subject to the needs of the screen and further testing. |
+| **Open** | A variation, gap, or proposal that needs more investigation before we choose a common treatment. |
 
-## 2. Terminal Dimensions & Responsive Degradation
+Explicit design decisions are identified locally, such as the ellipsis guidance
+in §4.3. Most stylistic guidance remains tentative. This document does not
+authorize an app-wide harmonization pass merely because two screens differ.
 
-| Tier | Geometry | Target Environment | Layout & Degradation Rules |
-| :--- | :--- | :--- | :--- |
-| **Extreme Floor** | **44 × 22** | Termux on mobile phones | • Top frame titles drop right-hand chips and pot meters.<br>• Rails (Room list, Right sidebar) collapse to zero width; main chat or canvas fills 100% width.<br>• Popups and dialogs clamp to viewport bounds or trigger `draw_too_small`.<br>• Footers drop unread counts, radio station tags, and secondary action hints (`row_with_hint`). |
-| **Compact / Laptop** | **96 × 34** | Standard split terminal / laptop window | • Standard modal viewport (`MODAL_WIDTH = 96`, `MODAL_HEIGHT = 34`).<br>• Room list rail (`AUTO_ROOM_LIST_MIN_COLS = 96`) becomes visible.<br>• Right sidebar (`AUTO_RIGHT_SIDEBAR_MIN_COLS = 72`) is visible.<br>• Up to 2-pane side-by-side data grids. |
-| **Median Target** | **180 × 60** | Full-screen desktop terminal | • Canonical development target. All chrome, sidebars, and three-pane views visible.<br>• Sidebars expand to full component stacks (presence, radio booth, mini-calendar, bonsai).<br>• Ample 2-column padding between structural panels. |
-| **Expansive / Ultrawide** | **500 × 200** | Multi-monitor / tiled ultrawide | • Artboard gallery displays full uncropped canvases.<br>• Text columns and dialogs clamp to maximum readable widths (`MAX_WIDTH = 110`) using `centered_rect` to prevent ultra-long unreadable lines of text. |
+The scope is the interface drawn by late.sh: its shell, screens, launchers,
+dialogs, and native games. Embedded applications such as NetHack own their
+in-game presentation and input conventions. Repository architecture and
+correctness contracts remain documented in [CONTEXT.md](CONTEXT.md) and the
+relevant domain context files. Source links below are implementation references;
+the illustrative snippets are not a new shared API.
 
-### Minimum Dimension Gates (`draw_too_small`)
-When a screen or interactive canvas has a hard geometric requirement, guard it using `primitives::draw_too_small`. Never show a generic "terminal too small" message—always report what needs space, the required dimensions, and the current size:
+## 1. Design aims — suggested
+
+1. **Density with breathing room.** Keep related information compact while giving controls and sections enough separation to be recognizable.
+2. **Predictable alignment.** Use stable gutters where they help scanning. Adapt the layout for long labels and narrow spaces while keeping important values readable.
+3. **Readable hierarchy.** Establish emphasis with tested foreground/background pairs, bold, glyphs, and spacing. A quieter treatment should still be readable when it carries necessary information.
+4. **Keyboard and mouse access.** Support clear keyboard paths and useful mouse targets, while respecting the chosen interaction mode and the input owned by an editor or game.
+5. **Recoverable compact layouts.** Aim to keep core tasks usable on small terminals. When a canvas cannot fit, explain the space it needs and preserve a way to leave or recover.
+
+These are design aims, not a claim that every current screen satisfies them.
+
+## 2. Terminal dimensions and responsive behavior
+
+### 2.1 Useful review sizes — suggested
+
+The first draft used these reference sizes. They are useful places to inspect
+behavior, rather than universal breakpoints or verified guarantees.
+
+| Terminal geometry | What to inspect |
+| :--- | :--- |
+| **44×22** | Compact phone-sized space: focus visibility, reachable fields, clipped controls, and a usable exit path. Some canvases require more room. |
+| **96×34** | Compact desktop space: interaction between the shell, rails, popups, and available body area. |
+| **180×60** | A roomy desktop reference: spacing, competing emphasis, and multi-pane readability. |
+| **500×200** | An optional extreme-size check: excessive text width, awkward centering, and unhelpful expansion. |
+
+**Observed:** the shell's Auto room-list threshold is 96 terminal columns and its
+Auto right-sidebar threshold is 72. Explicit On settings bypass those Auto
+thresholds. The right sidebar is drawn on Home and Arcade; its contents also
+depend on configuration and available space.
+See [shell layout](late-ssh/src/app/render.rs) and
+[sidebar](late-ssh/src/app/common/sidebar.rs).
+
+Distinguish terminal size from the size of a supplied content or pane `Rect`.
+The outer frame consumes two columns and two rows, and inner chrome can consume
+more. A component's minimum size usually refers to its supplied area, not the
+whole terminal.
+
+### 2.2 Minimum-size notices — observed, with suggested use
+
+[draw_too_small](late-ssh/src/app/common/primitives.rs) names the component,
+required dimensions, and available space. Existing thresholds include:
+
+| Component | Minimum checked area |
+| :--- | :--- |
+| Pool Table | 112×30 |
+| Traffic | 70×20, checked inside its own frame |
+| Games Hub | 60×6 |
+| Arcade Lobby | 50×10 |
+| Leaderboards | 48×8 |
+| Rubik's Cube | 42×18 |
+| Rice | 40×12 |
+| Green Dragon | 30×10 |
+
+These describe individual implementations, not standard minimums for new
+screens. For a genuine geometric requirement, the existing helper gives a useful
+recovery message:
 
 ```rust
-use crate::app::common::primitives::draw_too_small;
-
 if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
     draw_too_small(frame, area, "Pool Table", MIN_WIDTH, MIN_HEIGHT);
     return;
 }
 ```
-*Standard Thresholds*: Pool Table (`112×30`), Traffic (`70×20`), Games Hub (`60×6`), Arcade Lobby (`50×10`), Leaderboards (`48×8`), Rubik's Cube (`42×18`), Zen Engine (`40×12`), Green Dragon (`30×10`).
 
----
+**Suggested:** first consider hiding secondary chrome, scrolling, or paging for
+forms and lists. Merely clamping a popup to the viewport does not make its fields
+visible or reachable. Compact Settings behavior remains a gap; see §9.1.
 
-## 3. Grid, Layout & Spacing
+## 3. Grid, spacing, and borders
 
-### 3.1 Padding & Margin Conventions
-- **Spacious Views (Desktop / Median Viewports)**:
-  - Separate elements horizontally by **2 columns** (`Constraint::Length(2)`).
-  - Pair horizontal 2-column margins with a **1-row vertical breathing margin** (`Constraint::Length(1)`).
-- **Constrained / Dense Views (Modals, Compact Terminals)**:
-  - Reduce horizontal padding to **1 column** (`Constraint::Length(1)`).
-  - Reduce vertical margin to **0 or 1 row** (usually 1 row between sections, 0 between rows in a list).
-- **Outer Shell Padding**:
-  - Right sidebar leaves a 1-column gap past its left divider rule: `x: area.x + 2, width: area.width.saturating_sub(2)`.
-  - Chat composer applies a 1-column horizontal inset inside its top/bottom borders: `horizontal_inset(inner, 1)`.
+### 3.1 Spacing — observed and suggested
 
-### 3.2 Columnar Alignment
-- **Form Labels**: Standard label width is **16 columns** (`format!("{label:<16}")`).
-  - Longer descriptions (such as Tweaks or Feeds) expand to **28 or 32 columns** (`format!("{label:<32}")`).
-  - Compact facts (Profile fetch keys, runner stats) use **8 to 10 columns** (`format!("{label:<10}")`).
-- **Outlier Handling**: If an outlier label exceeds the column allocation (e.g. label length ≥ 16 in a 16-col row), do not wrap or blow out the table width. Append a single space and let the value flow:
-  ```rust
-  let label_text = if label.chars().count() >= 16 {
-      format!("{label} ")
-  } else {
-      format!("{label:<16}")
-  };
-  ```
+Common reference points are two columns between roomy groups, one column in
+dense layouts, and a breathing row between sections. These are useful starting
+points, not app-wide invariants. Lists often have no blank row between items;
+individual tables and panels use different gutters.
 
-### 3.3 Box Drawing Borders & Inline Titles
-- **Title Padding**: Block titles must always be padded with leading and trailing spaces:
-  ```rust
-  // CORRECT:
-  Block::default().title(" Settings ")
-  Block::default().title(format!(" {} ({hint}) ", overlay.title))
+**Observed:** the right sidebar leaves a one-column gap after its divider, and
+the chat composer uses a one-column horizontal inset.
+See [sidebar](late-ssh/src/app/common/sidebar.rs) and
+[chat layout](late-ssh/src/app/chat/ui.rs).
 
-  // AVOID (looks jammed against border corners):
-  Block::default().title("Settings")
-  ```
-- **Border Hierarchy**:
-  - `BORDER_ACTIVE()`: Active focused windows, focused inputs, app outer frame, statusline continuation rules.
-  - `BORDER()`: Inactive containers, resting composers, table outlines.
-  - `BORDER_DIM()`: Quiet internal panel dividers (rail rules, sidebar dividers, table sub-rules).
-  - `ERROR()`: Destructive modal frames (e.g. Delete Account dialog) or alert popovers.
+**Suggested:** judge spacing with the actual content and supplied area. Reducing
+padding can help a compact screen, but it cannot replace budgeting its controls
+or providing a way to reach hidden content.
 
----
+### 3.2 Column alignment and text measurement
 
-## 4. Typography, Text Hierarchy & Unicode Glyphs
+**Observed:** Settings commonly uses a 16-character formatted label column;
+longer settings descriptions use 28 or 32, and compact fact displays use narrower
+columns. Those choices are local conventions. Settings' character-count
+measurement is also a known limitation, not a reference implementation for
+arbitrary Unicode.
 
-### 4.1 Text Tiering (No Subpixels)
-Because terminals cannot render distinct font weights or sizes, visual hierarchy relies on luminance tiers from `late-ssh/src/app/common/theme.rs`:
+**Correctness:** display layout needs terminal-cell widths. Use Ratatui's
+`Line::width()` or `Span::width()`, and its styled graphemes when clipping.
+Byte length, scalar-value counts, and Rust format-string padding do not measure
+the rendered width of CJK text, emoji, or combining sequences.
 
-| Tier | Semantic Token | Typical Usage |
+**Suggested:** budget the prefix, label, separator, and value within the row's
+available width. A long label can be shortened, moved to another row, or paired
+with a different compact layout. Appending an unrestricted label and a space
+does not prevent overflow.
+
+References: [leaderboard row budgeting](late-ssh/src/app/leaderboard/ui.rs),
+[calendar title clipping](late-ssh/src/app/calendar/ui.rs), and the illustrative
+single-line example in §6.5.
+
+### 3.3 Borders and titles — observed and suggested
+
+Padding a title with one leading and trailing space is a common, useful treatment:
+
+```rust
+Block::default().title(" Settings ")
+```
+
+The existing palette roles generally distinguish active borders
+(`BORDER_ACTIVE`), ordinary borders (`BORDER`), quiet dividers (`BORDER_DIM`),
+and some destructive or error frames (`ERROR`). These roles are starting points;
+the actual color pair and surrounding emphasis still need review.
+
+## 4. Text hierarchy and glyphs
+
+### 4.1 Semantic text roles — observed
+
+Terminals provide a fixed cell grid; bold and other styling vary by emulator and
+font. The palette names below express intended roles, not a guaranteed ordering
+of brightness or contrast.
+
+| Role | Common token/treatment | Existing uses |
 | :--- | :--- | :--- |
-| **Header / Emphasis** | `TEXT_BRIGHT()` + `Modifier::BOLD` | Window titles, active values, focused selections, table totals. |
-| **Brand Accent** | `AMBER_GLOW()` + `Modifier::BOLD` | Active modal titles, highlighted cursors (`›`), unread mentions. |
-| **Primary Body** | `TEXT()` | Standard body text, dialog labels, profile values, chat body. |
-| **Secondary Metadata** | `TEXT_DIM()` | Unselected options, timestamps, keyhint action labels, table headers. |
-| **Quiet / Dividers** | `TEXT_FAINT()` | Empty placeholders, inactive hints, table rule dots, dot separators (`·`). |
+| Emphasis | `TEXT_BRIGHT` + bold | Titles, active values, totals |
+| Accent | `AMBER` or `AMBER_GLOW` + bold | Titles, cursors, action keys |
+| Body | `TEXT`, or domain-specific `CHAT_BODY` | Labels, values, body text |
+| Metadata | `TEXT_DIM` | Timestamps, action descriptions, table headers |
+| Quiet detail | `TEXT_FAINT` | Dividers, some placeholders, inactive hints |
+| Mentions | `MENTION` | Mention highlighting |
 
-### 4.2 Standard Unicode Glyph Glossary
+**Suggested:** choose emphasis by checking the actual foreground/background
+combination. In the nominal Latte palette, `TEXT` has 7.06:1 canvas contrast,
+while `TEXT_BRIGHT` has 2.34:1 and `AMBER_GLOW` has 2.31:1. A token called
+"bright" is not automatically a more readable heading color. Selection fills
+and account brightness adjustments also change the pairing.
 
-| Category | Glyph(s) | Semantic Meaning | Recommended Code Styling |
-| :--- | :--- | :--- | :--- |
-| **Selection / Cursor** | `›` (`\u{203a}`) | Active row indicator in lists & forms | `AMBER_GLOW().bold()` on `selection_style()` |
-| **Binary Toggle** | `● on` (`\u{25cf}`)<br>`○ off` (`\u{25cb}`) | Enabled switch<br>Disabled switch | `SUCCESS().bold()`<br>`TEXT_FAINT()` |
-| **Tri-State Option** | `◐ auto` (`\u{25d0}`) | Automatic / Hybrid / Inferred mode | `AMBER()` or `SUCCESS().bold()` |
-| **Disclosure** | `▸` (`\u{25b8}`)<br>`▾` (`\u{25be}`) | Collapsed node/folder<br>Expanded node/folder | `AMBER()`<br>`AMBER_GLOW()` |
-| **Cycle Choosers** | `◂ Value ▸` | Horizontal cycle selector | `AMBER().bold()` for arrows |
-| **Action Hints** | `⏎` (`\u{23ce}`) or `↵`<br>`·` (`\u{00b7}`) | Opens editor / sub-modal<br>Item / shortcut separator | `TEXT_DIM()`<br>`TEXT_FAINT()` |
-| **Truncation / Elision** | `…` (`\u{2026}`) | Content is currently omitted; see §4.3 | Inherit the visible text's style |
-| **Status Banners** | `✓` (`\u{2713}`)<br>`✗` (`\u{2717}`)<br>`•` (`\u{2022}`) | Success confirmation<br>Error / validation failure<br>Neutral info / alert | `SUCCESS()`<br>`ERROR()`<br>`AMBER()` |
-| **Markdown Headers**| `▍` (`\u{2584}`)<br>`▎` (`\u{258e}`)<br>`▏` (`\u{258f}`) | H1 Header marker<br>H2 Header marker<br>H3 Header marker | `AMBER_GLOW().bold()`<br>`AMBER().bold()`<br>`AMBER_DIM().bold()` |
-| **Text Caret** | `█` (`\u{2588}`) | Text input block cursor | `AMBER()` |
-| **Tree Branches** | `├─` / `└─` | Hierarchy list branches | `TEXT_FAINT()` (brightens on focus) |
+### 4.2 Glyph glossary — observed reference
 
-### 4.3 Ellipsis Usage
+Styling below names palette roles plus modifiers; it is not literal Rust method
+syntax on a `Color`.
+
+| Purpose | Glyphs | Common treatment |
+| :--- | :--- | :--- |
+| Selected row | `›` (U+203A) | Accent + bold; coordinate with selection style |
+| Binary toggle | `● on` (U+25CF), `○ off` (U+25CB) | Success for on; quiet text for off |
+| Automatic option | `◐ auto` (U+25D0) | Accent or success, depending on context |
+| Disclosure | `▸` (U+25B8), `▾` (U+25BE) | Collapsed / expanded |
+| Cycle selector | `◂ Value ▸` | Accented arrows |
+| Action / separation | `⏎` (U+23CE) or `↵`; `·` (U+00B7) | Action cue; separator |
+| Truncation / elision | `…` (U+2026) | Inherit visible text style; see §4.3 |
+| Status | `✓` (U+2713), `✗` (U+2717), `•` (U+2022) | Success, error, neutral information |
+| Markdown headings | `▍` (U+258D), `▎` (U+258E), `▏` (U+258F) | Accented H1/H2/H3 markers |
+| Text caret | `█` (U+2588) | Accent |
+| Tree branches | `├─`, `└─` | Quiet hierarchy lines |
+
+These are common examples, not a requirement to replace every existing glyph.
+Check font support and whether a symbol's meaning is clear in its context.
+
+### 4.3 Ellipsis usage — agreed direction
 
 Reserve the Unicode ellipsis character (`…`, U+2026) almost always for indicating
 truncation or elision. When used for that purpose, show it only while the value is
@@ -121,223 +207,170 @@ changing the value.
 
 Avoid using `…` merely to signal that a control opens a picker or dialog. For
 example, a cycle selector whose value fits should read `◂ Server ▸`, without an
-ellipsis after `Server`.
+ellipsis after `Server`. Existing picker hints that do this are migration gaps,
+not exceptions established by their presence in the app.
 
----
+### 4.4 Mnemonics and date emphasis
 
-## 5. Color, Theming & Contrast Matrix
+**Observed and agreed for Calendar:** toolbar labels integrate their mnemonic
+letter: the label is bold, the mnemonic is accented, and the remaining letters
+use brighter text. This avoids a separate key badge competing with the label.
+See [calendar toolbar](late-ssh/src/app/calendar/toolbar.rs).
 
-`late.sh` includes 105 built-in themes. All UI rendering must reference semantic accessors (`theme::*()`), never hardcoded RGB literals.
+Calendar uses a subtle today background where the day has a paintable canvas,
+with stronger emphasis reserved for the selected event. Terminal-owned
+backgrounds are preserved. Today-date emphasis does not use underlining, which
+can render poorly in terminals.
+See [calendar rendering](late-ssh/src/app/calendar/ui.rs).
 
-### 5.1 Palette Tokens Overview
-Every theme defines **27 semantic color tokens** in `struct Palette`:
-- **Canvas & Surface**: `bg_canvas`, `bg_selection`, `bg_highlight`
-- **Borders**: `border_dim`, `border`, `border_active`
-- **Text Tiers**: `text_faint`, `text_dim`, `text_muted`, `text`, `text_bright`
-- **Brand Accents**: `amber`, `amber_dim`, `amber_glow`
-- **Chat & Social**: `chat_body`, `chat_author`, `mention`
-- **Semantic State**: `success`, `error`, `bot`
-- **Domain Specific**: `bonsai_sprout`, `bonsai_leaf`, `bonsai_canopy`, `bonsai_bloom`, `badge_bronze`, `badge_silver`, `badge_gold`
+**Suggested:** consider these treatments for similar controls elsewhere, and
+prefer tint, bold, a marker, or reversal for new emphasis. Their suitability
+outside Calendar is still a design question.
 
-### 5.2 Key Archetype Contrast Matrix
-WCAG contrast ratios against `bg_canvas` across the primary theme families:
+## 5. Color, theming, and selection
 
-| Archetype | Theme ID | Background | `text` Ratio | `border_active` | `amber` Ratio | Contrast Notes |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Core Brand** | `late` | `#000000` (Pure Black) | **8.08:1** (`#af9e8a`) | 4.55:1 (`#a0692a`) | 5.76:1 (`#b8782c`) | Warm sepia/amber tone; high canvas contrast. |
-| **High Contrast** | `contrast` | `#0c0e0c` (Near Black) | **15.98:1** (`#e2eaf5`) | 10.73:1 (`#7ac9ff`) | 12.27:1 (`#ffc45c`) | System default; maximized readability. |
-| **Catppuccin** | `mocha` | `#1e1e2e` (Dark Blue) | **11.34:1** (`#cdd6f4`) | 8.07:1 (`#cba6f7`) | 9.27:1 (`#fab387`) | Soft pastel accents; strong selection contrast. |
-| **Kanagawa** | `kanagawa`| `#1f1f28` (Charcoal) | **9.84:1** (`#d2c9a6`) | 5.44:1 (`#7e96bd`) | 8.15:1 (`#ffa066`) | Muted Japanese autumnal ink tones. |
-| **Gruvbox** | `gruvboxdark` | `#282828` (Dark Gray) | **10.75:1** (`#ebdbb2`) | 3.81:1 (`#d65d0e`) | 5.94:1 (`#d79921`) | Earthy retro palette. |
-| **Light Theme**| `latte` | `#eff1f5` (Light Paper)| **7.06:1** (`#4c4f69`) | 4.79:1 (`#8839ef`) | Inverted | Inverted luminance: dark ink on light paper. |
+### 5.1 Palette roles and scope — observed, with suggested use
 
-### 5.3 Selection Highlighting & The Terminal Transparency Rule
-Selection highlights are created via `theme::selection_style()` and patched into row styles:
+The [theme module](late-ssh/src/app/common/theme.rs) contains 105 built-in choices
+and 27 `Palette` fields:
+
+- Canvas/surface: `bg_canvas`, `bg_selection`, `bg_highlight`
+- Borders: `border_dim`, `border`, `border_active`
+- Text: `text_faint`, `text_dim`, `text_muted`, `text`, `text_bright`
+- Accents: `amber`, `amber_dim`, `amber_glow`
+- Chat/social: `chat_body`, `chat_author`, `mention`
+- State: `success`, `error`, `bot`
+- Domain colors: `bonsai_sprout`, `bonsai_leaf`, `bonsai_canopy`, `bonsai_bloom`, `badge_bronze`, `badge_silver`, `badge_gold`
+
+**Suggested:** use semantic accessors for interface chrome and UI state, so the
+treatment follows the session's theme. User artwork, content colors, and
+established game identities can legitimately use their own colors; their
+legibility against UI backgrounds is a separate concern.
+
+**Rendering contract:** theme state is thread-local. The render path installs
+the reader's theme and brightness adjustment before drawing. Background work
+should carry data or semantic ink roles rather than resolve and cache
+reader-specific theme colors on an unrelated worker thread.
+See [render initialization](late-ssh/src/app/render.rs).
+
+### 5.2 Nominal palette contrast — observed snapshot
+
+These calculated RGB contrast ratios compare tokens with `bg_canvas` before
+account brightness adjustments. They do not describe every control, selection
+pair, or terminal configuration, and are not a claim of accessibility compliance.
+
+| Family | Theme ID | Canvas | `text` | `border_active` | `amber` |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Core brand | `late` | #000000 | 8.08:1 | 4.55:1 | 5.76:1 |
+| High Contrast (default) | `contrast` | #0c0e0c | 15.98:1 | 10.73:1 | 12.27:1 |
+| Catppuccin | `mocha` | #1e1e2e | 11.34:1 | 8.07:1 | 9.27:1 |
+| Kanagawa | `kanagawa` | #1f1f28 | 9.84:1 | 5.44:1 | 8.15:1 |
+| Gruvbox | `gruvboxdark` | #282828 | 10.75:1 | 3.81:1 | 5.94:1 |
+| Light | `latte` | #eff1f5 | 7.06:1 | 4.79:1 | 2.64:1 |
+
+### 5.3 Selection and terminal defaults — observed contract
+
+`theme::selection_style()` uses `BG_SELECTION` on a paintable canvas. For a
+`Color::Reset` canvas, it sets foreground and background to Reset and adds
+`REVERSED`, allowing the terminal's own foreground/background pair to provide
+the selection. Reset inherits terminal defaults, which may be opaque or
+transparent.
+
+Patch order is significant:
 
 ```rust
-// Apply selection style across a row:
-let row_style = Style::default().patch(theme::selection_style());
+// Ordinary text: apply selection after the text style.
+let selected_text = ordinary_style.patch(theme::selection_style());
+
+// Deliberate semantic foreground: set it after applying selection.
+let selected_semantic = theme::selection_style().fg(semantic_fg);
 ```
 
-**Transparent / Default Terminal Canvas (`Color::Reset`)**:
-When the user runs the `terminal` theme (`bg_canvas == Color::Reset`), terminal transparency is active. A fixed background fill cannot guarantee contrast against unknown terminal backgrounds.
-`selection_style()` resolves this by returning:
-```rust
-Style::default()
-    .fg(Color::Reset)
-    .bg(Color::Reset)
-    .add_modifier(Modifier::REVERSED)
-```
-- **Rule**: If a color carries semantic meaning inside a selected row (e.g. suit red, score colors), apply it **after** patching `selection_style()`.
-- **Rule**: Never patch-then-overwrite with `Modifier::REVERSED` because `REVERSED` is an additive bitflag. Treatments competing on the same cell must resolve to exactly one branch.
+The second treatment is an intentional exception for colors that carry meaning,
+such as suits or pieces. Under reversal, that foreground becomes the cell fill;
+it needs its own contrast review. Neither composition order is a universal
+answer for all selected spans.
 
-### 5.4 The Punch-Through Cutout Technique
-When rendering solid inverted glyph cutouts (Wordle tiles, Solitaire suits, Connect 4 discs) that must remain legible on both dark, light, and transparent terminals, use `theme::punch_through(fill)`:
+Adding `REVERSED` again does not toggle it off. Combining selection with another
+reversed treatment needs an explicit branch or removal of the modifier, rather
+than assuming a later style cancels it.
+See [selection_style](late-ssh/src/app/common/theme.rs).
+
+### 5.4 Glyph cutouts — observed technique
+
+Existing games use `theme::punch_through(fill)` for inverted glyph cutouts:
 
 ```rust
 pub fn punch_through(fill: Color) -> Style {
     Style::default().fg(fill).add_modifier(Modifier::REVERSED)
 }
 ```
-The terminal emulator paints the cell background with `fill` and shows the default background through the character cutout.
 
----
+The intended effect is a filled cell whose character cutout uses the inherited
+background. Reversal swaps the effective foreground/background; the inherited
+style therefore matters. This is a game-rendering technique, not a general
+selection recipe. Reference: [theme helpers](late-ssh/src/app/common/theme.rs).
 
-## 6. Canonical Ratatui Code Recipes
+## 6. Implementation references and illustrative patterns
 
-### 6.1 Modal & Dialog Framing
-Every modal follows this exact structure:
+### 6.1 Modal sizing and framing — observed inventory
+
+These are current outer-popup reference sizes, not app-wide requirements:
+
+| Component | Sizing | Reference |
+| :--- | :--- | :--- |
+| Settings | Desired 96×34 | [Settings](late-ssh/src/app/settings_modal/ui.rs) |
+| Quit confirmation | Desired 60×11 | [Quit](late-ssh/src/app/quit_confirm/ui.rs) |
+| Character sheet | Desired 80×28 | [Sheet](late-ssh/src/app/sheet_modal/ui.rs) |
+| Radio booth | Desired 120×40 | [Booth](late-ssh/src/app/audio/booth/ui.rs) |
+| Help | 80% of available width, 85% of height | [Help](late-ssh/src/app/help_modal/ui.rs) |
+| Calendar | Desired width 76, task-dependent height | [Calendar](late-ssh/src/app/calendar/ui.rs) |
+| Profile | Width capped at 110 | [Profile](late-ssh/src/app/profile_modal/ui.rs) |
+| Paper / News article | Width capped at 160 | [Paper](late-ssh/src/app/paper/ui.rs), [News](late-ssh/src/app/chat/news/ui.rs) |
+
+A common framing pattern clears the covered cells before drawing the popup.
+Clearing and painting the intended background are separate operations:
+`Clear` resets cells to terminal defaults; it does not paint `BG_CANVAS`.
+
+Illustrative fragment, after computing a bounded `popup` for the task:
 
 ```rust
-use ratatui::{
-    Frame,
-    layout::{Constraint, Flex, Layout, Rect},
-    style::{Modifier, Style},
-    widgets::{Block, Borders, Clear},
-};
-use crate::app::common::theme;
-
-pub(crate) const MODAL_WIDTH: u16 = 96;
-pub(crate) const MODAL_HEIGHT: u16 = 34;
-
-pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &MyState) {
-    let popup = centered_rect(MODAL_WIDTH, MODAL_HEIGHT, area);
-
-    // 1. MUST Clear underlying terminal content:
-    frame.render_widget(Clear, popup);
-
-    // 2. Outer block with active border and padded amber title:
-    let block = Block::default()
-        .title(" My Modal Title ")
-        .title_style(
-            Style::default()
-                .fg(theme::AMBER_GLOW())
-                .add_modifier(Modifier::BOLD),
-        )
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
-    let inner = block.inner(popup);
-    frame.render_widget(block, popup);
-
-    // 3. Vertical layout: breathing room -> body -> footer
-    let chunks = Layout::vertical([
-        Constraint::Length(1), // top breathing room
-        Constraint::Min(4),    // scrollable / interactive body
-        Constraint::Length(1), // action footer
-    ])
-    .split(inner);
-
-    draw_body(frame, chunks[1], state);
-    draw_footer(frame, chunks[2], state);
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let vertical = Layout::vertical([Constraint::Length(height)])
-        .flex(Flex::Center)
-        .split(area);
-    let horizontal = Layout::horizontal([Constraint::Length(width)])
-        .flex(Flex::Center)
-        .split(vertical[0]);
-    horizontal[0]
-}
+frame.render_widget(Clear, popup);
+let block = Block::default()
+    .title(" Settings ")
+    .title_style(Style::default().fg(theme::TEXT()).add_modifier(Modifier::BOLD))
+    .borders(Borders::ALL)
+    .border_style(Style::default().fg(theme::BORDER_ACTIVE()))
+    .style(Style::default().bg(theme::BG_CANVAS()));
+let inner = block.inner(popup);
+frame.render_widget(block, popup);
+// Lay out the body and footer within the inner rectangle.
 ```
 
----
+The canvas fill is appropriate when the popup is meant to use the theme canvas.
+Other treatments can be intentional. Body scrolling, focus visibility, footer
+space, and minimum usable geometry remain the component's responsibility.
+Reference: [Room Info framing](late-ssh/src/app/room_info_modal/ui.rs).
 
-### 6.2 Form Rows & Control Clusters (`row_line`)
-The canonical row control for forms, settings, and tweak panels:
+### 6.2 Form rows — observed reference, with suggested budgeting
+
+[Settings](late-ssh/src/app/settings_modal/ui.rs) has a local `ValueSpan` /
+`row_line` pattern combining a marker, label, value, and selected-row padding.
+Its `● on` / `○ off` toggles are useful examples of state communicated through
+both a word and a glyph.
+
+It is not yet a shared control primitive. Its character-count width handling
+should not be copied as the Unicode layout contract. A candidate reusable row
+would need explicit budgets for each part, compact behavior, and a deliberate
+selection-color policy (§5.3). Choosing a 16-cell label column alone does not
+provide those properties.
+
+### 6.3 Action hints — observed helper contracts
+
+`hint_line` styles every supplied action. It does not receive a width budget or
+remove hints:
 
 ```rust
-use ratatui::{
-    style::{Modifier, Style},
-    text::{Line, Span},
-};
-use crate::app::common::theme;
-
-pub struct ValueSpan {
-    pub text: String,
-    pub style: Style,
-}
-
-pub fn toggle_span(enabled: bool) -> ValueSpan {
-    if enabled {
-        ValueSpan {
-            text: "● on".to_string(),
-            style: Style::default()
-                .fg(theme::SUCCESS())
-                .add_modifier(Modifier::BOLD),
-        }
-    } else {
-        ValueSpan {
-            text: "○ off".to_string(),
-            style: Style::default().fg(theme::TEXT_FAINT()),
-        }
-    }
-}
-
-pub fn row_line(
-    selected: bool,
-    width: usize,
-    label: &str,
-    value: ValueSpan,
-) -> Line<'static> {
-    let marker = if selected { "›" } else { " " };
-    let prefix_style = if selected {
-        Style::default()
-            .fg(theme::AMBER_GLOW())
-            .patch(theme::selection_style())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::TEXT_FAINT())
-    };
-    let label_style = if selected {
-        Style::default()
-            .fg(theme::TEXT_BRIGHT())
-            .patch(theme::selection_style())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::TEXT_DIM())
-    };
-    let value_style = if selected {
-        value.style.patch(theme::selection_style())
-    } else {
-        value.style
-    };
-
-    let prefix = format!(" {marker} ");
-    let label_text = if label.chars().count() >= 16 {
-        format!("{label} ")
-    } else {
-        format!("{label:<16}")
-    };
-
-    let used = prefix.chars().count() + label_text.chars().count() + value.text.chars().count();
-    let padding = width.saturating_sub(used.min(width));
-    let trailing = " ".repeat(padding);
-    let trailing_style = if selected {
-        Style::default().patch(theme::selection_style())
-    } else {
-        Style::default()
-    };
-
-    Line::from(vec![
-        Span::styled(prefix, prefix_style),
-        Span::styled(label_text, label_style),
-        Span::styled(value.text, value_style),
-        Span::styled(trailing, trailing_style),
-    ])
-}
-```
-
----
-
-### 6.3 Action Hint Bars & Footers
-
-#### Canonical Multi-Action Footer (`hint_line`)
-```rust
-use crate::app::common::primitives::hint_line;
-
-// Renders: " ↑↓ move · Space pick · Esc done"
 let footer = hint_line(&[
     ("↑↓", "move"),
     ("Space", "pick"),
@@ -346,183 +379,267 @@ let footer = hint_line(&[
 frame.render_widget(Paragraph::new(footer), footer_area);
 ```
 
-#### Responsive Header Row with Right-Flushed Hint (`row_with_hint`)
-When horizontal space is tight, secondary action hints on the right are gracefully dropped rather than wrapping:
+`row_with_hint(left, right, width)` separates the two groups when they fit,
+otherwise returns the left group alone. It drops the whole right group, and does
+not shorten an oversized left group.
+
+**Suggested:** let the caller select shorter action sets or prioritize whole
+actions when space is tight. Preserve a discoverable exit/help path. Wrapping can
+be intentional when the layout reserves space for it; accidental clipping or
+wrapping of a nominally one-row footer needs attention.
+
+References: [hint helpers](late-ssh/src/app/common/primitives.rs) and
+[compact directory hints](late-ssh/src/app/directory/ui.rs).
+
+### 6.4 Tabs — observed variation
+
+The outer navigation uses bold amber active-tab pills. Settings uses an accented
+foreground on a highlight background. These are separate existing treatments;
+whether they should converge is open.
+
+The outer treatment, shown as a style-only excerpt:
 
 ```rust
-use crate::app::common::primitives::row_with_hint;
-
-let left = vec![
-    Span::styled("Section Title", Style::default().fg(theme::TEXT_BRIGHT()).add_modifier(Modifier::BOLD)),
-];
-let right = vec![
-    Span::styled("Enter", Style::default().fg(theme::AMBER_DIM()).add_modifier(Modifier::BOLD)),
-    Span::styled(" edit", Style::default().fg(theme::TEXT_DIM())),
-];
-let line = row_with_hint(left, right, area.width as usize);
-frame.render_widget(Paragraph::new(line), header_area);
+let active_style = Style::default()
+    .fg(theme::BG_SELECTION())
+    .bg(theme::AMBER())
+    .add_modifier(Modifier::BOLD);
 ```
 
----
+Clickable tabs additionally need measured, clipped hit regions recorded for the
+current frame. Styling a span does not create those regions.
+References: [outer navigation](late-ssh/src/app/render.rs) and
+[Settings tabs](late-ssh/src/app/settings_modal/ui.rs).
 
-### 6.4 Tab Bars & Header Rails
-Active tabs are styled as bold inverted amber pills, with hitboxes stored in `Cell<Rect>` for mouse clicks:
+### 6.5 Single-line clipping and numeric rows — illustrative
+
+This local helper illustrates cell-width budgeting and an ellipsis only when
+content is omitted. It is not an exported app helper. The fragment uses Ratatui's
+`Line`, `Span`, and `Style`; a caller remains responsible for styles and layout.
 
 ```rust
-for tab in visible_tabs {
-    let active = tab == current_tab;
-    let style = if active {
-        Style::default()
-            .fg(theme::BG_SELECTION())
-            .bg(theme::AMBER())
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme::TEXT_DIM())
-    };
-    spans.push(Span::styled(format!(" {} ", tab.label()), style));
-    spans.push(Span::raw(" "));
+fn clip_cells(text: &str, width: usize) -> String {
+    let line = Line::from(text);
+    if line.width() <= width {
+        return text.to_owned();
+    }
+    let ellipsis_width = Span::raw("…").width();
+    if width < ellipsis_width {
+        return String::new();
+    }
+    let limit = width - ellipsis_width;
+    let mut used = 0;
+    let mut out = String::new();
+    for grapheme in line.styled_graphemes(Style::default()) {
+        let cells = Span::raw(grapheme.symbol).width();
+        if used + cells > limit {
+            break;
+        }
+        out.push_str(grapheme.symbol);
+        used += cells;
+    }
+    out.push('…');
+    out
 }
 ```
 
----
-
-### 6.5 Tables & Data Lists
-- **Left-aligned text**: Names, titles, and ranks are left-aligned.
-- **Right-aligned numbers**: All numeric scores, kills, wins, and chip counts are grouped with commas via `primitives::thousands(i64)` and right-aligned with space padding:
+A suggested table treatment keeps names left-aligned and comparable numeric
+values right-aligned. Existing chip counts use `primitives::thousands(i64)`.
+This example reserves the value first, then budgets the name and gap:
 
 ```rust
-use crate::app::common::primitives::thousands;
-
-let rank = format!("  #{:<3}", entry.rank);
-let name = format!(" {}", entry.username);
-let value = format!("{} chips", thousands(entry.chips));
-
-let pad = width.saturating_sub(rank.len() + name.len() + value.len());
+let value = clip_cells(&format!("{} chips", thousands(entry.chips)), width);
+let value_width = Line::from(value.as_str()).width();
+let name_budget = width.saturating_sub(value_width + 2);
+let name = clip_cells(&entry.username, name_budget);
+let gap = width.saturating_sub(Line::from(name.as_str()).width() + value_width);
 let row = Line::from(vec![
-    Span::styled(rank, rank_style),
     Span::styled(name, name_style),
-    Span::raw(" ".repeat(pad.max(2))),
-    Span::styled(value, Style::default().fg(theme::TEXT_BRIGHT())),
+    Span::raw(" ".repeat(gap)),
+    Span::styled(value, value_style),
 ]);
 ```
 
----
+Additional rank or metadata spans need their own budgets. The gap can shrink when
+the value occupies the row; unconditionally forcing a minimum gap after laying
+out all content can overflow. For an existing richer implementation, see
+[leaderboard rows](late-ssh/src/app/leaderboard/ui.rs).
 
-### 6.6 Text Input Fields & Carets (`text_with_caret`)
-When rendering custom inline text inputs without full textareas:
+### 6.6 Text inputs and caret coordinates — observed contract
+
+Settings' inline caret helper takes a Unicode scalar-value index, matching the
+character index supplied by its TextArea. Naming that argument `cursor_col`
+can obscure its units:
 
 ```rust
-fn text_with_caret(text: &str, cursor_col: usize) -> String {
+fn text_with_caret(text: &str, cursor_char_index: usize) -> String {
     let mut chars: Vec<char> = text.chars().collect();
-    chars.insert(cursor_col.min(chars.len()), '█');
+    chars.insert(cursor_char_index.min(chars.len()), '█');
     chars.into_iter().collect()
 }
-
-// In the input renderer:
-let content = if typed.is_empty() {
-    Span::styled("█", Style::default().fg(theme::AMBER()))
-} else {
-    Span::styled(text_with_caret(&typed, cursor_x), Style::default().fg(theme::TEXT_BRIGHT()))
-};
 ```
 
----
+This does not convert a byte offset, grapheme index, or terminal-cell position.
+Mouse-to-caret placement needs the appropriate conversion, including the visible
+scroll offset. Prefer an existing editor widget where it fits the task.
+References: [Settings input](late-ssh/src/app/settings_modal/ui.rs) and
+[calendar mouse placement](late-ssh/src/app/calendar/editor.rs).
 
-### 6.7 Toast Notifications & Alert Banners (`draw_banner`)
-Toast banners auto-expire after 5 seconds and display standard status glyphs:
+### 6.7 Banners — observed lifecycle
+
+`Banner::is_active()` defines a five-second lifetime; `draw_banner` only renders.
+Create the banner when the event occurs, keep it in state, and arrange a redraw
+when it expires. Illustrative lifecycle using caller-owned state:
 
 ```rust
-use crate::app::common::primitives::{Banner, draw_banner};
+// Event handler:
+state.banner = Some(Banner::success("Account settings updated"));
 
-let banner = Banner::success("Account settings updated");
-// Or: Banner::error("Connection lost");
-// Or: Banner::info("Match drawn");
+// Drawing:
+if let Some(banner) = state.banner.as_ref().filter(|b| b.is_active()) {
+    draw_banner(frame, toast_area, banner);
+}
 
-draw_banner(frame, toast_area, &banner);
+// Tick/update:
+if state.banner.as_ref().is_some_and(|b| !b.is_active()) {
+    state.banner = None;
+    changed = true; // Request the final frame that clears the banner.
+}
 ```
 
----
+Creating a fresh banner during each draw restarts its lifetime.
+References: [Banner and drawing](late-ssh/src/app/common/primitives.rs),
+[active-banner filtering](late-ssh/src/app/render.rs), and
+[expiry redraw](late-ssh/src/app/tick.rs).
 
-## 7. Two-Pane Split Layouts (Rail + Detail)
+## 7. Split views — observed inventory and open choices
 
-For split views (Leaderboard, Artboard Gallery, Games Hub, Jobs Shelf):
+| Component | Current split behavior | Reference |
+| :--- | :--- | :--- |
+| Leaderboards | 25-column rail including divider; split retained down to its 48×8 area minimum | [Leaderboards](late-ssh/src/app/leaderboard/ui.rs) |
+| Games Hub | 19-column sidebar including rule; 60×6 area minimum | [Games](late-ssh/src/app/door/hub/ui.rs) |
+| Artboard | 21-column allocation; visibility follows editing/focus state | [Artboard](late-ssh/src/app/artboard/ui.rs) |
+| Artboard gallery | Preview omitted below 56 pane columns; listing requires 24×6 | [Gallery](late-ssh/src/app/artboard/gallery/ui.rs) |
+| Jobs shelf | List gets 42% when wide; list/detail drill-down below 100 columns of directory content width | [Jobs](late-ssh/src/app/jobs/ui.rs), [Directory](late-ssh/src/app/directory/ui.rs) |
 
-```text
-┌─────────────────────────────────────────────────────────────┐
-│ Rail (20-25 cols)      │ Detail Pane (Min 0 / Fill 1)      │
-│                        │                                    │
-│   ── Category ──       │   Title Heading                    │
-│  > Selected Item       │   Detailed description or table    │
-│    Unselected Item     │   ...                              │
-│                        │                                    │
-└────────────────────────┴────────────────────────────────────┘
-```
+A common treatment gives one pane ownership of the divider, avoiding a doubled
+rule. Some details start below a breathing row. Rail width, padding, and collapse
+behavior are component-specific; there is no app-wide "collapse below 72" rule.
 
-1. **Divider Ownership**:
-   - The left rail owns `Borders::RIGHT` with `theme::BORDER_DIM()`.
-   - The detail pane does not draw an additional left border.
-2. **Rail Width**:
-   - Fixed width between **20 and 25 columns** (`Constraint::Length(25)`).
-3. **Breathing Row Offset**:
-   - The rail rule touches row 0, while the detail pane starts 1 row lower to allow visual breathing room:
-     ```rust
-     fn below_breathing_row(area: Rect) -> Rect {
-         Rect { y: area.y + 1, height: area.height.saturating_sub(1), ..area }
-     }
-     ```
-4. **Responsive Collapse**:
-   - When total terminal width < 72 columns, collapse the two-pane layout into a single pane with `h`/`l` or `Enter`/`Esc` drill-down.
+**Suggested:** choose a split by the useful widths of its actual contents.
+Consider drill-down when simultaneous panes stop being usable. Keep the active
+pane and the path back apparent. Whether related rails should share more
+geometry or navigation conventions remains open.
 
----
+## 8. Interaction and rendering contracts
 
-## 8. Anti-Patterns & Deprecated Conventions
+### 8.1 Interaction modes — observed
 
-To maintain consistency across `late.sh`, AI coding agents and human developers must avoid the following legacy patterns:
+| Mode | Terminal mouse reporting | Intended emphasis |
+| :--- | :--- | :--- |
+| Keyboard | Off | Keyboard paths; native terminal text selection/copy |
+| Mouse | On | Mouse-first controls and hints |
+| Hybrid (default) | On | Keyboard shortcuts and mouse access |
 
-1. **DO NOT Hardcode Raw RGB Colors in Widgets**:
-   - *Bad*: `Color::Rgb(255, 176, 0)`.
-   - *Good*: Always use semantic accessors: `theme::AMBER()`, `theme::BORDER_ACTIVE()`, `theme::TEXT_DIM()`.
-2. **DO NOT Omit `Clear` Before Rendering Overlays**:
-   - Popups and modals must call `frame.render_widget(Clear, popup)` before drawing blocks; otherwise, text from the background screen bleeds through.
-3. **DO NOT Create Unpadded Box Titles**:
-   - *Bad*: `.title("Settings")`.
-   - *Good*: `.title(" Settings ")`.
-4. **DO NOT Use ASCII Checkboxes in Settings Rows**:
-   - *Bad*: `"[x]"` / `"[ ]"`.
-   - *Good*: Use unicode state glyphs: `● on` (success + bold) and `○ off` (text faint).
-5. **DO NOT Wrap Action Hints in Tight Containers**:
-   - When horizontal space is tight, secondary hints must be dropped from the right via `row_with_hint`, never wrapped to create ragged row heights.
-6. **DO NOT Resolve Theme Accessors Inside Background Threads**:
-   - Tokio `tick` threads do not hold the active reader's session theme in thread-local storage. Decouple layout tokens via an intermediate ink enum (e.g. `PaperInk`, `OverlayInk`), and resolve to Ratatui styles only during `draw()`.
-7. **DO NOT Use Generic "Too Small" Error Messages**:
-   - Always call `draw_too_small(frame, area, what, min_w, min_h)` so users know the required terminal dimensions.
+Mode describes intent, not a guarantee that every screen has complete mouse
+coverage. New controls should respect the mode and preserve a usable alternative
+for essential actions. See [InteractionMode](late-core/src/models/user.rs) and
+[input routing](late-ssh/src/app/input.rs).
 
----
+### 8.2 Input ownership and hit geometry — observed, with suggested checks
 
-## 9. Ideas for the Future
+The router gives open dialogs and relevant overlays ownership before the
+underlying screen. Text editors and active games have local key meanings.
+Adding a mnemonic should preserve those paths, including ordinary text entry.
 
-### 9.1 Codebase Harmonization & Primitive Deduplication
-- **Unify `centered_rect`**: Consolidate the ~15 disparate `centered_rect` implementations into `late-ssh/src/app/common/primitives.rs` with a single signature `(width: u16, height: u16, area: Rect) -> Rect` using Ratatui's `Layout::flex(Flex::Center)`.
-- **Extract a Canonical `RowControl` / `RowLine` Widget**: Promote the `row_line` pattern from `settings_modal/ui.rs` into a shared reusable primitive in `app/common/` so any modal, dialog, or sheet automatically gains standard 16-character columnar alignment, `›` cursors, and full-width `theme::selection_style()` padding.
-- **Normalize Sub-Dialog Glyphs**: Migrate legacy sub-dialogs (`chat_badges`, `sidebar_components`) from ASCII `[x]` / `[ ]` and `>` to the standard `● on` / `○ off` and `›`.
+The render path clears several previous-frame hit regions, and Calendar
+invalidates its geometry before drawing. A sound clickable-control pattern
+records the visible, clipped target for the current layout and clears targets
+that are hidden. Resize, scrolling, and switching screens must not leave a
+previous control active at its old location.
 
-### 9.2 Living "Component Gallery / Design System" Screen
-- **Interactive `/design` Screen or Dev Modal**: Introduce a staff/dev command (e.g., `/design` or `/components` in the composer) rendering all design system primitives side-by-side:
-  - Form rows (toggles, 3-state, sliders, cycle pickers)
-  - Action bars (`hint_line`, `row_with_hint`)
-  - Toast banners (`✓`, `✗`, `•`)
-  - Code blocks, blockquotes, and Markdown headers
-- **Theme Testing Sandbox**: Allows contributors to test new palettes and contrast levels on every UI control simultaneously without navigating through multiple application areas.
+**Suggested:** when appropriate to the content, review single-click selection,
+double-click opening, right-click actions, wheel scrolling, and list selection.
+Calendar provides examples of these behaviors; they are opportunities to assess
+for other screens, not requirements to add every gesture everywhere.
 
-### 9.3 Automated Visual Regression Testing (via `tmux-tui-test`)
-- **Automated Viewport Sweeps**: Build a scripted test harness using `tmux_tui_harness.py` to capture and verify screens at **44×22**, **96×34**, and **180×60**.
-- **Raster Snapshot Validation (`freeze`)**: Render PNG snapshots across primary theme archetypes (`contrast`, `late`, `mocha`, `kanagawa`, `gruvboxdark`) to catch visual clipping, ragged wrapping, or low-contrast traps before PR merges.
+References: [input router](late-ssh/src/app/input.rs),
+[render geometry lifecycle](late-ssh/src/app/render.rs),
+[calendar input](late-ssh/src/app/calendar/input.rs), and
+[calendar state](late-ssh/src/app/calendar/state.rs).
 
-### 9.4 Agent Tooling & Prompt Integration
-- **Cross-Reference in `CONTEXT.md`**: Add explicit guidance in `CONTEXT.md` pointing LLM coding agents to `DESIGN_GUIDE.md` whenever new UI features, dialogs, or settings rows are requested.
+### 8.3 Animation and terminal output — observed and suggested
 
-### 9.5 Animation, Frame Rates & Terminal Performance Guidelines
-- **Animation Standards**: Establish guidelines for active visual elements (Bonsai wind sway, snake food pulse, visualizers, marquee tickers):
-  - **Frame Rate Budgets**: Cap animation ticks at 15–20 fps to conserve SSH bandwidth over slow or mobile connections.
-  - **Double-Buffer Diffing**: Rely strictly on Ratatui's terminal cell diffing rather than emitting manual escape codes or full-screen clears to prevent visual flicker.
-  - **Idle CPU Sleep**: Ensure animations sleep or drop tick rates when their containing pane or screen is unfocused or minimized.
+The adaptive scheduler uses 66 ms hot ticks, 132 ms half-rate animation,
+264 ms quarter-rate animation, and a 500 ms idle floor. Input and push events
+can wake the loop; the idle floor is not an input delay.
+See [tick scheduler](late-ssh/src/app/tick.rs).
+
+**Suggested:** fit animation into the existing scheduler and use the lowest
+cadence that serves the interaction. An animation budget is a ceiling, not a
+request for every pane to redraw at that rate. Hidden or idle content should not
+force unnecessary work.
+
+Ordinary cell rendering uses Ratatui's diffing. Terminal background commands,
+notifications, and image protocols have intentional output outside that cell
+model. For popups intended to cover underlying content, the clearance and
+background treatment described in §6.1 still apply.
+
+## 9. Gaps, open questions, and possible next steps
+
+### 9.1 Known gaps from the review — observed
+
+These document behavior to revisit; editing this guide does not fix the app.
+
+| Gap | Relation to this guide |
+| :--- | :--- |
+| At 44×22 in High Contrast, Settings hides several fields, including the selected Username row | Popup clamping alone does not meet the compact-layout aim |
+| Settings adds picker ellipses to fully visible values | Does not follow the agreed ellipsis direction |
+| Settings rows use character counts and format padding for width | Not a safe model for arbitrary Unicode cell layout |
+| Nominal emphasis tokens have weak canvas contrast in some palettes | Token names alone cannot establish a readable hierarchy |
+
+The review combined source inspection with targeted real-SSH checks in High
+Contrast: Settings at 120×40 and 44×22, Leaderboards at 44×22, and Games at 96×34.
+The palette and Unicode measurement findings are based on source inspection.
+This was not an exhaustive screen or theme audit.
+
+### 9.2 Variations to evaluate — open
+
+- **Selected colors:** which semantic colors need to remain visible, and where is the terminal's plain reversed pair the clearer treatment?
+- **Active tabs and rails:** do the different treatments help distinguish navigation levels, or merely reflect separate implementations?
+- **Spacing and label widths:** which differences serve the content, and which make related tasks harder to scan?
+- **Other ellipsis uses:** loading indicators are an existing non-truncation use; decide whether explicit loading text or another cue would be clearer.
+- **Glyph consistency:** would replacing an ASCII checkbox or cursor improve clarity and terminal support in that particular control?
+
+A difference can be useful. Record the reason for a chosen treatment as evidence
+accumulates; avoid treating visual uniformity as sufficient justification for a
+broad rewrite.
+
+### 9.3 Shared primitives and component gallery — proposals
+
+Possible follow-ups include comparing local `centered_rect` contracts before
+consolidation, or extracting a form-row primitive after its width, selection,
+and compact behavior have been exercised. Fixed-size and percentage-based
+dialogs may need different sizing policies.
+
+A small developer component gallery could make those decisions easier to review:
+forms, selectors, tabs, hints, banners, Markdown, and selected semantic colors
+shown together. This is a proposal, not an implemented screen or prerequisite
+for ordinary UI work.
+
+### 9.4 Validation and maintenance — suggested
+
+Start interface review with High Contrast at the sizes relevant to the change.
+Include short and long values, Unicode text, selected/unselected states, resize,
+and the affected keyboard/mouse paths. Raster captures help judge contrast and
+spacing; interaction checks establish whether the controls remain usable.
+
+Expand theme coverage when the change concerns palette behavior, terminal
+defaults, or a particular theme. An exhaustive theme sweep is not a routine
+prerequisite. Theme contributions have their own guidance in [THEME.md](THEME.md).
+A targeted `tmux-tui-test` workflow could automate useful viewport captures.
+
+When updating this document, keep the status and scope of a claim clear, link
+useful implementation references, and record the reason for an explicit design
+decision. Source inspection establishes what the code does; use and testing help
+establish whether that behavior makes a good default.
