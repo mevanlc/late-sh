@@ -462,7 +462,10 @@ impl ChipMove {
     /// chips into one player at no cost to the board; and the starting
     /// stipend, which everyone gets once. Referral payouts stay out too:
     /// one is worth a month of anything else, so a single invite would
-    /// decide the board. Gilds received stay in: a gild
+    /// decide the board. Monthly prizes stay out, every one, today's
+    /// gallery prize and any added later: a prize is the result of a
+    /// month's board, never an earning on Top Chips, and one first place
+    /// would decide the next month. Gilds received stay in: a gild
     /// burns a third on the way, so it cannot funnel for free, and it is
     /// paid for a message other people rated. The pot stays in: the house
     /// mints it. Admin grants never reach the ledger at all
@@ -488,7 +491,8 @@ impl ChipMove {
             | Self::ShopPurchase
             | Self::SsnakeArenaLost
             | Self::ReferralReward
-            | Self::ReferralWelcome => false,
+            | Self::ReferralWelcome
+            | Self::ArtboardPrize => false,
             Self::BonsaiWatered
             | Self::PetFed
             | Self::AquariumFed
@@ -496,7 +500,6 @@ impl ChipMove {
             | Self::GildReceived
             | Self::PotWon
             | Self::NewsShared
-            | Self::ArtboardPrize
             | Self::SongQueued
             | Self::QuestReward
             | Self::DailyQuestStreakReward

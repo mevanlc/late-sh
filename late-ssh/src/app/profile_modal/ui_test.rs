@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use late_core::models::chips::{ChipMove, UserChips};
+use late_core::models::showcase::{Showcase, ShowcaseParams};
 use late_core::test_utils::create_test_user;
 use ratatui::{Terminal, backend::TestBackend};
 use tokio::time::{Duration, timeout};
@@ -24,8 +25,8 @@ struct Fixture {
     user_id: Uuid,
 }
 
-/// A user with the stipend, a dozen earned rows, and one gift received,
-/// with the modal open on them and the snapshot already drained.
+/// A user with the stipend, a dozen earned rows, one gift received, and a
+/// showcase, with the modal open on them and the snapshot already drained.
 async fn fixture(slug: &str) -> Fixture {
     let test_db = new_test_db().await;
     let db = test_db.db.clone();
@@ -48,6 +49,19 @@ async fn fixture(slug: &str) -> Fixture {
         .expect("quest")
         .expect("credited");
     }
+    Showcase::create_by_user_id(
+        &client,
+        user.id,
+        ShowcaseParams {
+            user_id: user.id,
+            title: "Terminal garden".to_string(),
+            url: "https://example.com/garden".to_string(),
+            description: "A project.".to_string(),
+            tags: Vec::new(),
+        },
+    )
+    .await
+    .expect("showcase");
     drop(client);
     {
         let mut client = db.get().await.expect("db client");
@@ -148,11 +162,12 @@ async fn a_wide_terminal_shows_every_section_in_order() {
 
     // Then the sections, in the order the design fixes.
     let bio = row_of(&lines, "bio ─").expect("bio heading");
+    let showcases = row_of(&lines, "showcases (1) ─").expect("showcases heading");
     let bonsai = row_of(&lines, "bonsai ─").expect("bonsai heading");
     let chips = row_of(&lines, "chips ─").expect("chips heading");
     assert!(
-        name < bio && bio < bonsai && bonsai < chips,
-        "late.fetch, bio, bonsai, chips:\n{text}"
+        name < bio && bio < showcases && showcases < bonsai && bonsai < chips,
+        "late.fetch, bio, showcases, bonsai, chips:\n{text}"
     );
     assert!(
         lines[bio + 1].contains("Not set"),

@@ -20,7 +20,6 @@ use std::time::Duration;
 use anyhow::Result;
 use late_core::db::DbConfig;
 use late_core::models::{
-    app_flag::APP_FLAG_CHANGED_CHANNEL,
     article::ARTICLES_CHANGED_CHANNEL,
     bonsai::BONSAI_CHANGED_CHANNEL,
     chat_message_gild::CHAT_MESSAGE_GILDED_CHANNEL,
@@ -48,7 +47,6 @@ const RETRY_DELAY: Duration = Duration::from_secs(5);
 /// here before it can retry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refresh {
-    AppFlags,
     RunnerLooks,
     CrownHolder,
     DailyMatches,
@@ -63,7 +61,6 @@ impl Refresh {
     /// The log line's name for the read.
     fn what(self) -> &'static str {
         match self {
-            Refresh::AppFlags => "app flags",
             Refresh::RunnerLooks => "runner looks",
             Refresh::CrownHolder => "crown holder",
             Refresh::DailyMatches => "daily matches",
@@ -112,7 +109,6 @@ where
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     CalendarChanged,
-    AppFlagChanged,
     ArticlesChanged,
     BonsaiChanged,
     ChatMessageGilded,
@@ -130,9 +126,8 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub const ALL: [Channel; 16] = [
+    pub const ALL: [Channel; 15] = [
         Channel::CalendarChanged,
-        Channel::AppFlagChanged,
         Channel::ArticlesChanged,
         Channel::BonsaiChanged,
         Channel::ChatMessageGilded,
@@ -153,7 +148,6 @@ impl Channel {
     pub fn name(self) -> &'static str {
         match self {
             Channel::CalendarChanged => late_core::models::calendar::CALENDAR_CHANGED_CHANNEL,
-            Channel::AppFlagChanged => APP_FLAG_CHANGED_CHANNEL,
             Channel::ArticlesChanged => ARTICLES_CHANGED_CHANNEL,
             Channel::BonsaiChanged => BONSAI_CHANGED_CHANNEL,
             Channel::ChatMessageGilded => CHAT_MESSAGE_GILDED_CHANNEL,

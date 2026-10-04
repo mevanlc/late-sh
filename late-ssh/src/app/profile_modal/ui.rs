@@ -9,9 +9,9 @@
 //! bonsai's sides when the column is narrower than the canvas.
 //!
 //! Top to bottom: late.fetch (the fact grid, with the runner column
-//! beside it for runners, each under its own heading), bio, the bonsai (the
-//! whole canvas at its true size), the aquarium with the pet beside it
-//! (each a full-width section when the other is not owned), showcases,
+//! beside it for runners, each under its own heading), bio, showcases, the
+//! bonsai (the whole canvas at its true size), the aquarium with the pet
+//! beside it (each a full-width section when the other is not owned),
 //! badges (all of them, always), and the chips ledger. The same order on
 //! every screen; the only reflow is a pair of columns (grid and runner,
 //! reef and pet) stacking into sections when the body is too narrow for
@@ -258,6 +258,24 @@ fn build_segments(
     }
     segments.push(Segment::Text(lines));
 
+    // ── showcases ──
+    let showcases = state.showcases();
+    if !showcases.is_empty() {
+        let mut lines = section_lines(&format!("showcases ({})", showcases.len()), width_usize);
+        for (index, item) in showcases.iter().enumerate() {
+            if index > 0 {
+                lines.push(Line::from(""));
+            }
+            lines.extend(render_body_to_lines(
+                &showcase_markdown(item),
+                width_usize,
+                Span::raw(""),
+                text,
+            ));
+        }
+        segments.push(Segment::Text(lines));
+    }
+
     // ── bonsai ──
     // The whole canvas at its true size, never a preview: a column
     // narrower than the canvas cuts the tree evenly on both sides.
@@ -306,24 +324,6 @@ fn build_segments(
                 segments.push(Segment::Aquarium);
             }
         }
-    }
-
-    // ── showcases ──
-    let showcases = state.showcases();
-    if !showcases.is_empty() {
-        let mut lines = section_lines(&format!("showcases ({})", showcases.len()), width_usize);
-        for (index, item) in showcases.iter().enumerate() {
-            if index > 0 {
-                lines.push(Line::from(""));
-            }
-            lines.extend(render_body_to_lines(
-                &showcase_markdown(item),
-                width_usize,
-                Span::raw(""),
-                text,
-            ));
-        }
-        segments.push(Segment::Text(lines));
     }
 
     // ── badges: every one, wrapped, never folded ──

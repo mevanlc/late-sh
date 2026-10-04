@@ -236,16 +236,8 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         crate::app::ai::translate::TranslationService::new(db.clone(), ai_service.clone());
     let summary_service =
         crate::app::ai::summary::SummaryService::new(db.clone(), ai_service.clone());
-    let paper_service = crate::app::paper::svc::PaperService::new(
-        db.clone(),
-        ai_service.clone(),
-        test_app_flags_rx(),
-    );
-    let jobs_service = crate::app::jobs::svc::JobsService::new(
-        db.clone(),
-        ai_service.clone(),
-        test_app_flags_rx(),
-    );
+    let paper_service = crate::app::paper::svc::PaperService::new(db.clone(), ai_service.clone());
+    let jobs_service = crate::app::jobs::svc::JobsService::new(db.clone(), ai_service.clone());
     let article_service = ArticleService::new(db.clone(), ai_service.clone());
     let feed_service = crate::app::chat::feeds::svc::FeedService::new(db.clone());
     let showcase_service = crate::app::chat::showcase::svc::ShowcaseService::new(db.clone());
@@ -309,7 +301,6 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         ),
         mention_ladders: crate::app::ai::ladder::MentionLadders::new(),
         scratchpad_registry: crate::app::scratchpad::registry::SharedScratchpadRegistry::new(),
-        app_flags: crate::app::flags::svc::AppFlagService::new(db.clone()),
         runner_looks: crate::app::deadchannel::runner::svc::RunnerLookService::new(db.clone()),
         presence: crate::app::presence::svc::PresenceService::detached(Vec::new()),
         username_directory,
@@ -385,10 +376,7 @@ pub fn test_app_state(db: Db, config: Config) -> State {
         house_registry: test_house_registry(db.clone()),
         dartboard_server,
         dartboard_provenance: test_dartboard_provenance(),
-        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(
-            db.clone(),
-            test_app_flags_rx(),
-        ),
+        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(db.clone()),
         leaderboard_service,
         quest_service,
         shop_service,
@@ -522,12 +510,10 @@ fn make_app_with_chat_service_and_permissions(
         paper_service: crate::app::paper::svc::PaperService::new(
             db.clone(),
             AiService::new(false, None),
-            test_app_flags_rx(),
         ),
         jobs_service: crate::app::jobs::svc::JobsService::new(
             db.clone(),
             AiService::new(false, None),
-            test_app_flags_rx(),
         ),
         notification_service: notification_service.clone(),
         article_service: ArticleService::new(db.clone(), AiService::new(false, None)),
@@ -602,10 +588,7 @@ fn make_app_with_chat_service_and_permissions(
         artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService::new(
             db.clone(),
         ),
-        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(
-            db.clone(),
-            test_app_flags_rx(),
-        ),
+        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(db.clone()),
         username: world.username.unwrap_or_else(|| "test-user".to_string()),
         bonsai_service: BonsaiService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         fight_service: crate::app::deadchannel::fight::svc::FightService::new(
@@ -694,8 +677,6 @@ fn make_app_with_chat_service_and_permissions(
         // a test app unless a test arms one on purpose.
         first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks::spent_for_tests(),
         first_contact_gate: crate::app::deadchannel::haunt::state::FirstContactGate::closed(),
-        app_flags_rx: test_app_flags_rx(),
-        app_flags: None,
         runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
             std::collections::HashMap::new(),
         ),
@@ -723,8 +704,8 @@ fn make_app_with_chat_service_and_permissions(
         initial_theme_id: "contrast".to_string(),
         initial_interaction_mode: None,
         initial_audio_source: late_core::models::user::AudioSource::default(),
-        initial_icecast_stream: late_core::models::user::IcecastStream::default(),
         initial_radio_station: late_core::models::user::RadioStation::default(),
+        initial_radio_slots: late_core::models::user::RadioSlots::default(),
     })
     .expect("app");
     let landed = app.screen;
@@ -788,12 +769,10 @@ pub fn make_app_with_paired_client(
         paper_service: crate::app::paper::svc::PaperService::new(
             db.clone(),
             AiService::new(false, None),
-            test_app_flags_rx(),
         ),
         jobs_service: crate::app::jobs::svc::JobsService::new(
             db.clone(),
             AiService::new(false, None),
-            test_app_flags_rx(),
         ),
         notification_service: notification_service.clone(),
         article_service: ArticleService::new(db.clone(), AiService::new(false, None)),
@@ -868,10 +847,7 @@ pub fn make_app_with_paired_client(
         artboard_snapshot_service: crate::app::artboard::svc::ArtboardSnapshotService::new(
             db.clone(),
         ),
-        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(
-            db.clone(),
-            test_app_flags_rx(),
-        ),
+        gallery_service: crate::app::artboard::gallery::svc::GalleryService::new(db.clone()),
         username: "test-user".to_string(),
         bonsai_service: BonsaiService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         fight_service: crate::app::deadchannel::fight::svc::FightService::new(
@@ -960,8 +936,6 @@ pub fn make_app_with_paired_client(
         // a test app unless a test arms one on purpose.
         first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks::spent_for_tests(),
         first_contact_gate: crate::app::deadchannel::haunt::state::FirstContactGate::closed(),
-        app_flags_rx: test_app_flags_rx(),
-        app_flags: None,
         runner_looks_rx: crate::app::deadchannel::runner::svc::fixed_looks_rx(
             std::collections::HashMap::new(),
         ),
@@ -983,8 +957,8 @@ pub fn make_app_with_paired_client(
         landing_page: late_core::models::user::LandingPage::Clubhouse,
         paper_at_login: false,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        initial_icecast_stream: late_core::models::user::IcecastStream::default(),
         initial_radio_station: late_core::models::user::RadioStation::default(),
+        initial_radio_slots: late_core::models::user::RadioSlots::default(),
         initial_theme_id: "contrast".to_string(),
         initial_interaction_mode: None,
         initial_audio_source: late_core::models::user::AudioSource::default(),
@@ -1221,22 +1195,6 @@ pub fn strip_ansi(input: &str) -> String {
         }
     }
     cells.into_values().collect()
-}
-
-/// The switches a test app runs under: kill switch on (so an armed whisper
-/// or a forced burst plays), fuse unlit. The sender is dropped on purpose;
-/// a `watch` receiver keeps serving the last value.
-pub fn test_app_flags_rx()
--> tokio::sync::watch::Receiver<Option<late_core::models::app_flag::AppFlags>> {
-    let (_tx, rx) = tokio::sync::watch::channel(Some(late_core::models::app_flag::AppFlags {
-        haunt_enabled: true,
-        haunt_live: false,
-        paper_enabled: true,
-        paper_outside_enabled: false,
-        artboard_gallery_enabled: true,
-        jobs_enabled: true,
-    }));
-    rx
 }
 
 /// Hang yesterday's canvas and publish it as today's login splash.

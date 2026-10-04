@@ -182,8 +182,9 @@ fn constants() {
 #[test]
 fn earning_exclusions_and_reason_uniqueness() {
     // Top Chips ranks what a player earned: every credit except the two
-    // house tables, gifts, the starting stipend (decided 2026-09-07), and
-    // the two referral payouts, one of which would decide a month's board.
+    // house tables, gifts, the starting stipend (decided 2026-09-07), the
+    // two referral payouts, and every monthly prize (the gallery's today):
+    // one of each would decide a month's board.
     // Spending is a debit and a debit never counts,
     // so buying a beer or a pot ticket cannot cost anyone their place.
     assert_eq!(
@@ -202,6 +203,7 @@ fn earning_exclusions_and_reason_uniqueness() {
             "chip_gild_sent",
             "chip_crown_taken",
             "pot_ticket",
+            "artboard_prize",
             "round_purchase",
             "drink_gift",
             "drink_purchase",

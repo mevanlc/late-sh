@@ -350,7 +350,7 @@ fn username_presence_lowercases_names_and_reads_away() {
     let user = |username: &str, sessions: Vec<ActiveSession>| ActiveUser {
         username: username.to_string(),
         fingerprint: None,
-        audio_source: late_core::models::user::AudioSource::Icecast,
+        audio_source: late_core::models::user::AudioSource::Radio,
         connection_count: sessions.len().max(1),
         sessions,
         last_login_at: Instant::now(),
@@ -770,6 +770,30 @@ fn make_room(
         },
         Vec::new(),
     )
+}
+
+/// Home's attention label is read off the room's kind and visibility; a
+/// kind it does not name lands on `OtherRoom` rather than a room label.
+#[test]
+fn home_room_kind_names_every_listed_kind() {
+    let kinds = [
+        ("lounge", "public", HomeRoom::Lounge),
+        ("language", "public", HomeRoom::Language),
+        ("topic", "public", HomeRoom::PublicTopic),
+        ("topic", "private", HomeRoom::PrivateTopic),
+        ("dm", "dm", HomeRoom::Dm),
+        ("deadchannel", "private", HomeRoom::Deadchannel),
+        ("game", "public", HomeRoom::OtherRoom),
+    ];
+    let named: Vec<_> = kinds
+        .iter()
+        .map(|(kind, visibility, _)| {
+            let (room, _) = make_room(Uuid::from_u128(40), kind, visibility, false, None);
+            home_room_kind(&room)
+        })
+        .collect();
+    let expected: Vec<_> = kinds.iter().map(|(_, _, home)| *home).collect();
+    assert_eq!(named, expected);
 }
 
 #[test]
@@ -1858,7 +1882,7 @@ fn format_active_user_lines_sorts_and_shows_session_counts() {
             ActiveUser {
                 username: "zoe".to_string(),
                 fingerprint: None,
-                audio_source: late_core::models::user::AudioSource::Icecast,
+                audio_source: late_core::models::user::AudioSource::Radio,
                 sessions: Vec::new(),
                 connection_count: 2,
                 last_login_at: std::time::Instant::now(),
@@ -1869,7 +1893,7 @@ fn format_active_user_lines_sorts_and_shows_session_counts() {
             ActiveUser {
                 username: "alice".to_string(),
                 fingerprint: None,
-                audio_source: late_core::models::user::AudioSource::Icecast,
+                audio_source: late_core::models::user::AudioSource::Radio,
                 sessions: Vec::new(),
                 connection_count: 1,
                 last_login_at: std::time::Instant::now(),

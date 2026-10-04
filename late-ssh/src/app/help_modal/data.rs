@@ -185,7 +185,7 @@ pub(crate) fn bot_app_context() -> String {
         CRITICAL FACTS:\n\
         - Chat username badges render in this order: bracketed last-month leaderboard awards, special role badges, bonsai stage, chat badge, chat flag, burn milestone, then the LIVE tag and the away glyph (\u{1F4A4}), which shows on its own after 30 quiet minutes across every session, or at once with /brb. The crown prints immediately after the name, and a rented title after that, ahead of the whole stack, as \"name \u{1F451}, the night clerk\".\n\
         - The Clubhouse (page 0, the Late Lounge tavern) is the landing screen: a walkable ASCII room where everyone online is present. Arrows/hjkl walk, i says something (it floats over your head and lands in #lounge), w waves, x dances, Enter interacts with a landmark. This is where you (@bartender) keep the bar. Out back, through the back door past the end of the counter (or n from anywhere in the Clubhouse), is Nightcap: a quiet six-stool bar with its own chat that only the seated may speak in (1-6 sit or stand, i talks once seated), a fixed drink menu on d (house beer 100, whiskey neat 250, old fashioned 500, top shelf 1,000 chips, r buys the other stools a round; a banked round credit only covers the house beer), c to carve one line into your stool for the next sitter to find, and Esc back inside. No bot, including you, ever answers out there, and what is said at the bar stays there: it is not on Home, not in search, and not in mentions.\n\
-        - @bartender pours drinks for Late Chips: mention him (or press t at the bar) to order. There is no fixed menu; he invents each drink's name and prices it 100-1000 chips, never more than the patron can spend while keeping a 100-chip floor untouched. A brand-new patron's first-ever drink is free. He pours only for the person ordering; \"@bartender buy @user a drink\" costs 200 chips and puts one drink credit on someone else's tab to redeem when they order, even if they are offline. It expires after 24 hours; a patron can hold at most three. Only that exact instruction buys a personal drink.\n\
+        - @bartender pours drinks for Late Chips: mention him (or press t at the bar) to order. There is no fixed menu; he invents each drink's name and prices it 100-1000 chips, never more than the patron can spend while keeping a 100-chip floor untouched. A brand-new patron's first-ever drink is free. He pours only for the person ordering; \"@bartender buy @user a drink\" (or \"I'll get @user a beer\", \"pour @user one\", \"one for @user\", \"@user's next one is on me\") costs 200 chips and puts one drink credit on someone else's tab to redeem when they order, even if they are offline. It expires after 24 hours; a patron can hold at most three. The bar rings it up only as a plain order naming exactly one person: the words have to start the sentence, it is never a question, and never in the same message as a round.\n\
         - Drinking builds a buzz that levels up: 0 sober, 1 tipsy, 2 buzzed, 3 sloshed, 4 wasted. Every non-sober level prints its word beside the name. Once wasted, the bartender cuts a patron off to water or coffee instead of more drinks.\n\
         - The buzz sobers up on its own over time, no action needed, whether the patron is online or not: it decays 334 points an hour, so reaching wasted wears off in about six hours and even a maxed-out binge is fully sober again half a day later.\n\
         - A buzz also comes out in your typing, in public rooms only (never DMs or private rooms). Letters inside a word get shuffled, more of them the drunker you are, but the first and last letter of every word stay put so it always stays readable. Tipsy is the odd stumbled word; wasted is most of the sentence, plus a *hic* dropped mid-sentence in about a third of messages (and once in a while at sloshed). Handles, room slugs, links, and code in backticks are never touched. The slurring is saved with the message, so it does not clear up when you sober up later.\n\
@@ -284,16 +284,16 @@ fn pair_help_lines(listen_url: &str) -> Vec<String> {
         "                           cargo build --release --bin late".to_string(),
         "".to_string(),
         "What `late` unlocks".to_string(),
-        "  audio       Icecast playback and visualizer on your machine".to_string(),
+        "  audio       radio playback and visualizer on your machine".to_string(),
         "  youtube     embedded webview hosts the shared queue locally".to_string(),
         "  clipboard   /paste-image reads your OS clipboard image into chat".to_string(),
         "  voice       talk in voice rooms with your mic (linux + windows; plain SSH only shows status)".to_string(),
         "  desktop     now playing shows in your desktop media widget (linux)".to_string(),
-        "  controls    m mute, +/- volume, v+x source, v+v Music Booth".to_string(),
+        "  controls    m mute, +/- volume, v+x source, v+r stations, v+v Music Booth".to_string(),
         "".to_string(),
         "Listen without the CLI".to_string(),
         "  Open the link below on any device, or scan the QR.".to_string(),
-        "  It plays the house streams, Nightride, and the community YouTube".to_string(),
+        "  It plays every radio station and the community YouTube".to_string(),
         "  queue in a plain browser tab. No pairing, no session, nothing to".to_string(),
         "  install, so it works from a phone or a locked-down laptop.".to_string(),
         "  Listening only: chat, games and the rest stay in the terminal.".to_string(),
@@ -652,7 +652,7 @@ pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "                     (Ctrl+O Tweaks → Daily paper at login turns the pop off)",
         "                     j/k, arrows or wheel scroll; drag the scrollbar or click",
         "                     its track to page. Esc/q/Enter or [x] closes the paper.",
-        "                     admins: /paper on|off, outside on|off, print, preview, reset",
+        "                     admins: /paper print, preview, reset",
         "",
         "Global chat keys",
         "  Ctrl+O             open your settings modal anywhere",
@@ -707,7 +707,7 @@ pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "Polls",
         "  /poll              create a 10/20/30-minute poll in the selected Home room",
         "  va / vb / vc       vote while a poll is visible",
-        "  v1 / v2 / v3       select music streams/stations",
+        "  v1 .. v3           tune to a pinned radio station",
         "  limit              one active poll per room",
         "  author             the strip names who started the poll, when it fits",
         "",
@@ -974,7 +974,7 @@ fn directory_help_lines() -> Vec<String> {
         "  n                 post a job of your own: company, role, link, where, regions, stack, pay, excerpt; live at once, three a person",
         "  d                 take down a posting made here: your own, or any when you moderate",
         "  for you           your own open or casual card shows its best matches on the People shelf; The Late Edition prints NEW WORK from yesterday's releases the same way",
-        "  /jobs             open the shelf from anywhere; /jobs post opens the form; admins: /jobs pull, /jobs release, /jobs on|off",
+        "  /jobs             open the shelf from anywhere; /jobs post opens the form; admins: /jobs pull, /jobs release",
         "",
         "Public web profile",
         "  /profiles         public index of work profiles; open first, then casual, then not-looking",
@@ -1350,9 +1350,10 @@ fn overview_lines() -> Vec<String> {
         "  m                 mute paired client",
         "  + / -             paired client volume",
         "  v then v          open the Music Booth (submit + queue + votes)",
-        "  v then x          cycle audio source: Icecast → YouTube → Radio",
+        "  v then x          switch audio source: Radio ⇄ YouTube",
         "  v then s          skip-vote the current YouTube track",
-        "  v then 1..5       select stream/station in the active source",
+        "  v then 1..3       tune to a pinned station (radio active)",
+        "  v then r          open Stations: every radio, live now-playing, pin to v1..v3",
         "  w, m, + / - and the v music prefix are off on the Artboard: that page",
         "  spends those letters itself (v applauds; m opens gallery moderation for staff)",
         "",
@@ -1427,8 +1428,7 @@ fn architecture_lines() -> Vec<String> {
         "  services publish watch snapshots and broadcast events into SSH sessions",
         "",
         "Audio stack",
-        "  Icecast has chill and classical house streams",
-        "  Radio has Nightride guest stations",
+        "  Radio is a station catalogue: Nightride, Nightwave Plaza, Code Radio, Radio Paradise, FIP and Radio Swiss guest stations plus the lofi and classical house streams",
         "  Liquidsoap manages the house playlists",
         "  the paired CLI plays audio locally; late.sh/listen plays the same sources in a browser",
         "",
@@ -1478,6 +1478,7 @@ fn news_help_lines() -> Vec<String> {
             "  Enter in composer submit link",
             "  Esc               cancel URL entry",
             "  j / k             browse stories",
+            "  r                 reply in #lounge quoting the selected story",
             "  d                 delete your own story",
             "  /                 toggle filter to only your stories",
             "  o on live strip   open the news item modal",
@@ -1548,7 +1549,7 @@ fn zen_help_lines() -> Vec<String> {
         "Tiles",
         "  w                 open Bonsai Care, as on every page",
         "  a                 feed the tank (free, once a day, +100 chips)",
-        "  m  - =  v x  v1-5 mute, volume, audio source, and station, as everywhere",
+        "  m  - =  v x  v1-3 mute, volume, audio source, and station, as everywhere",
         "  click             pet the pet; it reads the rest of your session itself",
         "  o                 with a live tile on the page, open what the #lounge live strip shows",
         "  Enter / click     on the live tile, the same",
@@ -2020,19 +2021,18 @@ fn bonsai_help_lines() -> Vec<String> {
 const MUSIC_PAIR_TEXT: &str = "\
 Music controls
 
-late.sh has three music sources:
+late.sh has two music sources:
 
-  Icecast    24/7 house radio with chill and classical streams.
+  Radio      a station catalogue: Nightride guest stations (chillsynth, nightride, datawave, spacesynth, ambient, darksynth, horrorsynth, ebsm), Nightwave Plaza (plaza), freeCodeCamp Code Radio (code radio), Radio Paradise (mellow), FIP (fip jazz), Radio Swiss (swiss jazz, swiss classic) and the late.sh house streams (lofi, classical). More stations arrive as they are cleared.
   YouTube    a shared queue everyone can submit links to.
-  Radio      direct Nightride guest stations.
 
-Your paired client plays the selected source. Use v then 1..5 to select a stream or station inside the active source.
+Your paired client plays the selected source. Pin up to three stations behind v1..v3 and open Stations (v then r) to browse the whole catalogue with live now-playing.
 
 Plain stream, no pairing:
   vlc https://late.sh/stream
   mpv https://late.sh/stream
 
-Direct stream playback is Icecast only. Pair the CLI or browser for source switching, mute/volume keys, visualizer sync, or the shared YouTube queue.
+Direct stream playback is the house streams only. Pair the CLI for source switching, stations, mute/volume keys, visualizer sync, or the shared YouTube queue.
 
 No sound from the paired CLI on Linux?
   The CLI plays audio through ALSA. On a PipeWire system with no ALSA compatibility layer, it finds no output device.
@@ -2041,7 +2041,7 @@ No sound from the paired CLI on Linux?
 Now playing on your desktop (Linux)
   The paired CLI publishes the current track over MPRIS, the D-Bus standard your desktop already uses for media players.
   GNOME's top bar, KDE's tray, lock screens, and panel applets pick it up on their own. There is nothing to switch on: it appears once `late` is running and paired.
-  Every source reports title and artist. YouTube tracks add duration, the video thumbnail, and a watch link; Icecast adds track length.
+  Every source reports title and artist. YouTube tracks add duration, the video thumbnail, and a watch link; house stations add track length.
   Play/pause from the widget, or your keyboard's media keys, mutes and unmutes the paired client, the same as pressing m here. The volume slider works too.
   The controls travel through the server to every paired player, so they cover all sources, YouTube included, and this terminal always agrees with the widget.
   Machines with no session bus (headless boxes, containers, some WSL setups) simply get nothing. Audio and everything else carry on as normal.
@@ -2051,12 +2051,13 @@ Global keys (work anywhere)
   m                 mute paired client
   + / -             volume up / down
 
-Select stream or station
-  Icecast active: v then 1 / 2 selects chill / classical
-  Radio active:   v then 1..5 selects Chillsynth / Nightride / Datawave / Spacesynth / Ambient
+Tune a station
+  v then 1..3       tune to the station pinned in that slot (radio active)
+  v then r          open Stations: ↑↓ move, Enter listen, 1-3 pin to a slot, 0 unpin, Esc close
+                    every row shows what that station is playing right now, so you can check before you switch
 
 Swap which source you hear
-  v then x          cycle your paired client through Icecast → YouTube → Radio. Your choice is saved per-user, so a refresh keeps it.
+  v then x          switch your paired client between Radio and YouTube. Your choice is saved per-user, so a refresh keeps it.
 
 Music Booth (v then v)
 

@@ -349,7 +349,7 @@ User commands:
 - `/roll [NdM ...]` rolls dice into the current room; bare `/roll` defaults to `d20`, caps are 100 dice per group and 1000 sides.
 - `/search [query]` opens the Ctrl+/ modal in message-search mode, pre-filled with `?query`. Parsed in `submit_composer`, drained via `take_requested_message_search` in `handle_post_submit_requests` (the modal is App-owned).
 - `/summary` asks the AI for a catch-up of the visible public room, from when you last left the app on this device (24h when the device has no mark), or exactly the window you type (`/summary 6h`, `/summary 90m`, up to 48h); see §14 Summary. `/history` opens the scroll-back modal, at the first message you missed when this session has an AFK line for the room; see §14 History Modal.
-- `/paper` opens The Late Edition, @graybeard's daily paper (`app/paper`, App-owned modal); `/paper on|off`, `/paper outside on|off`, `/paper print|preview|reset` are admin-only and banner for anyone else. Parsed in `submit_composer` into `requested_paper`, drained by `paper::svc::tick`.
+- `/paper` opens The Late Edition, @graybeard's daily paper (`app/paper`, App-owned modal); `/paper print|preview|reset` are admin-only and banner for anyone else. Parsed in `submit_composer` into `requested_paper`, drained by `paper::svc::tick`.
 - `/voice` joins the enabled voice channel for the active room; `/mute` toggles paired-CLI mic mute.
 - `/ultimate` opens owned Ultimate Spells.
 - Staff-only `/audio`, `/audio fallback`, and `/audio skip` route trusted music controls.
@@ -377,7 +377,7 @@ User commands:
 - `/upload <url>` downloads a public image URL server-side, reuploads it to configured public file storage, and inserts the resulting URL into the composer for the user to send.
 
 Admin commands:
-- `/haunt [on|off|live on|live off|glitch|name|replay|invite|reset]` controls the
+- `/haunt [arm|glitch|name|replay|invite|reset|welcome]` controls the
   first-contact haunting. Parsed in `submit_composer` **only when
   `is_admin`** (enum + parser live in `deadchannel/haunt/state.rs`): for
   everyone else, moderators included even though the ladder now runs
@@ -449,7 +449,6 @@ retains its usual colors, and help colors follow the active theme at render time
   user names omit `@`, and column widths use Ratatui's display measurements.
 - `artboard safety [admin] <nsfw|sfw|none> <piece-id-prefix> [reason...]` (staff; moderator tier by default even for admins, explicit `admin` selects admin tier; one mark per account and piece, replacing previous mark/tier; `none` clears only the selected tier; own art allowed)
 - `artboard safety none <piece-id-prefix> by <@user|user-id> [reason...]` (admin only; removes that actor's stored mark at either tier, another admin's included)
-- `artboard gallery <on|off>` (admin; the `artboard_gallery_enabled` switch)
 - `room-voice <#room> <on|off>`
 - `kick <server|voice|stream|#room> @name [reason...]`
 - `ban <server|#room|art|audio|stream> @name [duration] [reason...]`
@@ -737,8 +736,19 @@ its own domain; only the command and the glyph are chat's.
 One patron buys everyone at the bar a drink. The chips are burned like the
 crown's; what the room gets is a #lounge line and a free drink each.
 The same credit also serves a one-person gift: `@bartender buy @user a drink`
-is an exact, whole-message instruction (`drink_round::gift_drink_target`,
-protected from drunk-text slurring) resolved against the account username.
+or another entry on the closed `GIFT_PHRASES` list (a verb, the name and what
+is bought: "get @user a beer", "send @user a round", "pour @user one"; what is
+bought for whom: "drink for @user", "one for @user"; or whose is on whom:
+"@user's next one is on me"), read on the
+round's rules (any case, opening a clause anywhere in the message, not a
+`?` sentence, not in backticks; see "The trigger is a literal phrase" below) by
+`drink_round::gift_drink_target`, which also refuses a message naming any
+second handle besides the bartender's, so the recipient is never a guess. A
+message places one order at most: `drink_round::bar_order` reads both lists
+once for the bartender, and a gift and a round in the same message ring up
+neither and go to the model as talk. The handle is resolved against the
+account username, trailing dots dropped as sentence punctuation (a username
+never ends in one, `sanitize_username_input`).
 It costs 200 chips (`GIFT_DRINK_PRICE`, twice a round's head, since the one
 person it is aimed at will drink it), pours the recipient the same 400 points
 a round does, works for offline humans, shares the 24h expiry and
@@ -777,15 +787,29 @@ It touches chat twice, which is why it is documented here: the phrase gate
 reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
 
 - **The trigger is a literal phrase.** `ROUND_PHRASES` ("round for everyone",
-  "round for all", "round for the house", ...) matched case-insensitively on
-  word boundaries, so "turn around for all of us" is not an order. No model
+  "drinks for the house", "everyone a drink", "drinks on me", "round's on
+  me", ...) matched case-insensitively on word boundaries, so "turn around
+  for all of us" is not an order. Every entry names the whole house or says
+  "on me"; a bare "a round" is not on the list. No model
   decides this: it is the only bartender action that spends more than one
   drink's worth, the price is the size of the room, so the phrase is the
   confirmation. An order is a statement: `contains_round_request` rejects a
   phrase whose sentence runs on to a `?` and never looks inside backticks, so
   "how much is a round for everyone?" is a question the model answers, not a
-  bill. (`round_phrase_spans`, the slur guard's view, still protects the
-  words wherever they appear.) It also means a round costs no model call.
+  bill. The `?` scan reads the whole message and skips code spans, so
+  "round for everyone in `#lounge`?" is a question too. An order also has to
+  open its clause (`is_order`, shared with the gift): between the last
+  `, . ! ? ; :` or line break and the phrase there may only be the
+  bartender's `@name` and entries from the closed `LEAD_INS` list: small
+  talk ("a", "another", "please", "the next"), saying you are about to order
+  ("I'll", "I'd like to", "let's", "can I"), and the verb when the phrase
+  starts at what is bought ("buy", "get", "do", "put"). Nothing negative,
+  past or conditional is on it. "I'll buy a round for everyone", "let's do a
+  round for the house" and "don't worry, round on me" order; "no round for
+  everyone tonight", "he said round on me", "we had drinks for everyone" and
+  "@alice drinks on me" spend nothing and the model gives the words to say.
+  (`round_phrase_spans`, the slur guard's view, still protects the words
+  wherever they appear.) It also means a round costs no model call.
 - **A settled round answers ahead of the mention ladder**, in both the event
   loop's pre-filter and the reply, because throttling a paid action would
   swallow a purchase in silence. A refusal is free, so it steps the ladder
@@ -795,9 +819,13 @@ reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
   (§14 Drunk Text), so a wasted patron's order would otherwise reach the
   matcher as "ronud for eevryone" and the feature would break for exactly the
   people most likely to use it. `slur_segment` passes any token overlapping a
-  `round_phrase_spans` range through untouched, and `with_hiccup` will not
-  drop a `*hic*` inside one. Both the guard and the matcher read the one list
-  in `drink_round.rs`, so they cannot drift apart. The words around the order
+  `spending_phrase_spans` range (the round phrases and the gift phrases,
+  each widened back over the lead-in words it opens its clause with, so a
+  scrambled "please" cannot stop an order being one) through untouched, and
+  `with_hiccup` will not drop a `*hic*` inside one; a hiccup right before the
+  lead-in is itself on `LEAD_INS`.
+  The guard and the matchers read the same lists in `drink_round.rs`, so they
+  cannot drift apart. The words around the order
   still take their beating.
 - **Price** 100 (`ROUND_PRICE_PER_PATRON`) for every credit that actually
   landed, never for the heads counted: the grant's own `RETURNING` is what
@@ -913,7 +941,7 @@ Synthetic entries are selected from the room list but are not normal `ChatRoom`s
 - The reward is capped at one per URL per user and at `NEWS_SHARE_MAX_PAID_PER_DAY` (3) paid shares per UTC day, and the `chip_ledger` row is what enforces both, keyed on `(user_id, url)` and counted by `created_at` date like pot tickets (hence `source_ref` holds the URL, not an article id; migration 163 indexes the lookup). The `articles` row cannot be the record of payment: deleting a story frees its URL, so paying on insert alone would let one player share, delete, and re-share the same link forever. `articles.url` is unique, so while a story is live only its first sharer was paid.
 - A repeat or capped share still succeeds and still goes up on the live strip; it just mints nothing. `Article::create_shared` returns a closed `NewsShareReward` (`Paid` / `RepeatUrl` / `DailyCapReached`) that rides `ArticleEvent::Created` and `FeedEvent::EntryShared`, so `news::state::news_share_banner` says what the ledger did ("+500 chips" / "Already paid for this link" / "Today's 3 paid shares are used up") and `metrics::record_news_shared` labels `late_ssh_news_shares_total` by the same outcome. An RSS entry marked shared because its link was already in News carries `reward: None` and raises no second banner over "Already shared.".
 - Insert, ledger lookup, and credit are one transaction under a `pg_advisory_xact_lock` keyed on `('news_share', user_id)`, the shape `GamePayout` and the pot use: a failed credit leaves no orphan article squatting on a globally unique URL, and two shares by one person landing together serialize, so the day cap is exact rather than read-then-write.
-- Every snapshot article is a live strip candidate, stamped with its `created` (`news/live.rs`, `../live/CONTEXT.md`): a share joins the strip's News lane, which goes ahead of everything else at the next handover, and stays up exactly five minutes. `o` there opens the article modal (`ChatState::open_news_modal_for_article`); `r` opens the #lounge composer replying to it (`ChatState::begin_reply_to_article`, `ReplyTo::Article`), and the sent message carries `> @sharer: 📰 Title` with no `reply_to_message_id`, since there is no message to point at.
+- Every snapshot article is a live strip candidate, stamped with its `created` (`news/live.rs`, `../live/CONTEXT.md`): a share joins the strip's News lane, which goes ahead of everything else at the next handover, and stays up exactly five minutes. `o` there opens the article modal (`ChatState::open_news_modal_for_article`); `r` opens the #lounge composer replying to it (`ChatState::begin_reply_to_article`, `ReplyTo::Article`), and the sent message carries `> @sharer: 📰 Title` with no `reply_to_message_id`, since there is no message to point at. `r` on the selected article in the News room starts the same reply and switches to #lounge (`news/input.rs`).
 - A share has no chat message. Old #lounge rows whose body starts with `---NEWS---` (the cards shares used to post) are still in `chat_messages`; nothing writes, parses, or deletes them, so they render as plain text.
 - Delete removes the article (its author, or an admin with an audit row); there is no chat-side cleanup.
 - URL processing has a 5-minute timeout. Image ASCII fetch has byte, pixel, and time limits.
@@ -1096,7 +1124,7 @@ modals and the icon picker). Username profile-opens are debounced via
 
 | Entry | Keys |
 |-------|------|
-| News | `j/k` navigate, `i` paste URL, Enter copy/submit URL, `d` delete own/admin article, `/` toggle filter to mine, `Esc` cancel |
+| News | `j/k` navigate, `i` paste URL, Enter copy/submit URL, `r` reply in #lounge to the selected article, `d` delete own/admin article, `/` toggle filter to mine, `Esc` cancel |
 | Directory Projects | `j/k` navigate, `i` create, `e` edit own/admin, `d` delete own/admin, Enter copy/submit, Tab cycle fields while composing, `/` toggle filter to mine, `Esc` cancel |
 | Directory Profiles | `j/k` navigate, `i` create/edit own, `e` edit own/admin, `d` delete own/admin, Enter/`c` copy public profile link, Tab cycle fields while composing, `/` toggle filter to mine, `Esc` cancel |
 | Cyberspace feeds | `j/k` navigate, Enter open thread (or link modal when unlinked), `p` post, `c` copy entry link, `n` notifications, `r` refresh/reply, `b` back |

@@ -489,7 +489,7 @@ async fn o_on_a_booth_track_tunes_in_then_opens_the_booth() {
     app.resize(160, 40)
         .expect("resize to a card the full strip fits");
     wait_for_render_contains(&mut app, "lounge").await;
-    app.set_paired_playback_source(AudioSource::Icecast);
+    app.set_paired_playback_source(AudioSource::Radio);
 
     app.audio
         .service()
@@ -538,7 +538,7 @@ async fn o_on_a_booth_track_that_left_the_booth_changes_nothing() {
     app.resize(160, 40)
         .expect("resize to a card the full strip fits");
     wait_for_render_contains(&mut app, "lounge").await;
-    app.set_paired_playback_source(AudioSource::Icecast);
+    app.set_paired_playback_source(AudioSource::Radio);
 
     app.audio
         .service()
@@ -571,7 +571,7 @@ async fn o_on_a_booth_track_that_left_the_booth_changes_nothing() {
     app.handle_input(b"o");
     assert_eq!(
         app.paired_source,
-        AudioSource::Icecast,
+        AudioSource::Radio,
         "nothing to tune in to"
     );
     assert!(!app.booth_modal_state.is_open());
@@ -669,6 +669,71 @@ async fn r_on_a_shared_article_replies_with_its_title_quoted() {
             .collect::<Vec<_>>(),
         vec![(
             "> @strip-reply-them: 📰 The terminal renaissance\nworth a read",
+            None
+        )],
+        "the reply quotes the article, with no message to point at"
+    );
+}
+
+/// The same reply from the News room: `r` on the selected story takes you
+/// to #lounge with the composer replying to it, quoting its title.
+#[tokio::test]
+async fn r_on_a_news_story_replies_in_lounge_with_its_title_quoted() {
+    use crate::app::chat::state::RoomSlot;
+    use late_core::models::article::{Article, ArticleParams};
+
+    let test_db = new_test_db().await;
+    let me = create_test_user(&test_db.db, "news-reply-me").await;
+    let them = create_test_user(&test_db.db, "news-reply-them").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, me.id)
+        .await
+        .expect("join lounge room");
+    Article::create_by_user_id(
+        &client,
+        them.id,
+        ArticleParams {
+            user_id: them.id,
+            url: "https://example.com/terminal-renaissance".to_string(),
+            title: "The terminal renaissance".to_string(),
+            summary: "• terminals are back".to_string(),
+            ascii_art: "############\n#  late.sh #\n############".to_string(),
+        },
+    )
+    .await
+    .expect("share an article");
+    let mut app = make_app(test_db.db.clone(), me.id, "news-reply-flow-it");
+    app.resize(160, 40).expect("resize");
+    wait_for_render_contains(&mut app, "o read \u{b7} r reply").await;
+    app.chat.select_room_slot(RoomSlot::News);
+    app.sync_visible_chat_room();
+    wait_for_render_contains(&mut app, "r reply in #lounge").await;
+
+    app.handle_input(b"r");
+    assert_eq!(
+        (
+            app.chat.news_selected,
+            app.chat.selected_room_id,
+            app.chat.is_composing()
+        ),
+        (false, Some(lounge.id), true),
+        "r leaves News for #lounge with the composer open"
+    );
+    app.handle_input(b"worth a read\r");
+    wait_for_render_contains(&mut app, "worth a read").await;
+
+    let sent = ChatMessage::list_recent(&client, lounge.id, 1)
+        .await
+        .expect("list lounge");
+    assert_eq!(
+        sent.iter()
+            .map(|message| (message.body.as_str(), message.reply_to_message_id))
+            .collect::<Vec<_>>(),
+        vec![(
+            "> @news-reply-them: 📰 The terminal renaissance\nworth a read",
             None
         )],
         "the reply quotes the article, with no message to point at"
