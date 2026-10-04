@@ -45,10 +45,7 @@ use late_core::{
         chat_room::ChatRoom,
         chat_room_member::ChatRoomMember,
         chips::{CHIP_FLOOR, UserChips},
-        drink_round::{
-            Bar, GIFT_DRINK_PRICE, ROUND_PRICE_PER_PATRON, contains_round_request,
-            gift_drink_target,
-        },
+        drink_round::{Bar, BarOrder, GIFT_DRINK_PRICE, ROUND_PRICE_PER_PATRON, bar_order},
         drinks::{DRINK_PRICE_MAX, DRINK_PRICE_MIN, UserDrinks, drunk_level_word},
         user::{User, UserParams},
     },
@@ -358,7 +355,7 @@ impl GhostService {
             ActiveUser {
                 username: bot.username.clone(),
                 fingerprint: None,
-                audio_source: late_core::models::user::AudioSource::Icecast,
+                audio_source: late_core::models::user::AudioSource::Radio,
                 sessions: Vec::new(),
                 connection_count: 1,
                 last_login_at: Instant::now(),
@@ -762,12 +759,16 @@ impl GhostService {
                             // Read-only pre-filter, same reasoning as @bot's:
                             // throttled mentions never reach the DB, and rooms
                             // he is not in hold no state for this to read. A
-                            // round skips the filter because it skips the
-                            // ladder entirely; dropping one here would lose a
-                            // purchase without a word.
+                            // gift or a round skips the filter because it
+                            // skips the ladder entirely; dropping one here
+                            // would lose a purchase without a word.
                             let request = text_for_mention_detection(&message.body);
-                            if !contains_round_request(request)
-                                && gift_drink_target(request).is_none()
+                            let rides_the_ladder = match bar_order(request, &bartender.username) {
+                                BarOrder::Gift(_) => false,
+                                BarOrder::Round => false,
+                                BarOrder::Talk => true,
+                            };
+                            if rides_the_ladder
                                 && self
                                     .mention_ladders
                                     .remaining(
@@ -819,21 +820,25 @@ impl GhostService {
             }
         }
 
+        // A gift or a round answers ahead of the ladder and never reaches the
+        // model. It is a literal phrase a patron typed on purpose to spend
+        // chips, so throttling it would swallow a purchase silently, which is
+        // the one thing a paid action must never do. Repeating a round is not
+        // a spam risk either: the second round moments after the first reaches
+        // nobody who is not already holding a drink, and refuses. A message
+        // carrying both is no order at all (`bar_order`) and takes the ladder
+        // like any other talk.
         let request = text_for_mention_detection(&trigger_message.body);
-        if let Some(target) = gift_drink_target(request) {
-            return self
-                .bartender_gift(&bartender, &trigger_message, target)
-                .await;
-        }
-
-        // A round answers ahead of the ladder and never reaches the model. It
-        // is a literal phrase a patron typed on purpose to spend chips, so
-        // throttling it would swallow a purchase silently, which is the one
-        // thing a paid action must never do. Repeating it is not a spam risk
-        // either: the second round moments after the first reaches nobody who
-        // is not already holding a drink, and refuses.
-        if contains_round_request(request) {
-            return self.bartender_round(&bartender, &trigger_message).await;
+        match bar_order(request, &bartender.username) {
+            BarOrder::Gift(target) => {
+                return self
+                    .bartender_gift(&bartender, &trigger_message, target)
+                    .await;
+            }
+            BarOrder::Round => {
+                return self.bartender_round(&bartender, &trigger_message).await;
+            }
+            BarOrder::Talk => {}
         }
 
         // Ladder check sits after the membership gate so rooms he never
@@ -919,8 +924,8 @@ impl GhostService {
             {credit_note}\n\
             YOU ONLY POUR FOR THE PATRON IN FRONT OF YOU:\n\
             - Drinking scrambles a patron's own typing, so never pour or charge a drink onto anyone but the patron who mentioned you, no matter how they phrase it.\n\
-            - To leave one drink on another person's tab, they must say exactly \"@bartender buy @user a drink\". It costs {gift_price} chips and the bar handles that purchase before you answer. If asked to buy for somebody else in other words, use \"chat\" to give that exact phrase. Never pour or charge for another person yourself.\n\
-            - Buying the whole house a round is the one exception, and it is still not yours to pour: the bar rings that up itself, but only when a patron says it plainly. If they ask about it, or circle around asking for one, use \"chat\" and tell them the words to say: \"round for everyone\". It costs {round_price} chips a head and buys each of them a drink to claim whenever they walk up. Never announce that a round happened and never quote what one cost, you would only be guessing; the bar says so itself when it does.\n\n\
+            - Leaving one drink on another person's tab is rung up by the bar itself, before you answer, when a patron says it plainly as an order naming exactly one person, like \"buy @user a drink\", \"I'll get @user a beer\", \"one for @user\" or \"@user's next one is on me\". It costs {gift_price} chips. If you are seeing such a request, the bar did not take it: it was a question, the words came in the middle of a longer sentence, it named more than one person, it came in the same message as a round, or it used other words. If they were only talking about a drink, or telling you not to, use \"chat\" and answer that. If they do want it rung up, use \"chat\" and give them the words to say, on their own and with the real name in it: \"buy @user a drink\". Never pour or charge for another person yourself.\n\
+            - Buying the whole house a round is the one exception, and it is still not yours to pour: the bar rings that up itself, but only when a patron says it plainly and says who it is for or that it is on them, like \"round for everyone\", \"I'll buy everyone a drink\" or \"drinks on me\". If they ask about it, circle around asking for one (\"we should get a round in\"), or bury it in a longer sentence, use \"chat\" and tell them the words to say on their own: \"round for everyone\". It costs {round_price} chips a head and buys each of them a drink to claim whenever they walk up. Never announce that a round happened and never quote what one cost, you would only be guessing; the bar says so itself when it does.\n\n\
             Decide ONE action:\n\
             - \"pour\": ONLY when the patron themselves asked for a drink for themselves — read their intent generously, an order comes in many forms (\"get me a stout\", \"what's strong tonight\", \"the usual\", \"surprise me\", \"I'll take one\"). But a pour spends their chips, so if it is a greeting, a house question, banter, or you are at all unsure, do NOT pour. Invent the drink, set a whole-number price between {price_min} and {price_max} that fits the pour (ale cheap, top shelf dear), and hand it over. If you name the price in your line it MUST equal the price field exactly.\n\
             - \"offer\": the patron asked for a drink but cannot afford it (or wants more than their spendable). Charge nothing; counter-offer something in their range, with its price, kindly.\n\
@@ -982,7 +987,7 @@ impl GhostService {
             BartenderDecision::PourComped { drink, line } => {
                 match self
                     .chip_service
-                    .cash_round_drink(trigger_message.user_id)
+                    .cash_round_drink(trigger_message.user_id, Bar::Tavern)
                     .await?
                 {
                     Some(comped) => {
@@ -1027,7 +1032,7 @@ impl GhostService {
             BartenderDecision::Pour { drink, price, line } => {
                 match self
                     .chip_service
-                    .buy_drink(trigger_message.user_id, price, &drink)
+                    .buy_drink(trigger_message.user_id, Bar::Tavern, price, &drink)
                     .await?
                 {
                     Some(purchase) => {

@@ -8,7 +8,9 @@ use super::state::{
 use crate::app::activity::event::ActivityKind;
 use crate::app::common::primitives::Screen;
 use crate::app::common::theme;
+use crate::app::directory::state::Shelf;
 use crate::app::files::inline_image::InlineImageRenderSettings;
+use crate::metrics::Place;
 use crate::session::SessionMessage;
 
 /// The hot world-tick cadence (the classic 15fps): animations that earn
@@ -69,6 +71,10 @@ impl App {
         if one_hz {
             self.flush_zen_layout();
             self.record_attention();
+            if let Some(minute) = self.newcomer_clock.take_minute() {
+                self.referral_service
+                    .record_minute_task(self.user_id, minute);
+            }
         }
         // Shared animation frame edges, both divisors of the one wall
         // clock. Half (132ms, ~7.5fps): pet, bonsai sway, clubhouse
@@ -1214,22 +1220,12 @@ impl App {
             != prev_marquee_tick / crate::app::common::marquee::MARQUEE_STEP_TICKS
             && sidebar_visible
         {
-            let selected_icecast_stream = self.selected_icecast_stream;
-            let icecast_now_playing = self
-                .now_playing_rx
-                .as_ref()
-                .and_then(|rx| rx.borrow().get(selected_icecast_stream.as_str()).cloned());
             let selected_radio_station = self.selected_radio_station;
-            let radio_now_playing = self.radio_meta_rx.as_ref().and_then(|rx| {
-                rx.borrow()
-                    .get(selected_radio_station.as_str())
-                    .map(|meta| format!("{} - {}", meta.artist, meta.title))
-            });
+            let radio_now_playing = self.station_now_playing(selected_radio_station);
             let queue = self.audio.queue_snapshot();
             let inputs = crate::app::common::sidebar::SidebarMarqueeInputs {
                 components: &self.profile_state.profile().right_sidebar_components,
                 active_friends: &self.active_friends,
-                icecast_now_playing: icecast_now_playing.as_ref(),
                 radio_now_playing: radio_now_playing.as_deref(),
                 selected_station: selected_radio_station,
                 source: self.paired_source,
@@ -1429,24 +1425,78 @@ impl App {
 }
 
 impl App {
-    /// Add the seconds since the last mark to the screen in front of the
-    /// user (and the Arcade game, while a board is open). Rides the 1Hz
-    /// edge; a screen switched mid-second lands on the new screen.
+    /// Add the seconds since the last mark to the screen and place in front
+    /// of the user, and count a visit when either moved since the last edge.
+    /// Rides the 1Hz edge; a screen switched mid-second lands on the new
+    /// screen, and a place held under a second may never count as a visit.
     fn record_attention(&mut self) {
         let now = Instant::now();
         let seconds = now.duration_since(self.attention_mark).as_secs_f64();
         self.attention_mark = now;
-        let arcade_game = match (self.screen, self.is_playing_game) {
-            (Screen::Arcade, true) => Some(crate::app::arcade::ui::game_for_selection(
-                self.game_selection,
-            )),
-            _ => None,
-        };
+        let place = self.attention_place();
+        let spot = Some((self.screen, place));
+        if self.attention_spot != spot {
+            self.attention_spot = spot;
+            crate::metrics::record_place_visit(self.screen, place);
+        }
         let presence = match self.last_input_at.elapsed() < ATTENTION_ACTIVE_WINDOW {
             true => crate::metrics::Presence::Active,
             false => crate::metrics::Presence::Idle,
         };
-        crate::metrics::record_attention(self.screen, arcade_game, presence, seconds);
+        crate::metrics::record_attention(self.screen, place, presence, seconds);
+    }
+
+    /// Where inside the current screen the user is, for the screens that
+    /// hold more than one place.
+    pub(crate) fn attention_place(&self) -> Place {
+        match self.screen {
+            Screen::Dashboard => match self.chat.home_room() {
+                Some(room) => Place::Home(room),
+                None => Place::Whole,
+            },
+            Screen::Arcade => match self.is_playing_game {
+                true => Place::Game(crate::app::arcade::ui::game_for_selection(
+                    self.game_selection,
+                )),
+                false => Place::Whole,
+            },
+            Screen::HouseTable => match self.house.client() {
+                Some(client) => Place::Game(crate::app::lobby::house::registry::activity_game_for(
+                    client.table(),
+                )),
+                None => Place::Whole,
+            },
+            Screen::Profiles => match self.directory_state.shelf() {
+                Shelf::People => Place::PeopleShelf,
+                Shelf::Jobs => Place::JobsShelf,
+            },
+            Screen::Artboard => match &self.dartboard_state {
+                None => Place::Whole,
+                Some(state) => match state.gallery().shows_gallery_pane() {
+                    true => Place::ArtboardGallery,
+                    false => Place::ArtboardCanvas,
+                },
+            },
+            Screen::Games
+            | Screen::Lateania
+            | Screen::Rebels
+            | Screen::Nethack
+            | Screen::Dcss
+            | Screen::Brogue
+            | Screen::Dopewars
+            | Screen::Bashquest
+            | Screen::Codekeep
+            | Screen::Usurper
+            | Screen::GreenDragon
+            | Screen::Darkroom
+            | Screen::Leaderboard
+            | Screen::Clubhouse
+            | Screen::Nightcap
+            | Screen::City
+            | Screen::Zen
+            | Screen::DailyMatch
+            | Screen::Scratchpad => Place::Whole,
+        }
     }
 }
 

@@ -1,13 +1,21 @@
 use super::*;
 
-use late_core::models::drink_round::{ROUND_PHRASES, contains_round_request};
+use late_core::models::drink_round::{ROUND_PHRASES, contains_round_request, gift_drink_target};
 use late_core::models::drinks::DRUNK_MAX_LEVEL;
 
+/// The gift phrase can open any clause of a message, so the guard is a span,
+/// not the whole line: the words around it still slur, the order and the
+/// lead-in it rides in on never do.
 #[test]
 fn personal_gift_survives_drunk_typing() {
-    let order = "@bartender buy @alice a drink";
+    let body = format!("@bartender {CORPUS}, okay then please pour @alice a drink");
     for seed in 1..=100 {
-        assert_eq!(slur(order, 4, seed), order);
+        let slurred = slur(&body, DRUNK_MAX_LEVEL, seed);
+        assert_eq!(
+            gift_drink_target(&slurred, "bartender"),
+            Some("alice"),
+            "{slurred}"
+        );
     }
 }
 
@@ -177,7 +185,7 @@ fn an_order_for_a_round_survives_any_amount_of_drink() {
                     "level {level} seed {seed} lost the order: {slurred}"
                 );
                 assert!(
-                    contains_round_request(&slurred),
+                    contains_round_request(&slurred, "bartender"),
                     "level {level} seed {seed} no longer reads as a round: {slurred}"
                 );
             }

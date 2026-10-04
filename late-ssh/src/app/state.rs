@@ -379,12 +379,6 @@ pub struct SessionConfig {
     pub(crate) first_contact: crate::app::deadchannel::haunt::state::FirstContactMarks,
     /// The first-contact eligibility gate as evaluated at bootstrap.
     pub(crate) first_contact_gate: crate::app::deadchannel::haunt::state::FirstContactGate,
-    /// Process-wide switches (`app/flags`), read at arming and on every
-    /// haunting tick so flipping the kill switch off drops live theater.
-    pub app_flags_rx: tokio::sync::watch::Receiver<Option<late_core::models::app_flag::AppFlags>>,
-    /// The flag service, for `/haunt on|off|live`. `None` on headless/test
-    /// paths, which turns those commands into a banner.
-    pub app_flags: Option<crate::app::flags::svc::AppFlagService>,
     /// Every runner's look (`app/deadchannel/runner`), copied on the ~1s
     /// tick edge into `App::runner_looks` for the #deadchannel portraits.
     pub(crate) runner_looks_rx:
@@ -419,6 +413,11 @@ pub struct SessionConfig {
     /// an app without one; the panel then renders dashes and the commands
     /// say so.
     pub pot_service: Option<crate::app::pot::svc::PotService>,
+    /// Invites: the Settings dialog and newcomer minutes.
+    pub referral_service: crate::app::referral::svc::ReferralService,
+    /// Turns this session's input into active minutes while the account is
+    /// young. Built from the account's creation time; inert in test apps.
+    pub newcomer_clock: crate::app::referral::state::NewcomerClock,
     pub activity_feed_rx: Option<broadcast::Receiver<ActivityEvent>>,
     pub user_id: Uuid,
     pub permissions: Permissions,
@@ -442,11 +441,11 @@ pub struct SessionConfig {
     /// if they've never chosen one - which triggers the first-run prompt.
     pub initial_interaction_mode: Option<late_core::models::user::InteractionMode>,
     /// Initial audio source for the paired client, loaded from
-    /// `users.settings.audio_source` (default `Icecast`). v+x mutates this and
+    /// `users.settings.audio_source` (default `Radio`). v+x mutates this and
     /// persists the new value.
     pub initial_audio_source: late_core::models::user::AudioSource,
-    pub initial_icecast_stream: late_core::models::user::IcecastStream,
     pub initial_radio_station: late_core::models::user::RadioStation,
+    pub initial_radio_slots: late_core::models::user::RadioSlots,
 
     /// Server state
     pub is_draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -482,6 +481,9 @@ pub struct App {
     /// Where the attention metric last counted up to; the 1Hz edge adds
     /// the seconds since then to the screen in front of the user.
     pub(crate) attention_mark: Instant,
+    /// The screen and place the last 1Hz edge saw; a different one there
+    /// counts as a visit. None until the first edge, so landing counts too.
+    pub(crate) attention_spot: Option<(Screen, crate::metrics::Place)>,
     pub(crate) splash_hint: String,
     pub(crate) show_quit_confirm: bool,
     pub(crate) show_help: bool,
@@ -617,6 +619,8 @@ pub struct App {
         Option<watch::Receiver<Option<crate::app::crown::svc::CrownHolder>>>,
     pub(super) crown_events_rx: Option<broadcast::Receiver<crate::app::crown::svc::CrownEvent>>,
     pub(super) pot_service: Option<crate::app::pot::svc::PotService>,
+    pub(super) referral_service: crate::app::referral::svc::ReferralService,
+    pub(super) newcomer_clock: crate::app::referral::state::NewcomerClock,
     /// The process-shared pot, read on the ~1s edge into `pot_view` so no
     /// render ever queries for it.
     pub(super) pot_snapshot_rx: Option<watch::Receiver<Arc<crate::app::pot::svc::PotSnapshot>>>,
@@ -673,11 +677,9 @@ pub struct App {
     pub(crate) artboard_banned: bool,
     pub(crate) artboard_ban_expires_at: Option<DateTime<Utc>>,
     /// First contact, the haunting (`app/deadchannel/haunt`): every
-    /// stage's machine and the flags that gate them, in one slot.
+    /// stage's machine and what armed them, in one slot.
     /// `haunt::svc` owns all reads and writes.
     pub(crate) haunt: crate::app::deadchannel::haunt::state::HauntState,
-    /// Process-wide switches, for the `/haunt` flag commands.
-    pub(crate) app_flags: Option<crate::app::flags::svc::AppFlagService>,
 
     /// Chat
     pub(crate) chat: chat::state::ChatState,
@@ -707,8 +709,10 @@ pub struct App {
     /// webview helper. On pair-up the current value is replayed so a
     /// reconnect lands in the right mode.
     pub(crate) paired_source: late_core::models::user::AudioSource,
-    pub(crate) selected_icecast_stream: late_core::models::user::IcecastStream,
     pub(crate) selected_radio_station: late_core::models::user::RadioStation,
+    /// Pinned stations behind `v1`..`v3` (`users.settings.radio_slots`).
+    pub(crate) radio_slots: late_core::models::user::RadioSlots,
+    pub(crate) stations_modal_state: crate::app::audio::stations_modal::state::StationsModalState,
 
     /// How this session is driven (keyboard / mouse / hybrid). Gates whether the
     /// mouse is live; editable in settings.
@@ -1409,6 +1413,7 @@ impl App {
         let mut settings_modal_state = settings_modal::state::SettingsModalState::new(
             config.profile_service.clone(),
             config.feed_service.clone(),
+            config.referral_service.clone(),
             config.user_id,
         );
         let device_rails = config.key_layout;
@@ -1432,7 +1437,6 @@ impl App {
         };
         let haunt = crate::app::deadchannel::haunt::svc::arm(
             config.permissions.can_moderate(),
-            config.app_flags_rx.clone(),
             config.user_id,
             &config.username,
             config.first_contact,
@@ -1458,6 +1462,7 @@ impl App {
             last_input_at: Instant::now(),
             last_one_hz_index: None,
             attention_mark: Instant::now(),
+            attention_spot: None,
             splash_hint,
             show_quit_confirm: false,
             show_help: false,
@@ -1568,6 +1573,8 @@ impl App {
                 .as_ref()
                 .map(crate::app::pot::svc::PotService::subscribe_events),
             pot_service: config.pot_service,
+            referral_service: config.referral_service.clone(),
+            newcomer_clock: config.newcomer_clock,
             pot_view: crate::app::pot::state::PotView::default(),
             active_users: active_users.clone(),
             username_directory: config.username_directory,
@@ -1603,7 +1610,6 @@ impl App {
             artboard_banned: config.artboard_banned,
             artboard_ban_expires_at: config.artboard_ban_expires_at,
             haunt,
-            app_flags: config.app_flags.clone(),
             chat: chat::state::ChatState::new(
                 chat::state::ChatServices {
                     chat: config.chat_service,
@@ -1642,8 +1648,10 @@ impl App {
             tag_picker: super::tag_picker::state::TagPickerState::default(),
             booth_modal_state: crate::app::audio::booth::state::BoothModalState::default(),
             paired_source: config.initial_audio_source,
-            selected_icecast_stream: config.initial_icecast_stream,
             selected_radio_station: config.initial_radio_station,
+            radio_slots: config.initial_radio_slots,
+            stations_modal_state:
+                crate::app::audio::stations_modal::state::StationsModalState::default(),
             interaction_mode: config.initial_interaction_mode.unwrap_or_default(),
             music_prefix_armed: false,
             room_section_prefix_armed: false,
@@ -2606,6 +2614,7 @@ impl App {
     pub fn handle_input(&mut self, data: &[u8]) {
         if !data.is_empty() {
             self.last_input_at = Instant::now();
+            self.newcomer_clock.note_input(chrono::Utc::now());
         }
         // First contact's breakthrough (`app/deadchannel/haunt`): while it
         // plays, every key is swallowed here, before a running door game or
@@ -3126,11 +3135,9 @@ impl App {
     /// stops its webview helper for YouTube.
     pub fn toggle_paired_playback_source(&mut self) -> late_core::models::user::AudioSource {
         use late_core::models::user::AudioSource;
-        // Dock order in the sidebar music stage: radio → youtube → icecast.
         let next = match self.paired_source {
             AudioSource::Radio => AudioSource::Youtube,
-            AudioSource::Youtube => AudioSource::Icecast,
-            AudioSource::Icecast => AudioSource::Radio,
+            AudioSource::Youtube => AudioSource::Radio,
         };
         self.set_paired_playback_source(next);
         next
@@ -3148,14 +3155,36 @@ impl App {
         self.audio.persist_audio_source(source);
     }
 
-    pub fn select_icecast_stream(&mut self, stream: late_core::models::user::IcecastStream) {
-        self.selected_icecast_stream = stream;
-        self.audio.persist_icecast_stream(stream);
-    }
-
     pub fn select_radio_station(&mut self, station: late_core::models::user::RadioStation) {
         self.selected_radio_station = station;
         self.audio.persist_radio_station(station);
+    }
+
+    /// Pin `station` behind `v{index+1}`, vacating any slot it held.
+    pub fn pin_radio_slot(&mut self, index: usize, station: late_core::models::user::RadioStation) {
+        self.radio_slots.pin(index, station);
+        self.audio.persist_radio_slot(index, Some(station));
+    }
+
+    pub fn unpin_radio_slot(&mut self, index: usize) {
+        self.radio_slots.unpin(index);
+        self.audio.persist_radio_slot(index, None);
+    }
+
+    /// `Artist - Title` for `station` from its provider's feed, or `None`
+    /// while that feed has nothing (the caller shows the label).
+    pub(crate) fn station_now_playing(
+        &self,
+        station: late_core::models::user::RadioStation,
+    ) -> Option<String> {
+        let radio_meta = self.radio_meta_rx.as_ref().map(|rx| rx.borrow());
+        let house = self.now_playing_rx.as_ref().map(|rx| rx.borrow());
+        let (no_radio_meta, no_house) = (HashMap::new(), HashMap::new());
+        crate::app::audio::stations::station_now_playing(
+            station,
+            radio_meta.as_deref().unwrap_or(&no_radio_meta),
+            house.as_deref().unwrap_or(&no_house),
+        )
     }
 
     pub(crate) fn request_paired_clipboard_image_upload(

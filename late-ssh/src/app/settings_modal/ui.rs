@@ -9,7 +9,13 @@ use ratatui::{
 
 use late_core::models::user::{RightSidebarMode, RoomListMode};
 
-use crate::app::common::{markdown::render_body_to_lines, sidebar::SidebarOwnership, theme};
+use crate::app::common::{
+    markdown::render_body_to_lines, primitives::thousands, sidebar::SidebarOwnership, theme,
+};
+use crate::app::referral::state::{
+    INVITEE_BONUS_CHIPS, INVITER_REWARD_CHIPS, invitee_status_label, ssh_invite_command,
+};
+use late_core::models::referral::ReferralStatus;
 
 use super::mouse::{Field, Pane, Target};
 
@@ -260,6 +266,10 @@ fn draw_surface(
     if state.irc_token_dialog().open() {
         state.mouse.clear_surface();
         draw_irc_token_dialog(frame, popup, state);
+    }
+    if state.invites_dialog().open() {
+        state.mouse.clear_surface();
+        draw_invites_dialog(frame, popup, state);
     }
 }
 
@@ -1297,20 +1307,44 @@ fn tweak_row_line(
 }
 
 fn draw_account_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
-    let sections = Layout::vertical([
-        Constraint::Length(1), // heading
-        Constraint::Length(1), // breathing
-        Constraint::Length(1), // link row
-        Constraint::Length(1), // link description
-        Constraint::Length(1), // breathing
-        Constraint::Length(1), // IRC token row
-        Constraint::Length(1), // IRC token description
-        Constraint::Length(1), // breathing
-        Constraint::Length(1), // delete row
-        Constraint::Length(1), // delete description
-        Constraint::Min(0),
-    ])
-    .split(area);
+    let rows: [(AccountRow, &str, &str, bool); AccountRow::ALL.len()] = [
+        (
+            AccountRow::Invites,
+            "Invites",
+            "Invite friends with your own SSH command. Regulars earn you chips.",
+            false,
+        ),
+        (
+            AccountRow::LinkAccounts,
+            "Link Accounts",
+            "Move this SSH key onto another late.sh account. No data is merged.",
+            false,
+        ),
+        (
+            AccountRow::IrcToken,
+            "IRC access token",
+            "Create, reset, or revoke the token used by IRC clients.",
+            false,
+        ),
+        (
+            AccountRow::DeleteAccount,
+            "Delete Account",
+            "Delete your own account (cannot be undone!)",
+            true,
+        ),
+    ];
+    // Heading and a breathing line, then per row: the row, its
+    // description, a breathing line.
+    let mut constraints = vec![Constraint::Length(1), Constraint::Length(1)];
+    for _ in &rows {
+        constraints.extend([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ]);
+    }
+    constraints.push(Constraint::Min(0));
+    let sections = Layout::vertical(constraints).split(area);
 
     frame.render_widget(Paragraph::new(section_heading("Account")), sections[0]);
 
@@ -1318,66 +1352,20 @@ fn draw_account_tab(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalSt
         state.mouse.hit(sections[2 + idx * 3], Target::Account(row));
     }
     let width = area.width as usize;
-    frame.render_widget(
-        Paragraph::new(account_row_line(
-            state,
-            AccountRow::LinkAccounts,
-            width,
-            "Link Accounts",
-            false,
-        )),
-        sections[2],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                "Move this SSH key onto another late.sh account. No data is merged.",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ])),
-        sections[3],
-    );
-    frame.render_widget(
-        Paragraph::new(account_row_line(
-            state,
-            AccountRow::IrcToken,
-            width,
-            "IRC access token",
-            false,
-        )),
-        sections[5],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                "Create, reset, or revoke the token used by IRC clients.",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ])),
-        sections[6],
-    );
-    frame.render_widget(
-        Paragraph::new(account_row_line(
-            state,
-            AccountRow::DeleteAccount,
-            width,
-            "Delete Account",
-            true,
-        )),
-        sections[8],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                "Delete your own account (cannot be undone!)",
-                Style::default().fg(theme::TEXT_DIM()),
-            ),
-        ])),
-        sections[9],
-    );
+    for (index, (row, label, description, destructive)) in rows.into_iter().enumerate() {
+        let top = 2 + index * 3;
+        frame.render_widget(
+            Paragraph::new(account_row_line(state, row, width, label, destructive)),
+            sections[top],
+        );
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw("   "),
+                Span::styled(description, Style::default().fg(theme::TEXT_DIM())),
+            ])),
+            sections[top + 1],
+        );
+    }
 }
 
 fn account_row_line(
@@ -3075,6 +3063,182 @@ fn draw_link_account_footer(frame: &mut Surface<'_>, area: Rect, state: &Setting
             Span::styled("Esc", Style::default().fg(theme::AMBER_DIM())),
             Span::styled(" close", Style::default().fg(theme::TEXT_DIM())),
         ]),
+    };
+    frame.render_widget(Paragraph::new(footer), area);
+}
+
+/// How many invitees the dialog lists before summing up the rest.
+const INVITES_LISTED: usize = 8;
+
+fn draw_invites_dialog(frame: &mut Surface<'_>, area: Rect, state: &SettingsModalState) {
+    let dialog = state.invites_dialog();
+    let popup = centered_rect(76, 24, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .title(" Invites ")
+        .title_style(
+            Style::default()
+                .fg(theme::AMBER_GLOW())
+                .add_modifier(Modifier::BOLD),
+        )
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    close_button(frame, popup, state);
+    let layout = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let bright = Style::default().fg(theme::TEXT_BRIGHT());
+    let Some(overview) = dialog.overview() else {
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("Loading...", dim),
+            ])),
+            layout[0],
+        );
+        draw_invites_footer(frame, layout[2], dialog.accepts_code());
+        return;
+    };
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Send a friend this command:", dim),
+        ]),
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                ssh_invite_command(&overview.code),
+                bright.add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!(
+                    "Once they become an active regular here, you get {} chips",
+                    thousands(INVITER_REWARD_CHIPS)
+                ),
+                dim,
+            ),
+        ]),
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled(
+                format!(
+                    "and they get a {} chip welcome bonus.",
+                    thousands(INVITEE_BONUS_CHIPS)
+                ),
+                dim,
+            ),
+        ]),
+        Line::raw(""),
+    ];
+
+    match (&overview.inviter, overview.can_attach) {
+        (Some(inviter), _) => {
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("Invited by ", dim),
+                Span::styled(format!("@{inviter}"), bright),
+            ]));
+            lines.push(Line::raw(""));
+        }
+        (None, true) => {
+            lines.push(Line::from(vec![
+                Span::raw(" "),
+                Span::styled("Did someone invite you? Enter their code:", dim),
+            ]));
+            lines.push(link_account_input_line(
+                dialog.code_input(),
+                "invite code",
+                dialog.pending(),
+                true,
+            ));
+            lines.push(Line::raw(""));
+        }
+        (None, false) => {}
+    }
+
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(format!("Your invites ({})", overview.invited.len()), dim),
+    ]));
+    if overview.invited.is_empty() {
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled("Nobody yet.", Style::default().fg(theme::TEXT_FAINT())),
+        ]));
+    }
+    for invited in overview.invited.iter().take(INVITES_LISTED) {
+        let status_style = match invited.status {
+            ReferralStatus::Paid => Style::default().fg(theme::SUCCESS()),
+            ReferralStatus::Pending | ReferralStatus::Qualified => {
+                Style::default().fg(theme::AMBER())
+            }
+            ReferralStatus::Expired => Style::default().fg(theme::TEXT_FAINT()),
+        };
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            // Padded to a column, with a space that survives a username
+            // longer than the column (they run to 32).
+            Span::styled(format!("@{:<20} ", invited.username), bright),
+            Span::styled(invitee_status_label(invited.status), status_style),
+        ]));
+    }
+    if overview.invited.len() > INVITES_LISTED {
+        lines.push(Line::from(vec![
+            Span::raw("   "),
+            Span::styled(
+                format!("and {} more", overview.invited.len() - INVITES_LISTED),
+                Style::default().fg(theme::TEXT_FAINT()),
+            ),
+        ]));
+    }
+    frame.render_widget(Paragraph::new(lines), layout[0]);
+
+    if let Some((message, is_error)) = dialog.message() {
+        let color = if is_error {
+            theme::ERROR()
+        } else {
+            theme::SUCCESS()
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::raw(" "),
+                Span::styled(message.to_string(), Style::default().fg(color)),
+            ])),
+            layout[1],
+        );
+    }
+    draw_invites_footer(frame, layout[2], dialog.accepts_code());
+}
+
+fn draw_invites_footer(frame: &mut Surface<'_>, area: Rect, accepts_code: bool) {
+    let key = Style::default().fg(theme::AMBER_DIM());
+    let dim = Style::default().fg(theme::TEXT_DIM());
+    let footer = if accepts_code {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Enter", key),
+            Span::styled(" add code  ", dim),
+            Span::styled("Esc", key),
+            Span::styled(" close", dim),
+        ])
+    } else {
+        Line::from(vec![
+            Span::raw(" "),
+            Span::styled("Enter/Esc", key),
+            Span::styled(" close", dim),
+        ])
     };
     frame.render_widget(Paragraph::new(footer), area);
 }

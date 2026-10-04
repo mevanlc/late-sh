@@ -565,8 +565,6 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
             &user.settings,
         ),
         first_contact_gate,
-        app_flags_rx: state.app_flags.subscribe(),
-        app_flags: Some(state.app_flags.clone()),
         runner_looks_rx: state.runner_looks.subscribe(),
         presence: state.presence.clone(),
         zen_layout: late_core::models::user::extract_zen_layout(&user.settings),
@@ -574,6 +572,11 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         flair_directory: Some(state.flair_directory.clone()),
         crown_service: Some(state.crown_service.clone()),
         pot_service: Some(state.pot_service.clone()),
+        referral_service: state.referral_service.clone(),
+        newcomer_clock: crate::app::referral::state::NewcomerClock::new(
+            user.created,
+            chrono::Utc::now(),
+        ),
         activity_feed_rx,
         user_id,
         permissions,
@@ -587,8 +590,8 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
             .unwrap_or_else(|| theme::DEFAULT_ID.to_string()),
         initial_interaction_mode: late_core::models::user::extract_interaction_mode(&user.settings),
         initial_audio_source: late_core::models::user::extract_audio_source(&user.settings),
-        initial_icecast_stream: late_core::models::user::extract_icecast_stream(&user.settings),
         initial_radio_station: late_core::models::user::extract_radio_station(&user.settings),
+        initial_radio_slots: late_core::models::user::extract_radio_slots(&user.settings),
         is_draining: state.is_draining.clone(),
     }
 }

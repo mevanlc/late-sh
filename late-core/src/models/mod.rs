@@ -1,5 +1,4 @@
 pub mod account_link;
-pub mod app_flag;
 pub mod aquarium_care;
 #[cfg(test)]
 mod aquarium_care_test;
@@ -139,6 +138,9 @@ pub mod profile_award;
 #[cfg(test)]
 mod profile_award_test;
 pub mod quest;
+pub mod referral;
+#[cfg(test)]
+mod referral_test;
 pub mod rental;
 pub mod reward;
 #[cfg(test)]

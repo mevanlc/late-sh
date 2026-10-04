@@ -4,9 +4,9 @@ use crate::app::state::App;
 use super::gem::GemKey;
 use super::mouse::{Field, Target};
 use super::state::{
-    AccountRow, BIO_MAX_LEN, FEED_URL_MAX_LEN, IrcTokenFocus, LinkAccountEnterCodeFocus,
-    LinkAccountStep, PickerKind, Row, SYSTEM_FIELD_MAX_LEN, StatuslinePane, Tab, TweakRow,
-    USERNAME_MAX_LEN,
+    AccountRow, BIO_MAX_LEN, FEED_URL_MAX_LEN, INVITE_CODE_INPUT_MAX_LEN, IrcTokenFocus,
+    LinkAccountEnterCodeFocus, LinkAccountStep, PickerKind, Row, SYSTEM_FIELD_MAX_LEN,
+    StatuslinePane, Tab, TweakRow, USERNAME_MAX_LEN,
 };
 use crate::app::common::textarea_input::{
     EditOutcome, handle_multiline_edit, handle_single_line_edit,
@@ -22,6 +22,11 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
         return;
     }
     app.settings_modal_state.mouse.reveal_selection();
+    if app.settings_modal_state.invites_dialog().open() {
+        handle_invites_dialog_input(app, event);
+        return;
+    }
+
     if app.settings_modal_state.link_account_dialog().open() {
         handle_link_account_dialog_input(app, event);
         return;
@@ -288,6 +293,7 @@ fn handle_account_tab_input(app: &mut App, event: ParsedInput) {
         | ParsedInput::Arrow(b'A') => app.settings_modal_state.move_account_row(-1),
         ParsedInput::Byte(b'\r') | ParsedInput::Byte(b' ') | ParsedInput::Char(' ') => {
             match app.settings_modal_state.selected_account_row() {
+                AccountRow::Invites => app.settings_modal_state.open_invites_dialog(),
                 AccountRow::LinkAccounts => app.settings_modal_state.open_link_account_dialog(),
                 AccountRow::IrcToken => app.settings_modal_state.open_irc_token_dialog(),
                 AccountRow::DeleteAccount => app.settings_modal_state.open_delete_account_dialog(),
@@ -347,7 +353,9 @@ pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
     state.select_mouse_target(target);
     match target {
         Target::Close => {
-            if state.link_account_dialog().open() {
+            if state.invites_dialog().open() {
+                state.close_invites_dialog();
+            } else if state.link_account_dialog().open() {
                 state.close_link_account_dialog();
             } else if state.delete_account_dialog().open() {
                 state.close_delete_account_dialog();
@@ -372,6 +380,7 @@ pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
         Target::SidebarMode => cycle_tweak(app, true),
         Target::SidebarPanels => state.open_right_sidebar_components(),
         Target::Account(row) => match row {
+            AccountRow::Invites => state.open_invites_dialog(),
             AccountRow::LinkAccounts => state.open_link_account_dialog(),
             AccountRow::IrcToken => state.open_irc_token_dialog(),
             AccountRow::DeleteAccount => state.open_delete_account_dialog(),
@@ -726,6 +735,36 @@ fn handle_delete_account_dialog_input(app: &mut App, event: ParsedInput) {
             state.delete_account_push(byte as char)
         }
         _ => {}
+    }
+}
+
+/// Esc always closes. While an answer is pending nothing else does anything;
+/// without the code field (an inviter already named, or past the first
+/// week) Enter closes too; with it, every key edits the field and Enter
+/// submits.
+fn handle_invites_dialog_input(app: &mut App, event: ParsedInput) {
+    let state = &mut app.settings_modal_state;
+    if matches!(event, ParsedInput::Byte(0x1B)) {
+        state.close_invites_dialog();
+        return;
+    }
+    if state.invites_dialog().pending() {
+        return;
+    }
+    if !state.invites_dialog().accepts_code() {
+        if matches!(event, ParsedInput::Byte(b'\r')) {
+            state.close_invites_dialog();
+        }
+        return;
+    }
+    match handle_single_line_edit(
+        state.invites_code_input_mut(),
+        &event,
+        INVITE_CODE_INPUT_MAX_LEN,
+    ) {
+        EditOutcome::Submit => state.submit_invite_code(),
+        EditOutcome::Cancel => state.close_invites_dialog(),
+        EditOutcome::Handled | EditOutcome::Ignored => {}
     }
 }
 
