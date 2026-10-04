@@ -145,7 +145,7 @@ fn selected_line(mut line: Line<'static>, selected: bool) -> Line<'static> {
 
 /// Keep the selection marker and as much title as fits; indicate omitted text
 /// without slicing a wide or combining grapheme in half.
-fn clipped_title(line: Line<'static>, width: u16) -> Line<'static> {
+pub(super) fn clipped_title(line: Line<'static>, width: u16) -> Line<'static> {
     if width < 3 || line.width() <= width as usize {
         return line;
     }
@@ -339,73 +339,7 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
         return;
     }
     frame.render_widget(Paragraph::new("").style(base()), area);
-    let mut x = area.x;
-    button(
-        frame,
-        s,
-        &mut x,
-        area.y,
-        area.right(),
-        &format!("s {}", source_label(s)),
-        Action::Source,
-        false,
-    );
-    button(
-        frame,
-        s,
-        &mut x,
-        area.y,
-        area.right(),
-        &format!("v {}", s.view.label()),
-        Action::View,
-        false,
-    );
-    let timezone_on_first_row = x + Line::from(s.tz.to_string()).width() as u16 + 2 <= area.right();
-    if timezone_on_first_row {
-        row(
-            frame,
-            Rect::new(x + 1, area.y, area.right() - x - 1, 1),
-            s.tz.to_string(),
-            dim(),
-        );
-    }
-    let mut x = area.x;
-    for (label, action) in [
-        ("[ ‹", Action::Previous),
-        ("] ›", Action::Next),
-        ("t Today", Action::Today),
-        ("g Date", Action::Go),
-        ("n New", Action::New),
-        ("c Settings", Action::Settings),
-    ] {
-        button(
-            frame,
-            s,
-            &mut x,
-            area.y + 1,
-            area.right(),
-            label,
-            action,
-            false,
-        );
-    }
-    let mut period = Vec::new();
-    if !timezone_on_first_row {
-        period.push(Span::styled(s.tz.to_string(), dim()));
-        period.push(separator());
-    }
-    period.push(Span::styled(
-        s.selected.format("%B %Y").to_string(),
-        accent(),
-    ));
-    if s.loading {
-        period.push(Span::styled("  Loading…", muted()));
-    }
-    styled_row(
-        frame,
-        Rect::new(area.x, area.y + 2, area.width, 1),
-        Line::from(period),
-    );
+    let header_height = super::toolbar::draw(frame, area, s);
     let panel_height = if area.height < 20 || area.width < 50 {
         1
     } else {
@@ -420,9 +354,9 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
     draw_upcoming_panel(frame, panel, s);
     let body = Rect::new(
         area.x,
-        area.y + 3,
+        area.y + header_height,
         area.width,
-        area.height.saturating_sub(3 + panel_height),
+        area.height.saturating_sub(header_height + panel_height),
     );
     match s.view {
         CalendarView::Month => {
@@ -443,14 +377,6 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
         }
         CalendarView::List => draw_list(frame, body, s, false),
         _ => draw_hours(frame, body, s),
-    }
-    if let Some(error) = &s.error {
-        row(
-            frame,
-            Rect::new(area.x, area.y + 2, area.width, 1),
-            error,
-            base().fg(theme::ERROR()),
-        );
     }
 }
 #[allow(clippy::too_many_arguments)]

@@ -21,8 +21,16 @@ Escape or an outside click closes the menu. Source/view choices and buttons
 activate on one click. Selection and opening behave consistently in compact and
 wide layouts.
 
-Keys: `s` source, `v` view, `[`/`]` period, `t` today, `g` date, `n` new,
-`e` edit, Delete (confirmation), `u` upcoming, `c` Calendar Settings. Month arrows
+The header groups Settings/New event, Calendar/View, and date navigation.
+Calendar/View arrows cycle choices immediately; click a label or value to open
+the full picker. Smaller terminals pair selectors with actions and keep date
+navigation on its own row. Bold labels highlight their mnemonic letter in the
+accent color, with the remaining text brightened; either letter case works.
+The period and account timezone share the header. When space is limited, the
+selected date's zone abbreviation replaces the full timezone name.
+
+Keys: `c` calendar, `v` view, `[`/`]` period, `t` today, `g` date, `n` new,
+`e` edit, Delete (confirmation), `u` upcoming, `s` Calendar Settings. Month arrows
 move by day/week; timed-view Left/Right changes day and Up/Down moves a half-hour
 slot. `j`/`k` selects events and reveals the selection; list arrows also select
 events. Enter opens the selected event or date agenda, or starts a draft in the

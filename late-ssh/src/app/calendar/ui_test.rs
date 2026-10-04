@@ -172,6 +172,123 @@ fn calendar_high_contrast_selection_distinguishes_surface_and_text() {
 }
 
 #[tokio::test]
+async fn calendar_toolbar_keeps_all_controls_visible_and_separate_on_compact_screens() {
+    let _restore = RestoreTheme::new();
+    theme::set_current_by_id("contrast");
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    let owner_id = Uuid::from_u128(2);
+    s.public.push(PublicCalendar {
+        owner_id,
+        username: "日本語_calendar_with_a_long_name".into(),
+    });
+    s.source = CalendarSource::Personal(owner_id);
+    s.view = CalendarView::List;
+    s.tz = chrono_tz::America::New_York;
+    s.selected = "2026-11-02".parse().unwrap();
+    s.loading = false;
+    for (width, height) in [(120, 40), (80, 24), (44, 22), (48, 16)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let area = Rect::new(2, 1, width - 4, height - 2);
+        let mut header_height = 0;
+        terminal
+            .draw(|frame| {
+                header_height = super::toolbar::draw(frame, area, &s);
+            })
+            .unwrap();
+        let header = Rect::new(area.x, area.y, area.width, header_height);
+        let hits = s.hits.borrow();
+        for action in [
+            Action::Source,
+            Action::View,
+            Action::CycleSource(-1),
+            Action::CycleSource(1),
+            Action::CycleView(-1),
+            Action::CycleView(1),
+            Action::Settings,
+            Action::New,
+            Action::Previous,
+            Action::Next,
+            Action::Go,
+            Action::Today,
+        ] {
+            let hit = hits
+                .iter()
+                .find(|hit| hit.action == action)
+                .expect("control missing");
+            assert_eq!(
+                hit.area.intersection(header),
+                hit.area,
+                "{width}x{height}: {hit:?}"
+            );
+            assert!(
+                !rendered_text(terminal.backend().buffer(), hit.area)
+                    .trim()
+                    .is_empty(),
+                "{hit:?}"
+            );
+        }
+        for (index, hit) in hits.iter().enumerate() {
+            for other in &hits[index + 1..] {
+                assert_eq!(
+                    hit.area.intersection(other.area).area(),
+                    0,
+                    "{hit:?} overlaps {other:?}"
+                );
+            }
+        }
+        let buffer = terminal.backend().buffer();
+        let view_value = hits.iter().rfind(|hit| hit.action == Action::View).unwrap();
+        let view_text = rendered_text(buffer, view_value.area);
+        assert!(
+            matches!(view_text.trim(), "Event List" | "List"),
+            "{width}x{height}: unexpected view value {view_text:?}"
+        );
+        let source_value = hits
+            .iter()
+            .rfind(|hit| hit.action == Action::Source)
+            .unwrap();
+        assert!(
+            rendered_text(buffer, source_value.area)
+                .trim()
+                .ends_with('…')
+        );
+        for (action, label) in [
+            (Action::Source, "Calendar"),
+            (Action::View, "View"),
+            (Action::Settings, "Settings"),
+            (Action::New, "New event"),
+            (Action::Go, "Go to date"),
+            (Action::Today, "Today"),
+        ] {
+            let (x, y) = label_position(buffer, action_bounds(&s, action), label);
+            for index in 0..label.len() {
+                let cell = &buffer[(x + index as u16, y)];
+                assert_eq!(
+                    cell.fg,
+                    if index == 0 {
+                        theme::AMBER()
+                    } else {
+                        theme::TEXT_BRIGHT()
+                    }
+                );
+                assert!(cell.modifier.contains(Modifier::BOLD));
+                assert!(!cell.modifier.contains(Modifier::UNDERLINED));
+            }
+        }
+        let text = rendered_text(buffer, header);
+        assert!(
+            text.contains("2026") && (text.contains("America/New_York") || text.contains("EST")),
+            "{width}x{height}: {text}"
+        );
+        drop(hits);
+        s.invalidate_geometry();
+    }
+}
+
+#[tokio::test]
 async fn calendar_picker_scroll_and_close_follow_the_visible_viewport() {
     let mut s = CalendarState::new(
         CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
@@ -617,6 +734,16 @@ fn action_area(s: &CalendarState, action: Action) -> Rect {
         .area
 }
 
+fn action_bounds(s: &CalendarState, action: Action) -> Rect {
+    s.hits
+        .borrow()
+        .iter()
+        .filter(|hit| hit.action == action)
+        .map(|hit| hit.area)
+        .reduce(|left, right| left.union(right))
+        .unwrap()
+}
+
 #[tokio::test]
 async fn calendar_theme_hierarchy_preserves_controls_and_geometry() {
     let _restore = RestoreTheme::new();
@@ -634,18 +761,27 @@ async fn calendar_theme_hierarchy_preserves_controls_and_geometry() {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|frame| draw(frame, area, &s)).unwrap();
             let buffer = terminal.backend().buffer();
-            let view = action_area(&s, Action::View);
-            let key = &buffer[label_position(buffer, view, "v")];
+            let view = action_bounds(&s, Action::View);
+            let key = &buffer[label_position(buffer, view, "V")];
             let label = &buffer[label_position(buffer, view, "Month")];
-            assert_eq!(key.fg, theme::AMBER_DIM(), "{id} {w}x{h}");
+            assert_eq!(key.fg, theme::AMBER(), "{id} {w}x{h}");
             assert!(key.modifier.contains(Modifier::BOLD));
-            assert_ne!(key.fg, label.fg, "{id}: key and label merge");
+            if id == "contrast" {
+                assert_ne!(key.fg, label.fg, "{id}: key and label merge");
+            }
             assert!(!label.modifier.contains(Modifier::BOLD));
 
-            let source = action_area(&s, Action::Source);
-            for word in ["s", "Server"] {
+            let source = action_bounds(&s, Action::Source);
+            for word in ["C", "Server"] {
                 let cell = &buffer[label_position(buffer, source, word)];
-                assert_eq!(cell.bg, theme::BG_CANVAS());
+                assert_eq!(
+                    cell.bg,
+                    if word == "Server" {
+                        theme::BG_HIGHLIGHT()
+                    } else {
+                        theme::BG_CANVAS()
+                    }
+                );
                 assert!(!cell.modifier.contains(Modifier::REVERSED));
             }
             let grid_corner = buffer

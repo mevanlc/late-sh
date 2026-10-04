@@ -70,16 +70,16 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
             s.move_selected_event(-1, false);
             return true;
         }
-        Some('s') => Some(Action::Source),
-        Some('v') => Some(Action::View),
+        Some('c' | 'C') => Some(Action::Source),
+        Some('v' | 'V') => Some(Action::View),
         Some('[') => Some(Action::Previous),
         Some(']') => Some(Action::Next),
-        Some('t') => Some(Action::Today),
-        Some('g') => Some(Action::Go),
-        Some('n') => Some(Action::New),
+        Some('t' | 'T') => Some(Action::Today),
+        Some('g' | 'G') => Some(Action::Go),
+        Some('n' | 'N') => Some(Action::New),
         Some('e') => Some(Action::Edit),
         Some('u') => Some(Action::Upcoming),
-        Some('c') => Some(Action::Settings),
+        Some('s' | 'S') => Some(Action::Settings),
         Some('\r') => Some(match s.selection {
             Selection::Event(id) => Action::Event(id),
             Selection::Slot(_) => Action::New,
@@ -403,6 +403,44 @@ fn editor_command(s: &mut CalendarState, command: EditorCommand) {
     }
 }
 
+fn source_index(s: &CalendarState) -> usize {
+    match s.source {
+        CalendarSource::Server => 0,
+        CalendarSource::Personal(id) if id == s.viewer => 1,
+        CalendarSource::Personal(id) => s
+            .public
+            .iter()
+            .position(|p| p.owner_id == id)
+            .map(|n| n + 2)
+            .unwrap_or(0),
+    }
+}
+
+fn choose_source(s: &mut CalendarState, index: usize) {
+    let source = match index {
+        0 => CalendarSource::Server,
+        1 => CalendarSource::Personal(s.viewer),
+        _ => {
+            let Some(calendar) = s.public.get(index - 2) else {
+                return;
+            };
+            CalendarSource::Personal(calendar.owner_id)
+        }
+    };
+    s.source = source;
+    s.events.clear();
+    s.reset_scroll();
+    s.refresh();
+}
+
+fn choose_view(s: &mut CalendarState, index: usize) {
+    if let Some(view) = CalendarView::ALL.get(index) {
+        s.view = *view;
+        s.reset_scroll();
+        s.refresh();
+    }
+}
+
 pub fn act(s: &mut CalendarState, action: Action) {
     if s.pending {
         return;
@@ -429,17 +467,21 @@ pub fn act(s: &mut CalendarState, action: Action) {
             s.refresh();
         }
         Action::Source => {
-            let i = match s.source {
-                CalendarSource::Server => 0,
-                CalendarSource::Personal(id) if id == s.viewer => 1,
-                CalendarSource::Personal(id) => s
-                    .public
-                    .iter()
-                    .position(|p| p.owner_id == id)
-                    .map(|n| n + 2)
-                    .unwrap_or(0),
-            };
-            s.push_modal(Modal::Source(i));
+            s.push_modal(Modal::Source(source_index(s)));
+        }
+        Action::CycleSource(delta) => {
+            let index = (source_index(s) as isize + delta as isize)
+                .rem_euclid((s.public.len() + 2) as isize) as usize;
+            choose_source(s, index);
+        }
+        Action::CycleView(delta) => {
+            let index = CalendarView::ALL
+                .iter()
+                .position(|v| *v == s.view)
+                .unwrap_or(0);
+            let index = (index as isize + delta as isize)
+                .rem_euclid(CalendarView::ALL.len() as isize) as usize;
+            choose_view(s, index);
         }
         Action::View => s.push_modal(Modal::View(
             CalendarView::ALL
@@ -590,29 +632,12 @@ pub fn act(s: &mut CalendarState, action: Action) {
             }
         }
         Action::Choice(i) => {
-            if matches!(s.modal, Some(Modal::Source(_))) {
-                let source = match i {
-                    0 => CalendarSource::Server,
-                    1 => CalendarSource::Personal(s.viewer),
-                    _ => {
-                        let Some(p) = s.public.get(i - 2) else {
-                            return;
-                        };
-                        CalendarSource::Personal(p.owner_id)
-                    }
-                };
+            if matches!(s.modal, Some(Modal::Source(_))) && i < s.public.len() + 2 {
                 s.pop_modal();
-                s.source = source;
-                s.events.clear();
-                s.reset_scroll();
-                s.refresh();
-            } else if matches!(s.modal, Some(Modal::View(_)))
-                && let Some(view) = CalendarView::ALL.get(i)
-            {
+                choose_source(s, i);
+            } else if matches!(s.modal, Some(Modal::View(_))) && i < CalendarView::ALL.len() {
                 s.pop_modal();
-                s.view = *view;
-                s.reset_scroll();
-                s.refresh();
+                choose_view(s, i);
             }
         }
         Action::MenuChoice(i) => {

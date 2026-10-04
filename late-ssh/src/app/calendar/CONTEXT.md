@@ -9,7 +9,13 @@ menus and modal return frames. `editor.rs` owns semantic field focus, conditiona
 controls, form scrolling and text-cell caret geometry. `ui.rs` resolves theme
 styles and records page/modal hit and scroll geometry at render time.
 `parser.rs` performs deterministic title-suffix inference once per new draft.
-Calendar controls use the shared accent-key/dim-label hints. Bright titles and
+`toolbar.rs` groups actions, calendar/view selectors and date navigation across
+two control rows; compact layouts pair selectors with actions and keep navigation
+and the period on a third row. Selector arrows cycle choices; labels/values open
+pickers. Resting control fills differ from event selection. Bold control labels
+embed an accent mnemonic among bright text: `c` Calendar, `s` Settings; both cases
+work for header letter shortcuts. Selector values show an ellipsis only when
+clipped. Bright titles and
 values contrast with muted timing, dim metadata, faint separators and subdued
 grid rules. Selection adds a marker and patches every span last, using at least
 4.5:1 text contrast against fixed fills or terminal-owned inversion. High Contrast
@@ -57,7 +63,7 @@ moderator control. Moderator-created server events permit moderator CRUD but onl
 admins change notifications. Personal events belong exclusively to their owner.
 Public calendars are read-only; overlays retain source labels/permissions.
 
-Settings on `c` persist week start, default view, server overlay and calendar
+Settings on `s` persist week start, default view, server overlay and calendar
 sharing separately from account Settings. Account timezone or UTC governs timed
 editing/display; all-day dates do not shift. All-day notice boundaries use the
 creator's captured zone. DST gaps are rejected; repeats require separate start/end

@@ -195,7 +195,7 @@ replaces its mark and tier.
 For calendar development, run `make seed-calendar` after starting the current
 stack. Fixture accounts include ordinary users, a moderator, an admin, and
 public/private calendars; SSH keys live in `tmp/calendar-seed-keys/`. Press `7`,
-then `s` to choose a source, `v` to choose a view, or `c` for Calendar Settings.
+then `c` to choose a calendar, `v` to choose a view, or `s` for Calendar Settings.
 Click once to select a day/event, double-click to open it, or right-click for
 available actions. Timed views also support selecting an empty slot to create an event.
 See [CALENDAR.md](CALENDAR.md) for controls, permissions, timing and the fixture.

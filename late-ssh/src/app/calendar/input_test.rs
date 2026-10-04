@@ -133,3 +133,50 @@ async fn calendar_modal_and_menu_letters_accept_terminal_character_events() {
     assert!(s.context_menu.is_none());
     assert!(matches!(s.modal, Some(Modal::Editor(_))));
 }
+
+#[tokio::test]
+async fn calendar_source_arrows_wrap_and_clear_the_previous_calendar() {
+    let mut s = state();
+    let shared = Uuid::from_u128(2);
+    s.public.push(late_core::models::calendar::PublicCalendar {
+        owner_id: shared,
+        username: "shared".into(),
+    });
+    s.source = CalendarSource::Server;
+    let date = s.selected;
+    s.events.push(event());
+    s.selection = Selection::Event(s.events[0].id);
+    s.agenda_scroll = 5;
+
+    act(&mut s, Action::CycleSource(-1));
+    assert_eq!(s.source, CalendarSource::Personal(shared));
+    assert!(s.events.is_empty());
+    assert_eq!(s.selection, Selection::Date);
+    assert_eq!(s.agenda_scroll, 0);
+    assert_eq!(s.selected, date);
+    assert!(s.modal.is_none());
+
+    act(&mut s, Action::CycleSource(1));
+    assert_eq!(s.source, CalendarSource::Server);
+    act(&mut s, Action::CycleSource(1));
+    assert_eq!(s.source, CalendarSource::Personal(s.viewer));
+    act(&mut s, Action::Source);
+    assert!(matches!(s.modal, Some(Modal::Source(1))));
+}
+
+#[tokio::test]
+async fn calendar_view_arrows_wrap_and_preserve_the_selected_date() {
+    let mut s = state();
+    let date = s.selected;
+    act(&mut s, Action::CycleView(-1));
+    assert_eq!(s.view, CalendarView::List);
+    act(&mut s, Action::CycleView(1));
+    assert_eq!(s.view, CalendarView::Month);
+    act(&mut s, Action::CycleView(1));
+    assert_eq!(s.view, CalendarView::Week);
+    assert!(matches!(s.selection, Selection::Slot(_)));
+    assert_eq!(s.selected, date);
+    assert!(s.modal.is_none());
+    act(&mut s, Action::View);
+    assert!(matches!(s.modal, Some(Modal::View(1))));
+}

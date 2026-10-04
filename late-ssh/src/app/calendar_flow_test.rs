@@ -65,7 +65,7 @@ async fn calendar_go_date_human_input_preview_validation_and_mouse_submit() {
     .await;
     assert_eq!(app.calendar.selected, app.calendar.today());
 
-    app.handle_input(b"s\x1b[B\rnTrip\t\t\t\x152 Oct 2028\t");
+    app.handle_input(b"c\x1b[B\rnTrip\t\t\t\x152 Oct 2028\t");
     let Some(Modal::Editor(e)) = &app.calendar.modal else {
         panic!()
     };
@@ -96,7 +96,7 @@ async fn calendar_app_navigation_modal_priority_and_editor_text() {
     assert_eq!(app.screen, Screen::Calendars);
     wait_for_app(&mut app, "calendar load", |a| !a.calendar.loading).await;
     assert!(render_plain(&mut app).contains("Upcoming events"));
-    app.handle_input(b"s");
+    app.handle_input(b"C");
     assert!(matches!(app.calendar.modal, Some(Modal::Source(_))));
     app.handle_input(b"\x1b[B\r");
     assert_eq!(app.calendar.source, CalendarSource::Personal(user.id));
@@ -118,11 +118,11 @@ async fn calendar_app_navigation_modal_priority_and_editor_text() {
     };
     assert_eq!(e.text(0), "Unicode 日");
     assert_eq!(e.text(2), "2028-02-29");
-    app.handle_input(b"7svt");
+    app.handle_input(b"7sScCvVnNgGtT");
     let Some(Modal::Editor(e)) = &app.calendar.modal else {
         panic!()
     };
-    assert_eq!(e.text(1), "7svt");
+    assert_eq!(e.text(1), "7sScCvVnNgGtT");
     assert_eq!(app.screen, Screen::Calendars);
     act(&mut app.calendar, Action::Cancel);
     let Some(Modal::Editor(e)) = &app.calendar.modal else {
@@ -134,9 +134,11 @@ async fn calendar_app_navigation_modal_priority_and_editor_text() {
     wait_for_app(&mut app, "calendar save", |a| !a.calendar.pending).await;
     assert!(matches!(app.calendar.modal, Some(Modal::Details(_))));
     act(&mut app.calendar, Action::Cancel);
-    app.handle_input(b"c");
-    assert!(matches!(app.calendar.modal, Some(Modal::Settings { .. })));
-    act(&mut app.calendar, Action::Cancel);
+    for key in [b"s", b"S"] {
+        app.handle_input(key);
+        assert!(matches!(app.calendar.modal, Some(Modal::Settings { .. })));
+        act(&mut app.calendar, Action::Cancel);
+    }
     app.handle_input(b"\x0f");
     assert!(app.show_settings);
     app.show_settings = false;
@@ -223,7 +225,7 @@ async fn calendar_mouse_select_open_context_and_keyboard_menu_priority() {
     let user = create_test_user(&db.db, "calendar_pointer").await;
     let mut app = make_app(db.db.clone(), user.id, "calendar-pointer-flow");
     app.show_splash = false;
-    app.handle_input(b"7s\x1b[B\r");
+    app.handle_input(b"7c\x1b[B\r");
     wait_for_app(&mut app, "personal calendar", |a| !a.calendar.loading).await;
     let date = app.calendar.selected;
     let event = CalendarStore::new(db.db.clone())
@@ -324,7 +326,7 @@ async fn calendar_nested_details_edit_save_cancel_and_delete_return_to_agenda() 
     let user = create_test_user(&db.db, "calendar_nested").await;
     let mut app = make_app(db.db.clone(), user.id, "calendar-nested-flow");
     app.show_splash = false;
-    app.handle_input(b"7s\x1b[B\r");
+    app.handle_input(b"7c\x1b[B\r");
     wait_for_app(&mut app, "nested personal calendar", |a| {
         !a.calendar.loading
     })
@@ -380,7 +382,7 @@ async fn calendar_timed_slot_keyboard_and_double_click_create_at_selected_time()
     let user = create_test_user(&db.db, "calendar_slots").await;
     let mut app = make_app(db.db.clone(), user.id, "calendar-slot-flow");
     app.show_splash = false;
-    app.handle_input(b"7s\x1b[B\r");
+    app.handle_input(b"7c\x1b[B\r");
     wait_for_app(&mut app, "slot personal calendar", |a| !a.calendar.loading).await;
     app.calendar.view = CalendarView::Day;
     let date = app.calendar.selected;
