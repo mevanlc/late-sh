@@ -20,8 +20,5 @@
   "/history opens right on your first unread message when a room has news for you",
   "Someone said something good? Select it and press g to gild it: two thirds of what you pay lands in their balance, and the marker never comes off",
   "The crown costs 1.5x whatever the last holder paid, and it goes back to vacant every month",
-  "The bottom statusline is yours: Ctrl+O, then the Statusline tab. Hide the shortcut hints or add a clock, quests, the pot, or who's online",
-  "Press 7 for Calendars: c selects a calendar, v changes view, s opens Calendar Settings",
-  "Press u on Home or Calendars for upcoming server and personal events",
-  "On Calendars, g accepts Oct 2, 2026 or 2 months ago; offsets start from the selected date"
+  "The bottom statusline is yours: Ctrl+O, then the Statusline tab. Hide the shortcut hints or add a clock, quests, the pot, or who's online"
 ]
