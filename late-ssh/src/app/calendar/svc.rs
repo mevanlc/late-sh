@@ -1,4 +1,5 @@
 //! Async work only. Private data returns on the requesting session's channel.
+use super::ical::{self, Candidate};
 use crate::pg_listener::{Refresh, Signal, read_until_ok};
 use chrono::{NaiveDate, Utc};
 use chrono_tz::Tz;
@@ -44,6 +45,10 @@ pub enum Reply {
         generation: u64,
         result: Result<CalendarEvent, String>,
     },
+    Imported {
+        generation: u64,
+        result: Result<Vec<Candidate>, String>,
+    },
 }
 #[derive(Clone, Copy)]
 pub struct Query {
@@ -55,6 +60,29 @@ pub struct Query {
     pub generation: u64,
 }
 impl CalendarService {
+    pub(super) fn import(
+        &self,
+        input: String,
+        tz: Tz,
+        generation: u64,
+        tx: mpsc::UnboundedSender<Reply>,
+    ) {
+        tokio::spawn(async move {
+            let result = async {
+                let content = if let Some(url) = ical::import_url(&input)? {
+                    let timeout = std::time::Duration::from_secs(20);
+                    let bytes = tokio::time::timeout(timeout,
+                        crate::app::files::image_upload::download_url_bytes_following_redirects(
+                            &url, timeout, ical::MAX_BYTES, 5))
+                        .await.map_err(|_| anyhow::anyhow!("iCalendar download timed out"))?
+                        .map_err(|_| anyhow::anyhow!("Could not fetch iCalendar: URL must be public, reachable and at most 1 MiB"))?;
+                    String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("iCalendar must be UTF-8 text"))?
+                } else { input };
+                ical::parse(&content, tz)
+            }.await.map_err(|e| e.to_string());
+            let _ = tx.send(Reply::Imported { generation, result });
+        });
+    }
     pub fn new(db: Db) -> Self {
         let (changed, _) = watch::channel(0);
         let (server, _) = watch::channel(Vec::new());

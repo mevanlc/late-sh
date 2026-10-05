@@ -774,14 +774,7 @@ async fn calendar_theme_hierarchy_preserves_controls_and_geometry() {
             let source = action_bounds(&s, Action::Source);
             for word in ["C", "Server"] {
                 let cell = &buffer[label_position(buffer, source, word)];
-                assert_eq!(
-                    cell.bg,
-                    if word == "Server" {
-                        theme::BG_HIGHLIGHT()
-                    } else {
-                        theme::BG_CANVAS()
-                    }
-                );
+                assert_eq!(cell.bg, theme::BG_CANVAS());
                 assert!(!cell.modifier.contains(Modifier::REVERSED));
             }
             let grid_corner = buffer
@@ -819,6 +812,77 @@ async fn calendar_theme_hierarchy_preserves_controls_and_geometry() {
                 let rect = action_area(&s, action);
                 assert_eq!(rect.intersection(area), rect);
             }
+        }
+    }
+}
+
+#[tokio::test]
+async fn calendar_ical_import_controls_and_picker_fit_themes_and_compact_sizes() {
+    let _restore = RestoreTheme::new();
+    let mut s = CalendarState::new(
+        CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
+        Uuid::nil(),
+    );
+    s.source = CalendarSource::Personal(s.viewer);
+    for id in READABILITY_THEMES {
+        theme::set_current_by_id(id);
+        for (w, h) in [(120, 40), (80, 24), (44, 22), (48, 16)] {
+            let area = Rect::new(0, 0, w, h);
+            let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
+            s.modal = None;
+            terminal.draw(|frame| draw(frame, area, &s)).unwrap();
+            assert!(
+                !s.hits
+                    .borrow()
+                    .iter()
+                    .any(|hit| hit.action == Action::Import)
+            );
+            s.modal = Some(Modal::Import(Box::default()));
+            terminal.draw(|frame| draw_modal(frame, area, &s)).unwrap();
+            assert!(action_area(&s, Action::Save).width > 0);
+            assert!(action_area(&s, Action::Cancel).width > 0);
+            let Some(Modal::Import(import)) = &mut s.modal else {
+                panic!("import");
+            };
+            import.candidates = Some(super::ical::parse("BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:One\nDTSTART;VALUE=DATE:20261004\nEND:VEVENT\nBEGIN:VEVENT\nSUMMARY:Two\nDTSTART;VALUE=DATE:20261005\nEND:VEVENT\nEND:VCALENDAR", chrono_tz::UTC).unwrap());
+            import.selected = 1;
+            terminal.draw(|frame| draw_modal(frame, area, &s)).unwrap();
+            assert!(action_area(&s, Action::Choice(1)).width > 0);
+            assert!(action_area(&s, Action::Cancel).width > 0);
+            for hit in s.hits.borrow().iter() {
+                assert_eq!(
+                    hit.area.intersection(area),
+                    hit.area,
+                    "{id} {w}x{h} {hit:?}"
+                );
+            }
+            s.modal = Some(Modal::Details(event(9, 10)));
+            terminal.draw(|frame| draw_modal(frame, area, &s)).unwrap();
+            assert!(action_area(&s, Action::Copy).width > 0);
+            assert!(action_area(&s, Action::Cancel).width > 0);
+            let mut draft = EventDraft::from(&event(9, 10));
+            draft.description = "First line\nSecond line with a long sentence that extends past a narrow field\nLast line".into();
+            let mut editor = Editor::new(
+                s.source,
+                s.selected,
+                EventAccess {
+                    edit: true,
+                    notifications: true,
+                    delegate: false,
+                },
+            );
+            editor.apply_import(&draft, s.tz);
+            s.modal = Some(Modal::Editor(Box::new(editor)));
+            terminal.draw(|frame| draw_modal(frame, area, &s)).unwrap();
+            let import = action_area(&s, Action::Import);
+            assert!(import.width > 0, "{id} {w}x{h}");
+            assert_eq!(import.intersection(area), import);
+            for action in [Action::Save, Action::Cancel] {
+                assert!(action_area(&s, action).width > 0);
+            }
+            let text = rendered_text(terminal.backend().buffer(), area);
+            assert!(text.contains("First line"), "{w}x{h}: {text}");
+            assert!(text.contains("Second line"), "{w}x{h}: {text}");
         }
     }
 }

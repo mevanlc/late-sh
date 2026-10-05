@@ -50,6 +50,7 @@ pub enum MenuAction {
     New,
     Edit,
     Delete,
+    Copy,
 }
 
 impl MenuAction {
@@ -60,6 +61,7 @@ impl MenuAction {
             Self::New => "New event",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
+            Self::Copy => "Copy as iCal",
         }
     }
 }
@@ -581,9 +583,14 @@ impl CalendarState {
                 };
                 self.select_event(id, date, upcoming);
                 if event_access(&event, self.viewer, self.role).edit {
-                    vec![MenuAction::Open, MenuAction::Edit, MenuAction::Delete]
+                    vec![
+                        MenuAction::Open,
+                        MenuAction::Edit,
+                        MenuAction::Delete,
+                        MenuAction::Copy,
+                    ]
                 } else {
-                    vec![MenuAction::Open]
+                    vec![MenuAction::Open, MenuAction::Copy]
                 }
             }
             ClickTarget::Date(date) => {

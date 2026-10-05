@@ -11,7 +11,6 @@ use ratatui::{
     layout::Rect,
     style::Modifier,
     text::{Line, Span},
-    widgets::Paragraph,
 };
 
 fn mnemonic_line(label: &str, key: char) -> Line<'static> {
@@ -39,23 +38,11 @@ fn action_line(label: &str, key: char, padded: bool) -> Line<'static> {
     line
 }
 
-fn control(
-    frame: &mut Frame,
-    s: &CalendarState,
-    area: Rect,
-    mut line: Line<'static>,
-    action: Action,
-) {
+fn control(frame: &mut Frame, s: &CalendarState, area: Rect, line: Line<'static>, action: Action) {
     if area.width == 0 {
         return;
     }
-    // A resting control surface is distinct from the stronger event selection.
-    let fill = theme::BG_HIGHLIGHT();
-    line.style = base().patch(line.style).bg(fill);
-    for span in &mut line.spans {
-        span.style = span.style.bg(fill);
-    }
-    frame.render_widget(Paragraph::new(line).style(base().bg(fill)), area);
+    styled_row(frame, area, line);
     hit(s, area, action);
 }
 

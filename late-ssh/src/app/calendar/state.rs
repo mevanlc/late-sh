@@ -1,5 +1,6 @@
 pub use super::editor::Editor;
 use super::{
+    import::Import,
     navigation::{ClickRecord, ContextMenu, NavigationFrame, Selection},
     svc::{CalendarService, Query, Reply},
 };
@@ -36,6 +37,8 @@ pub enum Action {
     Today,
     Go,
     New,
+    Import,
+    Copy,
     Edit,
     Delete,
     Upcoming,
@@ -70,6 +73,7 @@ pub enum Modal {
     Source(usize),
     View(usize),
     Go(Box<TextArea<'static>>),
+    Import(Box<Import>),
     Settings {
         draft: CalendarPreferences,
         focus: usize,
@@ -169,6 +173,8 @@ pub struct CalendarState {
     rx: mpsc::UnboundedReceiver<Reply>,
     pub generation: u64,
     pub open_generation: u64,
+    pub(super) import_generation: u64,
+    pub(super) clipboard: Option<String>,
     needs_refresh: bool,
     last_refresh: Instant,
     initialized: bool,
@@ -227,6 +233,8 @@ impl CalendarState {
             rx,
             generation: 0,
             open_generation: 0,
+            import_generation: 0,
+            clipboard: None,
             needs_refresh: false,
             last_refresh: Instant::now(),
             initialized: false,
@@ -357,6 +365,63 @@ impl CalendarState {
             }
         }
     }
+    pub(super) fn read_import(&mut self) {
+        if let Some(Modal::Import(import)) = &mut self.modal {
+            if import.loading {
+                return;
+            }
+            if import.candidates.is_some() {
+                let selected = import.selected;
+                self.choose_import(selected);
+                return;
+            }
+            self.import_generation += 1;
+            import.loading = true;
+            import.error = None;
+            self.service.import(
+                import.input.lines().join("\n"),
+                self.tz,
+                self.import_generation,
+                self.tx.clone(),
+            );
+        }
+    }
+    pub(super) fn choose_import(&mut self, index: usize) {
+        let Some(Modal::Editor(editor)) = self
+            .modal_parents
+            .last()
+            .and_then(|frame| frame.modal.as_ref())
+        else {
+            return;
+        };
+        let can_import = editor.access.edit
+            && (editor.existing.is_some()
+                || editor.source == CalendarSource::Personal(self.viewer)
+                || (editor.source == CalendarSource::Server && self.role != CreationTier::User));
+        let Some(Modal::Import(import)) = &mut self.modal else {
+            return;
+        };
+        if !can_import {
+            import.error = Some("This calendar is read-only".into());
+            return;
+        }
+        let Some(candidate) = import.candidates.as_ref().and_then(|c| c.get(index)) else {
+            return;
+        };
+        let draft = match &candidate.draft {
+            Ok(draft) => draft.clone(),
+            Err(error) => {
+                import.error = Some(error.clone());
+                return;
+            }
+        };
+        self.import_generation += 1;
+        self.pop_modal();
+        if let Some(Modal::Editor(editor)) = &mut self.modal {
+            editor.apply_import(&draft, self.tz);
+        }
+        self.invalidate_geometry();
+    }
     pub fn save_settings(&mut self) {
         if self.pending {
             return;
@@ -445,6 +510,29 @@ impl CalendarState {
     }
     pub fn apply(&mut self, reply: Reply) -> bool {
         match reply {
+            Reply::Imported { generation, result }
+                if generation == self.import_generation
+                    && matches!(&self.modal, Some(Modal::Import(import)) if import.loading) =>
+            {
+                let Some(Modal::Import(import)) = &mut self.modal else {
+                    return false;
+                };
+                import.loading = false;
+                let mut single = false;
+                match result {
+                    Ok(candidates) => {
+                        single = candidates.len() == 1 && candidates[0].draft.is_ok();
+                        import.candidates = Some(candidates);
+                        import.selected = 0;
+                        self.picker_reveal.set(true);
+                    }
+                    Err(error) => import.error = Some(error),
+                }
+                if single {
+                    self.choose_import(0);
+                }
+                true
+            }
             Reply::Loaded { generation, result } if generation == self.generation => {
                 self.loading = false;
                 match result {

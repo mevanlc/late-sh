@@ -46,8 +46,8 @@ fn value_target(e: &Editor, control: EditorControl) -> Target {
 #[test]
 fn calendar_editor_focus_order_tracks_visible_controls_and_retains_time_drafts() {
     use EditorControl::{
-        AllDay, Cancel, Description, EndDate, LeadTime, Notifications, Save, StartDate, StartTime,
-        Title,
+        AllDay, Cancel, Description, EndDate, Import, LeadTime, Notifications, Save, StartDate,
+        StartTime, Title,
     };
     let mut e = editor();
     assert_eq!(
@@ -60,7 +60,8 @@ fn calendar_editor_focus_order_tracks_visible_controls_and_retains_time_drafts()
             EndDate,
             Notifications,
             Save,
-            Cancel
+            Cancel,
+            Import
         ]
     );
     e.focus(AllDay, today(), chrono_tz::UTC);
@@ -88,7 +89,11 @@ fn calendar_editor_focus_order_tracks_visible_controls_and_retains_time_drafts()
     assert_eq!(e.focus, Save);
     e.focus = Title;
     handle_key(&mut e, &ParsedInput::BackTab, today(), chrono_tz::UTC);
-    assert_eq!(e.focus, Cancel);
+    assert_eq!(e.focus, Import);
+    assert_eq!(
+        handle_key(&mut e, &ParsedInput::Byte(b'\r'), today(), chrono_tz::UTC),
+        EditorCommand::Import
+    );
 }
 
 #[test]
@@ -180,6 +185,8 @@ async fn calendar_editor_every_focused_control_is_visible_after_compact_resize()
                     TargetAction::Command(EditorCommand::Save) => control == EditorControl::Save,
                     TargetAction::Command(EditorCommand::Cancel) =>
                         control == EditorControl::Cancel,
+                    TargetAction::Command(EditorCommand::Import) =>
+                        control == EditorControl::Import,
                     _ => false,
                 }),
                 "{control:?} missing at {width}x{height}"

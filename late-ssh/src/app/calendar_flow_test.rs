@@ -469,3 +469,114 @@ async fn calendar_public_profile_link_opens_read_only_source_and_clears_on_resiz
         Some("This calendar is read-only")
     );
 }
+
+#[tokio::test]
+async fn calendar_ical_paste_review_save_and_clipboard_follow_real_input_routing() {
+    use base64::Engine;
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_exchange_flow").await;
+    let mut app = make_app(db.db.clone(), user.id, "calendar-exchange-flow");
+    app.show_splash = false;
+    app.handle_input(b"7c\x1b[B\r");
+    wait_for_app(&mut app, "personal calendar", |a| !a.calendar.loading).await;
+    assert_eq!(app.calendar.source, CalendarSource::Personal(user.id));
+    app.handle_input(b"i");
+    assert!(app.calendar.modal.is_none());
+    app.handle_input(b"\x1b[200~https://example.org/events.ics\x1b[201~");
+    assert!(app.calendar.modal.is_none());
+    app.handle_input(b"n");
+    assert!(matches!(app.calendar.modal, Some(Modal::Editor(_))));
+    app.handle_input(b"\x1b[Z\r");
+    assert!(matches!(app.calendar.modal, Some(Modal::Import(_))));
+    let input = "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nSUMMARY:Clipboard café\r\nDESCRIPTION:First\\nSecond\\, third\r\nDTSTART:20261004T153027Z\r\nDTEND:20261004T163029Z\r\nEND:VEVENT\r\nEND:VCALENDAR";
+    app.handle_input(format!("\x1b[200~{input}\x1b[201~").as_bytes());
+    app.handle_input(b"\x13");
+    assert!(!app.show_settings);
+    wait_for_app(&mut app, "import review", |a| {
+        matches!(a.calendar.modal, Some(Modal::Editor(_)))
+    })
+    .await;
+    let Some(Modal::Editor(editor)) = &app.calendar.modal else {
+        panic!("editor");
+    };
+    assert_eq!(editor.text(0), "Clipboard café");
+    assert_eq!(editor.text(1), "First\nSecond, third");
+    assert!(app.calendar.events.is_empty());
+    app.handle_input(b"\x13");
+    wait_for_app(&mut app, "import save", |a| {
+        matches!(a.calendar.modal, Some(Modal::Details(_))) && !a.calendar.pending
+    })
+    .await;
+    let Some(Modal::Details(saved)) = &app.calendar.modal else {
+        panic!("details");
+    };
+    let saved = saved.clone();
+    app.handle_input(b"y");
+    let copied = app.pending_clipboard.as_ref().unwrap().clone();
+    let unfolded = icalendar::parser::unfold(&copied);
+    let document = icalendar::parser::read_components(&unfolded).unwrap();
+    let event = &document[0].components[0];
+    assert_eq!(
+        event.find_prop("SUMMARY").unwrap().val.as_str(),
+        saved.title
+    );
+    assert_eq!(
+        event.find_prop("DESCRIPTION").unwrap().val.as_str(),
+        saved.description
+    );
+    assert_eq!(
+        event.find_prop("DTSTART").unwrap().val.as_str(),
+        "20261004T153027Z"
+    );
+    assert_eq!(
+        event.find_prop("DTEND").unwrap().val.as_str(),
+        "20261004T163029Z"
+    );
+    let expected = format!(
+        "\x1b]52;c;{}\x07",
+        base64::engine::general_purpose::STANDARD.encode(copied.as_bytes())
+    );
+    render_plain(&mut app);
+    assert!(
+        app.pending_terminal_commands
+            .iter()
+            .any(|bytes| bytes == expected.as_bytes())
+    );
+    assert!(app.pending_clipboard.is_none());
+
+    app.handle_input(b"e\x1b[Z\r");
+    assert!(matches!(app.calendar.modal, Some(Modal::Import(_))));
+    let replacement =
+        "BEGIN:VEVENT\r\nSUMMARY:Revised appointment\r\nDTSTART;VALUE=DATE:20261006\r\nEND:VEVENT";
+    app.handle_input(format!("\x1b[200~{replacement}\x1b[201~").as_bytes());
+    app.handle_input(b"\x13");
+    wait_for_app(&mut app, "edit import review", |a| {
+        matches!(a.calendar.modal, Some(Modal::Editor(_)))
+    })
+    .await;
+    let Some(Modal::Editor(editor)) = &app.calendar.modal else {
+        panic!("editor");
+    };
+    assert_eq!(editor.existing, Some((saved.id, saved.revision)));
+    assert_eq!(editor.text(0), "Revised appointment");
+    assert_eq!(editor.text(2), "2026-10-06");
+    app.handle_input(b"\x13");
+    wait_for_app(&mut app, "edit import save", |a| {
+        matches!(&a.calendar.modal, Some(Modal::Details(e)) if e.id == saved.id && e.revision > saved.revision)
+            && !a.calendar.pending
+    }).await;
+    let rows = db
+        .db
+        .get()
+        .await
+        .unwrap()
+        .query(
+            "SELECT id, title FROM calendar_events WHERE owner_id=$1",
+            &[&user.id],
+        )
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].get::<_, uuid::Uuid>(0), saved.id);
+    assert_eq!(rows[0].get::<_, String>(1), "Revised appointment");
+}
