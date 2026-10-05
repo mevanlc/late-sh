@@ -1238,12 +1238,14 @@ Every published GitHub Release lands in `release.yml`, which parses the tag suff
 │ │ f favorite│ │                                      │ bonsai      │
 │ └───────────┘ │                                      │ ─────────── │
 │               │                                      │             │
-└─ Settings ^O … Exit qq ─ mic - ─ unread 2 ─ care 1 ──────── ko-fi… ┘
+└─ Settings ^O … Exit qq ─ mic - ─ unread 2 ─ care 1 ─ late.sh/thanks ┘
 ```
 
 Toast notification is hidden by default (0 rows). When active, it appears as a 3-row bordered block (green for success, red for error) at the **top-right** of the content area. The settings overlay renders on top of the toast.
 
 ### Frame status bars [STABLE]
+
+The sponsor link is `https://late.sh/thanks`, redirected by `late-web` to the donation page.
 
 Framed pages paint a status bar on each horizontal border through one component renderer (`late-ssh/src/app/statusline/`): a fixed top-right bar (pot, chips) beside the page tabs, and a user-arranged bottom-left bar (Keyhints, mentions, voice, live, and date by default, all visible while idle) beside the sponsor line. A reading the user places on the bottom bar leaves the top one. The sponsor link has first claim on its row. Nothing on either bar is ever shortened: segments take room in list order and one that does not fit is dropped whole. Zen is frameless: it paints the user's bar on its own bottom row, and drops the row when every component is off. The model, fitting rules, click targets, and customizer live in `late-ssh/src/app/statusline/CONTEXT.md`.
 

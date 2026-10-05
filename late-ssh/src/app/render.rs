@@ -3019,7 +3019,7 @@ fn sponsor_line(include_thanks: bool) -> Line<'static> {
     // over the bottom border, so without them the `─` glyphs on either side
     // get swallowed into the URL by terminals that linkify what they see.
     spans.push(Span::styled(
-        " https://ko-fi.com/mateuszpiorowski ",
+        " https://late.sh/thanks ",
         Style::default().fg(theme::AMBER_DIM()),
     ));
     Line::from(spans).right_aligned()

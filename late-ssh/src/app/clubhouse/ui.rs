@@ -1739,8 +1739,7 @@ pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen:
         .max(title.chars().count())
         + 4)
     .min(usize::from(area.width).saturating_sub(2)) as u16;
-    let height =
-        ((lines.len() + footer.len()) as u16 + 2).min(area.height.saturating_sub(1));
+    let height = ((lines.len() + footer.len()) as u16 + 2).min(area.height.saturating_sub(1));
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 3,
@@ -1752,11 +1751,8 @@ pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen:
         .borders(Borders::ALL)
         .border_style(border)
         .title(Span::styled(title, border.add_modifier(Modifier::BOLD)));
-    let rows = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(footer.len() as u16),
-    ])
-    .split(block.inner(rect));
+    let rows = Layout::vertical([Constraint::Fill(1), Constraint::Length(footer.len() as u16)])
+        .split(block.inner(rect));
 
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
