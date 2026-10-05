@@ -4182,19 +4182,34 @@ impl ChatState {
         if let Some(rest) = body.trim().strip_prefix("/brb")
             && (rest.is_empty() || rest.starts_with(char::is_whitespace))
         {
+            let chat_body = match rest.trim() {
+                "" => "🌙 brb".to_string(),
+                reason => format!("🌙 brb: {reason}"),
+            };
+            // Snapshot the composer's room before `clear_composer_after_submit`
+            // wipes it. Only the composer's room, like `/me`: a stale visible
+            // or selected room would post the announcement somewhere unseen.
+            let room_id = self.composer_room_id;
             self.clear_composer_after_submit();
+            let Some(room_id) = room_id else {
+                return Some(Banner::error("Use /brb from inside a room"));
+            };
+            let request_id = Uuid::now_v7();
+            self.service
+                .send_message_with_reply_task(super::svc::SendMessageTask {
+                    user_id: self.user_id,
+                    room_id,
+                    room_slug: self.room_slug(room_id),
+                    body: chat_body,
+                    reply_to_message_id: None,
+                    request_id,
+                    is_admin: self.is_admin,
+                });
+            self.pending_send_notices.push_back(request_id);
             // `/brb` goes away now instead of after the idle threshold, and
-            // the next key comes back. Trailing text is told why rather than
-            // "unknown".
-            match rest.trim() {
-                "" => {
-                    self.requested_brb = true;
-                    return None;
-                }
-                _ => {
-                    return Some(Banner::error("/brb takes no message"));
-                }
-            }
+            // the next key comes back.
+            self.requested_brb = true;
+            return None;
         }
 
         if let Some((kind, text)) = parse_report_command(&body) {

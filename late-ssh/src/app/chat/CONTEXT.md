@@ -364,7 +364,7 @@ User commands:
   for the selected full UUID; earlier output remains scrollable and any command draft stays intact.
 - `/paste-image` asks a paired `late` CLI with `clipboard_image` capability to read the local system clipboard image, sends it back over `/api/ws/pair`, uploads the PNG bytes through the normal image upload path, and inserts the resulting public URL into the composer. Pending clipboard requests time out after 15s so a dead paired client cannot wedge the command.
 - `/petname [name]` shows or sets the user's cat name; `/petname clear` removes it.
-- `/brb` sends this session away now instead of after 30 quiet minutes; the next key brings it back. No announcement message, no free-text note (trailing text gets a usage banner), no audio muting. Parsed in `submit_composer`, drained via `take_requested_brb` into `App::sent_away`. See away above.
+- `/brb [reason]` posts `🌙 brb` (or `🌙 brb: <reason>`) to the composer's room, then sends this session away now instead of after 30 quiet minutes; the next key brings it back. Only the composer's room, like `/me`: with none it banners `Use /brb from inside a room` and does not go away, rather than posting into a stale visible or selected room. The post is a normal send through `send_message_with_reply_task`, so a failed send (e.g. a non-staff `/brb` in a report-only room) shows the usual send notice while the session still goes away. It does not mute audio. Parsed in `submit_composer`, drained via `take_requested_brb` into `App::sent_away`. See away above.
 - `/bug <text>` and `/suggest <text>` post a report card into `#bugs` / `#suggestions` regardless of the composer's current room (`ChatService::send_report_task` resolves the room by slug and joins the caller first). A report is a normal chat message whose body starts with `ReportKind::marker()` (`---BUG---` / `---SUGGESTION---`), so reactions, replies, pins, and deletes work unchanged; `ui_text::wrap_report_to_lines` renders the card. Text under 10 chars (`REPORT_MIN_CHARS`) banners usage instead of posting. Those two rooms are report-only: `send_message` rejects free-text sends from non-staff (`report-only:<slug>` error, covers IRC too since it checks the DB slug), while admins/moderators keep plain text so they can reply under a report; everyone keeps reactions ("+1"). The staff-flag DB lookup runs only on that rare gated path.
 - `/coffee` and `/tea` post a small ASCII-cup chat message to the current room as a coffee/tea-break ritual. No arguments. Steam pattern rotates per invocation through `CUP_VARIANT_COUNT` variants tracked on `ChatState::next_cup_variant` (session-local, not persisted). Routes through the normal `send_message_with_reply_task` send path — the body is a regular chat message subject to the same length/visibility rules.
 - `/private #room` creates a private topic room and joins the caller.
@@ -776,8 +776,10 @@ credit is good at either bar and is worth what its seller wrote.
 | Gift ("@bartender buy @user a drink") | `GIFT_DRINK_PRICE` (200) | 400 | no | `drink_gift`, bar `tavern` |
 | Nightcap round (`r` on the stools) | `ROUND_PRICE_PER_PATRON` (100) a stool | 100 | yes, 100 | `round_purchase`, bar `nightcap` |
 
-The Nightcap tab board filters on both the round reason and its own bar, so
-gifts and tavern rounds never reach it (`clubhouse/nightcap/CONTEXT.md` §5).
+Every drink taken off a round, the buyer's own included, is logged in
+`drink_pours` like any other pour (`UserDrinks::record_pour`), under the bar
+that poured it, not the bar that sold it; buying a round or a gift counts
+nothing for the buyer beyond their own drink.
 
 `late-core/src/models/drink_round.rs` owns both tables (migrations 164 and
 168), the price, the cap, and the phrase list; `GhostService::bartender_round`
