@@ -30,7 +30,8 @@ The period and account timezone share the header. When space is limited, the
 selected date's zone abbreviation replaces the full timezone name.
 
 Keys: `c` calendar, `v` view, `[`/`]` period, `t` today, `g` date, `n` new,
-`e` edit, Delete (confirmation), `u` upcoming, `s` Calendar Settings. Month arrows
+`e` edit, `y` copy event as iCalendar, Delete (confirmation),
+`u` upcoming, `s` Calendar Settings. Month arrows
 move by day/week; timed-view Left/Right changes day and Up/Down moves a half-hour
 slot. `j`/`k` selects events and reveals the selection; list arrows also select
 events. Enter opens the selected event or date agenda, or starts a draft in the
@@ -87,6 +88,36 @@ stay untouched. Inference is disabled permanently after assignment; existing
 saved events never infer. Validation and revision conflicts keep the draft.
 Click the conflict error to reload the latest revision while retaining your draft,
 then review before saving.
+
+## iCalendar exchange
+
+Open **New event** (`n`) or **Edit** (`e`), then choose **Import iCal** in the
+editor (click, or Tab/Shift+Tab to it and Enter). Paste the contents of an `.ics`
+file or an `http://`, `https://` or `webcal://` URL. Enter reads the content; Alt+Enter inserts a line, and
+Escape cancels, including during a download. A feed with several events opens
+a chooser: arrows or `j/k` select, Enter reviews, and `b` returns to the input.
+The selected event fills the current form. When editing, it keeps the existing
+event's identity and permissions; cancelling import restores the untouched draft.
+Review the form and use Save or Ctrl+S to apply it. Normal calendar permissions
+apply; select your personal calendar if the current calendar is read-only.
+
+Press `y` on a selected event or in its details to copy a complete iCalendar
+document to the terminal clipboard. Details also offers **Copy iCal**, and event
+context menus offer **Copy as iCal**. Clipboard access uses the same OSC 52 path
+as other copy actions. Export includes a stable event UID, UTC timed instants,
+exclusive all-day end dates, escaped/folded UTF-8 text, and enabled display alarms.
+Events without an explicit end export their displayed one-hour duration.
+
+Import accepts full VCALENDAR files or a single VEVENT, folded lines, escaped
+text, all-day dates, UTC times, IANA TZIDs, account-local floating times, and
+DTEND or DURATION. Location and URL values are kept in the description. Supported
+display alarms become notice leads where your permissions allow notifications;
+other alarm types and invitation/attendee metadata are not imported. Recurring
+series, custom timezone definitions, cancelled events, and invalid timings show
+errors; other events in the same feed remain selectable. Downloads use public
+URLs with checked redirects, a 20-second limit and a 1 MiB cap. Inputs are limited
+to 1000 events. This is a one-time copy; it does not subscribe to the URL or update
+existing events.
 
 ## Authorization and notices
 
@@ -184,8 +215,8 @@ cards. Fixture theme preferences were restored afterward.
 ## Future (parked, unplanned but noted for future consideration)
 
 This complete list preserves the original proposal. **Account-timezone display
-and conversion, including UTC fallback and the effective timezone reminder, are
-the expressly included exception.** Per-event timezone controls remain parked.
+and conversion, including UTC fallback and the effective timezone reminder, and
+the iCalendar exchange described above are included.** Per-event timezone controls remain parked.
 Fixed chronological presentation, overlap rendering, calendar sharing and the
 specified in-app upcoming panels do not activate the other proposed features.
 
@@ -194,7 +225,7 @@ specified in-app upcoming panels do not activate the other proposed features.
 - Year view
 - Event search/filtering
 - Event sorting (by date, title, category, etc.)
-- Event import/export (iCal, etc.)
+- Other event import/export formats and calendar feed subscriptions
 - Email notifications
 - Event invitations (send, accept, decline, etc.)
 - Event reminders (popup, email, etc.)

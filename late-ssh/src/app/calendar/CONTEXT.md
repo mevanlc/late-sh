@@ -9,10 +9,21 @@ menus and modal return frames. `editor.rs` owns semantic field focus, conditiona
 controls, form scrolling and text-cell caret geometry. `ui.rs` resolves theme
 styles and records page/modal hit and scroll geometry at render time.
 `parser.rs` performs deterministic title-suffix inference once per new draft.
+`ical.rs` handles bounded RFC 5545 parsing/serialization; `import.rs` owns the
+paste/URL dialog and event chooser. New/Edit event offers Import iCal to fill the
+current form from iCalendar content or a public HTTP(S)/webcal URL; multi-event
+feeds select one event. The editor remains a modal parent so cancellation restores
+the draft. Selection fills its fields while preserving identity, source, access,
+revision, delegation and the original dirty-check baseline; Save applies changes.
+`y` copies the selected/details event through the session's OSC 52 clipboard.
+URL reads run in `svc.rs` with the shared guarded downloader, a 1 MiB limit and
+20-second timeout; cancelled/replaced dialogs reject stale import generations.
+Imports retain all-day exclusive ends and convert UTC/IANA/floating times into
+the account zone. Recurring series and unsupported zones produce visible errors.
 `toolbar.rs` groups actions, calendar/view selectors and date navigation across
 two control rows; compact layouts pair selectors with actions and keep navigation
 and the period on a third row. Selector arrows cycle choices; labels/values open
-pickers. Resting control fills differ from event selection. Bold control labels
+pickers. Controls use the calendar canvas background. Bold control labels
 embed an accent mnemonic among bright text: `c` Calendar, `s` Settings; both cases
 work for header letter shortcuts. Selector values show an ellipsis only when
 clipped. Bright titles and
@@ -46,7 +57,7 @@ and horizontally. Viewport row counts drive list selection scrolling.
 The editor visits only applicable controls and scrolls by rendered row heights.
 All-day hides times, disabled notices hide lead time, permission checks hide staff
 controls, and repeated-time choices appear only for ambiguous local timestamps.
-Save/Cancel remain fixed. Clicked text uses Ratatui grapheme cell widths to place
+Save/Cancel/Import iCal remain fixed. Clicked text uses Ratatui grapheme cell widths to place
 the caret. Discard confirmation defaults to keeping the draft; Escape keeps it.
 
 The central `CalendarChanged` listener channel carries table-trigger invalidation

@@ -215,6 +215,7 @@ not exceptions established by their presence in the app.
 **Observed and agreed for Calendar:** toolbar labels integrate their mnemonic
 letter: the label is bold, the mnemonic is accented, and the remaining letters
 use brighter text. This avoids a separate key badge competing with the label.
+Toolbar controls use the calendar canvas background.
 See [calendar toolbar](late-ssh/src/app/calendar/toolbar.rs).
 
 Calendar uses a subtle today background where the day has a paintable canvas,

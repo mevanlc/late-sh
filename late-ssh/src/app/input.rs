@@ -3872,6 +3872,7 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
                     app.calendar.modal,
                     Some(
                         crate::app::calendar::state::Modal::Editor(_)
+                            | crate::app::calendar::state::Modal::Import(_)
                             | crate::app::calendar::state::Modal::Settings { .. }
                     )
                 ) =>

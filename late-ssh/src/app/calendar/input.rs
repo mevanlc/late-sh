@@ -1,11 +1,15 @@
 use super::{
     date_entry,
     editor::{self, EditorCommand},
+    ical,
     navigation::{ClickTarget, MenuAction, Selection},
     state::{Action, CalendarState, Editor, Modal, Pane},
 };
 use crate::app::{
-    common::{primitives::Screen, textarea_input::handle_single_line_edit},
+    common::{
+        primitives::{Banner, Screen},
+        textarea_input::handle_single_line_edit,
+    },
     input::{MouseButton, MouseEvent, MouseEventKind, ParsedInput},
     state::App,
 };
@@ -32,6 +36,15 @@ fn ascii_command(event: &ParsedInput) -> Option<ParsedInput> {
 }
 
 pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
+    let handled = handle_calendar_event(app, event);
+    if let Some(text) = app.calendar.clipboard.take() {
+        app.pending_clipboard = Some(text);
+        app.banner = Some(Banner::success("Event copied as iCalendar"));
+    }
+    handled
+}
+
+fn handle_calendar_event(app: &mut App, event: &ParsedInput) -> bool {
     // VTE emits printable ASCII as Char, while control keys arrive as Byte.
     // Calendar command dispatch uses one representation; Unicode text and paste
     // remain unchanged and the editor still owns its field input first.
@@ -77,6 +90,7 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
         Some('t' | 'T') => Some(Action::Today),
         Some('g' | 'G') => Some(Action::Go),
         Some('n' | 'N') => Some(Action::New),
+        Some('y' | 'Y') => Some(Action::Copy),
         Some('e') => Some(Action::Edit),
         Some('u') => Some(Action::Upcoming),
         Some('s' | 'S') => Some(Action::Settings),
@@ -369,6 +383,9 @@ fn handle_menu(s: &mut CalendarState, event: &ParsedInput) {
 }
 
 pub fn escape(s: &mut CalendarState) {
+    if matches!(s.modal, Some(Modal::Import(_))) {
+        s.import_generation += 1;
+    }
     s.cancel_open();
     s.clear_click();
     if s.pending {
@@ -397,6 +414,7 @@ fn editor_command(s: &mut CalendarState, command: EditorCommand) {
         EditorCommand::None => {}
         EditorCommand::Save => act(s, Action::Save),
         EditorCommand::Cancel => escape(s),
+        EditorCommand::Import => act(s, Action::Import),
         EditorCommand::Discard => act(s, Action::Discard),
         EditorCommand::Keep => act(s, Action::Keep),
         EditorCommand::Reload => act(s, Action::Reload),
@@ -550,6 +568,26 @@ pub fn act(s: &mut CalendarState, action: Action) {
                 s.error = Some("This calendar is read-only".into());
             }
         }
+        Action::Import => {
+            if matches!(&s.modal, Some(Modal::Editor(editor)) if editor.access.edit && !editor.discard_prompt)
+            {
+                s.import_generation += 1;
+                s.error = None;
+                s.push_modal(Modal::Import(Box::default()));
+            }
+        }
+        Action::Copy => {
+            let event = if let Some(Modal::Details(e)) = &s.modal {
+                Some(e.clone())
+            } else {
+                s.selected_event()
+            };
+            if let Some(event) = event {
+                s.clipboard = Some(ical::export(&event));
+            } else {
+                s.error = Some("Select an event to copy".into());
+            }
+        }
         Action::Edit | Action::Delete => {
             let event = if let Some(Modal::Details(e)) = &s.modal {
                 Some(e.clone())
@@ -572,6 +610,9 @@ pub fn act(s: &mut CalendarState, action: Action) {
         Action::Field(n) => {
             if let Some(Modal::Settings { focus, .. }) = &mut s.modal {
                 *focus = n;
+            }
+            if let Some(Modal::Import(import)) = &mut s.modal {
+                import.focus = n.min(2);
             }
         }
         Action::ToggleField(n) => {
@@ -596,7 +637,9 @@ pub fn act(s: &mut CalendarState, action: Action) {
             }
         }
         Action::Save => {
-            if let Some(Modal::Go(input)) = &s.modal {
+            if matches!(s.modal, Some(Modal::Import(_))) {
+                s.read_import();
+            } else if let Some(Modal::Go(input)) = &s.modal {
                 match date_entry::parse(&input.lines().join(""), s.selected, today) {
                     Ok(date) => {
                         s.pop_modal();
@@ -625,6 +668,11 @@ pub fn act(s: &mut CalendarState, action: Action) {
             }
         }
         Action::Reload => {
+            if let Some(Modal::Import(import)) = &mut s.modal {
+                import.candidates = None;
+                import.error = None;
+                import.focus = 0;
+            }
             if let Some(Modal::Editor(e)) = &s.modal
                 && let Some((id, _)) = e.existing
             {
@@ -632,7 +680,9 @@ pub fn act(s: &mut CalendarState, action: Action) {
             }
         }
         Action::Choice(i) => {
-            if matches!(s.modal, Some(Modal::Source(_))) && i < s.public.len() + 2 {
+            if matches!(s.modal, Some(Modal::Import(_))) {
+                s.choose_import(i);
+            } else if matches!(s.modal, Some(Modal::Source(_))) && i < s.public.len() + 2 {
                 s.pop_modal();
                 choose_source(s, i);
             } else if matches!(s.modal, Some(Modal::View(_))) && i < CalendarView::ALL.len() {
@@ -664,6 +714,7 @@ pub fn act(s: &mut CalendarState, action: Action) {
                 MenuAction::New => act(s, Action::New),
                 MenuAction::Edit => act(s, Action::Edit),
                 MenuAction::Delete => act(s, Action::Delete),
+                MenuAction::Copy => act(s, Action::Copy),
             }
         }
     }
@@ -676,6 +727,16 @@ fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
         return;
     }
     let today = s.today();
+    if let Some(Modal::Import(import)) = &mut s.modal {
+        let action = import.handle(event, s.picker_rows.get());
+        s.picker_reveal.set(true);
+        if let Some(action) = action {
+            act(s, action);
+        } else if let ParsedInput::Mouse(m) = event {
+            handle_mouse(s, m);
+        }
+        return;
+    }
     if let Some(Modal::Editor(e)) = &mut s.modal {
         let command = if let ParsedInput::Mouse(m) = event {
             let (Some(x), Some(y)) = (m.x.checked_sub(1), m.y.checked_sub(1)) else {
@@ -789,6 +850,7 @@ fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
         }
         Some(Modal::Details(_)) => match event {
             ParsedInput::Byte(b'e') => act(s, Action::Edit),
+            ParsedInput::Byte(b'y' | b'Y') => act(s, Action::Copy),
             ParsedInput::Byte(b'q') => escape(s),
             ParsedInput::Delete => act(s, Action::Delete),
             ParsedInput::PageDown | ParsedInput::Arrow(b'B') => scroll(s, Pane::List, 3),
@@ -834,6 +896,7 @@ fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
                 }
                 ParsedInput::Byte(b'n') if !upcoming => act(s, Action::New),
                 ParsedInput::Byte(b'e') => act(s, Action::Edit),
+                ParsedInput::Byte(b'y' | b'Y') => act(s, Action::Copy),
                 ParsedInput::Delete => act(s, Action::Delete),
                 _ => {}
             }

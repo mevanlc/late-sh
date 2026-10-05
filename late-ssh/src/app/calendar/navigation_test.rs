@@ -250,14 +250,22 @@ async fn calendar_context_menu_uses_target_permissions_and_does_not_enter_histor
     protected.creation_tier = CreationTier::Admin;
     s.events = vec![protected.clone()];
     s.open_context_menu(ClickTarget::Event(protected.id), (12, 8));
-    assert_eq!(s.context_menu.as_ref().unwrap().items, [MenuAction::Open]);
+    assert_eq!(
+        s.context_menu.as_ref().unwrap().items,
+        [MenuAction::Open, MenuAction::Copy]
+    );
     assert_eq!(s.selection, Selection::Event(protected.id));
     assert!(s.modal_parents.is_empty());
     s.role = CreationTier::Admin;
     s.open_context_menu(ClickTarget::Event(protected.id), (12, 8));
     assert_eq!(
         s.context_menu.as_ref().unwrap().items,
-        [MenuAction::Open, MenuAction::Edit, MenuAction::Delete]
+        [
+            MenuAction::Open,
+            MenuAction::Edit,
+            MenuAction::Delete,
+            MenuAction::Copy
+        ]
     );
     s.open_context_menu(
         ClickTarget::Slot {

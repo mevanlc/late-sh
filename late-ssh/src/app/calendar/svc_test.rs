@@ -36,6 +36,85 @@ async fn snapshot(svc: &CalendarService, viewer: uuid::Uuid, source: CalendarSou
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn calendar_ical_import_reviews_before_save_and_export_can_be_saved_as_new_event() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_ical_import").await;
+    let svc = CalendarService::new(db.db.clone());
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let input = "BEGIN:VCALENDAR\nBEGIN:VEVENT\nSUMMARY:Imported café\nDTSTART:20261004T153027Z\nDURATION:PT45M\nEND:VEVENT\nEND:VCALENDAR";
+    svc.import(input.into(), chrono_tz::UTC, 17, tx.clone());
+    let reply = timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let Reply::Imported {
+        generation: 17,
+        result: Ok(mut candidates),
+    } = reply
+    else {
+        panic!("{reply:?}");
+    };
+    let draft = candidates.remove(0).draft.unwrap();
+    let count: i64 = db
+        .db
+        .get()
+        .await
+        .unwrap()
+        .query_one("SELECT count(*) FROM calendar_events", &[])
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(count, 0);
+    svc.save(
+        user.id,
+        CalendarSource::Personal(user.id),
+        None,
+        draft,
+        tx.clone(),
+    );
+    let reply = timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let Reply::Saved(Ok(saved)) = reply else {
+        panic!("{reply:?}");
+    };
+    assert_eq!(saved.title, "Imported café");
+    assert_eq!(saved.owner_id, Some(user.id));
+    let exported = super::ical::export(&saved);
+    let draft = super::ical::parse(&exported, chrono_tz::UTC)
+        .unwrap()
+        .remove(0)
+        .draft
+        .unwrap();
+    let copy = svc
+        .store
+        .save(user.id, CalendarSource::Personal(user.id), None, &draft)
+        .await
+        .unwrap();
+    assert_ne!(copy.id, saved.id);
+    assert_eq!(copy.timing, saved.timing);
+    assert_eq!(copy.title, saved.title);
+    svc.import(
+        "http://127.0.0.1/calendar.ics".into(),
+        chrono_tz::UTC,
+        18,
+        tx,
+    );
+    let reply = timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        reply,
+        Reply::Imported {
+            generation: 18,
+            result: Err(_)
+        }
+    ));
+}
 async fn contains(rx: &mut watch::Receiver<Vec<CalendarEvent>>, id: uuid::Uuid, present: bool) {
     timeout(std::time::Duration::from_secs(10), async {
         loop {

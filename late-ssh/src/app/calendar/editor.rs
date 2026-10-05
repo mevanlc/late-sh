@@ -11,7 +11,7 @@ use crate::app::{
     },
     input::ParsedInput,
 };
-use chrono::{Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use late_core::models::calendar::{
     CalendarEvent, CalendarSource, CreationTier, EventAccess, EventDraft, EventTiming, Occurrence,
@@ -47,6 +47,7 @@ pub enum EditorControl {
     Delegation,
     Save,
     Cancel,
+    Import,
 }
 
 impl EditorControl {
@@ -80,6 +81,7 @@ impl EditorControl {
             Self::Delegation => "Moderator delegation",
             Self::Save => "Save",
             Self::Cancel => "Cancel",
+            Self::Import => "Import iCal",
         }
     }
 
@@ -97,6 +99,7 @@ pub enum EditorCommand {
     None,
     Save,
     Cancel,
+    Import,
     Discard,
     Keep,
     Reload,
@@ -168,6 +171,24 @@ fn occurrence_for(instant: chrono::DateTime<Utc>, tz: Tz) -> Option<Occurrence> 
     }
 }
 
+fn clock(time: impl Timelike) -> String {
+    format!(
+        "{:02}:{:02}{}",
+        time.hour(),
+        time.minute(),
+        if time.second() == 0 {
+            String::new()
+        } else {
+            format!(":{:02}", time.second())
+        }
+    )
+}
+
+fn parse_clock(text: &str) -> Result<NaiveTime, chrono::ParseError> {
+    NaiveTime::parse_from_str(text.trim(), "%H:%M")
+        .or_else(|_| NaiveTime::parse_from_str(text.trim(), "%H:%M:%S"))
+}
+
 impl Editor {
     pub fn new(source: CalendarSource, date: NaiveDate, access: EventAccess) -> Self {
         let mut e = Self {
@@ -232,6 +253,32 @@ impl Editor {
         e
     }
 
+    pub(super) fn apply_import(&mut self, draft: &EventDraft, tz: Tz) {
+        let e = self;
+        e.fields[0] = field(&draft.title);
+        e.fields[1] = field(&draft.description);
+        // Review starts at the beginning, including on horizontally clipped fields.
+        for input in &mut e.fields[..2] {
+            input.move_cursor(CursorMove::Top);
+            input.move_cursor(CursorMove::Head);
+        }
+        e.set_timing(&draft.timing, tz);
+        e.ever_assigned = true;
+        if e.access.notifications {
+            e.notifications = draft.notice_lead_seconds.is_some();
+            e.fields[6] = field(
+                humantime::format_duration(StdDuration::from_secs(
+                    draft.notice_lead_seconds.unwrap_or(86400) as u64,
+                ))
+                .to_string(),
+            );
+        }
+        e.error = None;
+        e.focus = EditorControl::Title;
+        e.scroll.set(0);
+        e.reveal_focus.set(true);
+    }
+
     pub fn text(&self, n: usize) -> String {
         self.fields[n].lines().join("\n")
     }
@@ -274,15 +321,13 @@ impl Editor {
                 self.end_occurrence = end.and_then(|t| occurrence_for(t, tz));
                 let start = start.with_timezone(&tz);
                 self.fields[2] = field(start.date_naive().to_string());
-                self.fields[3] = field(start.format("%H:%M").to_string());
+                self.fields[3] = field(clock(start));
                 self.fields[4] = field(
                     end.map(|t| t.with_timezone(&tz).date_naive().to_string())
                         .unwrap_or_default(),
                 );
-                self.fields[5] = field(
-                    end.map(|t| t.with_timezone(&tz).format("%H:%M").to_string())
-                        .unwrap_or_default(),
-                );
+                self.fields[5] =
+                    field(end.map(|t| clock(t.with_timezone(&tz))).unwrap_or_default());
             }
         }
     }
@@ -356,6 +401,9 @@ impl Editor {
             controls.push(Delegation);
         }
         controls.extend([Save, Cancel]);
+        if self.access.edit {
+            controls.push(EditorControl::Import);
+        }
         controls
     }
 
@@ -368,9 +416,7 @@ impl Editor {
         let Ok(date) = date_entry::parse(&self.text(date), today, today) else {
             return false;
         };
-        let Ok(time) =
-            NaiveTime::parse_from_str(self.text(if end { 5 } else { 3 }).trim(), "%H:%M")
-        else {
+        let Ok(time) = parse_clock(&self.text(if end { 5 } else { 3 })) else {
             return false;
         };
         matches!(
@@ -441,15 +487,15 @@ impl Editor {
                     .ok_or_else(|| anyhow::anyhow!("End date out of range"))?,
             }
         } else {
-            let time = NaiveTime::parse_from_str(self.text(3).trim(), "%H:%M")
-                .map_err(|_| anyhow::anyhow!("Start time must be HH:MM (24-hour)"))?;
+            let time = parse_clock(&self.text(3))
+                .map_err(|_| anyhow::anyhow!("Start time must be HH:MM or HH:MM:SS (24-hour)"))?;
             let begin = local_instant(start.and_time(time), tz, self.occurrence)?;
             let end = if end_date.is_none() && end_time.trim().is_empty() {
                 None
             } else {
                 let d = end_date.unwrap_or(start);
-                let t = NaiveTime::parse_from_str(end_time.trim(), "%H:%M")
-                    .map_err(|_| anyhow::anyhow!("End time must be HH:MM"))?;
+                let t = parse_clock(&end_time)
+                    .map_err(|_| anyhow::anyhow!("End time must be HH:MM or HH:MM:SS"))?;
                 Some(local_instant(d.and_time(t), tz, self.end_occurrence)?)
             };
             EventTiming::Timed { start: begin, end }
@@ -539,6 +585,7 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
             return match e.focus {
                 EditorControl::Save => Save,
                 EditorControl::Cancel => Cancel,
+                EditorControl::Import => EditorCommand::Import,
                 control if control.field().is_none() => {
                     e.toggle(control);
                     None
@@ -553,6 +600,7 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
             return match e.focus {
                 EditorControl::Save => Save,
                 EditorControl::Cancel => Cancel,
+                EditorControl::Import => EditorCommand::Import,
                 control => {
                     e.toggle(control);
                     None
@@ -764,6 +812,7 @@ fn draw_command(
     let action = match command {
         EditorCommand::Save => Action::Save,
         EditorCommand::Cancel => Action::Cancel,
+        EditorCommand::Import => Action::Import,
         EditorCommand::Discard => Action::Discard,
         EditorCommand::Keep => Action::Keep,
         EditorCommand::Reload => Action::Reload,
@@ -771,11 +820,13 @@ fn draw_command(
     };
     let start = *x;
     ui::button(frame, s, x, y, right, label, action, selected);
-    record(
-        e,
-        Rect::new(start, y, x.saturating_sub(start), 1),
-        TargetAction::Command(command),
-    );
+    if *x > start {
+        record(
+            e,
+            Rect::new(start, y, *x - start, 1),
+            TargetAction::Command(command),
+        );
+    }
 }
 
 pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
@@ -819,7 +870,12 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
     let mut row_offset = 0;
     let rows: Vec<_> = controls
         .into_iter()
-        .filter(|c| !matches!(c, EditorControl::Save | EditorControl::Cancel))
+        .filter(|c| {
+            !matches!(
+                c,
+                EditorControl::Save | EditorControl::Cancel | EditorControl::Import
+            )
+        })
         .map(|control| {
             let height = control.value_rows(viewport.height as usize) + 1;
             let row = (control, row_offset, height);
@@ -934,7 +990,10 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
             record(e, area, TargetAction::ScrollTo(target));
         }
     }
-    if footer_height >= 3 {
+    let stacked_buttons = e.access.edit
+        && inner.width < Line::from(" Save  Cancel  Import iCal ").width() as u16
+        && footer_height >= 2;
+    if footer_height >= 3 && !stacked_buttons {
         ui::row(
             frame,
             Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
@@ -942,8 +1001,13 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
             ui::dim(),
         );
     }
-    if footer_height >= 2 {
-        let area = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
+    if footer_height >= 2 && (!stacked_buttons || footer_height >= 3) {
+        let area = Rect::new(
+            inner.x,
+            inner.bottom() - if stacked_buttons { 3 } else { 2 },
+            inner.width,
+            1,
+        );
         if let Some(error) = &e.error {
             ui::row(frame, area, error, ui::base().fg(theme::ERROR()));
             if e.existing.is_some() {
@@ -965,12 +1029,13 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
         }
     }
     let mut x = inner.x;
+    let save_y = inner.bottom() - if stacked_buttons { 2 } else { 1 };
     draw_command(
         frame,
         s,
         e,
         &mut x,
-        inner.bottom() - 1,
+        save_y,
         inner.right(),
         "Save",
         EditorCommand::Save,
@@ -981,12 +1046,28 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
         s,
         e,
         &mut x,
-        inner.bottom() - 1,
+        save_y,
         inner.right(),
         "Cancel",
         EditorCommand::Cancel,
         e.focus == EditorControl::Cancel,
     );
+    if e.access.edit {
+        if stacked_buttons {
+            x = inner.x;
+        }
+        draw_command(
+            frame,
+            s,
+            e,
+            &mut x,
+            inner.bottom() - 1,
+            inner.right(),
+            "Import iCal",
+            EditorCommand::Import,
+            e.focus == EditorControl::Import,
+        );
+    }
 }
 
 #[cfg(test)]

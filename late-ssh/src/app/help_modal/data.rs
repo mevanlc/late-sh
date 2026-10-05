@@ -1302,6 +1302,8 @@ fn overview_lines() -> Vec<String> {
         "Go to date: Oct 2, 2026, +2w, or 2 months ago; offsets from selection.",
         "Today/weekday words use your local today. Editor offsets also use today.",
         "Enter opens selection; a timed slot starts a draft. n new, e edit, Delete confirms.",
+        "New/Edit event: Import iCal fills the form from pasted content or an http(s)/webcal URL.",
+        "y copies the selected/details event as iCalendar; event menus also offer Copy as iCal.",
         "Escape/Close returns to the previous dialog, selection and scroll; u upcoming.",
         "s Calendar Settings: week start, default view, overlay, sharing.",
         "PgUp/PgDn hours/agenda/lists, Ctrl+Left/Right columns; wheel targets its pane.",

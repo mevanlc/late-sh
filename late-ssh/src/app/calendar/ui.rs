@@ -1156,7 +1156,7 @@ pub fn draw_modal(frame: &mut Frame, area: Rect, s: &CalendarState) {
     }
 }
 
-fn picker(
+pub(super) fn picker(
     frame: &mut Frame,
     inner: Rect,
     s: &CalendarState,
@@ -1165,6 +1165,33 @@ fn picker(
 ) {
     let height = inner.height.saturating_sub(2).max(1);
     let content = Rect::new(inner.x, inner.y, inner.width, height);
+    picker_rows(frame, content, s, labels, selected);
+    if inner.height >= 2 {
+        let mut x = inner.x;
+        button(
+            frame,
+            s,
+            &mut x,
+            inner.bottom() - 1,
+            inner.right(),
+            "Close (Esc)",
+            Action::Cancel,
+            false,
+        );
+    }
+}
+
+pub(super) fn picker_rows(
+    frame: &mut Frame,
+    content: Rect,
+    s: &CalendarState,
+    labels: &[Line<'static>],
+    selected: usize,
+) {
+    let height = content.height;
+    if height == 0 {
+        return;
+    }
     let maximum = labels.len().saturating_sub(height as usize);
     s.picker_rows.set(height as usize);
     s.max_picker.set(maximum);
@@ -1179,22 +1206,9 @@ fn picker(
     s.picker_scroll.set(offset);
     pane(s, content, Pane::Picker);
     for (i, label) in labels.iter().enumerate().skip(offset).take(height as usize) {
-        let row = Rect::new(inner.x, inner.y + (i - offset) as u16, inner.width, 1);
+        let row = Rect::new(content.x, content.y + (i - offset) as u16, content.width, 1);
         styled_row(frame, row, selected_line(label.clone(), i == selected));
         hit(s, row, Action::Choice(i));
-    }
-    if inner.height >= 2 {
-        let mut x = inner.x;
-        button(
-            frame,
-            s,
-            &mut x,
-            inner.bottom() - 1,
-            inner.right(),
-            "Close (Esc)",
-            Action::Cancel,
-            false,
-        );
     }
 }
 
@@ -1225,6 +1239,7 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
         Modal::Source(_) => " Calendar source ",
         Modal::View(_) => " Calendar view ",
         Modal::Go(_) => " Go to date ",
+        Modal::Import(_) => " Import iCalendar event ",
         Modal::Delete(_) => " Delete event? ",
         Modal::Upcoming => " Upcoming events ",
         Modal::Agenda => " Selected-day agenda ",
@@ -1238,6 +1253,7 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
         return;
     }
     match modal {
+        Modal::Import(import) => super::import::draw(frame, inner, s, import),
         Modal::Source(selected) => {
             let labels: Vec<_> = std::iter::once(Line::styled("Server", bright()))
                 .chain(std::iter::once(Line::styled(
@@ -1519,6 +1535,16 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
                     false,
                 );
             }
+            button(
+                frame,
+                s,
+                &mut x,
+                inner.bottom() - 1,
+                inner.right(),
+                "y Copy iCal",
+                Action::Copy,
+                false,
+            );
             button(
                 frame,
                 s,
