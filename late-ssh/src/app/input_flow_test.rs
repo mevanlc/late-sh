@@ -1,6 +1,24 @@
 //! App input integration tests against a real ephemeral DB.
 
 #[tokio::test]
+async fn esc_in_the_settings_langs_picker_closes_the_picker_and_keeps_settings_open() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "langs-esc-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "langs-esc-flow-it");
+    app.handle_input(b"\x0f");
+    wait_for_render_contains(&mut app, "langs-esc-it").await;
+    // Username, Country, Timezone, Theme, IDE, Terminal, OS, then Langs.
+    app.handle_input(b"jjjjjjj\r");
+    wait_for_render_contains(&mut app, "[Done]").await;
+    assert!(app.tag_picker.is_open());
+
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "[Done]").await;
+    assert!(!app.tag_picker.is_open());
+    assert!(app.show_settings);
+}
+
+#[tokio::test]
 async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode() {
     use late_core::models::user::{ArtSplashMode, extract_art_splash_mode};
     let test_db = new_test_db().await;
@@ -462,6 +480,8 @@ async fn leaderboard_mouse_and_control_keys_target_rail_and_content_separately()
             .collect(),
         ..LeaderboardData::default()
     });
+    // Top Drinkers leads the rail; step down to the board the fixture fills.
+    app.leaderboard_page.select_next();
     app.render().unwrap();
     app.handle_input(b"\n\n\x0b");
     assert_eq!(app.leaderboard_page.scroll(), 1);
@@ -488,7 +508,7 @@ async fn leaderboard_mouse_and_control_keys_target_rail_and_content_separately()
 
     let board = (0..24)
         .flat_map(|y| (0..100).map(move |x| Position::new(x, y)))
-        .find(|point| app.leaderboard_page.board_at(*point) == Some(1))
+        .find(|point| app.leaderboard_page.board_at(*point) == Some(2))
         .unwrap();
     let click = format!("\x1b[<0;{};{}M", board.x + 1, board.y + 1);
     app.handle_input(click.as_bytes());

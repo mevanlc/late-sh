@@ -15,7 +15,7 @@ use late_core::models::user::{
 };
 use ratatui::style::{Modifier, Style};
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
-use tokio::sync::{broadcast, oneshot, watch};
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 use crate::app::common::theme;
@@ -556,14 +556,7 @@ impl LinkAccountDialogState {
     }
 }
 
-struct MouseSave {
-    result: oneshot::Receiver<Result<(), String>>,
-    draft: Profile,
-    destination: Target,
-}
-
 pub(crate) struct SettingsTick {
-    pub destination: Option<Target>,
     pub banner: Option<Banner>,
     /// True when this tick drained any async result into the open modal.
     pub changed: bool,
@@ -571,8 +564,6 @@ pub(crate) struct SettingsTick {
 
 pub(crate) struct SettingsModalState {
     pub(crate) mouse: MouseState,
-    mouse_save: Option<MouseSave>,
-    pub(crate) mouse_error: Option<String>,
     profile_service: ProfileService,
     feed_service: FeedService,
     user_id: Uuid,
@@ -659,8 +650,6 @@ impl SettingsModalState {
         feed_service.list_task(user_id);
         Self {
             mouse: MouseState::default(),
-            mouse_save: None,
-            mouse_error: None,
             profile_service,
             feed_service,
             user_id,
@@ -752,7 +741,6 @@ impl SettingsModalState {
         device_rails: (RoomListMode, RightSidebarMode),
     ) {
         self.mouse.reveal_selection();
-        self.mouse_error = None;
         self.draft = profile.clone();
         self.device_rails = device_rails;
         self.selected_tab = Tab::Settings;
@@ -801,49 +789,10 @@ impl SettingsModalState {
         if let Some(feed_banner) = self.drain_feed_events() {
             banner = Some(feed_banner);
         }
-        let mut changed = changed;
-        let mut destination = None;
-        if let Some(pending) = self.mouse_save.as_mut() {
-            let result = match pending.result.try_recv() {
-                Ok(result) => Some(result),
-                Err(oneshot::error::TryRecvError::Closed) => {
-                    Some(Err("Could not save. Please try again.".into()))
-                }
-                Err(oneshot::error::TryRecvError::Empty) => None,
-            };
-            if let Some(result) = result {
-                let pending = self.mouse_save.take().unwrap();
-                changed = true;
-                match result {
-                    Ok(()) => {
-                        self.draft = pending.draft;
-                        self.editing_username = false;
-                        self.editing_system_field = None;
-                        self.editing_bio = false;
-                        if self.editing_feed_url {
-                            self.feed_index = self.feeds.len();
-                        }
-                        self.editing_feed_url = false;
-                        set_bio_cursor_visible(&mut self.bio_input, false);
-                        self.mouse_error = None;
-                        destination = Some(pending.destination);
-                    }
-                    Err(error) => {
-                        self.mouse_error = Some(error.clone());
-                        banner = Some(Banner::error(&error));
-                    }
-                }
-                self.mouse.reveal_selection();
-            }
-        }
         if changed {
             self.mouse.invalidate();
         }
-        SettingsTick {
-            banner,
-            changed,
-            destination,
-        }
+        SettingsTick { banner, changed }
     }
 
     pub(crate) fn selected_tab(&self) -> Tab {
@@ -2390,13 +2339,11 @@ impl SettingsModalState {
     }
 
     pub(crate) fn cancel_username_edit(&mut self) {
-        self.mouse_error = None;
         self.editing_username = false;
         self.username_input = new_short_textarea(false);
     }
 
     pub(crate) fn submit_username(&mut self) {
-        self.mouse_error = None;
         self.editing_username = false;
         let normalized = sanitize_username_input(self.username_text().trim());
         self.username_input = new_short_textarea(false);
@@ -2414,13 +2361,11 @@ impl SettingsModalState {
     }
 
     pub(crate) fn cancel_system_field_edit(&mut self) {
-        self.mouse_error = None;
         self.editing_system_field = None;
         self.system_input = new_short_textarea(false);
     }
 
     pub(crate) fn submit_system_field(&mut self) {
-        self.mouse_error = None;
         let Some(field) = self.editing_system_field.take() else {
             return;
         };
@@ -2437,7 +2382,6 @@ impl SettingsModalState {
     }
 
     pub(crate) fn stop_bio_edit(&mut self) {
-        self.mouse_error = None;
         self.editing_bio = false;
         self.draft.bio = self.bio_text().trim_end().to_string();
         reset_bio_view_to_top(&mut self.bio_input);
@@ -2471,7 +2415,6 @@ impl SettingsModalState {
     }
 
     pub(crate) fn cancel_feed_url_edit(&mut self) {
-        self.mouse_error = None;
         self.editing_feed_url = false;
         self.feed_url_input = new_short_textarea(false);
     }
@@ -2768,39 +2711,18 @@ impl SettingsModalState {
         }
     }
 
-    pub(crate) fn mouse_save_pending(&self) -> bool {
-        self.mouse_save.is_some()
-    }
-
-    /// Keep the editor buffer until this particular write is acknowledged.
-    pub(crate) fn save_before_mouse_navigation(&mut self, destination: Target) {
-        if self.mouse_save.is_some() {
-            return;
+    /// A click elsewhere leaves the open text editor the way its keyboard
+    /// submit does (Bio saves on Esc), so both inputs share one save path.
+    pub(crate) fn submit_text_edit(&mut self) {
+        if self.editing_username {
+            self.submit_username();
+        } else if self.editing_system_field.is_some() {
+            self.submit_system_field();
+        } else if self.editing_bio {
+            self.stop_bio_edit();
+        } else if self.editing_feed_url {
+            self.submit_feed_url();
         }
-        let mut draft = self.draft.clone();
-        let result = if self.editing_feed_url {
-            self.feed_service.add_feed_with_result(
-                self.user_id,
-                self.feed_url_input.lines().join("").trim().to_string(),
-            )
-        } else {
-            if self.editing_username {
-                draft.username = sanitize_username_input(self.username_text().trim());
-            } else if let Some(field) = self.editing_system_field {
-                field.set_value(&mut draft, self.system_text());
-            } else if self.editing_bio {
-                draft.bio = self.bio_text().trim_end().to_string();
-            }
-            self.profile_service
-                .edit_profile_with_result(self.user_id, Self::params(&draft))
-        };
-        self.mouse_error = None;
-        self.mouse_save = Some(MouseSave {
-            result,
-            draft,
-            destination,
-        });
-        self.mouse.invalidate();
     }
 
     pub(crate) fn select_mouse_target(&mut self, target: Target) {
@@ -2852,12 +2774,12 @@ impl SettingsModalState {
         }
     }
 
-    pub(crate) fn position_caret(&mut self, field: Field, row: usize, col: usize) {
+    pub(crate) fn position_caret(&mut self, field: Field, col: usize) {
         let input = match field {
             Field::Username => &mut self.username_input,
             Field::System => &mut self.system_input,
-            Field::Bio => &mut self.bio_input,
             Field::Feed => &mut self.feed_url_input,
+            Field::InviteCode => &mut self.invites.code_input,
             Field::LinkCode => {
                 self.move_link_account_enter_code_focus(LinkAccountEnterCodeFocus::PeerCode);
                 &mut self.link_account.code_input
@@ -2865,7 +2787,7 @@ impl SettingsModalState {
             Field::LinkConfirm => &mut self.link_account.confirm_input,
             Field::DeleteConfirm => &mut self.delete_account.input,
         };
-        input.move_cursor(CursorMove::Jump(row as u16, col as u16));
+        input.move_cursor(CursorMove::Jump(0, col as u16));
     }
 }
 

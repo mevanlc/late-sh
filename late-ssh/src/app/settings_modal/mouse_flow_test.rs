@@ -8,7 +8,7 @@ use super::mouse::{Field, Target};
 use super::state::{AccountRow, Row, StatuslinePane, Tab, TweakRow};
 use crate::app::common::sidebar::SidebarOwnership;
 use crate::app::state::App;
-use crate::test_helpers::{make_app, new_test_db};
+use crate::test_helpers::{make_app, new_test_db, wait_until};
 
 async fn fixture() -> (TestDb, App) {
     let db = new_test_db().await;
@@ -48,10 +48,21 @@ fn paint(app: &App) -> Buffer {
 }
 
 fn hits(app: &App) -> Vec<(ratatui::layout::Rect, Target)> {
+    use crate::app::tag_picker::state::Target as TagTarget;
     if app.tag_picker.is_open() {
-        app.tag_picker.mouse.hits.borrow().clone()
+        // The tag picker has its own targets; name them in Settings terms so
+        // one `click` helper drives both surfaces.
+        app.tag_picker
+            .mouse
+            .hits()
+            .into_iter()
+            .map(|(rect, target)| match target {
+                TagTarget::Done => (rect, Target::Close),
+                TagTarget::Row(index) => (rect, Target::Pick(index)),
+            })
+            .collect()
     } else {
-        app.settings_modal_state.mouse.hits.borrow().clone()
+        app.settings_modal_state.mouse.hits()
     }
 }
 
@@ -445,119 +456,61 @@ async fn settings_mouse_toggles_reorders_and_scrolls_status_panes_independently(
 }
 
 #[tokio::test]
-async fn settings_mouse_saves_before_navigation_and_retains_rejected_username() {
+async fn settings_mouse_click_away_submits_the_open_editor_and_cancel_discards_it() {
     let (db, mut app) = fixture().await;
-    let _taken = create_test_user(&db.db, "taken-name").await;
+    let original = app.settings_modal_state.draft().username.clone();
     click(&mut app, Target::Row(Row::Username));
-    app.handle_input(b"\x15taken-name");
-    click(&mut app, Target::Tab(Tab::Account));
-    assert!(app.settings_modal_state.mouse_save_pending());
-    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Settings);
-    // Duplicate requests cannot enqueue another destination or erase text.
-    super::input::activate_mouse_target(&mut app, Target::Tab(Tab::Bio));
-    settle(&mut app, |app| {
-        !app.settings_modal_state.mouse_save_pending()
-    })
-    .await;
-    assert!(app.settings_modal_state.editing_username());
-    assert_eq!(
-        app.settings_modal_state.username_input().lines(),
-        &["taken-name"]
-    );
-    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Settings);
-    assert!(
-        app.settings_modal_state
-            .mouse_error
-            .as_deref()
-            .unwrap()
-            .contains("taken")
-    );
+    app.handle_input(b"\x15discarded");
     click(&mut app, Target::Cancel);
     assert!(!app.settings_modal_state.editing_username());
-    assert!(app.settings_modal_state.mouse_error.is_none());
+    assert_eq!(app.settings_modal_state.draft().username, original);
+
     click(&mut app, Target::Row(Row::Username));
     app.handle_input(b"\x15fresh-name");
     click(&mut app, Target::Row(Row::Ide));
-    assert!(app.settings_modal_state.editing_username());
-    settle(&mut app, |app| {
-        !app.settings_modal_state.mouse_save_pending()
-    })
-    .await;
     assert!(!app.settings_modal_state.editing_username());
     assert!(app.settings_modal_state.editing_system_field().is_some());
     app.handle_input(b"my editor");
     click(&mut app, Target::Tab(Tab::Bio));
-    settle(&mut app, |app| {
-        !app.settings_modal_state.mouse_save_pending()
-    })
-    .await;
     assert_eq!(app.settings_modal_state.selected_tab(), Tab::Bio);
-    let client = db.db.get().await.unwrap();
-    let stored = Profile::load(&client, app.user_id).await.unwrap();
-    assert_eq!(stored.username, "fresh-name");
-    assert_eq!(stored.ide.as_deref(), Some("my editor"));
+    assert!(!app.settings_modal_state.editing_text());
+
+    let user_id = app.user_id;
+    wait_until(
+        || async {
+            let client = db.db.get().await.unwrap();
+            let stored = Profile::load(&client, user_id).await.unwrap();
+            stored.username == "fresh-name" && stored.ide.as_deref() == Some("my editor")
+        },
+        "click-away edits saved",
+    )
+    .await;
 }
 
 #[tokio::test]
-async fn settings_mouse_bio_wide_wrapped_caret_wheel_and_done_preserve_text() {
+async fn settings_mouse_bio_click_edits_and_done_saves_without_moving_the_caret() {
     let (_db, mut app) = fixture().await;
     click(&mut app, Target::Tab(Tab::Bio));
     click(&mut app, Target::Bio);
-    app.handle_input(
-        "漢字 e\u{301} first line\nsecond line\n"
-            .repeat(20)
-            .as_bytes(),
-    );
-    app.resize(48, 14).unwrap();
-    let buffer = paint(&app);
-    let done = hits(&app)
-        .into_iter()
-        .find_map(|(rect, target)| (target == Target::Submit).then_some(rect))
-        .unwrap();
-    assert_eq!(buffer[(done.x - 1, done.y)].symbol(), " ");
-    for x in done.right()..buffer.area.right() - 2 {
-        assert_eq!(buffer[(x, done.y)].symbol(), " ");
-    }
+    assert!(app.settings_modal_state.editing_bio());
+    app.handle_input("漢字 first line\nsecond line".as_bytes());
+    app.handle_input(b"\x1b[D");
     let before = app.settings_modal_state.bio_input().lines().to_vec();
     let cursor = app.settings_modal_state.bio_input().cursor();
-    let target = hits(&app)
-        .iter()
-        .find_map(|(_, target)| {
-            matches!(target, Target::Caret(Field::Bio, _, _)).then_some(*target)
-        })
-        .unwrap();
-    wheel(&mut app, target, false);
+    // Inside the open editor a click neither saves nor relocates the caret,
+    // and the wheel leaves the text alone.
+    click(&mut app, Target::Bio);
+    wheel(&mut app, Target::Bio, false);
+    assert!(app.settings_modal_state.editing_bio());
     assert_eq!(app.settings_modal_state.bio_input().lines(), before);
     assert_eq!(app.settings_modal_state.bio_input().cursor(), cursor);
-    let target = hits_after_paint(&app)
-        .iter()
-        .find_map(|(_, target)| {
-            matches!(target, Target::Caret(Field::Bio, _, _)).then_some(*target)
-        })
-        .unwrap();
-    let Target::Caret(_, row, col) = target else {
-        unreachable!()
-    };
-    click(&mut app, target);
-    assert_eq!(app.settings_modal_state.bio_input().cursor(), (row, col));
-    assert_eq!(app.settings_modal_state.bio_input().lines(), before);
     click(&mut app, Target::Submit);
-    settle(&mut app, |app| {
-        !app.settings_modal_state.mouse_save_pending()
-    })
-    .await;
     assert!(!app.settings_modal_state.editing_bio());
-    assert_eq!(
-        app.settings_modal_state.draft().bio,
-        before.join("\n").trim_end()
-    );
-    // Existing Bio Enter/Esc timing remains synchronous.
-    app.handle_input(b"\r\x1b");
-    settle(&mut app, |app| !app.settings_modal_state.editing_bio()).await;
+    assert_eq!(app.settings_modal_state.draft().bio, before.join("\n"));
 }
 
 #[tokio::test]
-async fn settings_mouse_rss_waits_for_storage_and_preserves_selected_feed_identity() {
+async fn settings_mouse_rss_click_away_adds_the_feed_and_keeps_the_clicked_one_selected() {
     let (db, mut app) = fixture().await;
     let client = db.db.get().await.unwrap();
     let original = RssFeed::create_for_user(&client, app.user_id, "http://127.0.0.1:1/original")
@@ -570,28 +523,29 @@ async fn settings_mouse_rss_waits_for_storage_and_preserves_selected_feed_identi
     drop(client);
     settle(&mut app, |app| app.settings_modal_state.feeds().len() == 1).await;
     click(&mut app, Target::Tab(Tab::Feeds));
+
+    // An empty URL is dropped quietly, the way Enter drops it.
     click(&mut app, Target::AddFeed);
-    app.handle_input(b"bad-url");
     click(&mut app, Target::Tab(Tab::Account));
-    settle(&mut app, |app| {
-        !app.settings_modal_state.mouse_save_pending()
-    })
-    .await;
-    assert!(app.settings_modal_state.editing_feed_url());
-    assert_eq!(
-        app.settings_modal_state.feed_url_input().lines(),
-        &["bad-url"]
-    );
-    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Feeds);
-    app.handle_input(b"\x15http://127.0.0.1:1/new");
-    click(&mut app, Target::Feed(original.id));
-    assert!(app.settings_modal_state.mouse_save_pending());
-    settle(&mut app, |app| {
-        !app.settings_modal_state.mouse_save_pending()
-    })
-    .await;
-    settle(&mut app, |app| app.settings_modal_state.feeds().len() == 2).await;
     assert!(!app.settings_modal_state.editing_feed_url());
+    assert_eq!(app.settings_modal_state.selected_tab(), Tab::Account);
+
+    click(&mut app, Target::Tab(Tab::Feeds));
+    click(&mut app, Target::AddFeed);
+    app.handle_input(b"http://127.0.0.1:1/new");
+    click(&mut app, Target::Feed(original.id));
+    assert!(!app.settings_modal_state.editing_feed_url());
+    let user_id = app.user_id;
+    wait_until(
+        || async {
+            let client = db.db.get().await.unwrap();
+            RssFeed::list_for_user(&client, user_id).await.unwrap().len() == 2
+        },
+        "subscription stored",
+    )
+    .await;
+    click(&mut app, Target::RefreshFeeds);
+    settle(&mut app, |app| app.settings_modal_state.feeds().len() == 2).await;
     assert_eq!(
         app.settings_modal_state.feeds()[app.settings_modal_state.feed_index()].id,
         original.id
@@ -603,7 +557,6 @@ async fn settings_mouse_rss_waits_for_storage_and_preserves_selected_feed_identi
     );
     click(&mut app, Target::RemoveFeed);
     settle(&mut app, |app| app.settings_modal_state.feeds().len() == 1).await;
-    click(&mut app, Target::RefreshFeeds);
 }
 
 #[tokio::test]
@@ -621,7 +574,7 @@ async fn settings_mouse_account_dialogs_require_typed_confirmation_and_block_pen
         !app.settings_modal_state.link_account_dialog().pending()
     })
     .await;
-    click(&mut app, Target::Caret(Field::LinkCode, 0, 0));
+    click(&mut app, Target::Caret(Field::LinkCode, 0));
     app.handle_input(b"invalid-code");
     click(&mut app, Target::LookupCode);
     settle(&mut app, |app| {
@@ -772,6 +725,51 @@ async fn settings_mouse_theme_search_stars_groups_and_wheel_do_not_apply_acciden
 }
 
 #[tokio::test]
+async fn settings_mouse_invites_code_field_takes_the_caret_and_its_button_submits() {
+    let (_db, mut app) = fixture().await;
+    click(&mut app, Target::Tab(Tab::Account));
+    click(&mut app, Target::Account(AccountRow::Invites));
+    settle(&mut app, |app| {
+        app.settings_modal_state.invites_dialog().accepts_code()
+    })
+    .await;
+    app.handle_input(b"??");
+    click(&mut app, Target::Caret(Field::InviteCode, 0));
+    assert_eq!(
+        app.settings_modal_state.invites_dialog().code_input().cursor(),
+        (0, 0)
+    );
+    click(&mut app, Target::AddInviteCode);
+    assert_eq!(
+        app.settings_modal_state.invites_dialog().message(),
+        Some(("That does not look like an invite code.", true))
+    );
+}
+
+#[tokio::test]
+async fn settings_mouse_close_during_theme_search_saves_the_previewed_theme() {
+    use crate::app::common::theme;
+    let (db, mut app) = fixture().await;
+    click(&mut app, Target::Tab(Tab::Themes));
+    let original = app.settings_modal_state.draft().theme_id.clone();
+    click(&mut app, Target::Search);
+    // Typing previews the first match; nothing is clicked or confirmed.
+    app.handle_input(theme::OPTIONS[theme::OPTIONS.len() - 1].label.as_bytes());
+    let previewed = app.settings_modal_state.draft().theme_id.clone();
+    assert_ne!(previewed, original);
+    click(&mut app, Target::Close);
+    assert!(!app.show_settings);
+
+    let client = db.db.get().await.unwrap();
+    let user_id = app.user_id;
+    wait_until(
+        || async { Profile::load(&client, user_id).await.unwrap().theme_id == previewed },
+        "previewed theme saved",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn settings_mouse_link_confirmation_choices_fields_and_submit_on_short_terminal() {
     use late_core::models::account_link;
     use late_core::models::user::User;
@@ -781,7 +779,7 @@ async fn settings_mouse_link_confirmation_choices_fields_and_submit_on_short_ter
     let (code, _) = account_link::create_code(&client, other.id).await.unwrap();
     click(&mut app, Target::Tab(Tab::Account));
     click(&mut app, Target::Account(AccountRow::LinkAccounts));
-    click(&mut app, Target::Caret(Field::LinkCode, 0, 0));
+    click(&mut app, Target::Caret(Field::LinkCode, 0));
     app.handle_input(code.as_bytes());
     click(&mut app, Target::LookupCode);
     settle(&mut app, |app| {
@@ -813,7 +811,7 @@ async fn settings_mouse_link_confirmation_choices_fields_and_submit_on_short_ter
             .unwrap()
             .contains("does not match")
     );
-    click(&mut app, Target::Caret(Field::LinkConfirm, 0, 0));
+    click(&mut app, Target::Caret(Field::LinkConfirm, 0));
     app.handle_input(b"mouse-user");
     app.resize(48, 14).unwrap();
     paint(&app);
@@ -827,7 +825,7 @@ async fn settings_mouse_link_confirmation_choices_fields_and_submit_on_short_ter
         let rect = hits(&app)
             .iter()
             .find_map(|(rect, hit)| {
-                matches!(hit, Target::Caret(_, _, _) | Target::KeepAccount(_)).then_some(*rect)
+                matches!(hit, Target::Caret(_, _) | Target::KeepAccount(_)).then_some(*rect)
             })
             .unwrap();
         app.handle_input(format!("\x1b[<65;{};{}M", rect.x + 1, rect.y + 1).as_bytes());

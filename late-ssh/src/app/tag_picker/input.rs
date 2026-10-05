@@ -1,10 +1,9 @@
 //! Keys on the picker, and the two doors: `open` seeds it from the field
 //! that asked, `close` hands the chosen tags back to that field.
 
-use super::state::{TagPickerState, TagPickerTarget};
+use super::state::{TagPickerState, TagPickerTarget, Target};
 use crate::app::directory::editor::state::Field;
 use crate::app::input::{MouseButton, MouseEventKind, ParsedInput};
-use crate::app::settings_modal::mouse::Target;
 use crate::app::state::App;
 
 pub(crate) fn open(app: &mut App, target: TagPickerTarget) {
@@ -45,9 +44,9 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
             MouseEventKind::ScrollDown => app.tag_picker.mouse.scroll(x, y, 3, app.size),
             MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
                 match app.tag_picker.mouse.target(x, y, app.size) {
-                    Some(Target::Close) => close(app),
-                    Some(Target::Pick(index)) => app.tag_picker.click_row(index),
-                    _ => {}
+                    Some(Target::Done) => close(app),
+                    Some(Target::Row(index)) => app.tag_picker.click_row(index),
+                    None => {}
                 }
                 app.tag_picker.mouse.invalidate();
             }

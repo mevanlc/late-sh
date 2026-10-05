@@ -10,9 +10,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use super::state::{Row, TagPickerState};
+use super::state::{Row, TagPickerState, Target};
 use crate::app::common::{primitives::hint_line, theme};
-use crate::app::settings_modal::mouse::{Pane, Target};
 
 const POPUP_W: u16 = 64;
 const POPUP_H: u16 = 26;
@@ -46,7 +45,7 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, state: &TagPickerState) {
         Paragraph::new("[Done]").style(Style::default().fg(theme::AMBER_GLOW())),
         done,
     );
-    state.mouse.hit(done, Target::Close);
+    state.mouse.hit(done, Target::Done);
 
     let [chosen_area, query_area, _, list_area, foot_area] = Layout::vertical([
         Constraint::Length(2),
@@ -133,11 +132,10 @@ fn draw_chosen(frame: &mut Frame, area: Rect, state: &TagPickerState) {
 fn draw_list(frame: &mut Frame, area: Rect, state: &TagPickerState) {
     let rows = state.rows();
     let height = area.height as usize;
-    state.set_visible_height(height);
     let width = area.width as usize;
     let scroll = state
         .mouse
-        .pane(area, Pane::Picker, rows.len(), state.cursor());
+        .pane(area, (), rows.len(), state.cursor());
     let end = (scroll + height).min(rows.len());
     let mut lines: Vec<Line<'static>> = Vec::new();
     for (idx, row) in rows[scroll..end].iter().enumerate() {
@@ -152,7 +150,7 @@ fn draw_list(frame: &mut Frame, area: Rect, state: &TagPickerState) {
             Row::Tag(tag) => {
                 state.mouse.hit(
                     Rect::new(area.x, area.y + idx as u16, area.width, 1),
-                    Target::Pick(at),
+                    Target::Row(at),
                 );
                 let under_cursor = at == state.cursor();
                 let chosen = state.is_chosen(tag);

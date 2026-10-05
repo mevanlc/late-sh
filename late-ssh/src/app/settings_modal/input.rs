@@ -18,9 +18,6 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
         handle_mouse(app, mouse);
         return;
     }
-    if app.settings_modal_state.mouse_save_pending() {
-        return;
-    }
     app.settings_modal_state.mouse.reveal_selection();
     if app.settings_modal_state.invites_dialog().open() {
         handle_invites_dialog_input(app, event);
@@ -322,27 +319,23 @@ fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
             let Some(target) = state.mouse.target(x, y, app.size) else {
                 return;
             };
-            if state.mouse_save_pending() {
-                return;
-            }
-            let same_editor = matches!(target, Target::Caret(Field::Username, _, _) if state.editing_username())
-                || matches!(target, Target::Caret(Field::System, _, _) if state.editing_system_field().is_some())
-                || matches!(target, Target::Caret(Field::Bio, _, _) if state.editing_bio())
-                || matches!(target, Target::Caret(Field::Feed, _, _) if state.editing_feed_url());
+            let same_editor = match target {
+                Target::Caret(Field::Username, _) => state.editing_username(),
+                Target::Caret(Field::System, _) => state.editing_system_field().is_some(),
+                Target::Caret(Field::Feed, _) => state.editing_feed_url(),
+                Target::Bio => state.editing_bio(),
+                _ => false,
+            };
             if state.editing_text() && !same_editor && target != Target::Cancel {
-                state.save_before_mouse_navigation(target);
-            } else {
-                activate_mouse_target(app, target);
+                state.submit_text_edit();
             }
+            activate_mouse_target(app, target);
         }
         _ => {}
     }
 }
 
-pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
-    if app.settings_modal_state.mouse_save_pending() {
-        return;
-    }
+fn activate_mouse_target(app: &mut App, target: Target) {
     let state = &mut app.settings_modal_state;
     if state.link_account_dialog().pending() || state.irc_token_dialog().pending() {
         return;
@@ -368,6 +361,10 @@ pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
             } else if state.picker_open() {
                 state.close_picker();
             } else {
+                // Leaving mid-search keeps the theme it previewed, as Esc does.
+                if state.theme_searching() {
+                    state.cancel_theme_search();
+                }
                 app.show_settings = false;
             }
         }
@@ -411,12 +408,16 @@ pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
         Target::SidebarMove(_, delta) => state.move_right_sidebar_component(delta),
         Target::Badge(_) => state.toggle_chat_badge(),
         Target::Pick(_) => apply_picker_selection(app),
-        Target::Bio => state.start_bio_edit(),
+        Target::Bio => {
+            if !state.editing_bio() {
+                state.start_bio_edit();
+            }
+        }
         Target::Feed(_) => {}
         Target::AddFeed => state.start_feed_url_edit(),
         Target::RemoveFeed => state.remove_selected_feed(),
         Target::RefreshFeeds => state.refresh_feeds(),
-        Target::Submit => {} // the acknowledged edit is already committed
+        Target::Submit => {} // the click already submitted the open editor
         Target::Cancel => {
             if state.editing_username() {
                 state.cancel_username_edit();
@@ -426,12 +427,8 @@ pub(crate) fn activate_mouse_target(app: &mut App, target: Target) {
                 state.cancel_feed_url_edit();
             }
         }
-        Target::Caret(field, row, col) => {
-            if field == Field::Bio && !state.editing_bio() {
-                state.start_bio_edit();
-            }
-            state.position_caret(field, row, col);
-        }
+        Target::Caret(field, col) => state.position_caret(field, col),
+        Target::AddInviteCode => state.submit_invite_code(),
         Target::GenerateCode => state.generate_link_account_code(),
         Target::LookupCode => {
             state.move_link_account_enter_code_focus(LinkAccountEnterCodeFocus::PeerCode);

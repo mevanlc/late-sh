@@ -1,7 +1,7 @@
 use crate::app::ai::ghost::GRAYBEARD_MENTION_COOLDOWN;
 use crate::app::common::primitives::thousands;
 use crate::app::common::qr::{Barcode, HalfBlock};
-use crate::app::common::username_effect::CROWN_GLYPH;
+use crate::app::common::username_effect::{CROWN_GLYPH, CROWN_LAUREATE_GLYPH};
 use late_core::models::{
     article::{NEWS_SHARE_MAX_PAID_PER_DAY, NEWS_SHARE_REWARD_CHIPS},
     asterion::ASTERION_DAILY_ESCAPE_PAYOUT,
@@ -508,13 +508,17 @@ fn chips_help_lines() -> Vec<String> {
         "".to_string(),
         "9. The crown".to_string(),
         format!("  One slot, one holder, one {CROWN_GLYPH} after their name in every message they send."),
-        "  /crown shows who wears it and what taking it costs. /crown take buys it.".to_string(),
+        "  /crown shows who wears it and what taking it costs. /crown take buys it at that price.".to_string(),
         format!("  A vacant crown costs {}. After that it costs 1.5x whatever the holder paid, rounded up,", thousands(CROWN_MIN_PRICE)),
         "  so the price ratchets on its own and nobody sets it.".to_string(),
+        "  /crown take N bids N chips instead, any amount at or above the price. You pay all of it,".to_string(),
+        "  and the next price is 1.5x your bid: overpay to put the crown out of a rival's reach.".to_string(),
+        "  A bid that the price has climbed past by the time it lands is refused, and nothing is charged.".to_string(),
         "  Every chip is destroyed: the crown pays nobody, and none of it comes back into the economy.".to_string(),
         "  There is no cooldown: anyone can take it off you the moment you have it, at 1.5x. You cannot take a crown you already wear.".to_string(),
         "  It empties at the end of every UTC month: the crown goes back to vacant, and whoever wore it".to_string(),
-        "  when the month ended keeps the permanent [CRWN] badge for that month.".to_string(),
+        format!("  when the month ended wears a {CROWN_LAUREATE_GLYPH} before their name in chat all the next month,"),
+        "  and keeps the permanent [CRWN] badge for that month on their profile.".to_string(),
         "  Every takeover posts to #lounge, naming both players.".to_string(),
         "  Like Shop spending, the crown does not count against Top Chips.".to_string(),
         "".to_string(),
@@ -1032,7 +1036,7 @@ fn arcade_help_lines() -> Vec<String> {
         "  [24#]     2048",
         "  [SN]      Snake",
         "  [CRWN]    The Crown, to whoever wore it when the month ended.",
-        "            No rank digit: the crown has one holder.",
+        "            Profile only: in chat the winner wears a crown before their name.",
         "  [LATE]    Late Time, to whoever spent the most time online that month.",
         "            First place only, so no rank digit either.",
         "  [DRNK]    Top Drinkers, to whoever took the most buzz from drinks that month.",
@@ -1592,8 +1596,8 @@ fn settings_help_lines() -> Vec<String> {
         "  Click a tab or row to activate it immediately; [x] closes the foreground dialog".to_string(),
         "  Wheel scrolls only the pane under the pointer, three visual rows per notch".to_string(),
         "  Scrolling changes neither selection nor settings; keyboard navigation reveals its row".to_string(),
-        "  Clicking away from text saves first; failed saves keep your text in the editor".to_string(),
-        "  Click text to place the caret; Save/Cancel mirror Enter/Esc; Bio has Done (Esc saves)".to_string(),
+        "  Clicking away from a text field saves it, the same as Enter".to_string(),
+        "  Click a field to place the caret; Save/Cancel mirror Enter/Esc; Bio has Done (Esc saves)".to_string(),
         "  Themes: click to apply, headings to fold, ☆/★ to favorite, search to filter".to_string(),
         "  Statusline: labels open options; checkboxes toggle; [↑↓] arrows reorder".to_string(),
         "  Amber ◂/▸ controls cycle backward/forward; ordinary row/value clicks cycle forward".to_string(),

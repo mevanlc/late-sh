@@ -2057,6 +2057,12 @@ fn dispatch_escape(app: &mut App) {
         app.show_ultimate_modal = false;
         return;
     }
+    // Drawn over the settings modal and the profile editor, so it takes Esc
+    // ahead of both, the same order `handle_parsed_input` gives its keys.
+    if app.tag_picker.is_open() {
+        crate::app::tag_picker::input::close(app);
+        return;
+    }
     if app.show_settings {
         settings_modal::input::handle_escape(app);
         return;
@@ -2106,10 +2112,6 @@ fn dispatch_escape(app: &mut App) {
     }
     if app.icon_picker_open {
         close_icon_picker(app);
-        return;
-    }
-    if app.tag_picker.is_open() {
-        crate::app::tag_picker::input::close(app);
         return;
     }
     if app.jobs.post.is_open() {
