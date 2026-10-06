@@ -181,6 +181,9 @@ struct DrawContext<'a> {
     daily_chat_view: Option<chat::ui::EmbeddedRoomChatView<'a>>,
     house: &'a crate::app::lobby::house::state::HouseState,
     house_chat_view: Option<chat::ui::EmbeddedRoomChatView<'a>>,
+    /// The Games hub cards this session sees (`HubGame::roster`): Night
+    /// City heads it for runners only.
+    games_hub_roster: &'static [crate::app::door::hub::state::HubGame],
     games_hub_selected: usize,
     /// Rows the selected Games hub landing is scrolled down.
     games_hub_scroll: u16,
@@ -425,6 +428,7 @@ impl App {
         let brogue_live = HubGame::Brogue.live_screen(self).is_some();
         let darkroom_live = HubGame::Darkroom.live_screen(self).is_some();
         let greendragon_live = HubGame::GreenDragon.live_screen(self).is_some();
+        let games_hub_roster = HubGame::roster(self.is_runner());
         // Clear last-frame mouse hit-test rects so screens that don't draw
         // them this frame can't leave a stale target behind.
         self.last_pet_rect.set(None);
@@ -1389,7 +1393,8 @@ impl App {
                         daily_chat_view,
                         house: &self.house,
                         house_chat_view,
-                        games_hub_selected: self.games_hub_state.selected(),
+                        games_hub_roster,
+                        games_hub_selected: self.games_hub_state.selected(games_hub_roster),
                         games_hub_scroll: self.games_hub_state.scroll(),
                         games_hub_max_scroll: self.games_hub_state.max_scroll(),
                         door_rc_modal: self
@@ -1838,6 +1843,20 @@ impl App {
             app_content_and_sidebar_areas(inner, ctx.show_right_sidebar)
         };
         let foreground_overlay_open = foreground_terminal_overlay_open(&ctx);
+        // The tour stops that write into a real surface: the two modals take
+        // the header themselves, the practice table and the dungeon fight
+        // get it drawn across the top of the page.
+        let tour_header = crate::app::clubhouse::ui::tour_header(
+            ctx.clubhouse_state.tutorial,
+            crate::app::clubhouse::ui::table_stop(content_area, ctx.daily.practice_played()),
+            ctx.clubhouse_state.tour_fight.won(),
+        );
+        let board_area = match (&tour_header, screen) {
+            (Some(header), Screen::DailyMatch | Screen::Games) => {
+                header.draw_above(frame, content_area)
+            }
+            (Some(_), _) | (None, _) => content_area,
+        };
         match screen {
             Screen::Dashboard => {
                 const HOME_RAIL_WIDTH: u16 = 24;
@@ -1877,11 +1896,19 @@ impl App {
                     );
                 }
             }
+            // The tour's dungeon stop plays its fight where the hub would be.
+            Screen::Games if tour_header.is_some() => crate::app::clubhouse::fight::draw(
+                frame,
+                board_area,
+                &ctx.clubhouse_state.tour_fight,
+                ctx.clubhouse_state.username(),
+            ),
             Screen::Games => {
                 crate::app::door::hub::ui::draw_games_hub(
                     frame,
                     content_area,
                     &crate::app::door::hub::ui::HubView {
+                        roster: ctx.games_hub_roster,
                         selected: ctx.games_hub_selected,
                         scroll: ctx.games_hub_scroll,
                         max_scroll: ctx.games_hub_max_scroll,
@@ -1906,6 +1933,12 @@ impl App {
                         rc_modal: ctx.door_rc_modal.map(|(game, content)| {
                             crate::app::door::hub::ui::RcModalView { game, content }
                         }),
+                        night_city: crate::app::deadchannel::city::landing::LandingView {
+                            sheet: ctx.city_sheet,
+                            street: ctx.city_street,
+                            own_user_id: ctx.city_own_user_id,
+                            tick: ctx.marquee_tick,
+                        },
                     },
                 );
             }
@@ -2168,7 +2201,7 @@ impl App {
             }
             Screen::DailyMatch => crate::app::lobby::daily::board_ui::draw(
                 frame,
-                content_area,
+                board_area,
                 ctx.daily,
                 ctx.terminal_image_protocol,
                 terminal_images,
@@ -2339,7 +2372,14 @@ impl App {
         }
 
         if ctx.show_lobby_modal {
-            crate::app::lobby::modal_ui::draw(frame, inner, ctx.lobby, ctx.daily, ctx.house);
+            crate::app::lobby::modal_ui::draw(
+                frame,
+                inner,
+                ctx.lobby,
+                ctx.daily,
+                ctx.house,
+                tour_header.as_ref(),
+            );
         }
 
         // One-time arcade-name claim modal, over the door landings that need a
@@ -2477,7 +2517,9 @@ impl App {
             );
         }
 
-        if ctx.stations_modal_open {
+        // The tour holds this modal open through a quit confirm, and it would
+        // draw over the prompt.
+        if ctx.stations_modal_open && !ctx.show_quit_confirm {
             crate::app::audio::stations_modal::ui::draw(
                 frame,
                 inner,
@@ -2488,6 +2530,7 @@ impl App {
                     slots: ctx.radio_slots,
                     source: ctx.paired_source,
                 },
+                tour_header.as_ref(),
             );
         }
 
@@ -2653,7 +2696,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     // key. The chrome says so, the way the door games do.
     if screen == Screen::City {
         spans.push(Span::styled(
-            "· f fight · p patch · ? guide ",
+            "· f road · p patch · ? guide ",
             Style::default().fg(theme::TEXT_DIM()),
         ));
     }

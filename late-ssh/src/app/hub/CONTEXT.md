@@ -44,7 +44,7 @@ Former tabs, for archaeology:
 - `Leaderboard`: replaced by the top-level Leaderboards page (screen `6`, `late-ssh/src/app/leaderboard/`).
 - `Quests`: replaced by the strip at the top of The Arcade lobby (`dailies/ui.rs::draw_arcade_strip`).
 - `Admin` (reward-template/shop-item editor): deleted; those edits are direct DB/migration work (§ Known Gaps).
-- `Events`: deleted; the events pillar is parked (DRAGON.md graveyard note).
+- `Events`: deleted; the events pillar is parked (`deadchannel/GAME.md` graveyard note).
 - `Guide`: moved to the global guide's Economy topic.
 
 ## Aquarium

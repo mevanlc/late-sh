@@ -865,7 +865,8 @@ async fn games_hub_config_modal_saves_and_clears_the_door_rc() {
     // Walk the hub sidebar down to NetHack and open the config box. The step
     // count comes from the selector order itself, so a game inserted above
     // NetHack moves the cursor here instead of opening another game's config.
-    let steps = HubGame::ALL
+    // A fresh account is no runner, so its roster has no Night City.
+    let steps = HubGame::roster(false)
         .iter()
         .position(|game| *game == HubGame::Nethack)
         .expect("nethack is in the selector");
@@ -3443,13 +3444,15 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
 }
 
 #[tokio::test]
-async fn forced_tour_gates_input_until_each_named_key() {
+async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "tour-gate-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "tour-gate-flow-it");
+    // Room for the practice table under its header.
+    app.resize(160, 50).unwrap();
 
     // Arm the tour the way a first-ever session does: land in the tavern
     // with the walkthrough pending.
@@ -3459,8 +3462,8 @@ async fn forced_tour_gates_input_until_each_named_key() {
         .enter_screen(crate::app::presence::svc::now_ms());
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The gate swallows everything but the named key: no page hopping, no
-    // Tab, no help modal, no reserved chords (Zen's included), no composer.
+    // The gate swallows everything but Enter: no page hopping, no Tab, no
+    // help modal, no reserved chords (Zen's included), no composer.
     for bytes in [&b"2"[..], b"\t", b"?", b"\x0f", b"\x07", b"\x06", b"i"] {
         app.handle_input(bytes);
     }
@@ -3468,25 +3471,80 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert!(!app.show_help);
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The named keys walk the route in order, nothing else moves it. The
-    // two Enter interludes (the music, the lobby) stay on their page, and
-    // the last page hands over to Zen through its own chord.
-    for (bytes, screen) in [
-        (&b"1"[..], Screen::Dashboard),
-        (b"\r", Screen::Dashboard),
-        (b"2", Screen::Arcade),
-        (b"\r", Screen::Arcade),
-        (b"3", Screen::Games),
-        (b"4", Screen::Artboard),
-        (b"5", Screen::Profiles),
-        (b"0", Screen::Profiles),
-        (b"6", Screen::Leaderboard),
-        (b"0", Screen::Leaderboard),
-        (b"\x06", Screen::Zen),
-        (b"\x06", Screen::Zen),
-        (b"0", Screen::Clubhouse),
+    // Enter walks to Home, then the music stop holds the real Stations
+    // modal open; its own keys and a lone Esc do nothing to it.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Dashboard);
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+    assert!(app.stations_modal_state.is_open());
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(app.stations_modal_state.is_open());
+
+    // On to the arcade, where the lobby stop holds the real Lobby modal.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Arcade);
+    assert!(!app.stations_modal_state.is_open());
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLobby);
+    assert!(app.show_lobby_modal);
+
+    // Enter leads to the practice table, where the break has to be played:
+    // Enter strikes it rather than skipping past.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::DailyMatch);
+    assert!(!app.show_lobby_modal);
+    wait_for_esc_effect(
+        &mut app,
+        |app| {
+            app.daily
+                .board
+                .as_ref()
+                .is_some_and(|board| board.detail.is_some())
+        },
+        "practice table racked",
+    )
+    .await;
+    assert!(!app.daily.practice_played());
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::DailyMatch);
+    wait_for_esc_effect(&mut app, |app| app.daily.practice_played(), "break struck").await;
+    // One shot only: Space does not strike the rack twice.
+    app.handle_input(b" ");
+    app.tick();
+    let shots = |app: &crate::app::state::App| {
+        let board = app.daily.board.as_ref().expect("the table is open");
+        let pool = board.detail.as_ref().and_then(|detail| detail.pool());
+        pool.expect("a pool table").state.move_count()
+    };
+    assert_eq!(shots(&app), 1);
+
+    // Enter leaves the table behind for the games page.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Games);
+    assert!(app.daily.board.is_none());
+
+    // The dungeon stop stays on that page until the fight is won: every
+    // Enter or Space is a blow, and the page only turns after the last one.
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
+    while !app.clubhouse.tour_fight.won() {
+        app.handle_input(b" ");
+        assert_eq!(app.screen, Screen::Games);
+        assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
+    }
+
+    // The rest of the route is Enter alone.
+    for screen in [
+        Screen::Artboard,
+        Screen::Profiles,
+        Screen::Leaderboard,
+        Screen::Zen,
+        Screen::Clubhouse,
     ] {
-        app.handle_input(bytes);
+        app.handle_input(b"\r");
         assert_eq!(app.screen, screen);
     }
     assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
@@ -3498,38 +3556,117 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert_eq!(app.screen, Screen::Arcade);
 }
 
-/// Some terminals and multiplexers swallow Ctrl+F, and the gate also blocks
-/// the `/zen` fallback, so the Zen stop needs a key every terminal sends.
-/// Without one the newcomer can only quit, and the tour restarts next session.
+/// The practice table needs more room than a default terminal has. There
+/// the stop says so and Enter walks on, with no break struck blind.
 #[tokio::test]
-async fn forced_tour_zen_stop_accepts_enter_when_the_chord_is_swallowed() {
+async fn forced_tour_skips_the_practice_table_on_a_small_terminal() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "tour-zen-enter-it").await;
-    let mut app = make_app(test_db.db.clone(), user.id, "tour-zen-enter-flow-it");
+    let user = create_test_user(&test_db.db, "tour-small-table-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-small-table-flow-it");
+    app.resize(80, 24).unwrap();
 
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Pending;
     app.clubhouse
         .enter_screen(crate::app::presence::svc::now_ms());
-    for bytes in [&b"1"[..], b"\r", b"2", b"\r", b"3", b"4", b"5", b"6"] {
-        app.handle_input(bytes);
+    for _ in 0..5 {
+        app.handle_input(b"\r");
     }
-    assert_eq!(app.screen, Screen::Leaderboard);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLeaderboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitTable);
+    assert_eq!(app.screen, Screen::DailyMatch);
+    wait_for_esc_effect(
+        &mut app,
+        |app| {
+            app.daily
+                .board
+                .as_ref()
+                .is_some_and(|board| board.detail.is_some())
+        },
+        "practice table racked",
+    )
+    .await;
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("this table needs a bigger window"),
+        "frame={frame:?}"
+    );
+    assert!(frame.contains("[Enter] next: the games"), "frame={frame:?}");
 
     app.handle_input(b"\r");
-    assert_eq!(app.screen, Screen::Zen);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitZen);
+    assert_eq!(app.screen, Screen::Games);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitGames);
+    assert!(app.daily.board.is_none());
+}
 
-    // Enter is not a way past the Zen box itself: that one still names `0`.
+/// `q` at the music stop asks before quitting, and the held Stations modal
+/// stays out of the prompt's way until Esc brings the tour back.
+#[tokio::test]
+async fn forced_tour_quit_confirm_shows_over_the_held_stations_modal() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "tour-quit-music-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-quit-music-flow-it");
+    app.resize(80, 24).unwrap();
+
+    app.set_screen(Screen::Clubhouse);
+    app.clubhouse.tutorial = Tutorial::Pending;
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
     app.handle_input(b"\r");
-    assert_eq!(app.screen, Screen::Zen);
-    app.handle_input(b"0");
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+
+    app.handle_input(b"q");
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Clicked by mistake, right?"),
+        "frame={frame:?}"
+    );
+    assert!(!frame.contains("the tour · the radio"), "frame={frame:?}");
+
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("Clicked by mistake, right?"),
+        "frame={frame:?}"
+    );
+    assert!(frame.contains("the tour · the radio"), "frame={frame:?}");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+}
+
+/// `/onboard` from Home puts anyone back at the tavern door with the tour
+/// running from the top, as forced as a first visit.
+#[tokio::test]
+async fn onboard_command_starts_the_tour_again() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let (_test_db, mut app) = chat_compose_app("onboard-command").await;
+    app.clubhouse.tutorial = Tutorial::Done;
+    for _ in 0..3 {
+        app.clubhouse.tour_fight.strike();
+    }
+    assert!(app.clubhouse.tour_fight.won());
+
+    app.handle_input(b"/onboard");
+    app.handle_input(b"\r");
     assert_eq!(app.screen, Screen::Clubhouse);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
+    assert!(!app.clubhouse.tour_fight.won());
+
+    app.handle_input(b"3");
+    assert_eq!(app.screen, Screen::Clubhouse);
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitChat);
 }
 
 /// The Lounge composer is plain speech: a `/` draft is refused with a
@@ -5563,7 +5700,7 @@ async fn the_first_descent_opens_the_guide_and_the_question_mark_reopens_it() {
     app.handle_input(b"0");
     // The chrome names the key, and the first descent opens the guide by
     // itself once the claim answers.
-    wait_for_render_contains(&mut app, " Undercity · f fight · p patch · ? guide ").await;
+    wait_for_render_contains(&mut app, " Undercity · f road · p patch · ? guide ").await;
     wait_for_render_contains(&mut app, "the street, explained").await;
     // It opens at the top: the whole game in one screen.
     wait_for_render_contains(&mut app, "the short version").await;
@@ -5642,8 +5779,8 @@ async fn p_opens_patch_from_anywhere_on_the_street() {
     wait_for_render_not_contains(&mut app, " Esc closes ").await;
 }
 
-/// Esc over a live fight is the run, not a way out: the exchange gets a
-/// run line (away, or caught turning) and the scene stays up either way.
+/// A scene whose last answer was the service failing is not a fight to be
+/// trapped in: Esc closes it instead of running.
 #[tokio::test]
 async fn esc_closes_a_scene_the_static_stopped_answering() {
     use crate::app::deadchannel::fight::svc::FightOutcome;
@@ -5688,9 +5825,9 @@ async fn esc_closes_a_scene_the_static_stopped_answering() {
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, " Undercity ").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[Enter] step in").await;
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[a] attack").await;
+    wait_for_render_contains(&mut app, "[a] auto turn").await;
 
     // The service fails to answer the next command: an outage, as the
     // session would hear it.
@@ -5712,7 +5849,7 @@ async fn esc_closes_a_scene_the_static_stopped_answering() {
 
 #[tokio::test]
 async fn esc_in_a_fight_is_a_run() {
-    use crate::app::deadchannel::fight::data::{RUN_FAILED_LINES, RUN_LINES};
+    use crate::app::deadchannel::fight::data::RUN_LINES;
     use crate::app::deadchannel::runner::state::Look;
     use crate::app::deadchannel::runner::svc::RunnerEntry;
     use late_core::models::deadchannel_runner::DeadchannelRunner;
@@ -5755,18 +5892,17 @@ async fn esc_in_a_fight_is_a_run() {
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, " Undercity ").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[Enter] step in").await;
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[a] attack").await;
+    wait_for_render_contains(&mut app, "[a] auto turn").await;
 
-    // The roll goes either way; both answers are run lines, and neither
-    // closes the scene.
+    // No dice: the flicker's hit lands on the way out, and the runner is
+    // out. The scene stays up, over, on the getaway line.
     app.handle_input(b"\x1b");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let run_lines = RUN_LINES.iter().chain(RUN_FAILED_LINES.iter());
     let frame = loop {
         let frame = render_plain(&mut app);
-        if run_lines.clone().any(|line| frame.contains(line)) {
+        if RUN_LINES.iter().any(|line| frame.contains(line)) {
             break frame;
         }
         assert!(
@@ -5780,9 +5916,51 @@ async fn esc_in_a_fight_is_a_run() {
         "expected the scene to stay up after the run; frame={frame:?}"
     );
     assert!(
-        frame.contains("[Enter] back to the street") || frame.contains("[a] attack"),
-        "expected the scene over (away) or still on (caught); frame={frame:?}"
+        frame.contains("it hits you for "),
+        "expected the hit on the way out; frame={frame:?}"
     );
+    assert!(
+        frame.contains("[Enter] back to the road"),
+        "expected the scene over; frame={frame:?}"
+    );
+
+    // Enter goes back to the road: the step is spent, the next one waits.
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, " the road ").await;
+    wait_for_render_contains(&mut app, "rations 9/10").await;
+}
+
+/// The hand takes its digits while a fight is on: `1` to `5` play the
+/// card in that slot and never switch pages, `e` ends the turn, and the
+/// glyph answers.
+#[tokio::test]
+async fn the_number_keys_play_cards_and_e_ends_the_turn() {
+    let (_test_db, mut app, _) = runner_on_the_street("undercity-cards-it", 100, 34, |_| {}).await;
+
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "[1-5] play").await;
+    wait_for_render_contains(&mut app, "energy ██ ██ ██").await;
+
+    // Whatever was dealt, slot one holds a card that costs something.
+    app.handle_input(b"1");
+    wait_for_render_not_contains(&mut app, "energy ██ ██ ██").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" Undercity "),
+        "a card key is not a page switch; frame={frame:?}"
+    );
+    assert!(
+        !frame.contains("╭ 1 "),
+        "the played slot is empty; frame={frame:?}"
+    );
+
+    // The turn ends: the flicker hits, and a full hand is back.
+    app.handle_input(b"e");
+    wait_for_render_contains(&mut app, "it hits you for ").await;
+    wait_for_render_contains(&mut app, "energy ██ ██ ██").await;
+    wait_for_render_contains(&mut app, "╭ 1 ").await;
 }
 
 /// A runner on the street: the row shaped by `shape` on today's day,
@@ -5845,22 +6023,22 @@ async fn runner_on_the_street(
     (test_db, app, user.id)
 }
 
-/// A spent runner's `f` opens the picker on the reason, and Enter (what
+/// A spent runner's `f` opens the road on the reason, and Enter (what
 /// its key row offers) lands back on the street: no scene opens only to
-/// repeat the refusal the picker already showed.
+/// repeat the refusal the road already showed.
 #[tokio::test]
-async fn enter_on_a_spent_runners_picker_lands_back_on_the_street() {
+async fn enter_on_a_spent_runners_road_lands_back_on_the_street() {
     let (_test_db, mut app, _) = runner_on_the_street("undercity-spent-it", 100, 30, |sheet| {
         sheet.rations_left = 0
     })
     .await;
 
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "you are spent for today. the static will keep.").await;
+    wait_for_render_contains(&mut app, "the road is walked. the static will keep").await;
     wait_for_render_contains(&mut app, "[Enter] back to the street").await;
 
     app.handle_input(b"\r");
-    wait_for_render_not_contains(&mut app, "you are spent for today").await;
+    wait_for_render_not_contains(&mut app, "the road is walked").await;
     assert_render_not_contains_for(&mut app, " the end of the row ", Duration::from_millis(300))
         .await;
     let frame = render_plain(&mut app);
@@ -5947,36 +6125,42 @@ async fn the_bar_and_the_cart_take_their_keys_and_keep_the_rest() {
     wait_for_render_contains(&mut app, " Home ").await;
 }
 
-/// The picker at its tallest (the bright glyph, the fair fight, and the
-/// step down all on offer) fits a classic 80 by 24 terminal under the
-/// app's frame: every offer's key and the key row are on screen.
+/// The road and the scene both fit a classic 80 by 24 terminal under the
+/// app's frame: the map, the node under the cursor with its step-down
+/// key, and the key row are on screen, and so is the whole hand.
 #[tokio::test]
-async fn the_picker_with_all_three_offers_fits_an_80_by_24_terminal() {
-    use crate::app::deadchannel::fight::data::{RATIONS_PER_DAY, bright_steps};
-    use crate::app::deadchannel::fight::svc::FightService;
-
-    let [bright_step, _] = bright_steps(FightService::today());
-    let (_test_db, mut app, _) = runner_on_the_street("undercity-picker-24-it", 80, 24, |sheet| {
+async fn the_road_and_the_hand_fit_an_80_by_24_terminal() {
+    let (_test_db, mut app, _) = runner_on_the_street("undercity-road-24-it", 80, 24, |sheet| {
         sheet.level = 2;
         sheet.peak_level = 2;
         sheet.signal = 20;
-        sheet.rations_left = RATIONS_PER_DAY - (bright_step - 1);
     })
     .await;
 
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[b]").await;
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
     let frame = render_plain(&mut app);
     for needle in [
-        "[b]",
-        "[f]",
-        "[g]",
-        "[Enter] step in",
-        "esc back to the street",
+        " the road ",
+        "▸ [f]",
+        "hiss  lv 2",
+        "[▚]",
+        "[g] flicker, half pay",
+        "esc back",
     ] {
         assert!(
             frame.contains(needle),
-            "expected {needle:?} on an 80 by 24 picker; frame={frame:?}"
+            "expected {needle:?} on an 80 by 24 road; frame={frame:?}"
+        );
+    }
+
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "[1-5] play").await;
+    let frame = render_plain(&mut app);
+    for needle in ["╭ 1 ", "╭ 5 ", "energy ██ ██ ██", "[e] end turn", "[r] run"] {
+        assert!(
+            frame.contains(needle),
+            "expected {needle:?} on an 80 by 24 scene; frame={frame:?}"
         );
     }
 }

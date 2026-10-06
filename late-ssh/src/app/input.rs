@@ -1263,7 +1263,8 @@ fn launcher_key_byte(event: &ParsedInput) -> Option<u8> {
 fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
     use crate::app::door::hub::state::HubGame;
 
-    let selected = app.games_hub_state.selected_game();
+    let roster = HubGame::roster(app.is_runner());
+    let selected = app.games_hub_state.selected_game(roster);
 
     // The rc config modal is fully modal while open: `x` clears the stored
     // config, paste replaces it (handle_bracketed_paste), Esc closes it
@@ -1296,12 +1297,13 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
         let body = app_content_area(app);
         if let Some(idx) = crate::app::door::hub::ui::sidebar_hit_test(
             body,
-            app.games_hub_state.selected(),
+            roster,
+            app.games_hub_state.selected(roster),
             mouse.x.saturating_sub(1),
             mouse.y.saturating_sub(1),
         ) {
             app.door_delete_confirm = false;
-            app.games_hub_state.select(idx);
+            app.games_hub_state.select(roster, idx);
             return true;
         }
         return false;
@@ -1333,7 +1335,8 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
                     // hub at all (see the guard above) - its own landing is
                     // the only place that can reach this arm, and it never
                     // will, but the match still has to be exhaustive.
-                    HubGame::Lateania
+                    HubGame::NightCity
+                    | HubGame::Lateania
                     | HubGame::Minecraft
                     | HubGame::Rebels
                     | HubGame::Nethack
@@ -1377,14 +1380,14 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
         ParsedInput::Byte(b'l' | b'j')
         | ParsedInput::Char('l' | 'j')
         | ParsedInput::Arrow(b'C' | b'B') => {
-            app.games_hub_state.select_next();
+            app.games_hub_state.select_next(roster);
             true
         }
         // Left: h, k, or Left/Up arrow.
         ParsedInput::Byte(b'h' | b'k')
         | ParsedInput::Char('h' | 'k')
         | ParsedInput::Arrow(b'D' | b'A') => {
-            app.games_hub_state.select_prev();
+            app.games_hub_state.select_prev(roster);
             true
         }
         // Lateania has multiple character slots now, so its own landing (with
@@ -1417,9 +1420,8 @@ fn open_door_rc_modal(app: &mut App, game: late_core::models::door_rc::DoorRcGam
         late_core::models::door_rc::DoorRcGame::Nethack => HubGame::Nethack,
         late_core::models::door_rc::DoorRcGame::Dcss => HubGame::Dcss,
     };
-    if let Some(idx) = HubGame::ALL.iter().position(|g| *g == hub_game) {
-        app.games_hub_state.select(idx);
-    }
+    app.games_hub_state
+        .select_game(HubGame::roster(app.is_runner()), hub_game);
     app.set_screen(Screen::Games);
     app.door_rc_modal = Some(game);
 }
@@ -1432,6 +1434,9 @@ fn launch_games_hub_selection(app: &mut App, game: crate::app::door::hub::state:
 
     app.door_delete_confirm = false;
     match game {
+        // Only on a runner's roster, so the gate already held when the
+        // card was selected; the descent is the one `0` takes.
+        HubGame::NightCity => crate::app::deadchannel::city::input::descend(app),
         HubGame::Lateania => {
             // Lands on the character-select landing rather than jumping
             // straight into the world, since which of the account's saved
@@ -2039,6 +2044,11 @@ fn dispatch_escape(app: &mut App) {
     }
     if app.show_quit_confirm {
         quit_confirm::input::handle_escape(app);
+        return;
+    }
+    // A lone Esc skips the tour gate the same way, and would close the modal
+    // or the practice table a stop is holding open.
+    if app.clubhouse.tutorial_forced_step().is_some() {
         return;
     }
     if app.show_help {
@@ -3559,13 +3569,13 @@ pub(crate) fn trigger_global_quit(app: &mut App) {
     }
 }
 
-/// The forced first-visit tour: while a tour box names a key
-/// (`clubhouse::state::State::tutorial_forced_step`), that key and quitting
-/// are the only inputs that do anything. Everything else, mouse, arrows,
-/// and chords included, dies here so no modal, composer, or game can hijack
-/// a newcomer mid-route. Returns true when the event was consumed.
+/// The forced first-visit tour: while a stop is up
+/// (`clubhouse::state::State::tutorial_forced_step`), Enter moves it on and
+/// quitting is the way out. Everything else, mouse, arrows, and chords
+/// included, dies here so no modal, composer, or game can hijack a newcomer
+/// mid-route. Returns true when the event was consumed.
 fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
-    use crate::app::clubhouse::state::TourStep;
+    use crate::app::clubhouse::state::{TableStop, TourStep};
 
     let Some(step) = app.clubhouse.tutorial_forced_step() else {
         return false;
@@ -3576,32 +3586,81 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
         // Arrows, mouse, pastes: swallowed while the tour runs.
         _ => return true,
     };
-    match step {
-        TourStep::Page(expected, screen) if byte == expected => {
-            // `set_screen` runs `tutorial_screen_entered`, which advances
-            // the tour to the next stop.
-            app.set_screen(screen);
-        }
-        // The Zen stop teaches the chord itself, so it runs the same toggle
-        // Ctrl+F runs anywhere (modals closed, return page remembered).
-        // Enter does the same: terminals and multiplexers that swallow the
-        // chord would otherwise trap a newcomer here, since the gate also
-        // blocks the `/zen` fallback.
-        TourStep::Zen if matches!(byte, CTRL_F | b'\r' | b'\n') => {
-            toggle_zen_globally(app);
-        }
-        TourStep::Enter if matches!(byte, b'\r' | b'\n') => {
-            if app.clubhouse.tutorial_advance() {
-                app.persist_clubhouse_tutorial_done();
+    match (step, byte) {
+        (TourStep::Enter, b'\r' | b'\n') => tour_advance(app),
+        // The table's one shot has to be played: Enter or Space strikes the
+        // break, and only then does Enter move on. A terminal the table does
+        // not fit has no shot to see, so Enter walks on from there.
+        (TourStep::Table, b'\r' | b'\n' | b' ') => {
+            let table = crate::app::clubhouse::ui::table_stop(
+                app.content_area(),
+                app.daily.practice_played(),
+            );
+            match (table, byte) {
+                (TableStop::Racked, _) => app.daily.practice_break(),
+                (TableStop::TooSmall | TableStop::Played, b' ') => {}
+                (TableStop::TooSmall | TableStop::Played, _) => tour_advance(app),
             }
         }
-        TourStep::Page(..) | TourStep::Zen | TourStep::Enter => match byte {
-            // The way out is always open.
-            b'q' | b'Q' => trigger_global_quit(app),
-            _ => {}
-        },
+        // The fight is the same: every press is the next blow until it is won.
+        (TourStep::Fight, b'\r' | b'\n') if app.clubhouse.tour_fight.won() => tour_advance(app),
+        (TourStep::Fight, b'\r' | b'\n' | b' ') => app.clubhouse.tour_fight.strike(),
+        // The way out is always open.
+        (TourStep::Enter | TourStep::Table | TourStep::Fight, b'q' | b'Q') => {
+            trigger_global_quit(app)
+        }
+        (TourStep::Enter | TourStep::Table | TourStep::Fight, _) => {}
     }
+    sync_tour_modal(app);
     true
+}
+
+/// `/onboard`: the first-visit tour from the top, for anyone who asks.
+/// Through `leave_board` so a board left behind is closed properly.
+pub(crate) fn start_tour(app: &mut App) {
+    crate::app::lobby::daily::board_input::leave_board(app, Screen::Clubhouse);
+    app.clubhouse.begin_tutorial(
+        crate::app::presence::svc::now_ms(),
+        crate::app::clubhouse::state::TourStart::Rerun,
+    );
+}
+
+/// Enter at a tour stop: walk the newcomer to wherever the next one lives.
+fn tour_advance(app: &mut App) {
+    use crate::app::clubhouse::state::TourMove;
+
+    match app.clubhouse.tutorial_advance() {
+        TourMove::Stay => {}
+        // Through `leave_board` so a practice table left behind is dropped.
+        TourMove::Page(screen) => crate::app::lobby::daily::board_input::leave_board(app, screen),
+        // A pool table nobody else sees, for one break.
+        TourMove::Table => {
+            let username = app.username.clone();
+            app.daily.open_practice_table(Screen::Arcade, &username);
+            app.set_screen(Screen::DailyMatch);
+        }
+        // The same toggle Ctrl+F runs anywhere (modals closed, return page
+        // remembered).
+        TourMove::Zen => toggle_zen_globally(app),
+        TourMove::Finished => app.persist_clubhouse_tutorial_done(),
+    }
+}
+
+/// Hold open the real modal the current stop pitches, and close it once the
+/// tour has moved past.
+fn sync_tour_modal(app: &mut App) {
+    use crate::app::clubhouse::state::TourModal;
+
+    let modal = app.clubhouse.tour_modal();
+    match (
+        modal == TourModal::Stations,
+        app.stations_modal_state.is_open(),
+    ) {
+        (true, false) => app.stations_modal_state.open(app.selected_radio_station),
+        (false, true) => app.stations_modal_state.close(),
+        (true, true) | (false, false) => {}
+    }
+    app.show_lobby_modal = modal == TourModal::Lobby;
 }
 
 /// Live games own Ctrl+S even when they currently leave it unbound. Running
@@ -4101,31 +4160,15 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         }
         // `0` is the clubhouse. Pressed again on the clubhouse it goes
         // down to the undercity (deadchannel's street), runners only;
-        // from the undercity it comes back up. A descent always lands on
-        // the street: a panel or the ledge left open on the way up does
-        // not carry over.
+        // from the undercity it comes back up.
         b'0' if !artboard_blocks_page_switch => {
             reset_composers_for_page_change(app);
-            let target = match ctx.screen {
+            match ctx.screen {
                 Screen::Clubhouse if app.is_runner() => {
-                    app.city.dismiss();
-                    app.fight.close();
-                    app.tailor.close();
-                    app.guide.state.close();
-                    // The descent is a touch: the sheet re-reads (and the
-                    // day rolls if it turned) before the strip shows it.
-                    app.fight.reload();
-                    // The first descent opens the guide by itself, once
-                    // per runner (`app/deadchannel/guide`).
-                    app.guide.descend();
-                    // On the shared street from here until the session
-                    // ends (`deadchannel/street`).
-                    app.street.descend();
-                    Screen::City
+                    crate::app::deadchannel::city::input::descend(app)
                 }
-                _ => Screen::Clubhouse,
-            };
-            app.set_screen(target);
+                _ => app.set_screen(Screen::Clubhouse),
+            }
             true
         }
         b'\t' if artboard_rail_takes_tab(app, ctx.screen) => {

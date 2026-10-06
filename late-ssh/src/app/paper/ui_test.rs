@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use super::draw;
 use crate::app::common::theme;
-use crate::app::paper::state::{PaperLayout, PaperModal};
+use crate::app::paper::state::{PaperLayout, PaperModal, PaperNeighbors};
 
 fn edition() -> PaperEdition {
     PaperEdition {
@@ -31,15 +31,18 @@ fn edition() -> PaperEdition {
 fn build(edition: &PaperEdition) -> PaperModal {
     let rail = [Uuid::from_u128(1)];
     let members: HashSet<Uuid> = rail.iter().copied().collect();
-    PaperModal::edition(PaperLayout {
-        edition,
-        announcements: &[],
-        work: None,
-        rail_order: &rail,
-        member_room_ids: &members,
-        blocked_room_ids: &HashSet::new(),
-        bumped_labels: &[],
-    })
+    PaperModal::edition(
+        PaperLayout {
+            edition,
+            announcements: &[],
+            work: None,
+            rail_order: &rail,
+            member_room_ids: &members,
+            blocked_room_ids: &HashSet::new(),
+            bumped_labels: &[],
+        },
+        PaperNeighbors::default(),
+    )
 }
 
 /// Every foreground colour the modal actually puts on screen, in cell order.

@@ -129,6 +129,7 @@ const COMMANDS: &[Command] = &[
     global("lobby", "open/close the Lobby (same as Ctrl+G)"),
     global("me", "send an action line (/me waves)"),
     global("members", "room members"),
+    global("onboard", "take the first-visit tour again"),
     global("pair", "shared coding scratchpad; both run /pair @user"),
     global("paper", "graybeard's daily paper (/paper [YYYY-MM-DD])"),
     global("paste-image", "upload image from CLI clipboard"),

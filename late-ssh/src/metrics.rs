@@ -79,12 +79,14 @@ pub enum PaperPrintResult {
     Failed,
 }
 
-/// How a request to open the paper resolved. `Login` and `Command` are the
-/// two ways a reader got it; the rest are why they did not.
+/// How a request to open the paper resolved. `Login`, `Command`, and
+/// `Browse` (`←`/`→` in the open paper) are the ways a reader got it; the
+/// rest are why they did not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaperOpenResult {
     Login,
     Command,
+    Browse,
     /// Nothing printed for today's edition.
     Empty,
     /// `/paper YYYY-MM-DD` named an edition the press never printed.
@@ -216,10 +218,20 @@ pub enum FirstContactBeat {
 pub enum FightBeat {
     Started,
     SteppedDown,
-    /// A step in against a bright glyph.
+    /// A step onto a bright glyph's node.
     Bright,
     Resumed,
+    /// A card played, the fight still on.
+    Played,
+    /// A turn ended, both standing.
     Round,
+    /// A card drafted into the deck.
+    Drafted,
+    /// A rest on the road spent on the signal, or on the deck.
+    Mended,
+    Cleared,
+    /// A cache on the road taken.
+    Cached,
     Won,
     /// The Old Signal put down: a mark and the reset.
     Slain,
@@ -1425,7 +1437,12 @@ mod inner {
             FightBeat::SteppedDown => "stepped_down",
             FightBeat::Bright => "bright",
             FightBeat::Resumed => "resumed",
+            FightBeat::Played => "played",
             FightBeat::Round => "round",
+            FightBeat::Drafted => "drafted",
+            FightBeat::Mended => "mended",
+            FightBeat::Cleared => "cleared",
+            FightBeat::Cached => "cached",
             FightBeat::Won => "won",
             FightBeat::Slain => "slain",
             FightBeat::Lost => "lost",
@@ -1881,6 +1898,7 @@ mod inner {
             ShareCardKind::RubiksCube => "rubiks_cube",
             ShareCardKind::SlidingPuzzle => "sliding_puzzle",
             ShareCardKind::Day => "day",
+            ShareCardKind::Road => "road",
         }
     }
 
@@ -2292,6 +2310,7 @@ mod inner {
         match result {
             PaperOpenResult::Login => "login",
             PaperOpenResult::Command => "command",
+            PaperOpenResult::Browse => "browse",
             PaperOpenResult::Empty => "empty",
             PaperOpenResult::NotPrinted => "not_printed",
             PaperOpenResult::AlreadyShown => "already_shown",
