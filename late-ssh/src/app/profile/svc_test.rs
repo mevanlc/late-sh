@@ -573,6 +573,55 @@ async fn edit_profile_emits_saved_event_and_refreshes_snapshot() {
     assert_eq!(updated.art_splash_mode, ArtSplashMode::Never);
 }
 
+/// Rapid full-profile saves from cloned handles must leave the final edit
+/// intact, including when a fresh burst follows a drained writer.
+#[tokio::test]
+async fn rapid_profile_saves_keep_the_last_edit_and_resume_after_idle() {
+    use crate::app::profile::state::profile_params_from_profile;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "profile-save-order").await;
+    let client = test_db.db.get().await.expect("db client");
+    let profile = Profile::load(&client, user.id).await.expect("load profile");
+    let service = ProfileService::new(test_db.db.clone(), default_active_users());
+    let other_handle = service.clone();
+    let mut events = service.subscribe_events();
+
+    for burst in 0..2 {
+        for edit in 0..16 {
+            let mut params = profile_params_from_profile(&profile);
+            params.ide = Some(format!("editor-{burst}-{edit}"));
+            params.bio = format!("bio-{burst}-{edit}");
+            let handle = if edit % 2 == 0 {
+                &service
+            } else {
+                &other_handle
+            };
+            handle.edit_profile(user.id, params);
+        }
+
+        timeout(Duration::from_secs(10), async {
+            for _ in 0..16 {
+                assert!(
+                    matches!(
+                        events.recv().await.expect("profile event"),
+                        ProfileEvent::Saved { user_id } if user_id == user.id
+                    ),
+                    "every queued edit must save"
+                );
+            }
+        })
+        .await
+        .expect("queued profile saves timeout");
+
+        let stored = Profile::load(&client, user.id)
+            .await
+            .expect("load saved profile");
+        assert_eq!(stored.ide, Some(format!("editor-{burst}-15")));
+        assert_eq!(stored.bio, format!("bio-{burst}-15"));
+    }
+}
+
 #[tokio::test]
 async fn edit_profile_normalizes_username_before_persisting() {
     let test_db = new_test_db().await;
