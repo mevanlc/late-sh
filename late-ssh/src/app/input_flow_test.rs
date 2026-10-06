@@ -3438,13 +3438,15 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
 }
 
 #[tokio::test]
-async fn forced_tour_gates_input_until_each_named_key() {
+async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "tour-gate-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "tour-gate-flow-it");
+    // Room for the practice table under its header.
+    app.resize(160, 50).unwrap();
 
     // Arm the tour the way a first-ever session does: land in the tavern
     // with the walkthrough pending.
@@ -3454,8 +3456,8 @@ async fn forced_tour_gates_input_until_each_named_key() {
         .enter_screen(crate::app::presence::svc::now_ms());
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The gate swallows everything but the named key: no page hopping, no
-    // Tab, no help modal, no reserved chords (Zen's included), no composer.
+    // The gate swallows everything but Enter: no page hopping, no Tab, no
+    // help modal, no reserved chords (Zen's included), no composer.
     for bytes in [&b"2"[..], b"\t", b"?", b"\x0f", b"\x07", b"\x06", b"i"] {
         app.handle_input(bytes);
     }
@@ -3463,25 +3465,80 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert!(!app.show_help);
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The named keys walk the route in order, nothing else moves it. The
-    // two Enter interludes (the music, the lobby) stay on their page, and
-    // the last page hands over to Zen through its own chord.
-    for (bytes, screen) in [
-        (&b"1"[..], Screen::Dashboard),
-        (b"\r", Screen::Dashboard),
-        (b"2", Screen::Arcade),
-        (b"\r", Screen::Arcade),
-        (b"3", Screen::Games),
-        (b"4", Screen::Artboard),
-        (b"5", Screen::Profiles),
-        (b"0", Screen::Profiles),
-        (b"6", Screen::Leaderboard),
-        (b"0", Screen::Leaderboard),
-        (b"\x06", Screen::Zen),
-        (b"\x06", Screen::Zen),
-        (b"0", Screen::Clubhouse),
+    // Enter walks to Home, then the music stop holds the real Stations
+    // modal open; its own keys and a lone Esc do nothing to it.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Dashboard);
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+    assert!(app.stations_modal_state.is_open());
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(app.stations_modal_state.is_open());
+
+    // On to the arcade, where the lobby stop holds the real Lobby modal.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Arcade);
+    assert!(!app.stations_modal_state.is_open());
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLobby);
+    assert!(app.show_lobby_modal);
+
+    // Enter leads to the practice table, where the break has to be played:
+    // Enter strikes it rather than skipping past.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::DailyMatch);
+    assert!(!app.show_lobby_modal);
+    wait_for_esc_effect(
+        &mut app,
+        |app| {
+            app.daily
+                .board
+                .as_ref()
+                .is_some_and(|board| board.detail.is_some())
+        },
+        "practice table racked",
+    )
+    .await;
+    assert!(!app.daily.practice_played());
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::DailyMatch);
+    wait_for_esc_effect(&mut app, |app| app.daily.practice_played(), "break struck").await;
+    // One shot only: Space does not strike the rack twice.
+    app.handle_input(b" ");
+    app.tick();
+    let shots = |app: &crate::app::state::App| {
+        let board = app.daily.board.as_ref().expect("the table is open");
+        let pool = board.detail.as_ref().and_then(|detail| detail.pool());
+        pool.expect("a pool table").state.move_count()
+    };
+    assert_eq!(shots(&app), 1);
+
+    // Enter leaves the table behind for the games page.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Games);
+    assert!(app.daily.board.is_none());
+
+    // The dungeon stop stays on that page until the fight is won: every
+    // Enter or Space is a blow, and the page only turns after the last one.
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
+    while !app.clubhouse.tour_fight.won() {
+        app.handle_input(b" ");
+        assert_eq!(app.screen, Screen::Games);
+        assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
+    }
+
+    // The rest of the route is Enter alone.
+    for screen in [
+        Screen::Artboard,
+        Screen::Profiles,
+        Screen::Leaderboard,
+        Screen::Zen,
+        Screen::Clubhouse,
     ] {
-        app.handle_input(bytes);
+        app.handle_input(b"\r");
         assert_eq!(app.screen, screen);
     }
     assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
@@ -3493,38 +3550,117 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert_eq!(app.screen, Screen::Arcade);
 }
 
-/// Some terminals and multiplexers swallow Ctrl+F, and the gate also blocks
-/// the `/zen` fallback, so the Zen stop needs a key every terminal sends.
-/// Without one the newcomer can only quit, and the tour restarts next session.
+/// The practice table needs more room than a default terminal has. There
+/// the stop says so and Enter walks on, with no break struck blind.
 #[tokio::test]
-async fn forced_tour_zen_stop_accepts_enter_when_the_chord_is_swallowed() {
+async fn forced_tour_skips_the_practice_table_on_a_small_terminal() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "tour-zen-enter-it").await;
-    let mut app = make_app(test_db.db.clone(), user.id, "tour-zen-enter-flow-it");
+    let user = create_test_user(&test_db.db, "tour-small-table-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-small-table-flow-it");
+    app.resize(80, 24).unwrap();
 
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Pending;
     app.clubhouse
         .enter_screen(crate::app::presence::svc::now_ms());
-    for bytes in [&b"1"[..], b"\r", b"2", b"\r", b"3", b"4", b"5", b"6"] {
-        app.handle_input(bytes);
+    for _ in 0..5 {
+        app.handle_input(b"\r");
     }
-    assert_eq!(app.screen, Screen::Leaderboard);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLeaderboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitTable);
+    assert_eq!(app.screen, Screen::DailyMatch);
+    wait_for_esc_effect(
+        &mut app,
+        |app| {
+            app.daily
+                .board
+                .as_ref()
+                .is_some_and(|board| board.detail.is_some())
+        },
+        "practice table racked",
+    )
+    .await;
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("this table needs a bigger window"),
+        "frame={frame:?}"
+    );
+    assert!(frame.contains("[Enter] next: the games"), "frame={frame:?}");
 
     app.handle_input(b"\r");
-    assert_eq!(app.screen, Screen::Zen);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitZen);
+    assert_eq!(app.screen, Screen::Games);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitGames);
+    assert!(app.daily.board.is_none());
+}
 
-    // Enter is not a way past the Zen box itself: that one still names `0`.
+/// `q` at the music stop asks before quitting, and the held Stations modal
+/// stays out of the prompt's way until Esc brings the tour back.
+#[tokio::test]
+async fn forced_tour_quit_confirm_shows_over_the_held_stations_modal() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "tour-quit-music-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-quit-music-flow-it");
+    app.resize(80, 24).unwrap();
+
+    app.set_screen(Screen::Clubhouse);
+    app.clubhouse.tutorial = Tutorial::Pending;
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
     app.handle_input(b"\r");
-    assert_eq!(app.screen, Screen::Zen);
-    app.handle_input(b"0");
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+
+    app.handle_input(b"q");
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Clicked by mistake, right?"),
+        "frame={frame:?}"
+    );
+    assert!(!frame.contains("the tour · the radio"), "frame={frame:?}");
+
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("Clicked by mistake, right?"),
+        "frame={frame:?}"
+    );
+    assert!(frame.contains("the tour · the radio"), "frame={frame:?}");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+}
+
+/// `/onboard` from Home puts anyone back at the tavern door with the tour
+/// running from the top, as forced as a first visit.
+#[tokio::test]
+async fn onboard_command_starts_the_tour_again() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let (_test_db, mut app) = chat_compose_app("onboard-command").await;
+    app.clubhouse.tutorial = Tutorial::Done;
+    for _ in 0..3 {
+        app.clubhouse.tour_fight.strike();
+    }
+    assert!(app.clubhouse.tour_fight.won());
+
+    app.handle_input(b"/onboard");
+    app.handle_input(b"\r");
     assert_eq!(app.screen, Screen::Clubhouse);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
+    assert!(!app.clubhouse.tour_fight.won());
+
+    app.handle_input(b"3");
+    assert_eq!(app.screen, Screen::Clubhouse);
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitChat);
 }
 
 /// The Lounge composer is plain speech: a `/` draft is refused with a

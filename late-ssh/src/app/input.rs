@@ -2041,6 +2041,11 @@ fn dispatch_escape(app: &mut App) {
         quit_confirm::input::handle_escape(app);
         return;
     }
+    // A lone Esc skips the tour gate the same way, and would close the modal
+    // or the practice table a stop is holding open.
+    if app.clubhouse.tutorial_forced_step().is_some() {
+        return;
+    }
     if app.show_help {
         help_modal::input::handle_escape(app);
         return;
@@ -3558,13 +3563,13 @@ pub(crate) fn trigger_global_quit(app: &mut App) {
     }
 }
 
-/// The forced first-visit tour: while a tour box names a key
-/// (`clubhouse::state::State::tutorial_forced_step`), that key and quitting
-/// are the only inputs that do anything. Everything else, mouse, arrows,
-/// and chords included, dies here so no modal, composer, or game can hijack
-/// a newcomer mid-route. Returns true when the event was consumed.
+/// The forced first-visit tour: while a stop is up
+/// (`clubhouse::state::State::tutorial_forced_step`), Enter moves it on and
+/// quitting is the way out. Everything else, mouse, arrows, and chords
+/// included, dies here so no modal, composer, or game can hijack a newcomer
+/// mid-route. Returns true when the event was consumed.
 fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
-    use crate::app::clubhouse::state::TourStep;
+    use crate::app::clubhouse::state::{TableStop, TourStep};
 
     let Some(step) = app.clubhouse.tutorial_forced_step() else {
         return false;
@@ -3575,32 +3580,81 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
         // Arrows, mouse, pastes: swallowed while the tour runs.
         _ => return true,
     };
-    match step {
-        TourStep::Page(expected, screen) if byte == expected => {
-            // `set_screen` runs `tutorial_screen_entered`, which advances
-            // the tour to the next stop.
-            app.set_screen(screen);
-        }
-        // The Zen stop teaches the chord itself, so it runs the same toggle
-        // Ctrl+F runs anywhere (modals closed, return page remembered).
-        // Enter does the same: terminals and multiplexers that swallow the
-        // chord would otherwise trap a newcomer here, since the gate also
-        // blocks the `/zen` fallback.
-        TourStep::Zen if matches!(byte, CTRL_F | b'\r' | b'\n') => {
-            toggle_zen_globally(app);
-        }
-        TourStep::Enter if matches!(byte, b'\r' | b'\n') => {
-            if app.clubhouse.tutorial_advance() {
-                app.persist_clubhouse_tutorial_done();
+    match (step, byte) {
+        (TourStep::Enter, b'\r' | b'\n') => tour_advance(app),
+        // The table's one shot has to be played: Enter or Space strikes the
+        // break, and only then does Enter move on. A terminal the table does
+        // not fit has no shot to see, so Enter walks on from there.
+        (TourStep::Table, b'\r' | b'\n' | b' ') => {
+            let table = crate::app::clubhouse::ui::table_stop(
+                app.content_area(),
+                app.daily.practice_played(),
+            );
+            match (table, byte) {
+                (TableStop::Racked, _) => app.daily.practice_break(),
+                (TableStop::TooSmall | TableStop::Played, b' ') => {}
+                (TableStop::TooSmall | TableStop::Played, _) => tour_advance(app),
             }
         }
-        TourStep::Page(..) | TourStep::Zen | TourStep::Enter => match byte {
-            // The way out is always open.
-            b'q' | b'Q' => trigger_global_quit(app),
-            _ => {}
-        },
+        // The fight is the same: every press is the next blow until it is won.
+        (TourStep::Fight, b'\r' | b'\n') if app.clubhouse.tour_fight.won() => tour_advance(app),
+        (TourStep::Fight, b'\r' | b'\n' | b' ') => app.clubhouse.tour_fight.strike(),
+        // The way out is always open.
+        (TourStep::Enter | TourStep::Table | TourStep::Fight, b'q' | b'Q') => {
+            trigger_global_quit(app)
+        }
+        (TourStep::Enter | TourStep::Table | TourStep::Fight, _) => {}
     }
+    sync_tour_modal(app);
     true
+}
+
+/// `/onboard`: the first-visit tour from the top, for anyone who asks.
+/// Through `leave_board` so a board left behind is closed properly.
+pub(crate) fn start_tour(app: &mut App) {
+    crate::app::lobby::daily::board_input::leave_board(app, Screen::Clubhouse);
+    app.clubhouse.begin_tutorial(
+        crate::app::presence::svc::now_ms(),
+        crate::app::clubhouse::state::TourStart::Rerun,
+    );
+}
+
+/// Enter at a tour stop: walk the newcomer to wherever the next one lives.
+fn tour_advance(app: &mut App) {
+    use crate::app::clubhouse::state::TourMove;
+
+    match app.clubhouse.tutorial_advance() {
+        TourMove::Stay => {}
+        // Through `leave_board` so a practice table left behind is dropped.
+        TourMove::Page(screen) => crate::app::lobby::daily::board_input::leave_board(app, screen),
+        // A pool table nobody else sees, for one break.
+        TourMove::Table => {
+            let username = app.username.clone();
+            app.daily.open_practice_table(Screen::Arcade, &username);
+            app.set_screen(Screen::DailyMatch);
+        }
+        // The same toggle Ctrl+F runs anywhere (modals closed, return page
+        // remembered).
+        TourMove::Zen => toggle_zen_globally(app),
+        TourMove::Finished => app.persist_clubhouse_tutorial_done(),
+    }
+}
+
+/// Hold open the real modal the current stop pitches, and close it once the
+/// tour has moved past.
+fn sync_tour_modal(app: &mut App) {
+    use crate::app::clubhouse::state::TourModal;
+
+    let modal = app.clubhouse.tour_modal();
+    match (
+        modal == TourModal::Stations,
+        app.stations_modal_state.is_open(),
+    ) {
+        (true, false) => app.stations_modal_state.open(app.selected_radio_station),
+        (false, true) => app.stations_modal_state.close(),
+        (true, true) | (false, false) => {}
+    }
+    app.show_lobby_modal = modal == TourModal::Lobby;
 }
 
 /// Live games own Ctrl+S even when they currently leave it unbound. Running

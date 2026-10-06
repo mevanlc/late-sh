@@ -1,12 +1,7 @@
 # Door Games & MUDs - Candidate Research
 
 Investigation notes for slowly adding more door games / MUDs to late.sh.
-Status: **research notes.** Last updated 2026-07-28 (A Dark Room v1 is playable
-end to end: the room and village acts, the pacing decision, and the door's own
-context file). Previous cut 2026-07-21: Brogue CE
-is the next door, one marketing beat before the Green Dragon push (see root
-`DRAGON.md`); TradeWars/twclone re-parked as future season/event content
-despite a green spike; museum wing passed on.
+Status: **research notes.**
 
 ## TL;DR
 
@@ -246,9 +241,9 @@ ever want the gladiator-arena vibe, a **native Rust original** inspired by it
 (mechanics aren't copyrightable) is the only sane route - and at that point it's
 really a new Lateania-style game, not "The Pit."
 
-**Resolved 2026-07-21:** the gladiator vibe is absorbed into the Green Dragon
-plan instead - a town arena where player characters fight each other, results
-called into #lounge (see root `DRAGON.md`, we-own-it liberties). Gladiators
+**Resolved:** the gladiator vibe is absorbed into deadchannel's arena
+instead - runners fight each other on a nightly card, with bets and an
+announcer (see `late-ssh/src/app/deadchannel/GAME.md`, "The arena"). Gladiators
 fighting is a mechanic, not a door; The Pit stays red and stays unhosted.
 
 ## The incremental shelf: A Dark Room and its neighbours

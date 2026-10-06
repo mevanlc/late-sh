@@ -79,12 +79,14 @@ pub enum PaperPrintResult {
     Failed,
 }
 
-/// How a request to open the paper resolved. `Login` and `Command` are the
-/// two ways a reader got it; the rest are why they did not.
+/// How a request to open the paper resolved. `Login`, `Command`, and
+/// `Browse` (`←`/`→` in the open paper) are the ways a reader got it; the
+/// rest are why they did not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaperOpenResult {
     Login,
     Command,
+    Browse,
     /// Nothing printed for today's edition.
     Empty,
     /// `/paper YYYY-MM-DD` named an edition the press never printed.
@@ -2292,6 +2294,7 @@ mod inner {
         match result {
             PaperOpenResult::Login => "login",
             PaperOpenResult::Command => "command",
+            PaperOpenResult::Browse => "browse",
             PaperOpenResult::Empty => "empty",
             PaperOpenResult::NotPrinted => "not_printed",
             PaperOpenResult::AlreadyShown => "already_shown",
