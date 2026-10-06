@@ -32,7 +32,7 @@ use late_core::MutexRecover;
 use late_core::db::Db;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio::sync::{broadcast, mpsc, oneshot, watch};
+use tokio::sync::{broadcast, oneshot, watch};
 use tracing::{Instrument, info_span};
 
 use crate::app::profile::ledger::{self, LedgerRow, LedgerSources};
@@ -45,8 +45,8 @@ use crate::usernames::{self, UsernameDirectory};
 pub struct ProfileService {
     db: Db,
     snapshot_txs: Arc<Mutex<HashMap<Uuid, watch::Sender<ProfileSnapshot>>>>,
-    profile_writes: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<ProfileParams>>>>,
     interaction_mode_writes: Arc<Mutex<HashMap<Uuid, watch::Sender<InteractionMode>>>>,
+    profile_edit_writes: Arc<Mutex<HashMap<Uuid, watch::Sender<ProfileParams>>>>,
     evt_tx: broadcast::Sender<ProfileEvent>,
     active_users: ActiveUsers,
     username_directory: Option<UsernameDirectory>,
@@ -177,8 +177,8 @@ impl ProfileService {
         Self {
             db,
             snapshot_txs: Arc::new(Mutex::new(HashMap::new())),
-            profile_writes: Arc::new(Mutex::new(HashMap::new())),
             interaction_mode_writes: Arc::new(Mutex::new(HashMap::new())),
+            profile_edit_writes: Arc::new(Mutex::new(HashMap::new())),
             evt_tx,
             active_users,
             username_directory: None,
@@ -363,22 +363,23 @@ impl ProfileService {
         Ok(())
     }
 
-    /// Preserve save order without blocking input or another account's edits.
-    pub fn edit_profile(&self, user_id: Uuid, mut params: ProfileParams) {
-        let mut writers = self.profile_writes.lock_recover();
+    /// Persist the latest profile draft with one background writer per user.
+    /// Every save carries the whole draft, so saves land in order and a burst
+    /// collapses into its newest draft instead of racing an older one.
+    pub fn edit_profile(&self, user_id: Uuid, params: ProfileParams) {
+        let mut writers = self.profile_edit_writes.lock_recover();
         if let Some(writer) = writers.get(&user_id) {
-            match writer.send(params) {
-                Ok(()) => return,
-                Err(error) => params = error.0,
-            }
+            writer.send_replace(params);
+            return;
         }
-        let (writer, mut pending) = mpsc::unbounded_channel();
+        let (writer, mut pending) = watch::channel(params);
         writers.insert(user_id, writer);
         drop(writers);
         let service = self.clone();
         tokio::spawn(
             async move {
                 loop {
+                    let params = pending.borrow_and_update().clone();
                     if let Err(e) = service.do_edit_profile(user_id, params).await {
                         late_core::error_span!(
                             "profile_edit_failed",
@@ -390,15 +391,12 @@ impl ProfileService {
                             message: profile_error_message(&e).to_string(),
                         });
                     }
-                    // Enqueue and retire under the same lock so a new save
-                    // cannot be stranded in a writer that is exiting.
-                    let mut writers = service.profile_writes.lock_recover();
-                    match pending.try_recv() {
-                        Ok(next) => params = next,
-                        Err(_) => {
-                            writers.remove(&user_id);
-                            break;
-                        }
+                    // Share the enqueue lock so a new draft cannot arrive
+                    // between checking for work and retiring this writer.
+                    let mut writers = service.profile_edit_writes.lock_recover();
+                    if !pending.has_changed().unwrap_or(false) {
+                        writers.remove(&user_id);
+                        break;
                     }
                 }
             }
