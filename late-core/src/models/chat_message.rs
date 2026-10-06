@@ -257,6 +257,7 @@ impl ChatMessage {
                  JOIN users author ON author.id = msg.user_id
                  JOIN chat_rooms room ON room.id = msg.room_id
                  WHERE msg.room_id = $1
+                   AND /* channel visibility */
                    AND room.kind <> ALL($7::text[])
                    AND (
                      (room.visibility = 'public' AND room.kind <> 'game')
@@ -280,6 +281,7 @@ impl ChatMessage {
                  JOIN users author ON author.id = msg.user_id
                  JOIN chat_rooms room ON room.id = msg.room_id
                  WHERE msg.room_id = $1
+                   AND /* channel visibility */
                    AND room.kind <> ALL($7::text[])
                    AND (
                      (room.visibility = 'public' AND room.kind <> 'game')
@@ -299,9 +301,10 @@ impl ChatMessage {
             }
         };
 
+        let sql = super::channel_block::visible_query(sql, "room", "$2");
         let rows = client
             .query(
-                sql,
+                &sql,
                 &[
                     &room_id,
                     &user_id,
@@ -345,11 +348,13 @@ impl ChatMessage {
     ) -> Result<Vec<Self>> {
         let rows = client
             .query(
-                "SELECT msg.*
+                &super::channel_block::visible_query(
+                    "SELECT msg.*
                  FROM chat_messages msg
                  JOIN users author ON author.id = msg.user_id
                  JOIN chat_rooms room ON room.id = msg.room_id
                  WHERE msg.room_id = $1
+                   AND /* channel visibility */
                    AND room.visibility = 'public'
                    AND EXISTS (
                         SELECT 1 FROM chat_room_members mem
@@ -362,6 +367,9 @@ impl ChatMessage {
                    AND COALESCE((author.settings->>'system')::boolean, false) = false
                  ORDER BY msg.created DESC, msg.id DESC
                  LIMIT $5",
+                    "room",
+                    "$2",
+                ),
                 &[&room_id, &user_id, &floor, &exclude_user_ids, &limit],
             )
             .await?;
@@ -421,11 +429,13 @@ impl ChatMessage {
     ) -> Result<Option<Self>> {
         let row = client
             .query_opt(
-                "SELECT msg.*
+                &super::channel_block::visible_query(
+                    "SELECT msg.*
                  FROM chat_messages msg
                  JOIN users author ON author.id = msg.user_id
                  JOIN chat_rooms room ON room.id = msg.room_id
                  WHERE msg.room_id = $1
+                   AND /* channel visibility */
                    AND (
                      (room.visibility = 'public' AND room.kind <> 'game')
                      OR EXISTS (
@@ -441,6 +451,9 @@ impl ChatMessage {
                    AND COALESCE((author.settings->>'system')::boolean, false) = false
                  ORDER BY msg.created ASC, msg.id ASC
                  LIMIT 1",
+                    "room",
+                    "$2",
+                ),
                 &[&room_id, &user_id, &cutoff, &exclude_user_ids],
             )
             .await?;
@@ -497,10 +510,12 @@ impl ChatMessage {
     ) -> Result<Option<Self>> {
         let row = client
             .query_opt(
-                "SELECT msg.*
+                &super::channel_block::visible_query(
+                    "SELECT msg.*
                  FROM chat_messages msg
                  JOIN chat_rooms room ON room.id = msg.room_id
                  WHERE msg.id = $1
+                   AND /* channel visibility */
                    AND (
                      (room.visibility = 'public' AND room.kind <> 'game')
                      OR EXISTS (
@@ -508,6 +523,9 @@ impl ChatMessage {
                         WHERE mem.room_id = msg.room_id AND mem.user_id = $2
                      )
                    )",
+                    "room",
+                    "$2",
+                ),
                 &[&message_id, &user_id],
             )
             .await?;
@@ -534,13 +552,15 @@ impl ChatMessage {
         let pattern = format!("%{}%", escape_like_pattern(query));
         let rows = client
             .query(
-                "SELECT msg.*
+                &super::channel_block::visible_query(
+                    "SELECT msg.*
                  FROM chat_messages msg
                  JOIN chat_room_members mem
                    ON mem.room_id = msg.room_id AND mem.user_id = $1
                  JOIN chat_rooms room ON room.id = msg.room_id
                  JOIN users author ON author.id = msg.user_id
                  WHERE msg.body ILIKE $2 ESCAPE '\\'
+                   AND /* channel visibility */
                    AND room.kind <> 'game'
                    AND room.kind <> ALL($6::text[])
                    AND ($3::uuid IS NULL OR msg.room_id = $3)
@@ -550,6 +570,9 @@ impl ChatMessage {
                    AND COALESCE((author.settings->>'system')::boolean, false) = false
                  ORDER BY msg.created DESC, msg.id DESC
                  LIMIT $5",
+                    "room",
+                    "$1",
+                ),
                 &[
                     &user_id,
                     &pattern,

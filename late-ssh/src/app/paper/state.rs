@@ -51,6 +51,16 @@ impl PaperState {
             self.awaiting = None;
         }
     }
+
+    /// Cached columns must not outlive a change to this reader's blocklist.
+    pub(crate) fn invalidate_channel_visibility(&mut self) {
+        if self.modal.as_ref().is_some_and(|modal| !modal.at_the_press) {
+            self.modal = None;
+        }
+        self.pending_modal = None;
+        // An outstanding request is laid out with the current blocklist when
+        // its answer arrives, so leave its spinner and request intact.
+    }
 }
 
 /// What `/paper` asked for. The open is for everyone; the press commands
@@ -278,6 +288,8 @@ pub(crate) struct PaperLayout<'a> {
     /// skipped, rooms missing from the rail follow by activity.
     pub rail_order: &'a [Uuid],
     pub member_room_ids: &'a HashSet<Uuid>,
+    /// Hide a blocked room's whole column and status entry, never prose.
+    pub blocked_room_ids: &'a HashSet<Uuid>,
     /// Rail labels (slugs) of rooms under an active `room_bump`.
     pub bumped_labels: &'a [String],
 }
@@ -451,6 +463,7 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
         work,
         rail_order,
         member_room_ids,
+        blocked_room_ids,
         bumped_labels,
     } = layout;
     let covered = edition.edition.pred_opt().unwrap_or(edition.edition);
@@ -496,6 +509,7 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
     for room_id in rail_order {
         if let Some(page) = edition.rooms.iter().find(|page| page.room_id == *room_id)
             && member_room_ids.contains(room_id)
+            && !blocked_room_ids.contains(room_id)
             && !member_pages.iter().any(|seen| seen.room_id == page.room_id)
         {
             member_pages.push(page);
@@ -503,6 +517,7 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
     }
     for page in &edition.rooms {
         if member_room_ids.contains(&page.room_id)
+            && !blocked_room_ids.contains(&page.room_id)
             && !member_pages.iter().any(|seen| seen.room_id == page.room_id)
         {
             member_pages.push(page);
@@ -541,7 +556,9 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
         .rooms
         .iter()
         .filter(|page| {
-            page.status == PaperStatus::Ready && !member_room_ids.contains(&page.room_id)
+            page.status == PaperStatus::Ready
+                && !member_room_ids.contains(&page.room_id)
+                && !blocked_room_ids.contains(&page.room_id)
         })
         .collect();
     let is_bumped = |page: &PaperRoomPage| {

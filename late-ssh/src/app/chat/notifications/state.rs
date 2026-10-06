@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use std::{collections::HashSet, time::Instant};
 use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
@@ -18,6 +19,8 @@ pub struct State {
     service: NotificationService,
     user_id: Uuid,
     items: Vec<NotificationView>,
+    blocked_rooms: HashSet<Uuid>,
+    blocks_applied_at: Option<Instant>,
     selected: usize,
     snapshot_rx: watch::Receiver<NotificationSnapshot>,
     event_rx: broadcast::Receiver<NotificationEvent>,
@@ -36,6 +39,8 @@ impl State {
             service,
             user_id,
             items: Vec::new(),
+            blocked_rooms: HashSet::new(),
+            blocks_applied_at: None,
             selected: 0,
             snapshot_rx,
             event_rx,
@@ -44,6 +49,22 @@ impl State {
             marker_read_at: None,
             preserve_marker_read_at: false,
         }
+    }
+
+    pub fn set_blocked_rooms(&mut self, ids: HashSet<Uuid>, at: Instant) {
+        self.blocked_rooms = ids;
+        self.blocks_applied_at = Some(at);
+        self.items
+            .retain(|item| !self.blocked_rooms.contains(&item.room_id));
+        self.selected = clamp_index(self.selected, self.items.len());
+        // Counts are bounded queries, not derivable from this list's 50 rows.
+        self.unread_count = 0;
+        self.list();
+        self.refresh_unread_count();
+    }
+
+    fn current_read(&self, at: Instant) -> bool {
+        self.blocks_applied_at.is_none_or(|applied| at >= applied)
     }
 
     pub fn all_items(&self) -> &[NotificationView] {
@@ -106,8 +127,16 @@ impl State {
     fn drain_snapshot(&mut self) {
         if let Ok(true) = self.snapshot_rx.has_changed() {
             let snapshot = self.snapshot_rx.borrow_and_update().clone();
-            if snapshot.user_id == Some(self.user_id) {
-                self.items = snapshot.items;
+            if snapshot.user_id == Some(self.user_id)
+                && snapshot
+                    .read_started_at
+                    .is_none_or(|at| self.current_read(at))
+            {
+                self.items = snapshot
+                    .items
+                    .into_iter()
+                    .filter(|item| !self.blocked_rooms.contains(&item.room_id))
+                    .collect();
                 self.selected = clamp_index(self.selected, self.items.len());
             }
         }
@@ -119,10 +148,11 @@ impl State {
             match self.event_rx.try_recv() {
                 Ok(event) => match event {
                     NotificationEvent::UnreadCountUpdated {
+                        read_started_at,
                         user_id,
                         unread_count,
                         last_read_at,
-                    } if user_id == self.user_id => {
+                    } if user_id == self.user_id && self.current_read(read_started_at) => {
                         self.unread_count = unread_count;
                         self.last_read_at = last_read_at;
                         if unread_count == 0 && !self.preserve_marker_read_at {
@@ -130,9 +160,14 @@ impl State {
                         }
                     }
                     NotificationEvent::NewMention {
+                        read_started_at,
+                        room_id,
                         user_id,
                         unread_count,
-                    } if user_id == self.user_id => {
+                    } if user_id == self.user_id
+                        && self.current_read(read_started_at)
+                        && !self.blocked_rooms.contains(&room_id) =>
+                    {
                         let increased = unread_count > self.unread_count;
                         self.unread_count = unread_count;
                         if increased {

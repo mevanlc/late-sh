@@ -69,6 +69,18 @@ impl State {
         self.loading = false;
     }
 
+    pub fn remove_blocked(&mut self, ids: &std::collections::HashSet<uuid::Uuid>) {
+        let selected_id = self.selected_item().map(|room| room.room_id);
+        self.items.retain(|room| !ids.contains(&room.room_id));
+        self.selected = selected_id
+            .and_then(|id| {
+                self.visible_items()
+                    .iter()
+                    .position(|room| room.room_id == id)
+            })
+            .unwrap_or(0);
+    }
+
     pub fn finish_loading(&mut self) {
         self.loading = false;
     }

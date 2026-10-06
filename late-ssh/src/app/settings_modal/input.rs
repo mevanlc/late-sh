@@ -19,6 +19,10 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
         return;
     }
     app.settings_modal_state.mouse.reveal_selection();
+    if app.settings_modal_state.blocked_channels.open {
+        app.settings_modal_state.blocked_channels.input(event);
+        return;
+    }
     if app.settings_modal_state.invites_dialog().open() {
         handle_invites_dialog_input(app, event);
         return;
@@ -346,7 +350,9 @@ fn activate_mouse_target(app: &mut App, target: Target) {
     state.select_mouse_target(target);
     match target {
         Target::Close => {
-            if state.invites_dialog().open() {
+            if state.blocked_channels.open {
+                state.blocked_channels.back();
+            } else if state.invites_dialog().open() {
                 state.close_invites_dialog();
             } else if state.link_account_dialog().open() {
                 state.close_link_account_dialog();
@@ -406,6 +412,10 @@ fn activate_mouse_target(app: &mut App, target: Target) {
         }
         Target::Sidebar(_) => state.toggle_right_sidebar_component(),
         Target::SidebarMove(_, delta) => state.move_right_sidebar_component(delta),
+        Target::AddBlockedChannel => state.blocked_channels.add(),
+        Target::BlockChannel(id) => state.blocked_channels.set(id, true),
+        Target::UnblockChannel(id) => state.blocked_channels.set(id, false),
+        Target::BlockChannelsBack => state.blocked_channels.back(),
         Target::Badge(_) => state.toggle_chat_badge(),
         Target::Pick(_) => apply_picker_selection(app),
         Target::Bio => {

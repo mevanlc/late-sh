@@ -1,8 +1,27 @@
 use super::*;
 
+#[test]
+fn channel_block_drops_already_queued_alerts_without_hiding_unrelated_alerts() {
+    let (notifier, mut outbox) = channel();
+    let hidden = uuid::Uuid::new_v4();
+    let profile = Profile {
+        notify_kinds: vec!["mentions".into()],
+        ..Default::default()
+    };
+    notifier.push(Notification::mention("hidden", "hidden preview".into()).in_room(hidden));
+    notifier.push(Notification::friend_online("visible friend"));
+    let bytes = outbox
+        .drain(&profile, &std::collections::HashSet::from([hidden]))
+        .unwrap();
+    let payload = String::from_utf8(bytes).unwrap();
+    assert!(!payload.contains("hidden preview"));
+    assert!(payload.contains("visible friend"));
+}
+
 fn dm_bytes(mode: Mode, bell: bool) -> String {
     let notification = Notification::dm("sender", "hello".to_string());
     let notification = Notification {
+        room_id: None,
         title: "DM title".to_string(),
         ..notification
     };
@@ -33,6 +52,7 @@ fn terminal_bytes_osc9_mode_emits_only_osc_9() {
 #[test]
 fn terminal_bytes_sanitize_control_bytes_and_separators() {
     let notification = Notification {
+        room_id: None,
         kind: Kind::Dms,
         title: "hey;\x07".to_string(),
         body: "a\nb\x1bc".to_string(),
@@ -66,19 +86,25 @@ fn drain_emits_first_enabled_kind_and_drops_the_rest() {
     notifier.push(Notification::mention("b", "mention body".to_string()));
     notifier.push(Notification::mention("c", "later body".to_string()));
 
-    let bytes = outbox.drain(&profile).expect("one payload");
+    let bytes = outbox
+        .drain(&profile, &Default::default())
+        .expect("one payload");
     let got = String::from_utf8(bytes).expect("valid utf8");
     assert!(got.contains("mention body"));
     assert!(!got.contains("dm body"));
     // The rest were dropped, not queued.
-    assert!(outbox.drain(&profile).is_none());
+    assert!(outbox.drain(&profile, &Default::default()).is_none());
 }
 
 #[test]
 fn drain_always_allows_friend_notifications() {
     let (notifier, mut outbox) = channel();
     notifier.push(Notification::friend_online("pal"));
-    assert!(outbox.drain(&Profile::default()).is_some());
+    assert!(
+        outbox
+            .drain(&Profile::default(), &Default::default())
+            .is_some()
+    );
 }
 
 #[test]
@@ -90,9 +116,9 @@ fn drain_honors_cooldown() {
         ..Profile::default()
     };
     notifier.push(Notification::dm("a", "first".to_string()));
-    assert!(outbox.drain(&profile).is_some());
+    assert!(outbox.drain(&profile, &Default::default()).is_some());
     notifier.push(Notification::dm("a", "second".to_string()));
-    assert!(outbox.drain(&profile).is_none());
+    assert!(outbox.drain(&profile, &Default::default()).is_none());
 }
 
 // The whole reason `Streams` exists as its own kind: both stream alerts
@@ -111,20 +137,38 @@ fn stream_alerts_gate_on_their_own_kind() {
         ..Profile::default()
     };
     notifier.push(Notification::stream_viewer("bob"));
-    assert!(outbox.drain(&everything_else).is_none());
+    assert!(
+        outbox
+            .drain(&everything_else, &Default::default())
+            .is_none()
+    );
     notifier.push(Notification::friend_live("pal", None));
-    assert!(outbox.drain(&everything_else).is_none());
+    assert!(
+        outbox
+            .drain(&everything_else, &Default::default())
+            .is_none()
+    );
 
     let streams_on = Profile {
         notify_kinds: vec!["streams".to_string()],
         ..Profile::default()
     };
     notifier.push(Notification::stream_viewer("bob"));
-    let got = String::from_utf8(outbox.drain(&streams_on).expect("one payload")).expect("utf8");
+    let got = String::from_utf8(
+        outbox
+            .drain(&streams_on, &Default::default())
+            .expect("one payload"),
+    )
+    .expect("utf8");
     assert!(got.contains("@bob is watching your stream"));
 
     notifier.push(Notification::friend_live("pal", Some("render loop")));
-    let got = String::from_utf8(outbox.drain(&streams_on).expect("one payload")).expect("utf8");
+    let got = String::from_utf8(
+        outbox
+            .drain(&streams_on, &Default::default())
+            .expect("one payload"),
+    )
+    .expect("utf8");
     assert!(got.contains("@pal is live: render loop"));
 }
 
@@ -138,14 +182,19 @@ fn gild_alerts_gate_on_the_mentions_kind() {
         ..Profile::default()
     };
     notifier.push(Notification::gilded("bob", "Gold", 3_333));
-    assert!(outbox.drain(&mentions_off).is_none());
+    assert!(outbox.drain(&mentions_off, &Default::default()).is_none());
 
     let mentions_on = Profile {
         notify_kinds: vec!["mentions".to_string()],
         ..Profile::default()
     };
     notifier.push(Notification::gilded("bob", "Gold", 3_333));
-    let got = String::from_utf8(outbox.drain(&mentions_on).expect("one payload")).expect("utf8");
+    let got = String::from_utf8(
+        outbox
+            .drain(&mentions_on, &Default::default())
+            .expect("one payload"),
+    )
+    .expect("utf8");
     assert!(got.contains("Gold gild received"));
     assert!(got.contains("@bob gilded your message (+3333 chips)"));
 }

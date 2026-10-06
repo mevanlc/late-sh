@@ -49,18 +49,18 @@ pub(crate) fn draw(
     state.mouse.finish();
 }
 
-struct Surface<'a> {
+pub(super) struct Surface<'a> {
     buffer: &'a mut Buffer,
 }
 impl Surface<'_> {
-    fn render_widget(&mut self, widget: impl Widget, area: Rect) {
+    pub(super) fn render_widget(&mut self, widget: impl Widget, area: Rect) {
         widget.render(area, self.buffer);
     }
 }
 
 /// Render the complete body once, then copy its viewport and translate only
 /// visible hit targets. Short terminals never compress one-row controls.
-fn draw_scroll(
+pub(super) fn draw_scroll(
     frame: &mut Surface<'_>,
     area: Rect,
     state: &SettingsModalState,
@@ -91,7 +91,7 @@ fn draw_scroll(
     }
 }
 
-fn button(
+pub(super) fn button(
     frame: &mut Surface<'_>,
     area: Rect,
     state: &SettingsModalState,
@@ -107,7 +107,7 @@ fn button(
     state.mouse.hit(rect, target);
 }
 
-fn close_button(frame: &mut Surface<'_>, popup: Rect, state: &SettingsModalState) {
+pub(super) fn close_button(frame: &mut Surface<'_>, popup: Rect, state: &SettingsModalState) {
     button(
         frame,
         Rect::new(
@@ -242,6 +242,10 @@ fn draw_surface(
         state.mouse.clear_surface();
         draw_right_sidebar_components_dialog(frame, popup, state, ownership);
     }
+    if state.blocked_channels.open {
+        state.mouse.clear_surface();
+        super::blocked_channels::draw(frame, popup, state);
+    }
     if state.chat_badges_open() {
         state.mouse.clear_surface();
         draw_chat_badges_dialog(frame, popup, state);
@@ -367,7 +371,10 @@ fn tweak_lines() -> Vec<BodyLine<TweakRow>> {
         | TweakRow::RightSidebar
         | TweakRow::RoomListSidebar => "Appearance",
         TweakRow::ComposerKeepFocused | TweakRow::InteractionMode => "Input",
-        TweakRow::FlagFallback | TweakRow::TerminalImages | TweakRow::ChatBadges => "Display",
+        TweakRow::FlagFallback
+        | TweakRow::TerminalImages
+        | TweakRow::ChatBadges
+        | TweakRow::BlockedChannels => "Display",
         TweakRow::LandingPage | TweakRow::PaperAtLogin | TweakRow::ArtSplash => "Startup",
     })
 }
@@ -999,6 +1006,11 @@ fn draw_tweak_row(frame: &mut Surface<'_>, rect: Rect, state: &SettingsModalStat
             true,
         ),
         TweakRow::ChatBadges => ("Chat badges", chat_badges_span(state), false),
+        TweakRow::BlockedChannels => (
+            "Blocked channels",
+            value_span("Manage…", theme::AMBER()),
+            false,
+        ),
         TweakRow::LandingPage => ("Land on", landing_page_span(draft.landing_page), true),
         TweakRow::PaperAtLogin => (
             "Daily paper at login",
@@ -3821,7 +3833,7 @@ fn has_kind(state: &SettingsModalState, kind: &str) -> bool {
     state.draft().notify_kinds.iter().any(|value| value == kind)
 }
 
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub(super) fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let vertical = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .split(area);

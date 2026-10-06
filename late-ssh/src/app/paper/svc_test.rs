@@ -486,6 +486,71 @@ async fn slash_paper_reopens_the_edition_and_a_non_admin_cannot_run_the_press() 
 }
 
 #[tokio::test]
+async fn channel_block_closes_cached_papers_and_reopening_filters_only_the_room_column() {
+    let (test_db, mut app) = chat_compose_app("paper-block-reader").await;
+    seed_lounge_page(&test_db.db, "- A conversation mentioned #paper-hidden").await;
+    let client = test_db.db.get().await.expect("db client");
+    let hidden = ChatRoom::get_or_create_public_room(&client, "paper-hidden")
+        .await
+        .expect("channel");
+    let edition = edition_for(Utc::now());
+    assert!(
+        PaperRoomEdition::claim_printing(
+            &client,
+            hidden.id,
+            edition,
+            20,
+            4,
+            Utc::now(),
+            PAPER_MAX_ATTEMPTS,
+        )
+        .await
+        .expect("claim")
+    );
+    PaperRoomEdition::finish(
+        &client,
+        hidden.id,
+        edition,
+        Some("- Hidden dedicated column"),
+    )
+    .await
+    .expect("finish");
+    drop(client);
+    app.handle_input(b"/paper\r");
+    wait_for_render_contains(&mut app, "Hidden dedicated column").await;
+    app.paper.pending_modal = app.paper.modal.clone();
+
+    let ids = app
+        .chat
+        .service
+        .set_channel_blocked(app.user_id, hidden.id, true)
+        .await
+        .expect("block channel");
+    app.chat.apply_blocked_rooms(ids, std::time::Instant::now());
+    app.tick();
+    assert!(app.paper.modal.is_none());
+    assert!(app.paper.pending_modal.is_none());
+
+    app.handle_input(b"i/paper\r");
+    wait_for_render_contains(&mut app, "A conversation mentioned #paper-hidden").await;
+    let frame = render_plain(&mut app);
+    assert!(!frame.contains("Hidden dedicated column"), "{frame}");
+    assert!(!frame.contains("/join #paper-hidden"), "{frame}");
+
+    app.handle_input(b"\x1b");
+    let ids = app
+        .chat
+        .service
+        .set_channel_blocked(app.user_id, hidden.id, false)
+        .await
+        .expect("unblock channel");
+    app.chat.apply_blocked_rooms(ids, std::time::Instant::now());
+    app.tick();
+    app.handle_input(b"i/paper\r");
+    wait_for_render_contains(&mut app, "Hidden dedicated column").await;
+}
+
+#[tokio::test]
 async fn a_newcomers_paper_waits_until_the_tour_is_walked() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;

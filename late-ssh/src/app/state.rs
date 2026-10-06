@@ -1414,6 +1414,7 @@ impl App {
             config.feed_service.clone(),
             config.referral_service.clone(),
             config.user_id,
+            config.chat_service.clone(),
         );
         let device_rails = config.key_layout;
         settings_modal_state.open_from_profile(
@@ -3265,6 +3266,9 @@ impl App {
     }
 
     fn handle_voice_join_result(&mut self, result: VoiceJoinTaskResult) {
+        if self.chat.voice_channel_is_blocked(result.channel_id) {
+            return;
+        }
         let ticket = match result.ticket {
             Ok(ticket) => ticket,
             Err(message) => {
@@ -3782,7 +3786,7 @@ impl App {
         }));
     }
 
-    fn voice_leave_current_channel(&mut self) -> bool {
+    pub(crate) fn voice_leave_current_channel(&mut self) -> bool {
         let sent = self
             .paired_client_registry
             .as_ref()

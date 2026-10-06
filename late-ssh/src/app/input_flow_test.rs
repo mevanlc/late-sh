@@ -20,7 +20,12 @@ async fn esc_in_the_settings_langs_picker_closes_the_picker_and_keeps_settings_o
 
 #[tokio::test]
 async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode() {
+    use crate::app::settings_modal::state::TweakRow;
     use late_core::models::user::{ArtSplashMode, extract_art_splash_mode};
+    let splash_index = TweakRow::ALL
+        .iter()
+        .position(|row| *row == TweakRow::ArtSplash)
+        .expect("art splash tweak");
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "splash-tweak-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "splash-tweak-flow-it");
@@ -28,7 +33,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
     wait_for_render_contains(&mut app, "splash-tweak-it").await;
     app.resize(80, 24).unwrap();
     app.handle_input(b"\t\t\t");
-    for _ in 0..11 {
+    for _ in 0..splash_index {
         app.handle_input(b"j");
     }
     wait_for_render_contains(&mut app, "Show Gallery Art on Splash").await;
@@ -74,7 +79,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
     app.handle_input(b"\x0f");
     wait_for_render_contains(&mut app, "Theme").await;
     app.handle_input(b"\t\t\t");
-    for _ in 0..11 {
+    for _ in 0..splash_index {
         app.handle_input(b"j");
     }
     wait_for_render_contains(&mut app, "◂ Never  ▸").await;

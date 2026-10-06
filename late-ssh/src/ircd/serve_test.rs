@@ -940,6 +940,7 @@ async fn tui_reply_projects_reply_tag_to_tag_aware_client() {
         .state
         .chat_service
         .send_message_with_reply_task(SendMessageTask {
+            origin: crate::app::chat::svc::MessageOrigin::Irc,
             user_id: user.id,
             room_id: user.lounge_id,
             room_slug: Some("lounge".to_string()),

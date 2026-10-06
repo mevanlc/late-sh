@@ -37,6 +37,7 @@ fn build(edition: &PaperEdition) -> PaperModal {
         work: None,
         rail_order: &rail,
         member_room_ids: &members,
+        blocked_room_ids: &HashSet::new(),
         bumped_labels: &[],
     })
 }

@@ -10,6 +10,92 @@ fn sorted_ids(mut ids: Vec<Uuid>) -> Vec<Uuid> {
     ids
 }
 
+#[tokio::test]
+async fn channel_block_retires_content_and_rejects_stale_snapshots_and_room_events() {
+    let db = crate::test_helpers::new_test_db().await;
+    let user = late_core::test_utils::create_test_user(&db.db, "block_state").await;
+    let client = db.db.get().await.unwrap();
+    let lounge = ChatRoom::ensure_lounge(&client).await.unwrap();
+    let hidden = ChatRoom::get_or_create_public_room(&client, "hidden_state")
+        .await
+        .unwrap();
+    let message = ChatMessage::create(
+        &client,
+        late_core::models::chat_message::ChatMessageParams {
+            room_id: hidden.id,
+            user_id: user.id,
+            body: "hidden state message".into(),
+        },
+    )
+    .await
+    .unwrap();
+    let mut state = counter_test_state(&db, user.id);
+    state.rooms = vec![
+        (lounge.clone(), Vec::new()),
+        (hidden.clone(), vec![message.clone()]),
+    ];
+    state.lounge_room_id = Some(lounge.id);
+    state.selected_room_id = Some(hidden.id);
+    state.visible_room_id = Some(hidden.id);
+    state.favorite_room_ids = vec![hidden.id];
+    state.unread_counts.insert(hidden.id, 7);
+    state.start_composing_in_room(hidden.id);
+    state.composer_push_str("draft in hidden channel");
+    state.pending_search_jump = Some((hidden.id, message.id));
+    state.pending_delete_message_id = Some(message.id);
+    state.open_overlay("Hidden rules", vec!["room rules".into()]);
+    let stale = super::super::svc::ChatSnapshot {
+        user_id: Some(user.id),
+        read_started_at: Some(Instant::now()),
+        chat_rooms: state.rooms.clone(),
+        unread_counts: state.unread_counts.clone(),
+        lounge_room_id: Some(lounge.id),
+        ..Default::default()
+    };
+    let (snapshot_tx, snapshot_rx) = watch::channel(super::super::svc::ChatSnapshot::default());
+    state.snapshot_rx = snapshot_rx;
+    let applied = Instant::now();
+    assert!(state.apply_blocked_rooms(vec![hidden.id], applied));
+    assert_eq!(state.selected_room_id, Some(lounge.id));
+    assert_eq!(state.favorite_room_ids, vec![hidden.id]);
+    assert!(!state.composing);
+    assert!(state.pending_search_jump.is_none());
+    assert!(state.pending_delete_message_id.is_none());
+    assert!(state.overlay.is_none());
+    snapshot_tx.send(stale).unwrap();
+    state.drain_snapshot();
+    assert!(state.room_is_blocked(hidden.id));
+    assert!(state.rooms.iter().all(|(room, _)| room.id != hidden.id));
+    assert!(!state.unread_counts.contains_key(&hidden.id));
+    let (event_tx, event_rx) = mpsc::unbounded_channel();
+    state.targeted_event_rx = event_rx;
+    event_tx
+        .send(ChatEvent::MessageCreated {
+            message,
+            target_user_ids: None,
+            author_username: Some("block_state".into()),
+            author_bonsai_glyph: None,
+            author_chat_badge: None,
+            author_profile_award_badges: None,
+        })
+        .unwrap();
+    event_tx
+        .send(ChatEvent::RoomJoined {
+            user_id: user.id,
+            room_id: hidden.id,
+            slug: "hidden_state".into(),
+        })
+        .unwrap();
+    state.drain_events();
+    assert!(state.rooms.iter().all(|(room, _)| room.id != hidden.id));
+    assert_eq!(state.selected_room_id, Some(lounge.id));
+    state.start_composing_in_room(hidden.id);
+    assert!(!state.composing);
+    assert!(!state.apply_blocked_rooms(Vec::new(), applied - Duration::from_millis(1)));
+    assert!(state.apply_blocked_rooms(Vec::new(), Instant::now()));
+    assert_eq!(state.favorite_room_ids, vec![hidden.id]);
+}
+
 #[test]
 fn click_display_col_maps_to_char_offset_ascii() {
     // Clicking column N over "hello" lands the caret before the Nth char,

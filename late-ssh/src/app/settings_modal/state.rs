@@ -141,13 +141,14 @@ pub(crate) enum TweakRow {
     FlagFallback,
     TerminalImages,
     ChatBadges,
+    BlockedChannels,
     LandingPage,
     PaperAtLogin,
     ArtSplash,
 }
 
 impl TweakRow {
-    pub(crate) const ALL: [TweakRow; 12] = [
+    pub(crate) const ALL: [TweakRow; 13] = [
         TweakRow::BackgroundColor,
         TweakRow::TextBrightness,
         TweakRow::RightSidebar,
@@ -157,6 +158,7 @@ impl TweakRow {
         TweakRow::FlagFallback,
         TweakRow::TerminalImages,
         TweakRow::ChatBadges,
+        TweakRow::BlockedChannels,
         TweakRow::LandingPage,
         TweakRow::PaperAtLogin,
         TweakRow::ArtSplash,
@@ -612,6 +614,7 @@ pub(crate) struct SettingsModalState {
     statusline_index: usize,
     statusline_pane: StatuslinePane,
     statusline_dial_index: usize,
+    pub(crate) blocked_channels: super::blocked_channels::State,
     chat_badges_open: bool,
     chat_badges_index: usize,
     feeds: Vec<RssFeed>,
@@ -642,6 +645,7 @@ impl SettingsModalState {
         feed_service: FeedService,
         referral_service: ReferralService,
         user_id: Uuid,
+        chat_service: crate::app::chat::svc::ChatService,
     ) -> Self {
         let feed_snapshot_rx = feed_service.subscribe_snapshot();
         let feed_event_rx = feed_service.subscribe_events();
@@ -649,6 +653,7 @@ impl SettingsModalState {
         let referral_event_rx = referral_service.subscribe_events();
         feed_service.list_task(user_id);
         Self {
+            blocked_channels: super::blocked_channels::State::new(chat_service, user_id),
             mouse: MouseState::default(),
             profile_service,
             feed_service,
@@ -770,6 +775,7 @@ impl SettingsModalState {
         self.statusline_index = 0;
         self.statusline_pane = StatuslinePane::List;
         self.statusline_dial_index = 0;
+        self.blocked_channels.open = false;
         self.chat_badges_open = false;
         self.chat_badges_index = 0;
         self.feed_service.list_task(self.user_id);
@@ -779,7 +785,8 @@ impl SettingsModalState {
         // Peek before draining: async results (feed list refresh, account
         // link steps) mutate the open modal without necessarily raising a
         // banner.
-        let changed = self.feed_snapshot_rx.has_changed().unwrap_or(false)
+        let changed = self.blocked_channels.tick()
+            | self.feed_snapshot_rx.has_changed().unwrap_or(false)
             || !self.feed_event_rx.is_empty()
             || !self.profile_event_rx.is_empty()
             || !self.referral_event_rx.is_empty();
@@ -1144,6 +1151,10 @@ impl SettingsModalState {
             TweakRow::ChatBadges => {
                 // A list, not a value: Enter opens the picker instead.
                 self.open_chat_badges();
+                return;
+            }
+            TweakRow::BlockedChannels => {
+                self.blocked_channels.open();
                 return;
             }
             TweakRow::LandingPage => {

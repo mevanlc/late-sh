@@ -25,6 +25,82 @@ async fn fixture() -> (TestDb, App) {
     (db, app)
 }
 
+#[tokio::test]
+async fn channel_block_settings_mouse_and_keyboard_flow() {
+    use late_core::models::{chat_room::ChatRoom, chat_room_member::ChatRoomMember, user::User};
+    let (db, mut app) = fixture().await;
+    let client = db.db.get().await.unwrap();
+    let room = ChatRoom::get_or_create_public_room(&client, "block-settings-room")
+        .await
+        .unwrap();
+    ChatRoomMember::join(&client, room.id, app.user_id)
+        .await
+        .unwrap();
+    app.settings_modal_state.select_tab(Tab::Tweaks);
+    click(&mut app, Target::Tweak(TweakRow::BlockedChannels));
+    settle(&mut app, |app| {
+        !app.settings_modal_state.blocked_channels.pending
+    })
+    .await;
+    let painted = paint(&app);
+    assert!(text(&painted).contains("Blocked channels"));
+    assert!(
+        hits(&app)
+            .iter()
+            .all(|(_, target)| !matches!(target, Target::Tab(_)))
+    );
+    for theme_id in ["contrast", "latte"] {
+        crate::app::common::theme::set_current_by_id(theme_id);
+        let buffer = paint(&app);
+        let add = hits(&app)
+            .into_iter()
+            .find_map(|(rect, target)| (target == Target::AddBlockedChannel).then_some(rect))
+            .unwrap();
+        assert_eq!(
+            buffer[(add.right() - 1, add.y + 1)].bg,
+            crate::app::common::theme::BG_CANVAS(),
+            "empty list cells must retain the {theme_id} dialog background"
+        );
+    }
+    click(&mut app, Target::AddBlockedChannel);
+    app.handle_input(b"block-");
+    app.handle_input(b"\x1b[200~settings-room\x1b[201~");
+    assert!(
+        text(&paint(&app)).contains("#block-settings-room"),
+        "adding={}, search={}, status={:?} screen={}",
+        app.settings_modal_state.blocked_channels.adding,
+        app.settings_modal_state.blocked_channels.search,
+        app.settings_modal_state.blocked_channels.status,
+        text(&paint(&app))
+    );
+    assert!(!text(&paint(&app)).contains("#moderators"));
+    app.handle_input(b"\r");
+    settle(&mut app, |app| {
+        !app.settings_modal_state.blocked_channels.pending && app.chat.room_is_blocked(room.id)
+    })
+    .await;
+    assert!(text(&paint(&app)).contains("#block-settings-room"));
+    assert!(
+        ChatRoomMember::is_member(&client, room.id, app.user_id)
+            .await
+            .unwrap()
+    );
+    // Small frames retain complete one-row controls and foreground hits.
+    app.size = (60, 16);
+    let painted = paint(&app);
+    assert!(text(&painted).contains("Blocked channels"));
+    click(&mut app, Target::UnblockChannel(room.id));
+    settle(&mut app, |app| {
+        !app.settings_modal_state.blocked_channels.pending && !app.chat.room_is_blocked(room.id)
+    })
+    .await;
+    let stored = User::get(&client, app.user_id).await.unwrap().unwrap();
+    assert!(late_core::models::user::extract_blocked_room_ids(&stored.settings).is_empty());
+    click(&mut app, Target::Close);
+    assert!(!app.settings_modal_state.blocked_channels.open);
+    assert!(app.show_settings);
+}
+
 fn paint(app: &App) -> Buffer {
     let mut terminal = Terminal::new(TestBackend::new(app.size.0, app.size.1)).unwrap();
     terminal

@@ -993,6 +993,7 @@ async fn ensure_user_can_join_voice(
         other => anyhow::bail!("unknown voice target kind: {other}"),
     };
 
+    late_core::models::channel_block::ensure_visible(client, user_id, chat_room_id).await?;
     if !ChatRoomMember::is_member(client, chat_room_id, user_id).await? {
         anyhow::bail!("you are not a member of this voice room");
     }

@@ -1483,18 +1483,7 @@ impl User {
         target_id: Uuid,
         key: &str,
     ) -> Result<(bool, Vec<Uuid>)> {
-        let mut settings = Self::settings_for_user(client, user_id).await?;
-        let mut ids = extract_uuid_ids(&settings, key);
-
-        if ids.contains(&target_id) {
-            return Ok((false, ids));
-        }
-
-        ids.push(target_id);
-        ids.sort();
-        set_uuid_ids(&mut settings, key, &ids);
-        Self::update_settings(client, user_id, &settings).await?;
-        Ok((true, ids))
+        Self::set_uuid_setting_id(client, user_id, target_id, key, true).await
     }
 
     async fn remove_uuid_setting_id(
@@ -1503,17 +1492,44 @@ impl User {
         target_id: Uuid,
         key: &str,
     ) -> Result<(bool, Vec<Uuid>)> {
-        let mut settings = Self::settings_for_user(client, user_id).await?;
-        let mut ids = extract_uuid_ids(&settings, key);
+        Self::set_uuid_setting_id(client, user_id, target_id, key, false).await
+    }
 
-        if !ids.contains(&target_id) {
-            return Ok((false, ids));
+    /// Change one UUID in one settings key using the current row, never a
+    /// session's whole settings document. Concurrent edits retain each other.
+    pub(crate) async fn set_uuid_setting_id(
+        client: &(impl tokio_postgres::GenericClient + Sync),
+        user_id: Uuid,
+        target_id: Uuid,
+        key: &str,
+        present: bool,
+    ) -> Result<(bool, Vec<Uuid>)> {
+        let target = target_id.to_string();
+        let row = client.query_opt(
+            "UPDATE users SET settings = (CASE WHEN jsonb_typeof(settings) = 'object' THEN settings ELSE '{}'::jsonb END) || jsonb_build_object($2::text, (
+                SELECT COALESCE(jsonb_agg(value ORDER BY value), '[]'::jsonb)
+                FROM (SELECT DISTINCT value FROM (
+                    SELECT value FROM jsonb_array_elements(CASE
+                        WHEN jsonb_typeof(settings->$2::text) = 'array'
+                        THEN settings->$2::text ELSE '[]'::jsonb END)
+                    WHERE lower(btrim(value #>> '{}')) IS DISTINCT FROM $3::text
+                    UNION ALL SELECT to_jsonb($3::text) WHERE $4
+                ) entries) deduped
+            )), updated = current_timestamp
+            WHERE id = $1 AND EXISTS(SELECT 1 FROM jsonb_array_elements(CASE
+                WHEN jsonb_typeof(settings->$2::text) = 'array' THEN settings->$2::text ELSE '[]'::jsonb END)
+                WHERE lower(btrim(value #>> '{}')) = $3::text) <> $4
+            RETURNING settings",
+            &[&user_id, &key, &target, &present],
+        ).await?;
+        if let Some(row) = row {
+            return Ok((true, extract_uuid_ids(&row.get("settings"), key)));
         }
-
-        ids.retain(|entry| entry != &target_id);
-        set_uuid_ids(&mut settings, key, &ids);
-        Self::update_settings(client, user_id, &settings).await?;
-        Ok((true, ids))
+        let row = client
+            .query_opt("SELECT settings FROM users WHERE id = $1", &[&user_id])
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("user not found"))?;
+        Ok((false, extract_uuid_ids(&row.get("settings"), key)))
     }
 
     /// Atomically merge `theme_id` into `settings` without clobbering other keys.
@@ -1694,11 +1710,19 @@ fn extract_uuid_ids(settings: &Value, key: &str) -> Vec<Uuid> {
     deduped.into_iter().collect()
 }
 
-fn set_uuid_ids(settings: &mut Value, key: &str, ids: &[Uuid]) {
-    if !settings.is_object() {
-        *settings = json!({});
-    }
-    settings[key] = json!(ids.iter().map(Uuid::to_string).collect::<Vec<_>>());
+pub fn extract_blocked_room_ids(settings: &Value) -> Vec<Uuid> {
+    let Some(entries) = settings.get("blocked_room_ids").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| entry.as_str())
+        .map(str::trim)
+        .filter(|value| value.len() == 36)
+        .filter_map(|value| Uuid::parse_str(value).ok())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 /// The chosen interaction mode, or `None` if the user has never picked one -

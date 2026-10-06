@@ -3076,6 +3076,7 @@ pub struct ChatRenderInput<'a> {
     pub room_last_message_at: &'a HashMap<Uuid, Option<DateTime<Utc>>>,
     pub favorite_room_ids: &'a [Uuid],
     pub active_room_effects: &'a HashMap<Uuid, Vec<ActiveChatRoomEffect>>,
+    pub blocked_room_ids: &'a HashSet<Uuid>,
     pub active_poll: Option<&'a ActiveChatPoll>,
     pub collapsed_sections: &'a HashSet<RoomSection>,
     pub selected_room_id: Option<Uuid>,
@@ -3192,6 +3193,7 @@ pub(crate) struct ChatRoomListView<'a> {
     pub room_last_message_at: &'a HashMap<Uuid, Option<DateTime<Utc>>>,
     pub favorite_room_ids: &'a [Uuid],
     pub active_room_effects: &'a HashMap<Uuid, Vec<ActiveChatRoomEffect>>,
+    pub blocked_room_ids: &'a HashSet<Uuid>,
     pub collapsed_sections: &'a HashSet<RoomSection>,
     pub selected_room_id: Option<Uuid>,
     pub room_jump_active: bool,
@@ -3628,6 +3630,7 @@ fn room_list_view_from_render_input<'a>(view: &'a ChatRenderInput<'a>) -> ChatRo
         room_last_message_at: view.room_last_message_at,
         favorite_room_ids: view.favorite_room_ids,
         active_room_effects: view.active_room_effects,
+        blocked_room_ids: view.blocked_room_ids,
         collapsed_sections: view.collapsed_sections,
         selected_room_id: view.selected_room_id,
         room_jump_active: view.room_jump_active,
@@ -4436,7 +4439,7 @@ fn build_cozy_room_rail_rows(view: &ChatRoomListView<'_>, width: u16) -> RoomLis
     // Bumped rooms are advertised as read-only text at the top of the rail;
     // they are not part of `order`, so they take no jump key and never
     // participate in selection or navigation.
-    let bumped_slugs = bumped_join_room_slugs(view.active_room_effects);
+    let bumped_slugs = bumped_join_room_slugs(view.active_room_effects, view.blocked_room_ids);
     let jump_targets: HashMap<RoomSlot, u8> = order
         .iter()
         .copied()
@@ -4930,10 +4933,12 @@ fn stream_rail_label(
 /// of the rail (no slot, no selection, no jump key).
 pub(crate) fn bumped_join_room_slugs(
     active_room_effects: &HashMap<Uuid, Vec<ActiveChatRoomEffect>>,
+    blocked_room_ids: &HashSet<Uuid>,
 ) -> Vec<String> {
     let mut slugs = active_room_effects
-        .values()
-        .filter_map(|effects| {
+        .iter()
+        .filter(|(id, _)| !blocked_room_ids.contains(id))
+        .filter_map(|(_, effects)| {
             let first = effects.first()?;
             (has_room_effect(effects, "room_bump")
                 && first.room_kind == "topic"

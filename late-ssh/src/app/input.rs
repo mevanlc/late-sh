@@ -2603,6 +2603,7 @@ fn chat_room_list_view<'a>(
         room_last_message_at: &app.chat.room_last_message_at,
         favorite_room_ids: &app.profile_state.profile().favorite_room_ids,
         active_room_effects: app.shop_state.active_room_effects(),
+        blocked_room_ids: app.chat.blocked_room_ids(),
         collapsed_sections: &app.chat.collapsed_sections,
         selected_room_id: app.chat.selected_room_id,
         room_jump_active: app.chat.room_jump_active,

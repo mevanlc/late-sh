@@ -2,6 +2,7 @@ use late_core::{
     db::Db,
     models::notification::{Notification, NotificationView},
 };
+use std::time::Instant;
 use tokio::sync::{broadcast, watch};
 use tracing::{Instrument, info_span};
 use uuid::Uuid;
@@ -12,16 +13,20 @@ use crate::app::common::mentions;
 pub struct NotificationSnapshot {
     pub user_id: Option<Uuid>,
     pub items: Vec<NotificationView>,
+    pub read_started_at: Option<Instant>,
 }
 
 #[derive(Clone, Debug)]
 pub enum NotificationEvent {
     UnreadCountUpdated {
+        read_started_at: Instant,
         user_id: Uuid,
         unread_count: i64,
         last_read_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     NewMention {
+        read_started_at: Instant,
+        room_id: Uuid,
         user_id: Uuid,
         unread_count: i64,
     },
@@ -74,9 +79,11 @@ impl NotificationService {
     }
 
     async fn do_list(&self, user_id: Uuid) -> anyhow::Result<()> {
+        let read_started_at = Instant::now();
         let client = self.db.get().await?;
         let items = Notification::list_for_user(&client, user_id, 50).await?;
         self.snapshot_tx.send(NotificationSnapshot {
+            read_started_at: Some(read_started_at),
             user_id: Some(user_id),
             items,
         })?;
@@ -98,10 +105,12 @@ impl NotificationService {
     }
 
     async fn publish_unread_count(&self, user_id: Uuid) -> anyhow::Result<()> {
+        let read_started_at = Instant::now();
         let client = self.db.get().await?;
         let unread_count = Notification::unread_count(&client, user_id).await?;
         let last_read_at = Notification::last_read_at(&client, user_id).await?;
         let _ = self.evt_tx.send(NotificationEvent::UnreadCountUpdated {
+            read_started_at,
             user_id,
             unread_count,
             last_read_at,
@@ -170,10 +179,12 @@ impl NotificationService {
     }
 
     async fn do_mark_all_read(&self, user_id: Uuid) -> anyhow::Result<()> {
+        let read_started_at = Instant::now();
         let client = self.db.get().await?;
         Notification::mark_all_read(&client, user_id).await?;
         let last_read_at = Notification::last_read_at(&client, user_id).await?;
         let _ = self.evt_tx.send(NotificationEvent::UnreadCountUpdated {
+            read_started_at,
             user_id,
             unread_count: 0,
             last_read_at,
@@ -239,8 +250,11 @@ impl NotificationService {
 
         // Broadcast updated unread counts for each mentioned user.
         for &uid in &user_ids {
+            let read_started_at = Instant::now();
             let count = Notification::unread_count(&client, uid).await?;
             let _ = self.evt_tx.send(NotificationEvent::NewMention {
+                read_started_at,
+                room_id,
                 user_id: uid,
                 unread_count: count,
             });

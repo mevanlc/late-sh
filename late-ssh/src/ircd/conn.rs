@@ -1063,6 +1063,7 @@ impl Session {
             }
             self.state.chat_service.send_message_with_reply_task(
                 crate::app::chat::svc::SendMessageTask {
+                    origin: crate::app::chat::svc::MessageOrigin::Irc,
                     user_id: self.user_id,
                     room_id,
                     room_slug: slug,
@@ -1105,6 +1106,7 @@ impl Session {
             );
             self.state.chat_service.send_message_with_reply_task(
                 crate::app::chat::svc::SendMessageTask {
+                    origin: crate::app::chat::svc::MessageOrigin::Irc,
                     user_id: self.user_id,
                     room_id: room.id,
                     room_slug: None,

@@ -48,14 +48,20 @@ impl Kind {
 /// notifications the app can emit; keep all copy here.
 #[derive(Clone, Debug)]
 pub(crate) struct Notification {
+    pub room_id: Option<uuid::Uuid>,
     pub kind: Kind,
     pub title: String,
     pub body: String,
 }
 
 impl Notification {
+    pub(crate) fn in_room(mut self, room_id: uuid::Uuid) -> Self {
+        self.room_id = Some(room_id);
+        self
+    }
     pub(crate) fn friend_online(username: &str) -> Self {
         Self {
+            room_id: None,
             kind: Kind::Friends,
             title: "Friend online".to_string(),
             body: format!("@{username} joined late.sh"),
@@ -69,6 +75,7 @@ impl Notification {
     /// in-app banner still fires either way.
     pub(crate) fn friend_live(username: &str, title: Option<&str>) -> Self {
         Self {
+            room_id: None,
             kind: Kind::Streams,
             title: "Friend live".to_string(),
             body: match title {
@@ -81,6 +88,7 @@ impl Notification {
     /// The only notification that fires at you about your own broadcast.
     pub(crate) fn stream_viewer(username: &str) -> Self {
         Self {
+            room_id: None,
             kind: Kind::Streams,
             title: "New viewer".to_string(),
             body: format!("@{username} is watching your stream"),
@@ -89,6 +97,7 @@ impl Notification {
 
     pub(crate) fn dm(sender: &str, preview: String) -> Self {
         Self {
+            room_id: None,
             kind: Kind::Dms,
             title: format!("New DM from {sender}"),
             body: preview,
@@ -97,6 +106,7 @@ impl Notification {
 
     pub(crate) fn mention(sender: &str, preview: String) -> Self {
         Self {
+            room_id: None,
             kind: Kind::Mentions,
             title: format!("{sender} mentioned you"),
             body: preview,
@@ -105,6 +115,7 @@ impl Notification {
 
     pub(crate) fn daily_your_turn(game: &str, opponent: &str) -> Self {
         Self {
+            room_id: None,
             kind: Kind::GameEvents,
             title: format!("Daily {game}: your turn"),
             body: format!("@{opponent} is waiting on your move"),
@@ -113,6 +124,7 @@ impl Notification {
 
     pub(crate) fn house_your_turn(game: &str) -> Self {
         Self {
+            room_id: None,
             kind: Kind::GameEvents,
             title: format!("{game}: your turn"),
             body: "the table is waiting on your move".to_string(),
@@ -121,6 +133,7 @@ impl Notification {
 
     pub(crate) fn poll_started(question: &str) -> Self {
         Self {
+            room_id: None,
             kind: Kind::GameEvents,
             title: "Poll started".to_string(),
             body: question.to_string(),
@@ -133,6 +146,7 @@ impl Notification {
     /// asking to be pinged about gilds either.
     pub(crate) fn gilded(buyer: &str, tier: &str, chips: i64) -> Self {
         Self {
+            room_id: None,
             kind: Kind::Mentions,
             title: format!("{tier} gild received"),
             body: format!("@{buyer} gilded your message (+{chips} chips)"),
@@ -180,10 +194,20 @@ impl Outbox {
     /// Drain pending notifications into at most one terminal payload per
     /// call. Notifications during cooldown or with disabled kinds are
     /// dropped, not queued.
-    pub(crate) fn drain(&mut self, profile: &Profile) -> Option<Vec<u8>> {
+    pub(crate) fn drain(
+        &mut self,
+        profile: &Profile,
+        blocked_rooms: &std::collections::HashSet<uuid::Uuid>,
+    ) -> Option<Vec<u8>> {
         let mut first = None;
         let mut pending = 0usize;
         while let Ok(notification) = self.rx.try_recv() {
+            if notification
+                .room_id
+                .is_some_and(|id| blocked_rooms.contains(&id))
+            {
+                continue;
+            }
             pending += 1;
             if first.is_none() && notification.kind.enabled(&profile.notify_kinds) {
                 first = Some(notification);

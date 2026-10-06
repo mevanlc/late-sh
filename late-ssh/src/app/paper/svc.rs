@@ -1351,14 +1351,17 @@ fn edition_modal(app: &App, issue: &PaperIssue) -> PaperModal {
         })
         .collect();
     let member_room_ids = app.chat.rooms.iter().map(|(room, _)| room.id).collect();
-    let bumped_labels =
-        crate::app::chat::ui::bumped_join_room_slugs(app.shop_state.active_room_effects());
+    let bumped_labels = crate::app::chat::ui::bumped_join_room_slugs(
+        app.shop_state.active_room_effects(),
+        app.chat.blocked_room_ids(),
+    );
     PaperModal::edition(PaperLayout {
         edition: &issue.edition,
         announcements: &issue.announcements,
         work: issue.work.as_ref(),
         rail_order: &rail_order,
         member_room_ids: &member_room_ids,
+        blocked_room_ids: app.chat.blocked_room_ids(),
         bumped_labels: &bumped_labels,
     })
 }

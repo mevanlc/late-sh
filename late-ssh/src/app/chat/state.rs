@@ -866,6 +866,10 @@ pub struct ChatState {
     pub(crate) countries: HashMap<Uuid, String>,
     ignored_user_ids: HashSet<Uuid>,
     friend_user_ids: HashSet<Uuid>,
+    blocked_room_ids: HashSet<Uuid>,
+    blocked_applied_at: Option<Instant>,
+    blocked_voice_channel_ids: HashSet<Uuid>,
+    block_visibility_changed: bool,
     /// When the last `IgnoreListUpdated`/`FriendListUpdated` was applied. Both
     /// lists also arrive on every chat snapshot, and a snapshot read that began
     /// before this write would roll the lists back to what the database held
@@ -1334,6 +1338,10 @@ impl ChatState {
             countries: HashMap::new(),
             ignored_user_ids: HashSet::new(),
             friend_user_ids: HashSet::new(),
+            blocked_room_ids: HashSet::new(),
+            blocked_applied_at: None,
+            blocked_voice_channel_ids: HashSet::new(),
+            block_visibility_changed: false,
             friend_ignore_applied_at: None,
             room_owner_ids: HashMap::new(),
             username_rx,
@@ -1508,6 +1516,9 @@ impl ChatState {
     }
 
     pub fn start_composing_in_room(&mut self, room_id: Uuid) {
+        if self.room_is_blocked(room_id) {
+            return;
+        }
         self.room_jump_active = false;
         self.composing = true;
         self.composer_room_id = Some(room_id);
@@ -1536,6 +1547,9 @@ impl ChatState {
     }
 
     pub fn request_room_tail(&mut self, room_id: Uuid) {
+        if self.room_is_blocked(room_id) {
+            return;
+        }
         if self.loading_tail_rooms.insert(room_id) {
             self.service.load_room_tail_task(self.user_id, room_id);
         }
@@ -1593,6 +1607,9 @@ impl ChatState {
     }
 
     pub fn mark_room_read(&mut self, room_id: Uuid) {
+        if self.room_is_blocked(room_id) {
+            return;
+        }
         self.note_sticky_unread_dm(room_id);
         self.pending_read_rooms.insert(room_id);
         self.unread_counts.insert(room_id, 0);
@@ -1667,6 +1684,7 @@ impl ChatState {
     }
 
     pub fn set_visible_room_id(&mut self, room_id: Option<Uuid>) {
+        let room_id = room_id.filter(|id| !self.room_is_blocked(*id));
         let changed = self.visible_room_id != room_id;
         if changed {
             self.flush_pending_read_cursors();
@@ -1898,7 +1916,7 @@ impl ChatState {
                 Err(TryRecvError::Lagged(_)) => continue,
                 Err(TryRecvError::Empty | TryRecvError::Closed) => break,
             };
-            if event.user_id != self.user_id {
+            if event.user_id != self.user_id || self.room_is_blocked(event.room_id) {
                 continue;
             }
             match event.outcome {
@@ -4215,6 +4233,7 @@ impl ChatState {
             let request_id = Uuid::now_v7();
             self.service
                 .send_message_with_reply_task(super::svc::SendMessageTask {
+                    origin: crate::app::chat::svc::MessageOrigin::Tui,
                     user_id: self.user_id,
                     room_id,
                     room_slug: self.room_slug(room_id),
@@ -4616,6 +4635,7 @@ impl ChatState {
             let request_id = Uuid::now_v7();
             self.service
                 .send_message_with_reply_task(super::svc::SendMessageTask {
+                    origin: crate::app::chat::svc::MessageOrigin::Tui,
                     user_id: self.user_id,
                     room_id,
                     room_slug: self.room_slug(room_id),
@@ -4641,6 +4661,7 @@ impl ChatState {
             let request_id = Uuid::now_v7();
             self.service
                 .send_message_with_reply_task(super::svc::SendMessageTask {
+                    origin: crate::app::chat::svc::MessageOrigin::Tui,
                     user_id: self.user_id,
                     room_id,
                     room_slug: self.room_slug(room_id),
@@ -4666,6 +4687,7 @@ impl ChatState {
             let request_id = Uuid::now_v7();
             self.service
                 .send_message_with_reply_task(super::svc::SendMessageTask {
+                    origin: crate::app::chat::svc::MessageOrigin::Tui,
                     user_id: self.user_id,
                     room_id,
                     room_slug: self.room_slug(room_id),
@@ -4725,6 +4747,7 @@ impl ChatState {
             } else {
                 self.service
                     .send_message_with_reply_task(super::svc::SendMessageTask {
+                        origin: crate::app::chat::svc::MessageOrigin::Tui,
                         user_id: self.user_id,
                         room_id,
                         room_slug: self.room_slug(room_id),
@@ -5877,12 +5900,32 @@ impl ChatState {
             return false;
         }
 
-        let snapshot = self.snapshot_rx.borrow_and_update().clone();
+        let mut snapshot = self.snapshot_rx.borrow_and_update().clone();
         if snapshot.user_id != Some(self.user_id) {
             return false;
         }
 
-        let mut changed = false;
+        let block_changed = if snapshot
+            .read_started_at
+            .is_some_and(|at| self.blocked_applied_at.is_none_or(|applied| at >= applied))
+        {
+            self.apply_blocked_rooms(
+                snapshot.blocked_room_ids.clone(),
+                snapshot.read_started_at.unwrap(),
+            )
+        } else {
+            false
+        };
+        snapshot
+            .chat_rooms
+            .retain(|(room, _)| !self.room_is_blocked(room.id));
+        snapshot
+            .unread_counts
+            .retain(|id, _| !self.room_is_blocked(*id));
+        snapshot
+            .room_last_message_at
+            .retain(|id, _| !self.room_is_blocked(*id));
+        let mut changed = block_changed;
         let mut context_changed = false;
         let refreshed_author_ids = snapshot
             .chat_rooms
@@ -5927,6 +5970,12 @@ impl ChatState {
             self.voice_channels_by_room_id = snapshot.voice_channels_by_room_id;
             changed = true;
         }
+        self.blocked_voice_channel_ids = self
+            .voice_channels_by_room_id
+            .iter()
+            .filter(|(id, _)| self.room_is_blocked(**id))
+            .map(|(_, channel)| channel.id)
+            .collect();
         for (_, messages) in &snapshot.chat_rooms {
             changed |= self.note_activity_ticker_from(messages);
         }
@@ -6031,6 +6080,12 @@ impl ChatState {
                     }
                 }
             };
+            if event
+                .room_id()
+                .is_some_and(|room_id| self.room_is_blocked(room_id))
+            {
+                continue;
+            }
             match event {
                 ChatEvent::MessageCreated {
                     message,
@@ -6076,8 +6131,10 @@ impl ChatState {
                                 .iter()
                                 .any(|m| m == &me_lc)
                             {
-                                self.notifier
-                                    .push(Notification::mention(&nickname, preview));
+                                self.notifier.push(
+                                    Notification::mention(&nickname, preview)
+                                        .in_room(message.room_id),
+                                );
                             }
                         }
                     }
@@ -6390,7 +6447,12 @@ impl ChatState {
                     self.replace_message(message);
                 }
                 ChatEvent::DiscoverRoomsLoaded { user_id, rooms } if self.user_id == user_id => {
-                    self.discover.set_items(rooms);
+                    self.discover.set_items(
+                        rooms
+                            .into_iter()
+                            .filter(|room| !self.room_is_blocked(room.room_id))
+                            .collect(),
+                    );
                 }
                 ChatEvent::DiscoverRoomsFailed { user_id, message } if self.user_id == user_id => {
                     self.discover.finish_loading();
@@ -6409,7 +6471,10 @@ impl ChatState {
                     let query = self.message_search.query.clone();
                     let hits = messages
                         .into_iter()
-                        .filter(|message| !self.message_is_ignored(message))
+                        .filter(|message| {
+                            !self.message_is_ignored(message)
+                                && !self.room_is_blocked(message.room_id)
+                        })
                         .map(|message| {
                             let (snippet_prefix, snippet_match, snippet_suffix) =
                                 build_search_snippet(&message.body, &query);
@@ -6546,6 +6611,7 @@ impl ChatState {
                     )));
                 }
                 ChatEvent::GildSucceeded {
+                    room_id,
                     author_user_id,
                     tier,
                     buyer_username,
@@ -6555,11 +6621,10 @@ impl ChatState {
                     // The author may be in another room, another tab, or away
                     // from the terminal: the banner alone would be missed, and
                     // a gild is the one chat event that cost someone money.
-                    self.notifier.push(Notification::gilded(
-                        &buyer_username,
-                        tier.label(),
-                        tier.author_share(),
-                    ));
+                    self.notifier.push(
+                        Notification::gilded(&buyer_username, tier.label(), tier.author_share())
+                            .in_room(room_id),
+                    );
                     banner = Some(Banner::success(&format!(
                         "@{buyer_username} gilded your message {} (+{} chips, balance {author_balance})",
                         tier.marker(),
@@ -6622,6 +6687,7 @@ impl ChatState {
                     banner = Some(Banner::error(&message));
                 }
                 ChatEvent::RoomMembersListed {
+                    room_id: _,
                     user_id,
                     title,
                     members,
@@ -6689,10 +6755,15 @@ impl ChatState {
                     banner = Some(Banner::error(&message));
                 }
                 ChatEvent::PublicRoomsListed {
+                    read_started_at,
                     user_id,
                     title,
                     rooms,
-                } if self.user_id == user_id => {
+                } if self.user_id == user_id
+                    && self
+                        .blocked_applied_at
+                        .is_none_or(|at| read_started_at >= at) =>
+                {
                     self.open_overlay(&title, rooms);
                 }
                 ChatEvent::InviteSucceeded {
@@ -6809,7 +6880,7 @@ impl ChatState {
                         .is_none_or(|existing| existing.poll.id != poll.poll.id);
                     if is_new_poll && self.rooms.iter().any(|(room, _)| room.id == room_id) {
                         self.notifier
-                            .push(Notification::poll_started(&poll.poll.question));
+                            .push(Notification::poll_started(&poll.poll.question).in_room(room_id));
                     }
                     self.active_polls.insert(room_id, poll);
                     if self.user_id == actor_user_id {
@@ -7007,6 +7078,115 @@ impl ChatState {
         }
     }
 
+    pub(crate) fn blocked_room_ids(&self) -> &HashSet<Uuid> {
+        &self.blocked_room_ids
+    }
+
+    pub(crate) fn room_is_blocked(&self, room_id: Uuid) -> bool {
+        self.blocked_room_ids.contains(&room_id)
+    }
+
+    pub(crate) fn voice_channel_is_blocked(&self, channel_id: Uuid) -> bool {
+        self.blocked_voice_channel_ids.contains(&channel_id)
+    }
+
+    pub(crate) fn take_block_visibility_changed(&mut self) -> bool {
+        std::mem::take(&mut self.block_visibility_changed)
+    }
+
+    pub(crate) fn apply_blocked_rooms(&mut self, ids: Vec<Uuid>, at: Instant) -> bool {
+        if self.blocked_applied_at.is_some_and(|applied| at < applied) {
+            return false;
+        }
+        self.blocked_applied_at = Some(at);
+        let ids: HashSet<_> = ids.into_iter().collect();
+        if self.blocked_room_ids == ids {
+            return false;
+        }
+        let selected_blocked = self.selected_room_id.is_some_and(|id| ids.contains(&id));
+        self.blocked_voice_channel_ids.retain(|id| {
+            self.voice_channels_by_room_id
+                .values()
+                .any(|channel| channel.id == *id && ids.contains(&channel.target_id))
+        });
+        for (room_id, channel) in &self.voice_channels_by_room_id {
+            if ids.contains(room_id) {
+                self.blocked_voice_channel_ids.insert(channel.id);
+            }
+        }
+        self.blocked_room_ids = ids;
+        self.block_visibility_changed = true;
+        self.rooms
+            .retain(|(room, _)| !self.blocked_room_ids.contains(&room.id));
+        self.unread_counts
+            .retain(|id, _| !self.blocked_room_ids.contains(id));
+        self.room_last_message_at
+            .retain(|id, _| !self.blocked_room_ids.contains(id));
+        self.loading_tail_rooms
+            .retain(|id| !self.blocked_room_ids.contains(id));
+        self.pending_read_rooms
+            .retain(|id| !self.blocked_room_ids.contains(id));
+        self.pending_read_flush
+            .rooms
+            .retain(|id| !self.blocked_room_ids.contains(id));
+        self.discover.remove_blocked(&self.blocked_room_ids);
+        self.notifications
+            .set_blocked_rooms(self.blocked_room_ids.clone(), at);
+        if self
+            .composer_room_id
+            .is_some_and(|id| self.room_is_blocked(id))
+        {
+            self.clear_composer_after_submit();
+        }
+        if self
+            .visible_room_id
+            .is_some_and(|id| self.room_is_blocked(id))
+        {
+            self.visible_room_id = self.lounge_room_id;
+        }
+        if selected_blocked {
+            self.selected_room_id = self.lounge_room_id;
+            self.selected_message_id = None;
+            self.selection_scroll.reset();
+        }
+        // Retire request identities and room-derived overlays. Their detached
+        // tasks can finish, but cannot reopen content the user hid.
+        self.pending_search_jump = None;
+        self.message_search.clear();
+        if self
+            .history_modal
+            .room_id()
+            .is_some_and(|id| self.room_is_blocked(id))
+        {
+            self.history_modal.close();
+        }
+        self.overlay = None;
+        self.pending_summary_overlay = None;
+        self.requested_room_info_modal = None;
+        self.requested_open_sheet = None;
+        self.requested_poll_room = None;
+        self.pending_reaction_owners_message_id = None;
+        self.pending_delete_message_id = None;
+        self.pending_chat_screen_switch = false;
+        self.image_modal = None;
+        if self
+            .image_upload_target_room_id
+            .is_some_and(|id| self.room_is_blocked(id))
+        {
+            self.image_upload_rx = None;
+            self.image_upload_pending = false;
+            self.image_upload_target_room_id = None;
+            self.image_upload_reply_target = None;
+        }
+        self.requested_url_upload = None;
+        self.pending_clipboard_image_upload = None;
+        self.requested_clipboard_image_upload = None;
+        self.context_epoch += 1;
+        self.sync_selection();
+        self.request_list();
+        true
+    }
+
     pub(crate) fn remove_room_for_moderation(&mut self, room_id: Uuid) {
         self.rooms.retain(|(room, _)| room.id != room_id);
         self.unread_counts.remove(&room_id);
@@ -7023,6 +7203,9 @@ impl ChatState {
     }
 
     fn merge_room_tail(&mut self, room_id: Uuid, messages: Vec<ChatMessage>) {
+        if self.room_is_blocked(room_id) {
+            return;
+        }
         self.note_activity_ticker_from(&messages);
         let Some((_, stored)) = self.rooms.iter_mut().find(|(room, _)| room.id == room_id) else {
             return;

@@ -69,6 +69,32 @@ Chat-owned moderation commands also use `room_ban.rs`,
 
 ---
 
+Account channel visibility is owned by `late-core/src/models/channel_block.rs` and
+Settings > Tweaks > Blocked channels. `users.settings.blocked_room_ids` stores
+UUID strings; ordinary topic/language rooms are eligible unless permanent,
+auto-joined, or a reserved core/special slug (including #moderators and #dnd).
+DMs, games/streams, feature-owned kinds, and synthetic entries are protected.
+TUI room snapshots, discovery/previews, bumped ads, /list, message search/history,
+mention lists/counts, room actions, and voice respect the policy. SQL viewer reads
+filter before LIMIT. `SendMessageTask.origin` distinguishes TUI sends from IRC and
+system sends; membership and IRC queries stay independent of channel visibility.
+A successful Settings save updates only the acting session immediately; others
+reconcile on the ordinary chat snapshot cadence. Timestamp guards reject older
+snapshots/list results, while room IDs and retired request identities reject late
+room events. Blocking prunes local content, falls back to #lounge, cancels pending
+room UI, and leaves its voice channel. Saved favorites and Zen bindings survive;
+Zen resolves a visible fallback while blocked. Unblocking restores joined rooms
+through a fresh snapshot; an unjoined public room returns to discovery. Hidden
+messages/mentions keep their DB history and unread cursors. Opening Mentions stamps
+visible notifications individually and leaves its global watermark unchanged while
+blocks exist, preserving hidden unread mentions. Desktop alerts carry their room
+ID until the render drain, which discards blocked sources. A blocked channel's
+dedicated newspaper column and status entry are hidden; cached papers close on
+blocklist changes. Moderation-console access and prose naming a channel are
+independent of this preference.
+
+---
+
 ## 3. Ownership Split
 
 - `svc.rs` is the async boundary between TUI state, DB models, mention notifications, and broadcast/watch channels.

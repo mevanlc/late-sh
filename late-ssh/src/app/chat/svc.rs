@@ -14,6 +14,7 @@ use late_core::{
     MutexRecover,
     db::Db,
     models::{
+        channel_block::{self, ChannelChoice},
         character_sheet::{CharacterSheet, CharacterSheetParams},
         chat_message::{ChatMessage, ChatMessageParams, HistoryDirection},
         chat_message_gild::{
@@ -251,6 +252,7 @@ struct SettledGild {
 /// what the author is told.
 #[derive(Clone, Debug)]
 pub struct GildOutcome {
+    pub room_id: Uuid,
     pub message_id: Uuid,
     pub tier: GildTier,
     pub buyer_username: String,
@@ -347,7 +349,15 @@ pub struct PreviewMessage {
     pub created: DateTime<Utc>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub enum MessageOrigin {
+    Tui,
+    Irc,
+    System,
+}
+
 pub struct SendMessageTask {
+    pub origin: MessageOrigin,
     pub user_id: Uuid,
     pub room_id: Uuid,
     pub room_slug: Option<String>,
@@ -367,6 +377,7 @@ pub struct SendLoungeMessageTask {
 
 /// Fully-resolved inputs for persisting a single chat message.
 struct SendMessageParams {
+    origin: MessageOrigin,
     user_id: Uuid,
     room_id: Uuid,
     room_slug: Option<String>,
@@ -714,6 +725,7 @@ pub struct ChatSnapshot {
     pub profile_award_badges: HashMap<Uuid, String>,
     pub ignored_user_ids: Vec<Uuid>,
     pub friend_user_ids: Vec<Uuid>,
+    pub blocked_room_ids: Vec<Uuid>,
     /// Derived owner per private room (see `ChatRoom::owner_ids_for_rooms`).
     /// Only private topic rooms are owned; public rooms answer to the house, so
     /// they are absent here.
@@ -877,6 +889,7 @@ pub enum ChatEvent {
     /// the author (who paid, what arrived); everyone else repaints off
     /// `MessageGildsUpdated`.
     GildSucceeded {
+        room_id: Uuid,
         user_id: Uuid,
         message_id: Uuid,
         tier: GildTier,
@@ -1012,11 +1025,13 @@ pub enum ChatEvent {
         message: String,
     },
     RoomMembersListed {
+        room_id: Uuid,
         user_id: Uuid,
         title: String,
         members: Vec<RoomMemberListItem>,
     },
     PublicRoomsListed {
+        read_started_at: Instant,
         user_id: Uuid,
         title: String,
         rooms: Vec<String>,
@@ -1146,6 +1161,35 @@ struct GiftOutcome {
     recipient_username: String,
     sender_balance: i64,
     recipient_balance: i64,
+}
+impl ChatEvent {
+    pub(super) fn room_id(&self) -> Option<Uuid> {
+        match self {
+            Self::MessageCreated { message, .. } | Self::MessageEdited { message, .. } => {
+                Some(message.room_id)
+            }
+            Self::MessageReactionDelta(delta) => Some(delta.room_id),
+            Self::RoomTailLoaded { room_id, .. }
+            | Self::RoomTailLoadFailed { room_id, .. }
+            | Self::MessageReactionsUpdated { room_id, .. }
+            | Self::MessageGildsUpdated { room_id, .. }
+            | Self::NameHit { room_id, .. }
+            | Self::DeltaSynced { room_id, .. }
+            | Self::DmOpened { room_id, .. }
+            | Self::OpenSheetResolved { room_id, .. }
+            | Self::RoomJoined { room_id, .. }
+            | Self::GameRoomJoined { room_id, .. }
+            | Self::RoomCreated { room_id, .. }
+            | Self::MessageDeleted { room_id, .. }
+            | Self::InviteSucceeded { room_id, .. }
+            | Self::RoomInfoUpdated { room_id, .. }
+            | Self::PollUpdated { room_id, .. }
+            | Self::PollStartAllowed { room_id, .. }
+            | Self::RoomMembersListed { room_id, .. }
+            | Self::GildSucceeded { room_id, .. } => Some(*room_id),
+            _ => None,
+        }
+    }
 }
 
 impl ChatService {
@@ -1431,6 +1475,20 @@ impl ChatService {
     }
 
     #[tracing::instrument(skip(self), fields(user_id = %user_id))]
+    pub(crate) async fn channel_choices(&self, user_id: Uuid) -> Result<Vec<ChannelChoice>> {
+        let client = self.db.get().await?;
+        channel_block::choices(&client, user_id).await
+    }
+
+    pub(crate) async fn set_channel_blocked(
+        &self,
+        user_id: Uuid,
+        room_id: Uuid,
+        blocked: bool,
+    ) -> Result<Vec<Uuid>> {
+        channel_block::set_blocked(&mut self.db.get().await?, user_id, room_id, blocked).await
+    }
+
     async fn build_chat_snapshot(&self, user_id: Uuid) -> Result<ChatSnapshot> {
         // Stamped before the permit wait, not after: time spent queueing for a
         // read slot is time this snapshot spends going stale.
@@ -1444,9 +1502,10 @@ impl ChatService {
         // Postgres still executes them in order, so this buys latency, not
         // server CPU; latency is what bounds `refresh_registered_sessions`,
         // which walks every live session in turn.
-        let (room_state, friends_and_ignored) = tokio::join!(
+        let (room_state, friends_and_ignored, blocked_room_ids) = tokio::join!(
             ChatRoom::list_for_user_with_state(&client, user_id, self.system_user_id()),
             User::friend_and_ignored_user_ids(&client, user_id),
+            channel_block::effective_ids(&**client, user_id),
         );
         let UserRoomState {
             rooms,
@@ -1456,6 +1515,8 @@ impl ChatService {
         let (friend_user_ids, ignored_user_ids) = friends_and_ignored?;
 
         let room_ids: Vec<Uuid> = rooms.iter().map(|room| room.id).collect();
+        let blocked_room_ids = blocked_room_ids?;
+        let voice_room_ids: Vec<_> = room_ids.iter().chain(&blocked_room_ids).copied().collect();
         let lounge_room_id = rooms
             .iter()
             .find(|room| room.kind == "lounge" && room.slug.as_deref() == Some("lounge"))
@@ -1485,7 +1546,7 @@ impl ChatService {
         // rather than try_join'd so each failure keeps its own handling, and
         // so a poll failure stays non-fatal to the rest of the snapshot.
         let (voice_channels_by_room_id, active_polls, author_metadata, room_owner_ids) = tokio::join!(
-            VoiceChannel::enabled_for_chat_rooms(&client, &room_ids),
+            VoiceChannel::enabled_for_chat_rooms(&client, &voice_room_ids),
             chat_poll::list_active_polls_for_rooms(&client, user_id, &room_ids),
             Self::load_chat_author_metadata(&client, &visible_user_ids),
             ChatRoom::owner_ids_for_rooms(&client, &private_room_ids),
@@ -1523,6 +1584,7 @@ impl ChatService {
             profile_award_badges: author_metadata.profile_award_badges,
             ignored_user_ids,
             friend_user_ids,
+            blocked_room_ids,
             room_owner_ids,
         })
     }
@@ -1784,6 +1846,7 @@ impl ChatService {
     #[tracing::instrument(skip(self), fields(user_id = %user_id, room_id = %room_id))]
     async fn mark_room_read(&self, user_id: Uuid, room_id: Uuid) -> Result<()> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let is_member = ChatRoomMember::is_member(&client, room_id, user_id).await?;
         if !is_member {
             anyhow::bail!("user is not a member of room");
@@ -1821,6 +1884,7 @@ impl ChatService {
         after_id: Uuid,
     ) -> Result<()> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let is_member = ChatRoomMember::is_member(&client, room_id, user_id).await?;
         if !is_member {
             anyhow::bail!("user is not a member of room");
@@ -1876,6 +1940,7 @@ impl ChatService {
     async fn load_room_tail(&self, user_id: Uuid, room_id: Uuid) -> Result<()> {
         let _permit = self.read_permits.acquire().await?;
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let is_member = ChatRoomMember::is_member(&client, room_id, user_id).await?;
         if !is_member {
             anyhow::bail!("user is not a member of room");
@@ -2460,6 +2525,7 @@ impl ChatService {
     async fn list_discover_rooms(&self, user_id: Uuid) -> Result<Vec<DiscoverRoomItem>> {
         let _permit = self.read_permits.acquire().await?;
         let client = self.db.get().await?;
+        let blocked = channel_block::effective_ids(&**client, user_id).await?;
         let joined_ids: HashSet<Uuid> = ChatRoom::list_for_user(&client, user_id)
             .await?
             .into_iter()
@@ -2468,7 +2534,7 @@ impl ChatService {
         let mut rooms: Vec<DiscoverRoomItem> = Self::list_all_discover_rooms(&client)
             .await?
             .into_iter()
-            .filter(|room| !joined_ids.contains(&room.room_id))
+            .filter(|room| !joined_ids.contains(&room.room_id) && !blocked.contains(&room.room_id))
             .collect();
 
         Self::attach_recent_previews(&client, &mut rooms).await?;
@@ -2757,6 +2823,7 @@ impl ChatService {
         is_admin: bool,
     ) {
         self.send_message_with_reply_task(SendMessageTask {
+            origin: MessageOrigin::Tui,
             user_id,
             room_id,
             room_slug,
@@ -2825,6 +2892,7 @@ impl ChatService {
         drop(client);
 
         self.send_message(SendMessageParams {
+            origin: MessageOrigin::System,
             user_id,
             room_id: room.id,
             room_slug: Some(kind.slug().to_string()),
@@ -2851,6 +2919,7 @@ impl ChatService {
             async move {
                 if let Err(e) = service
                     .send_message(SendMessageParams {
+                        origin: MessageOrigin::System,
                         user_id,
                         room_id,
                         room_slug: None,
@@ -3019,6 +3088,7 @@ impl ChatService {
                 tokio::time::sleep(send_after).await;
                 let sent = service
                     .send_message(SendMessageParams {
+                        origin: MessageOrigin::System,
                         user_id: voice_id,
                         room_id,
                         room_slug: None,
@@ -3087,6 +3157,7 @@ impl ChatService {
                     };
                     service
                         .send_message(SendMessageParams {
+                            origin: MessageOrigin::System,
                             user_id: voice.id,
                             room_id,
                             room_slug: None,
@@ -3112,6 +3183,7 @@ impl ChatService {
 
     pub fn send_message_with_reply_task(&self, task: SendMessageTask) {
         let SendMessageTask {
+            origin,
             user_id,
             room_id,
             room_slug,
@@ -3125,6 +3197,7 @@ impl ChatService {
             async move {
                 match service
                     .send_message(SendMessageParams {
+                        origin,
                         user_id,
                         room_id,
                         room_slug,
@@ -3224,6 +3297,7 @@ impl ChatService {
         drop(client);
 
         self.send_message(SendMessageParams {
+            origin: MessageOrigin::System,
             user_id,
             room_id: room.id,
             room_slug: Some("lounge".to_string()),
@@ -3264,6 +3338,7 @@ impl ChatService {
     #[tracing::instrument(skip(self, params), fields(user_id = %params.user_id, room_id = %params.room_id, body_len = params.body.len()))]
     async fn send_message(&self, params: SendMessageParams) -> Result<()> {
         let SendMessageParams {
+            origin,
             user_id,
             room_id,
             room_slug,
@@ -3285,6 +3360,9 @@ impl ChatService {
         let is_member = ChatRoomMember::is_member(&client, room_id, user_id).await?;
         if !is_member {
             anyhow::bail!("user is not a member of room");
+        }
+        if matches!(origin, MessageOrigin::Tui) {
+            channel_block::ensure_visible(&client, user_id, room_id).await?;
         }
         if RoomBan::is_active_for_room_and_user(&client, room_id, user_id).await? {
             anyhow::bail!("user is banned from this room");
@@ -3511,6 +3589,7 @@ impl ChatService {
         let existing = ChatMessage::get(&client, message_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("message not found"))?;
+        channel_block::ensure_visible(&client, user_id, existing.room_id).await?;
         let is_owner = existing.user_id == user_id;
         let target_tier = if is_owner {
             Tier::Regular
@@ -3577,7 +3656,7 @@ impl ChatService {
         tokio::spawn(
             async move {
                 if let Err(e) = service
-                    .toggle_message_reaction(user_id, message_id, &icon)
+                    .toggle_visible_message_reaction(user_id, message_id, &icon)
                     .await
                 {
                     late_core::error_span!(
@@ -3594,6 +3673,22 @@ impl ChatService {
                 icon = %span_icon
             )),
         );
+    }
+
+    async fn toggle_visible_message_reaction(
+        &self,
+        user_id: Uuid,
+        message_id: Uuid,
+        icon: &str,
+    ) -> Result<()> {
+        let client = self.db.get().await?;
+        let message = ChatMessage::get(&client, message_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Message not found"))?;
+        channel_block::ensure_visible(&client, user_id, message.room_id).await?;
+        drop(client);
+        self.toggle_message_reaction(user_id, message_id, icon)
+            .await
     }
 
     #[tracing::instrument(skip(self), fields(user_id = %user_id, message_id = %message_id, icon = %icon))]
@@ -3920,6 +4015,7 @@ impl ChatService {
             async move {
                 let event = match service.list_room_members(user_id, room_id).await {
                     Ok((title, members)) => ChatEvent::RoomMembersListed {
+                        room_id,
                         user_id,
                         title,
                         members,
@@ -3941,6 +4037,7 @@ impl ChatService {
         room_id: Uuid,
     ) -> Result<(String, Vec<RoomMemberListItem>)> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let room = ChatRoom::get(&client, room_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
@@ -4302,6 +4399,7 @@ impl ChatService {
         // `settle_gild`), including in this process; what is sent here is
         // only what the two people involved are told.
         let _ = self.evt_tx.send(ChatEvent::GildSucceeded {
+            room_id: outcome.room_id,
             user_id,
             message_id: outcome.message_id,
             tier,
@@ -4338,6 +4436,7 @@ impl ChatService {
         if !ChatRoomMember::is_member(&client, message.room_id, user_id).await? {
             return Err(GildError::Refused(GildRefusal::NotAMember));
         }
+        channel_block::ensure_visible(&client, user_id, message.room_id).await?;
         let Some(room) = ChatRoom::get(&client, message.room_id).await? else {
             return Err(GildError::Refused(GildRefusal::MessageNotFound));
         };
@@ -4380,6 +4479,7 @@ impl ChatService {
         // A gild that never landed must not spend the buyer's window.
         match self.settle_gild(user_id, &message, author.id, tier).await {
             Ok(settled) => Ok(GildOutcome {
+                room_id: message.room_id,
                 message_id,
                 tier,
                 buyer_username: buyer.username,
@@ -4514,6 +4614,7 @@ impl ChatService {
         if !is_member {
             anyhow::bail!("You are not a member of this room");
         }
+        channel_block::ensure_visible(&client, user_id, message.room_id).await?;
         let gilds = ChatMessageGild::list_for_message(&client, message_id).await?;
         let owners = ChatMessageReaction::list_owners_for_message(&client, message_id).await?;
         let mut owner_ids: Vec<Uuid> = owners
@@ -4532,8 +4633,10 @@ impl ChatService {
         let span = info_span!("chat.list_public_rooms_task", user_id = %user_id);
         tokio::spawn(
             async move {
-                let event = match service.list_public_rooms().await {
+                let read_started_at = Instant::now();
+                let event = match service.list_public_rooms(user_id).await {
                     Ok((title, rooms)) => ChatEvent::PublicRoomsListed {
+                        read_started_at,
                         user_id,
                         title,
                         rooms,
@@ -4549,12 +4652,14 @@ impl ChatService {
         );
     }
 
-    async fn list_public_rooms(&self) -> Result<(String, Vec<String>)> {
+    async fn list_public_rooms(&self, user_id: Uuid) -> Result<(String, Vec<String>)> {
         let client = self.db.get().await?;
         let rows = ChatRoom::list_public_topic_room_summaries(&client).await?;
+        let blocked = channel_block::effective_ids(&**client, user_id).await?;
 
         let rooms: Vec<String> = rows
             .into_iter()
+            .filter(|row| !blocked.contains(&row.room_id))
             .map(|row| {
                 let label = row
                     .slug
@@ -4812,6 +4917,7 @@ impl ChatService {
 
     async fn join_public_room(&self, user_id: Uuid, room_id: Uuid) -> Result<Uuid> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let room = ChatRoom::get(&client, room_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
@@ -4861,6 +4967,9 @@ impl ChatService {
             return self.join_deadchannel_room(user_id).await;
         }
         let client = self.db.get().await?;
+        if let Some(room) = ChatRoom::find_topic_room(&client, "public", slug).await? {
+            channel_block::ensure_visible(&client, user_id, room.id).await?;
+        }
         // Public rooms are hosted, not owned: only mods edit their topic and
         // rules. Whether this call opens a brand-new room decides whether the
         // house gets told about it, so look before creating.
@@ -5034,6 +5143,7 @@ impl ChatService {
         ChatRoomMember::join(&client, room_id, system_user_id).await?;
         drop(client);
         self.send_message(SendMessageParams {
+            origin: MessageOrigin::System,
             user_id: system_user_id,
             room_id,
             room_slug: room.slug,
@@ -5072,6 +5182,9 @@ impl ChatService {
 
     async fn create_private_room(&self, user_id: Uuid, slug: &str) -> Result<Uuid> {
         let client = self.db.get().await?;
+        if let Some(room) = ChatRoom::find_topic_room(&client, "private", slug).await? {
+            channel_block::ensure_visible(&client, user_id, room.id).await?;
+        }
         let room = ChatRoom::create_private_room(&client, slug, user_id).await?;
         ChatRoomMember::join(&client, room.id, user_id).await?;
         let display_name = room.slug.as_deref().unwrap_or("private");
@@ -5185,6 +5298,7 @@ impl ChatService {
         rules: Option<&str>,
     ) -> Result<String> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let room = ChatRoom::get(&client, room_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("room not found"))?;
@@ -5224,6 +5338,7 @@ impl ChatService {
 
     async fn leave_room(&self, user_id: Uuid, room_id: Uuid) -> Result<()> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let room = ChatRoom::get(&client, room_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
@@ -5449,6 +5564,7 @@ impl ChatService {
         target_username: &str,
     ) -> Result<(String, String)> {
         let client = self.db.get().await?;
+        channel_block::ensure_visible(&client, user_id, room_id).await?;
         let room = ChatRoom::get(&client, room_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
@@ -5544,6 +5660,7 @@ impl ChatService {
         let msg = ChatMessage::get(&client, message_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Message not found"))?;
+        channel_block::ensure_visible(&client, user_id, msg.room_id).await?;
         let is_owner = msg.user_id == user_id;
         let target_tier = if is_owner {
             Tier::Regular

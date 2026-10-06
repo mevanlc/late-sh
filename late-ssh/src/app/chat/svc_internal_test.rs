@@ -2,6 +2,126 @@ use super::*;
 use chrono::Duration as ChronoDuration;
 use late_core::models::chat_poll::{ChatPoll, ChatPollOptionSummary};
 
+#[tokio::test]
+async fn channel_block_guards_tui_opening_and_sending_while_irc_keeps_membership() {
+    let db = crate::test_helpers::new_test_db().await;
+    let user = late_core::test_utils::create_test_user(&db.db, "block_service").await;
+    let service = ChatService::new(
+        db.db.clone(),
+        super::super::notifications::svc::NotificationService::new(db.db.clone()),
+    );
+    let room_id = service
+        .open_public_room(user.id, "blocked_service_room")
+        .await
+        .unwrap();
+    let client = db.db.get().await.unwrap();
+    let channel = VoiceChannel::upsert_for_target(
+        &client,
+        late_core::models::voice_channel::TARGET_CHAT_ROOM,
+        room_id,
+        "Voice",
+        true,
+    )
+    .await
+    .unwrap();
+    drop(client);
+    service
+        .set_channel_blocked(user.id, room_id, true)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .open_public_room(user.id, "blocked_service_room")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("blocked")
+    );
+    assert!(service.join_public_room(user.id, room_id).await.is_err());
+    assert!(service.load_room_tail(user.id, room_id).await.is_err());
+    assert!(service.list_room_members(user.id, room_id).await.is_err());
+    let snapshot = service.build_chat_snapshot(user.id).await.unwrap();
+    assert!(
+        snapshot
+            .chat_rooms
+            .iter()
+            .all(|(room, _)| room.id != room_id)
+    );
+    assert!(snapshot.blocked_room_ids.contains(&room_id));
+    // Keep the channel identity so a session already in voice can leave it.
+    assert_eq!(snapshot.voice_channels_by_room_id[&room_id].id, channel.id);
+    assert!(
+        service
+            .list_public_rooms(user.id)
+            .await
+            .unwrap()
+            .1
+            .iter()
+            .all(|label| !label.contains("blocked-service-room"))
+    );
+    for (origin, expected) in [(MessageOrigin::Tui, false), (MessageOrigin::Irc, true)] {
+        let result = service
+            .send_message(SendMessageParams {
+                origin,
+                user_id: user.id,
+                room_id,
+                room_slug: Some("blocked_service_room".into()),
+                body: "origin check".into(),
+                reply_to_message_id: None,
+                reply_to_user_id: None,
+                is_admin: false,
+            })
+            .await;
+        assert_eq!(result.is_ok(), expected, "{origin:?}: {result:?}");
+    }
+    service
+        .set_channel_blocked(user.id, room_id, false)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .build_chat_snapshot(user.id)
+            .await
+            .unwrap()
+            .chat_rooms
+            .iter()
+            .any(|(room, _)| room.id == room_id)
+    );
+    let client = db.db.get().await.unwrap();
+    let unjoined = ChatRoom::get_or_create_public_room(&client, "blocked_discovery")
+        .await
+        .unwrap();
+    service
+        .set_channel_blocked(user.id, unjoined.id, true)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .list_discover_rooms(user.id)
+            .await
+            .unwrap()
+            .iter()
+            .all(|room| room.room_id != unjoined.id)
+    );
+    service
+        .set_channel_blocked(user.id, unjoined.id, false)
+        .await
+        .unwrap();
+    assert!(
+        service
+            .list_discover_rooms(user.id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|room| room.room_id == unjoined.id)
+    );
+    assert!(
+        !ChatRoomMember::is_member(&client, unjoined.id, user.id)
+            .await
+            .unwrap()
+    );
+}
+
 #[test]
 fn contains_link_catches_schemes_www_and_bare_domains() {
     for spam in [

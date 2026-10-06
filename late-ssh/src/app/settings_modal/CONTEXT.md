@@ -83,3 +83,12 @@ wheel do nothing.
 `app/common/mouse_test.rs` covers geometry; `mouse_flow_test.rs` covers rendered
 and application flows with disposable databases/accounts. Run focused tests
 through `make test-llm`.
+
+Tweaks > Blocked channels opens `blocked_channels.rs`: a blocked list with Add,
+then a searchable chooser of ordinary public/language rooms and joined private
+rooms. Enter/click blocks or unblocks; Esc/[Back] leaves the chooser, Esc/[x]
+closes the list. Saves are per-ID transactions with a session-owned reply queue;
+tick drains successful saves even after the dialog closes. Errors keep the current
+list and show a status. Deleted/inaccessible saved IDs show an opaque unavailable
+entry that can be removed. Protected rooms are excluded by the core policy.
+Nested geometry and wheel scrolling use the same shared Settings mouse surface.

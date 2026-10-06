@@ -119,6 +119,7 @@ fn the_paper_follows_the_rail_then_elsewhere_then_the_back_pages() {
         edition: &edition,
         rail_order: &rail_order,
         member_room_ids: &member_room_ids,
+        blocked_room_ids: &HashSet::new(),
         bumped_labels: &bumped,
     }));
 
@@ -184,6 +185,7 @@ fn a_member_room_missing_from_the_rail_still_gets_its_column() {
         edition: &edition,
         rail_order: &[],
         member_room_ids: &member_room_ids,
+        blocked_room_ids: &HashSet::new(),
         bumped_labels: &[],
     }));
     assert_eq!(
@@ -195,6 +197,121 @@ fn a_member_room_missing_from_the_rail_still_gets_its_column() {
             "#lounge · 8 messages · 11 people",
             "- a line"
         ]
+    );
+}
+
+#[test]
+fn channel_block_hides_paper_columns_and_statuses_before_the_elsewhere_limit() {
+    let mention = "- People also talked about #hidden-joined and #hidden-elsewhere";
+    let edition = PaperEdition {
+        edition: NaiveDate::from_ymd_opt(2026, 9, 3).unwrap(),
+        rooms: vec![
+            page(1, "lounge", PaperStatus::Ready, 50, Some(mention)),
+            page(
+                2,
+                "hidden-joined",
+                PaperStatus::Ready,
+                45,
+                Some("- hidden joined column"),
+            ),
+            page(
+                3,
+                "hidden-off-rail",
+                PaperStatus::Ready,
+                40,
+                Some("- hidden off-rail column"),
+            ),
+            page(4, "hidden-quiet", PaperStatus::Quiet, 2, None),
+            page(5, "hidden-printing", PaperStatus::Printing, 7, None),
+            page(6, "hidden-failed", PaperStatus::Failed, 15, None),
+            page(
+                7,
+                "hidden-elsewhere",
+                PaperStatus::Ready,
+                35,
+                Some("- hidden elsewhere column"),
+            ),
+            page(
+                8,
+                "visible-first",
+                PaperStatus::Ready,
+                30,
+                Some("- visible first"),
+            ),
+            page(
+                9,
+                "visible-second",
+                PaperStatus::Ready,
+                25,
+                Some("- visible second"),
+            ),
+            page(
+                10,
+                "visible-third",
+                PaperStatus::Ready,
+                20,
+                Some("- visible third"),
+            ),
+            page(
+                11,
+                "past-the-cap",
+                PaperStatus::Ready,
+                10,
+                Some("- past the cap"),
+            ),
+        ],
+        sections: vec![PaperSection {
+            section: PaperSectionKind::Reading,
+            status: PaperStatus::Ready,
+            text: Some("- A link shared in #hidden-joined".into()),
+        }],
+    };
+    let rail_order: Vec<_> = [1, 2, 4, 5, 6].map(Uuid::from_u128).into();
+    let member_room_ids = (1..=6).map(Uuid::from_u128).collect();
+    let blocked_room_ids = (2..=7).map(Uuid::from_u128).collect();
+    let announcements = [PaperAnnouncement {
+        author: "operator".into(),
+        posted_at: Utc.with_ymd_and_hms(2026, 9, 2, 9, 0, 0).unwrap(),
+        body: "An announcement mentions #hidden-elsewhere".into(),
+    }];
+    let lines = plain(&lay_out(PaperLayout {
+        edition: &edition,
+        announcements: &announcements,
+        work: None,
+        rail_order: &rail_order,
+        member_room_ids: &member_room_ids,
+        blocked_room_ids: &blocked_room_ids,
+        bumped_labels: &["hidden-elsewhere".into()],
+    }));
+
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.starts_with("#hidden-") || line.starts_with("- hidden ")),
+        "{lines:#?}"
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("hidden-quiet")
+            || line.contains("hidden-printing")
+            || line.contains("hidden-failed")),
+        "{lines:#?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.starts_with("#visible-"))
+            .count(),
+        PAPER_ELSEWHERE_LIMIT
+    );
+    assert!(
+        !lines.iter().any(|line| line.contains("past-the-cap")),
+        "{lines:#?}"
+    );
+    assert!(lines.contains(&mention.to_string()), "{lines:#?}");
+    assert!(lines.contains(&announcements[0].body), "{lines:#?}");
+    assert!(
+        lines.contains(&"- A link shared in #hidden-joined".to_string()),
+        "{lines:#?}"
     );
 }
 
@@ -258,6 +375,7 @@ fn new_work_speaks_to_the_card_the_reader_has() {
             edition: &edition,
             rail_order: &[],
             member_room_ids: &HashSet::new(),
+            blocked_room_ids: &HashSet::new(),
             bumped_labels: &[],
         }))
     };
@@ -378,6 +496,7 @@ fn a_room_past_a_hundred_people_prints_a_capped_count() {
         edition: &edition,
         rail_order: &rail_order,
         member_room_ids: &member_room_ids,
+        blocked_room_ids: &HashSet::new(),
         bumped_labels: &[],
     }));
     assert!(

@@ -3,6 +3,48 @@ use serde_json::Value;
 
 const ROOM: Uuid = Uuid::from_u128(0x1234);
 
+#[tokio::test]
+async fn channel_block_refuses_voice_tickets_and_unblocking_restores_access() {
+    use late_core::models::channel_block::set_blocked;
+    use late_core::models::chat_room::ChatRoom;
+    use late_core::test_utils::create_test_user;
+
+    let db = crate::test_helpers::new_test_db().await;
+    let user = create_test_user(&db.db, "block_voice").await;
+    let service = enabled_service().with_db(db.db.clone());
+    let mut client = db.db.get().await.unwrap();
+    let room = ChatRoom::get_or_create_public_room(&client, "block-voice")
+        .await
+        .unwrap();
+    ChatRoomMember::join(&client, room.id, user.id)
+        .await
+        .unwrap();
+    let channel =
+        VoiceChannel::upsert_for_target(&client, TARGET_CHAT_ROOM, room.id, "Voice", true)
+            .await
+            .unwrap();
+    set_blocked(&mut client, user.id, room.id, true)
+        .await
+        .unwrap();
+    let error = service
+        .checked_join_ticket(channel.id, user.id, &user.username, true, false)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("blocked"));
+    assert!(
+        ChatRoomMember::is_member(&client, room.id, user.id)
+            .await
+            .unwrap()
+    );
+    set_blocked(&mut client, user.id, room.id, false)
+        .await
+        .unwrap();
+    service
+        .checked_join_ticket(channel.id, user.id, &user.username, true, false)
+        .await
+        .unwrap();
+}
+
 fn enabled_service() -> VoiceService {
     VoiceService::new(
         VoiceConfig::enabled(

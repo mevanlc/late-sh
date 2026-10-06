@@ -1046,6 +1046,7 @@ fn chat_view<'a>(
     static FRIEND_USER_IDS: OnceLock<HashSet<Uuid>> = OnceLock::new();
     static LIVE_USER_IDS: OnceLock<HashSet<Uuid>> = OnceLock::new();
     static IGNORED_USER_IDS: OnceLock<HashSet<Uuid>> = OnceLock::new();
+    static BLOCKED_ROOM_IDS: OnceLock<HashSet<Uuid>> = OnceLock::new();
     static VOICE_SNAPSHOT: OnceLock<crate::app::voice::svc::VoiceSnapshot> = OnceLock::new();
     static VOICE_CHANNELS: OnceLock<HashMap<Uuid, late_core::models::voice_channel::VoiceChannel>> =
         OnceLock::new();
@@ -1124,6 +1125,7 @@ fn chat_view<'a>(
         unread_counts,
         room_last_message_at: ROOM_LAST_MESSAGE_AT.get_or_init(HashMap::new),
         favorite_room_ids: &[],
+        blocked_room_ids: BLOCKED_ROOM_IDS.get_or_init(HashSet::new),
         active_room_effects: ACTIVE_ROOM_EFFECTS.get_or_init(HashMap::new),
         active_poll: None,
         collapsed_sections: COLLAPSED_SECTIONS.get_or_init(HashSet::new),

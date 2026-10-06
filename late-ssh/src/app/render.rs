@@ -919,6 +919,7 @@ impl App {
             room_last_message_at: &self.chat.room_last_message_at,
             favorite_room_ids: &self.profile_state.profile().favorite_room_ids,
             active_room_effects: self.shop_state.active_room_effects(),
+            blocked_room_ids: self.chat.blocked_room_ids(),
             active_poll: selected_room_active_poll,
             collapsed_sections: &self.chat.collapsed_sections,
             selected_room_id: self.chat.selected_room_id,
@@ -1644,7 +1645,10 @@ impl App {
 
         // Emit OSC 777/OSC 9 desktop notifications queued by producers this
         // tick; the outbox applies notify_kinds, cooldown, format, and bell.
-        if let Some(payload) = self.notify_outbox.drain(self.profile_state.profile()) {
+        if let Some(payload) = self
+            .notify_outbox
+            .drain(self.profile_state.profile(), self.chat.blocked_room_ids())
+        {
             self.pending_terminal_commands.push(payload);
         }
 

@@ -193,11 +193,29 @@ impl App {
             changed = true;
         }
 
+        let settings_tick = self.settings_modal_state.tick();
+        changed |= settings_tick.changed;
+        if let Some(b) = settings_tick.banner {
+            self.banner = Some(b);
+            changed = true;
+        }
+        if let Some(applied) = self.settings_modal_state.blocked_channels.take_applied() {
+            changed |= self.chat.apply_blocked_rooms(applied.ids, applied.at);
+        }
         // Services
         let chat_tick = self.chat.tick();
         changed |= chat_tick.changed;
         if let Some(b) = chat_tick.banner {
             self.banner = Some(b);
+            changed = true;
+        }
+        if self.chat.take_block_visibility_changed() {
+            self.paper.invalidate_channel_visibility();
+            self.room_search_modal_state.close();
+            self.room_info_modal_state.close();
+            self.show_poll_modal = false;
+            self.poll_modal_state.close();
+            self.show_sheet_modal = false;
             changed = true;
         }
         // Fire a debounced message search for the Ctrl+/ modal's `?` mode.
@@ -287,6 +305,14 @@ impl App {
             changed = true;
         }
         changed |= self.voice.tick();
+        if self
+            .voice
+            .current_room(self.user_id)
+            .is_some_and(|id| self.chat.voice_channel_is_blocked(id))
+        {
+            self.voice_leave_current_channel();
+            changed = true;
+        }
         changed |= self.drain_voice_join_results();
         changed |= self.tick_stream();
         changed |= self.tick_crown();
@@ -319,12 +345,6 @@ impl App {
             .set_translate_settings(translate_to, auto_translate);
         changed |= self.sudoku_state.poll_daily_generation();
         changed |= self.le_word_state.poll_word_reload();
-        let settings_tick = self.settings_modal_state.tick();
-        changed |= settings_tick.changed;
-        if let Some(b) = settings_tick.banner {
-            self.banner = Some(b);
-            changed = true;
-        }
         if self.show_profile_modal {
             changed |= self.profile_modal_state.tick();
         }

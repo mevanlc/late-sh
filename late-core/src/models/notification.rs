@@ -75,7 +75,8 @@ impl Notification {
     ) -> Result<Vec<NotificationView>> {
         let rows = client
             .query(
-                "SELECT n.id, n.created, n.user_id, n.actor_id, n.message_id, n.room_id,
+                &super::channel_block::visible_query(
+                    "SELECT n.id, n.created, n.user_id, n.actor_id, n.message_id, n.room_id,
                         COALESCE(u.username, '') AS actor_username,
                         r.slug AS room_slug,
                         LEFT(m.body, 120) AS message_preview,
@@ -86,6 +87,7 @@ impl Notification {
                  JOIN chat_rooms r ON r.id = n.room_id
                  JOIN chat_messages m ON m.id = n.message_id
                  WHERE n.user_id = $1
+                   AND /* channel visibility */
                    AND NOT (
                         COALESCE(recipient.settings, '{}'::jsonb)
                         @> jsonb_build_object(
@@ -101,6 +103,9 @@ impl Notification {
                    )
                  ORDER BY n.created DESC
                  LIMIT $2",
+                    "r",
+                    "$1",
+                ),
                 &[&user_id, &limit],
             )
             .await?;
@@ -134,12 +139,14 @@ impl Notification {
     pub async fn unread_count(client: &Client, user_id: Uuid) -> Result<i64> {
         let row = client
             .query_one(
-                "SELECT COUNT(n.id)::bigint AS unread_count
+                &super::channel_block::visible_query(
+                    "SELECT COUNT(n.id)::bigint AS unread_count
                  FROM notifications n
                  JOIN chat_rooms r ON r.id = n.room_id
                  JOIN users recipient ON recipient.id = n.user_id
                  LEFT JOIN mention_feed_reads mfr ON mfr.user_id = $1
                  WHERE n.user_id = $1
+                   AND /* channel visibility */
                    AND n.read_at IS NULL
                    AND n.created > COALESCE(mfr.last_read_at, '-infinity'::timestamptz)
                    AND NOT (
@@ -155,15 +162,34 @@ impl Notification {
                         OR r.permanent = true
                         OR r.visibility IN ('public', 'private')
                    )",
+                    "r",
+                    "$1",
+                ),
                 &[&user_id],
             )
             .await?;
         Ok(row.get("unread_count"))
     }
 
-    /// Mark all unread notifications as read for a user.
+    /// Mark visible mentions read, preserving unread mentions in blocked rooms.
     pub async fn mark_all_read(client: &Client, user_id: Uuid) -> Result<()> {
-        MentionFeedRead::mark_read_now(client, user_id).await
+        let visible = super::channel_block::visible_sql("r", "$1");
+        let blocked = super::channel_block::effective_ids_query("$1");
+        // One statement uses the same preference snapshot for the per-mention
+        // stamps and global watermark, even during a concurrent block edit.
+        let sql = format!(
+            "WITH marked AS (
+                UPDATE notifications n SET read_at = current_timestamp, updated = current_timestamp
+                FROM chat_rooms r WHERE n.room_id = r.id AND n.user_id = $1 AND n.read_at IS NULL AND {visible}
+                RETURNING n.id
+            )
+            INSERT INTO mention_feed_reads (user_id, last_read_at, updated)
+            SELECT $1, current_timestamp, current_timestamp WHERE NOT EXISTS ({blocked})
+            ON CONFLICT (user_id) DO UPDATE SET
+                last_read_at = EXCLUDED.last_read_at, updated = current_timestamp"
+        );
+        client.execute(&sql, &[&user_id]).await?;
+        Ok(())
     }
 
     /// Stamp `read_at` on this user's mentions riding on the given messages.
@@ -181,11 +207,16 @@ impl Notification {
         }
         let count = client
             .execute(
-                "UPDATE notifications
+                &super::channel_block::visible_query(
+                    "UPDATE notifications n
                  SET read_at = current_timestamp, updated = current_timestamp
-                 WHERE user_id = $1
-                   AND message_id = ANY($2)
-                   AND read_at IS NULL",
+                 FROM chat_rooms r
+                 WHERE n.room_id = r.id AND n.user_id = $1
+                   AND n.message_id = ANY($2)
+                   AND n.read_at IS NULL AND /* channel visibility */",
+                    "r",
+                    "$1",
+                ),
                 &[&user_id, &message_ids],
             )
             .await?;

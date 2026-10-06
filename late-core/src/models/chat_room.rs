@@ -593,7 +593,8 @@ impl ChatRoom {
                 //
                 // The unread count stops at $3; see `UNREAD_COUNT_CAP` for why
                 // an exact total is neither needed nor affordable.
-                "SELECT r.*,
+                &super::channel_block::visible_query(
+                    "SELECT r.*,
                         latest.created AS last_message_at,
                         COALESCE(unread.unread_count, 0)::bigint AS unread_count
                  FROM chat_rooms r
@@ -621,6 +622,7 @@ impl ChatRoom {
                     ) capped
                  ) unread ON true
                  WHERE m.user_id = $1
+                   AND /* channel visibility */
                  ORDER BY
                      CASE
                          WHEN r.kind = 'lounge' AND r.slug = 'lounge' THEN 0
@@ -632,6 +634,9 @@ impl ChatRoom {
                      COALESCE(r.slug, COALESCE(r.language_code, '')) ASC,
                      r.created ASC,
                      r.id ASC",
+                    "r",
+                    "$1",
+                ),
                 &[
                     &user_id,
                     &system_user_id,
@@ -834,7 +839,7 @@ impl ChatRoom {
     ) -> Result<Vec<PublicTopicRoomSummary>> {
         let rows = client
             .query(
-                "SELECT r.kind,
+                "SELECT r.id, r.kind,
                         r.slug,
                         r.language_code,
                         COUNT(m.user_id)::bigint AS member_count
@@ -856,6 +861,7 @@ impl ChatRoom {
         Ok(rows
             .into_iter()
             .map(|row| PublicTopicRoomSummary {
+                room_id: row.get("id"),
                 kind: row.get("kind"),
                 slug: row.get("slug"),
                 language_code: row.get("language_code"),
@@ -1062,6 +1068,7 @@ pub struct DiscoverPublicTopicRoom {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PublicTopicRoomSummary {
+    pub room_id: Uuid,
     pub kind: String,
     pub slug: Option<String>,
     pub language_code: Option<String>,

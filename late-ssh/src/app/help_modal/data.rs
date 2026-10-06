@@ -1580,7 +1580,7 @@ fn settings_help_lines() -> Vec<String> {
         "  country via picker, with Unicode flag rendering".to_string(),
         "  timezone via picker".to_string(),
         "  IDE, terminal, OS, and languages for profile/late.fetch surfaces".to_string(),
-        "  Tweaks: terminal background sync, text brightness, right sidebar mode, room list, composer send behavior, plain glyphs, terminal images, chat badges, landing page, input mode"
+        "  Tweaks: terminal background sync, text brightness, right sidebar mode, room list, composer send behavior, plain glyphs, terminal images, chat badges, blocked channels, landing page, input mode"
             .to_string(),
         "  Statusline: bottom status bar components, their order, and display options".to_string(),
         "  private RSS/Atom subscriptions".to_string(),
@@ -1670,6 +1670,11 @@ fn settings_help_lines() -> Vec<String> {
         "  Display".to_string(),
         "    Plain glyphs                  for fonts without flags or Nerd Font: text labels instead of flag emoji in chat badges and Shop Flags, and Nerd Font icons left out of chat messages and reactions"
             .to_string(),
+        "    Blocked channels              hide ordinary public/private and language channels for your account in the SSH TUI".to_string(),
+        "                                  Enter opens your blocklist; Add channel opens a searchable chooser. Enter or click a blocked row to unblock it.".to_string(),
+        "                                  System, core, special, DM, game, and stream channels cannot be blocked.".to_string(),
+        "                                  Membership, favorites, and history are kept. Other SSH sessions catch up on their next chat refresh; IRC is unaffected.".to_string(),
+        "                                  A blocked channel's newspaper column is hidden; mentions of it in other text remain visible.".to_string(),
         "  Startup".to_string(),
         "    Land on                       where a session starts: Clubhouse (default), Home, or Zen; first sessions always start in the Clubhouse"
             .to_string(),
