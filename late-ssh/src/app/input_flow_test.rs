@@ -440,7 +440,8 @@ use crate::authz::Permissions;
 use crate::test_helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_in_world,
     make_app_with_chat_service, make_app_with_permissions, new_test_db, render_plain, strip_ansi,
-    wait_for_render_contains, wait_for_render_not_contains, wait_until, with_session_key,
+    wait_for_app, wait_for_render_contains, wait_for_render_not_contains, wait_until,
+    with_session_key,
 };
 use late_core::models::cyberspace_account::CyberspaceAccount;
 use late_core::models::user::{RightSidebarMode, RoomListMode};
@@ -4539,6 +4540,201 @@ async fn backtick_from_zen_hops_through_the_games_and_comes_home_to_zen() {
     assert_eq!(app.screen, Screen::Darkroom);
     app.handle_input(b"`");
     assert_eq!(app.screen, Screen::Dashboard);
+}
+
+/// A watch opened from Zen (`o` on its Live tile showing a live door game)
+/// is a trip into the games like any other stop: backtick comes home to
+/// Zen, and Zen still knows the page its `Ctrl+F` hands back.
+#[tokio::test]
+async fn a_watch_opened_from_zen_comes_home_to_zen_on_backtick() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::door::spectate::{
+        proxy::LiveGame,
+        state::{SpectateGame, WatchMode},
+    };
+    use crate::app::zen::state::{KindPick, TileKind};
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-watch-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-watch-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    let started_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock after the unix epoch")
+        .as_secs()
+        - 30;
+    app.live_games.publish_roster_for_tests(
+        SpectateGame::Dcss,
+        vec![LiveGame {
+            playname: "crawler".to_string(),
+            started_unix,
+            watchers: 0,
+            status: String::new(),
+        }],
+    );
+
+    // Zen opened over the Leaderboards, with a Live tile showing the game.
+    app.set_screen(Screen::Leaderboard);
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "w tend").await;
+    app.zen.focus = app
+        .zen
+        .first_tile_of(TileKind::Lobby)
+        .expect("the default has a lobby");
+    app.zen.open_kind_picker();
+    while app.zen.kind_picker_selection() != Some(TileKind::Live) {
+        app.zen.move_kind_picker(1);
+    }
+    assert_eq!(app.zen.pick_kind(), KindPick::Changed);
+    // The tile draws the strip's one-row form.
+    wait_for_render_contains(&mut app, "dcss crawler").await;
+
+    // No render runs from here: the test door host is unreachable, so a
+    // tick would see the stream end and drop the watch.
+    app.handle_input(b"o");
+    assert_eq!(app.screen, Screen::Games, "o opens the watch");
+    assert_eq!(
+        app.spectate_state.as_ref().map(|state| state.mode()),
+        Some(WatchMode::Open)
+    );
+
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Zen, "backtick comes home to Zen");
+    app.handle_input(b"\x06");
+    assert_eq!(
+        app.screen,
+        Screen::Leaderboard,
+        "and Zen still hands back the page it was opened over"
+    );
+}
+
+/// A player answers their watchers without leaving the game: F2, or a click
+/// on the pane, opens the chat composer in their own watch-chat room, the
+/// keys are the composer's until Esc hands them back, and the one-row form
+/// on a narrow terminal has no composer at all.
+#[tokio::test]
+async fn f2_or_a_click_on_the_pane_lets_a_player_write_to_their_watchers() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::door::spectate::state::SpectateGame;
+    use late_core::models::chat_room::ChatRoom;
+    use late_core::models::chat_room_member::ChatRoomMember;
+    use late_core::models::leaderboard::DoorGame;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "own-chat-f2").await;
+    // The player's watch-chat room, joined ahead of the session the way a
+    // returning player's is, so the room list the app loads carries it.
+    let client = test_db.db.get().await.expect("db client");
+    let room = ChatRoom::get_or_create_watch_room(&client, DoorGame::Nethack, "tester")
+        .await
+        .expect("the player's watch room");
+    ChatRoomMember::join(&client, room.id, user.id)
+        .await
+        .expect("join the watch room");
+    let mut app = make_app(test_db.db.clone(), user.id, "own-chat-f2-flow-it");
+    // Wide enough for NetHack's 80 columns, the rule and the 40-column pane.
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_app(&mut app, "the room list", |app| {
+        app.chat.room_by_id(room.id).is_some()
+    })
+    .await;
+    // The service has the room resolved, as after its lookup.
+    app.live_games
+        .publish_chat_room_for_tests(SpectateGame::Nethack, "tester", room.id);
+
+    // A running NetHack game under a claimed handle, as if launched from the
+    // hub. Nothing awaits from here on: the fabricated proxy's bridge task
+    // would be polled, fail to connect, and end the game.
+    app.set_screen(Screen::Games);
+    app.enter_nethack();
+    let state = app.nethack_state.as_mut().expect("nethack state");
+    state.force_claimed_handle_for_test("tester");
+    state.force_running_for_test();
+    app.set_screen(Screen::Nethack);
+    // One tick makes the player's link and takes its room.
+    app.tick();
+    let room_id = app
+        .own_watch_chat_room_id(SpectateGame::Nethack)
+        .expect("the player's own room");
+    assert_eq!(room_id, room.id);
+
+    // The frame draws the pane with its inert composer strip, which names
+    // the way in, and records where the pane is.
+    let plain = render_plain(&mut app);
+    assert!(plain.contains("Compose (F2 or click)"), "{plain}");
+    assert!(
+        plain.contains("F2 or click: write to your watchers"),
+        "{plain}"
+    );
+    let pane = app.own_chat_hit.get().expect("the pane was drawn");
+
+    // Until F2 every key is the game's: nothing composes.
+    app.handle_input(b"j");
+    assert!(!app.chat.is_composing());
+
+    app.handle_input(b"\x1bOQ");
+    assert!(app.chat.is_composing(), "F2 opens the composer");
+    assert_eq!(
+        app.chat.composer_room_id(),
+        Some(room_id),
+        "in the player's own room"
+    );
+    app.handle_input(b"hi all");
+    assert_eq!(
+        app.chat.composer().lines().join("\n"),
+        "hi all",
+        "typed keys are the composer's, not the game's"
+    );
+    let plain = render_plain(&mut app);
+    assert!(
+        plain.contains("hi all") && !plain.contains("Compose (F2 or click)"),
+        "the same strip, now open: {plain}"
+    );
+
+    // Esc discards and hands the keys back to the game. A lone Esc is held
+    // for escape-sequence disambiguation and dispatches on a later tick;
+    // backdate it and flush, since an await here would end the fabricated
+    // game.
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(!app.chat.is_composing(), "Esc closes the composer");
+    app.handle_input(b"j");
+    assert!(
+        !app.chat.is_composing(),
+        "and the keys are the game's again"
+    );
+    assert_eq!(app.screen, Screen::Nethack);
+
+    // A click on the pane opens it too (SGR coordinates are 1-based).
+    app.handle_input(format!("\x1b[<0;{};{}M", pane.x + 1, pane.y + 1).as_bytes());
+    assert!(
+        app.chat.is_composing(),
+        "a click on the pane opens the composer"
+    );
+    assert_eq!(app.chat.composer_room_id(), Some(room_id));
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(!app.chat.is_composing());
+
+    // A terminal with room for the one-row form only has no composer: F2
+    // stays the game's.
+    app.resize(100, 30).expect("resize test terminal");
+    render_plain(&mut app);
+    assert_eq!(app.own_chat_hit.get(), None, "no pane on a narrow terminal");
+    app.handle_input(b"\x1bOQ");
+    assert!(
+        !app.chat.is_composing(),
+        "F2 stays with the game without a pane"
+    );
 }
 
 #[tokio::test]

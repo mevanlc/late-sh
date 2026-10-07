@@ -3725,6 +3725,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vt100",
 ]
 
 [[package]]
@@ -3823,6 +3824,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "vt100",
 ]
 
 [[package]]
@@ -3852,6 +3854,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vt100",
 ]
 
 [[package]]
