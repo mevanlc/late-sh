@@ -2033,6 +2033,7 @@ impl App {
                     );
                 }
             }
+            Screen::Calendars => crate::app::calendar::ui::draw(frame, inner, ctx.calendar),
             // The tour's dungeon stop plays its fight where the hub would be.
             Screen::Games if tour_header.is_some() => crate::app::clubhouse::fight::draw(
                 frame,
@@ -2057,7 +2058,6 @@ impl App {
                     );
                 }
             }
-            Screen::Calendars => crate::app::calendar::ui::draw(frame, inner, ctx.calendar),
             Screen::Games => {
                 // The rail's selection sits on a live row while this session
                 // previews one; the preview then draws in the landing's place.

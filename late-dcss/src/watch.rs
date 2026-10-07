@@ -211,9 +211,8 @@ impl LiveGame {
             .screen()
             .contents();
         let mut status = self.status.lock().expect("live status mutex");
-        match hud_status(&contents) {
-            Some(read) => *status = read,
-            None => {}
+        if let Some(read) = hud_status(&contents) {
+            *status = read;
         }
         status.clone()
     }

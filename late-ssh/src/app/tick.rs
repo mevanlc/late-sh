@@ -1548,6 +1548,7 @@ impl App {
             | Screen::GreenDragon
             | Screen::Darkroom
             | Screen::Leaderboard
+            | Screen::Calendars
             | Screen::Clubhouse
             | Screen::Nightcap
             | Screen::City

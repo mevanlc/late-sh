@@ -160,6 +160,8 @@ pub fn fit_axis(screen_len: u16, view_len: u16, cursor: u16) -> AxisFit {
 }
 
 /// What the watch view draws around the watched screen.
+// This transient render input stays on the stack to avoid allocating each frame.
+#[allow(clippy::large_enum_variant)]
 pub enum WatchPane<'a> {
     /// The preview beside the hub's rail: the screen alone.
     Preview,

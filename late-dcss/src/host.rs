@@ -260,8 +260,7 @@ async fn run_bridge(
         &live_game,
         &master,
         &mut child,
-        &handle,
-        channel,
+        (&handle, channel),
         &mut shutdown_rx,
     )
     .await;
@@ -317,8 +316,7 @@ async fn bridge_loop(
     live_game: &LiveHandle,
     master: &std::sync::Arc<std::fs::File>,
     child: &mut tokio::process::Child,
-    handle: &Handle,
-    channel: ChannelId,
+    (handle, channel): (&Handle, ChannelId),
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> StopReason {
     use std::io::Write;
