@@ -222,6 +222,7 @@ impl ChipService {
         user_id: Uuid,
         price: i64,
         drink: &str,
+        intoxicating: bool,
     ) -> anyhow::Result<Option<DrinkPurchase>> {
         let mut client = self.db.get().await?;
         let tx = client.transaction().await?;
@@ -230,7 +231,7 @@ impl ChipService {
         else {
             return Ok(None);
         };
-        let drinks = UserDrinks::record_purchase(&tx, user_id, price).await?;
+        let drinks = UserDrinks::record_purchase(&tx, user_id, price, intoxicating).await?;
         tx.commit().await?;
         Ok(Some(DrinkPurchase {
             balance: chips.balance,
@@ -299,7 +300,8 @@ impl ChipService {
                 total,
             }));
         };
-        let drinks = UserDrinks::record_comped_pour(&tx, buyer_id, bar.drink_points()).await?;
+        let drinks =
+            UserDrinks::record_comped_pour(&tx, buyer_id, bar.drink_points(), true).await?;
         tx.commit().await.context("committing the round")?;
 
         Ok(RoundPurchase {
@@ -383,14 +385,19 @@ impl ChipService {
     /// with no chip debit anywhere. One transaction, so the credit cannot be
     /// spent without the drink landing. `None` means there was nothing to
     /// spend, and the caller charges for the pour as usual.
-    pub async fn cash_round_drink(&self, user_id: Uuid) -> anyhow::Result<Option<CompedDrink>> {
+    pub async fn cash_round_drink(
+        &self,
+        user_id: Uuid,
+        intoxicating: bool,
+    ) -> anyhow::Result<Option<CompedDrink>> {
         let mut client = self.db.get().await?;
         let tx = client.transaction().await?;
         let Some(credit) = DrinkCredit::cash(&tx, user_id).await? else {
             return Ok(None);
         };
         let drinks =
-            UserDrinks::record_comped_pour(&tx, user_id, credit.bar.drink_points()).await?;
+            UserDrinks::record_comped_pour(&tx, user_id, credit.bar.drink_points(), intoxicating)
+                .await?;
         tx.commit().await?;
         Ok(Some(CompedDrink {
             round_id: credit.round_id,

@@ -1,7 +1,8 @@
 //! Per-user tavern drink tally backing the clubhouse drunkenness glow.
 //!
 //! `drunk_points` is the raw buzz recorded at `last_drink_at` (chips spent on
-//! drinks, capped at [`MAX_DRUNK_POINTS`]). Readers apply [`decayed_points`]
+//! intoxicating drinks, capped at [`MAX_DRUNK_POINTS`]). Non-intoxicating pours
+//! only update the drink count and spending tally. Readers apply [`decayed_points`]
 //! against elapsed wall-clock time, so a user dries out on their own; the one
 //! write that sobers anyone up early is the Shop's hangover pill
 //! ([`UserDrinks::sober_up_in_tx`]).
@@ -114,13 +115,16 @@ impl UserDrinks {
         drunk_level(self.effective_points(now))
     }
 
-    /// Record a paid drink: `price` chips become both buzz and tab.
+    /// Record a paid drink: `price` chips go on the tab and become buzz only
+    /// when `intoxicating` is true.
     pub async fn record_purchase(
         client: &impl GenericClient,
         user_id: Uuid,
         price: i64,
+        intoxicating: bool,
     ) -> Result<Self> {
-        Self::record_pour(client, user_id, price, price).await
+        let points = if intoxicating { price } else { 0 };
+        Self::record_pour(client, user_id, points, price, intoxicating).await
     }
 
     /// Record a drink somebody else already paid for: the buzz lands, the tab
@@ -130,12 +134,15 @@ impl UserDrinks {
     /// bartender named the drink, so what the house comps never depends on
     /// what he invented to call it. `lifetime_spent` stays put because the
     /// drinker spent nothing: the chips are on the buyer's ledger row.
+    /// A non-intoxicating pour consumes the drink without adding any buzz.
     pub async fn record_comped_pour(
         client: &impl GenericClient,
         user_id: Uuid,
         points: i64,
+        intoxicating: bool,
     ) -> Result<Self> {
-        Self::record_pour(client, user_id, points, 0).await
+        let applied_points = if intoxicating { points } else { 0 };
+        Self::record_pour(client, user_id, applied_points, 0, intoxicating).await
     }
 
     /// Decay the stored buzz to now, add `points`, cap it, and bump the
@@ -148,35 +155,52 @@ impl UserDrinks {
         user_id: Uuid,
         points: i64,
         spent: i64,
+        intoxicating: bool,
     ) -> Result<Self> {
-        let row = client
-            .query_one(
-                "INSERT INTO user_drinks
-                    (user_id, drunk_points, lifetime_spent, drink_count, last_drink_at)
-                 VALUES ($1, LEAST($2::bigint, $4::bigint), $5::bigint, 1, current_timestamp)
-                 ON CONFLICT (user_id) DO UPDATE SET
-                    drunk_points = LEAST(
-                        GREATEST(
-                            user_drinks.drunk_points
-                                - (EXTRACT(EPOCH FROM (current_timestamp - user_drinks.last_drink_at))::bigint * $3::bigint / 3600),
-                            0
-                        ) + $2::bigint,
-                        $4::bigint
-                    ),
-                    lifetime_spent = user_drinks.lifetime_spent + $5::bigint,
-                    drink_count = user_drinks.drink_count + 1,
-                    last_drink_at = current_timestamp,
-                    updated = current_timestamp
-                 RETURNING *",
-                &[
-                    &user_id,
-                    &points,
-                    &DRUNK_DECAY_PER_HOUR,
-                    &MAX_DRUNK_POINTS,
-                    &spent,
-                ],
-            )
-            .await?;
+        let row = if intoxicating {
+            client
+                .query_one(
+                    "INSERT INTO user_drinks
+                        (user_id, drunk_points, lifetime_spent, drink_count, last_drink_at)
+                     VALUES ($1, LEAST($2::bigint, $4::bigint), $5::bigint, 1, current_timestamp)
+                     ON CONFLICT (user_id) DO UPDATE SET
+                        drunk_points = LEAST(
+                            GREATEST(
+                                user_drinks.drunk_points
+                                    - (EXTRACT(EPOCH FROM (current_timestamp - user_drinks.last_drink_at))::bigint * $3::bigint / 3600),
+                                0
+                            ) + $2::bigint,
+                            $4::bigint
+                        ),
+                        lifetime_spent = user_drinks.lifetime_spent + $5::bigint,
+                        drink_count = user_drinks.drink_count + 1,
+                        last_drink_at = current_timestamp,
+                        updated = current_timestamp
+                     RETURNING *",
+                    &[
+                        &user_id,
+                        &points,
+                        &DRUNK_DECAY_PER_HOUR,
+                        &MAX_DRUNK_POINTS,
+                        &spent,
+                    ],
+                )
+                .await?
+        } else {
+            client
+                .query_one(
+                    "INSERT INTO user_drinks
+                        (user_id, drunk_points, lifetime_spent, drink_count, last_drink_at)
+                     VALUES ($1, 0, $2::bigint, 1, '1970-01-01 00:00:00Z'::timestamp)
+                     ON CONFLICT (user_id) DO UPDATE SET
+                        lifetime_spent = user_drinks.lifetime_spent + $2::bigint,
+                        drink_count = user_drinks.drink_count + 1,
+                        updated = current_timestamp
+                     RETURNING *",
+                    &[&user_id, &spent],
+                )
+                .await?
+        };
         Ok(Self::from(row))
     }
 

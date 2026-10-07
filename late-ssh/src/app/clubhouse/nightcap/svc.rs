@@ -259,7 +259,7 @@ async fn order_drink(
     // for the house measure it bought (`Drink::on_the_round`): a priced
     // pick is debited as ordered and the credit stays banked.
     let credit = if drink.on_the_round() {
-        chip_service.cash_round_drink(user_id).await
+        chip_service.cash_round_drink(user_id, true).await
     } else {
         Ok(None)
     };
@@ -298,7 +298,7 @@ async fn order_drink(
     }
 
     match chip_service
-        .buy_drink(user_id, drink.price(), drink.name())
+        .buy_drink(user_id, drink.price(), drink.name(), true)
         .await
     {
         Ok(Some(purchase)) => {

@@ -2139,7 +2139,7 @@ async fn the_hangover_pill_sobers_a_drunk_buyer_and_refuses_a_sober_one() {
     assert_eq!(sober.status, PurchaseStatus::AlreadySober);
     assert_eq!(sober.balance, funded, "a sober buyer is never charged");
 
-    UserDrinks::record_purchase(&client, user.id, 800)
+    UserDrinks::record_purchase(&client, user.id, 800, true)
         .await
         .expect("drink");
     let drunk = UserDrinks::find(&client, user.id)
