@@ -14,7 +14,7 @@ This file owns chat-specific context; the root `CONTEXT.md` keeps only the map a
 
 Included here:
 - Home chat rooms, DMs, public/private topic rooms, synthetic entries, and game-backed room chat.
-- Home/Dashboard chat center, room rail, and the embedded game-chat surfaces (house tables, daily match boards).
+- Home/Dashboard chat center, room rail, and the embedded game-chat surfaces (house tables, daily match boards, the door watch view).
 - Message composer, replies, edits, deletes, reactions, ignores, overlays, and autocomplete.
 - Synthetic chat entries: RSS, News, Mentions/Notifications, and Discover. Voice is not a synthetic room slot: the dedicated `#voice` room is a real, permanent, public chat room pinned at the bottom of Core (above Discover). Any voice-enabled chat/game room (including `#voice`) renders an embedded voice strip and exposes `/voice`/`/mute` controls while you are inside it. Showcase/Projects and Work/Profiles keep their feed services and state here, but their UI and their editor (`app/directory/editor`) live on Profiles page 5.
 - Chat service refresh/tail/event contracts, DB model constraints, keybindings, tests, and gotchas.
@@ -278,12 +278,13 @@ Room favorites:
 Home presence:
 - The top activity/multiplayer/quest strip was removed; presence (online count + connected friends) lives in the right sidebar's pinned core block, and the public activity feed ships into #lounge as system messages (`app/activity/lounge.rs`; the sidebar Activity panel is retired) surfaced in the TUI as the one-row activity ticker above the composer, never as chat rows. The `b1`-`b4` recent-room jump keys died with the Rooms demolition.
 
-`App::sync_visible_chat_room()` is the read/tail-load bridge. It computes the visible chat room from the current screen (Home/Dashboard, house table, daily board, Clubhouse), stores it in `ChatState`, marks it read, and requests a tail on change. Call it after screen, selected room/synthetic entry, room favorite, or open-surface changes.
+`App::sync_visible_chat_room()` is the read/tail-load bridge. It computes the visible chat room from the current screen (Home/Dashboard, house table, daily board, Clubhouse, the Games hub while it has a door-game watch open, a player's own running DCSS, NetHack or Brogue game), stores it in `ChatState`, marks it read, and requests a tail on change. Call it after screen, selected room/synthetic entry, room favorite, or open-surface changes.
 
 There are separate `ChatRowsCache` instances on `App` for:
 - Home lounge dashboard chat.
 - Home chat center for the selected real room/synthetic entry.
 - Embedded game chat (house tables, daily match boards).
+- The door watch view's chat (`app/door/spectate`, the watched player's room).
 
 Do not share a row cache across surfaces unless width and visible messages are guaranteed identical.
 
@@ -1041,6 +1042,7 @@ Embedded game chat:
 - Uses `EmbeddedRoomChatView`.
 - Composer is capped at 4 visible lines.
 - Game-backed chat rooms are joined through their surface's idempotent `join_game_room_chat` (fired from `App::tick`), not the Home room rail.
+- The door watch view (`app/door/spectate`) is the one pane that lives inside another page: `Screen::Games` is in the pane roster (`app/input.rs::screen_has_chat_pane`) but resolves to a room only while the session has a watch open (a preview beside the rail has no chat) and the pane is docked. `draw_embedded_room_chat` returns its composer rect so the watch can tee its rule into the composer's borders. The player being watched gets the same room beside their own game through `draw_embedded_room_messages` (the message half of `draw_embedded_room_chat`: no selection, overlay or click target) with the room's ordinary composer strip always at its foot, inert (`ComposerInert::OwnWatchChat`) until F2 or a click on the pane opens it, or its newest message as one read-only row on a narrow terminal (`door/spectate/CONTEXT.md` §1).
 
 Message rendering:
 - Local message storage is newest-first.

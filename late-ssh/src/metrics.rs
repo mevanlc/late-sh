@@ -451,6 +451,18 @@ pub enum SshRejectReason {
     GlobalLimit,
 }
 
+/// How a viewer's watch stream of a live door game ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoorWatchOutcome {
+    /// The host closed the stream: the game ended, or was never live.
+    Closed,
+    /// The viewer ended the watch: another rail row, leaving the hub with a
+    /// preview, the off-screen window running out.
+    Left,
+    /// Connect, auth, or a broken frame stream.
+    Failed,
+}
+
 /// The band count a paired CLI's `viz` frame arrived with. CLIs from before
 /// the 16-band analyzer send 8, which the pair socket stretches to 16.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -477,16 +489,16 @@ mod inner {
     use super::XMediaLookup;
     use super::{
         ActivityGame, ArcadeDifficulty, ArcadeFinish, ArcadeMode, AwardAnnouncementOutcome,
-        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, FightBeat,
-        FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult, GalleryHangResult,
-        GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal, GildTier,
-        JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult, NewsShareReward,
-        NightcapHouseFailure, NightcapOrderResult, OldSignalPayout, OnlineTimeFlushResult,
-        PaperOpenResult, PaperPrintResult, Place, PoolShotOutcome, PotRefusal, PotReminderOutcome,
-        Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome, RenderReason, RoundRefusal,
-        RunnerDoor, Screen, SessionStartStage, SessionUser, SnapshotRowError, SongQueueReward,
-        SshRejectReason, SummaryResult, TailorBeat, ThumbnailFetch, TranslationResult,
-        VizWireBands,
+        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, DoorWatchOutcome,
+        FightBeat, FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult,
+        GalleryHangResult, GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal,
+        GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OldSignalPayout,
+        OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, Place, PoolShotOutcome,
+        PotRefusal, PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh,
+        RefreshOutcome, RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage,
+        SessionUser, SnapshotRowError, SongQueueReward, SshRejectReason, SummaryResult, TailorBeat,
+        ThumbnailFetch, TranslationResult, VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
     use super::{NewcomerMinuteResult, ReferralAttachOutcome, ReferralSettlement, ReferralSource};
@@ -2631,6 +2643,68 @@ mod inner {
         door_ingest_session_failures_total().add(1, &[KeyValue::new("game", game.key())]);
     }
 
+    fn door_watch_outcome_label(outcome: DoorWatchOutcome) -> &'static str {
+        match outcome {
+            DoorWatchOutcome::Closed => "closed",
+            DoorWatchOutcome::Left => "left",
+            DoorWatchOutcome::Failed => "failed",
+        }
+    }
+
+    fn door_watch_streams_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_watch_streams_total")
+                .with_description(
+                    "Viewer watch streams of a live door game, by game and how they ended",
+                )
+                .build()
+        })
+    }
+
+    fn door_watch_roster_failures_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_watch_roster_failures_total")
+                .with_description(
+                    "Door live-game roster stream failures (connect or mid-stream) before a retry, by game",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_door_watch_stream(game: DoorGame, outcome: DoorWatchOutcome) {
+        door_watch_streams_total().add(
+            1,
+            &[
+                KeyValue::new("game", game.key()),
+                KeyValue::new("outcome", door_watch_outcome_label(outcome)),
+            ],
+        );
+    }
+
+    pub fn record_door_watch_roster_failure(game: DoorGame) {
+        door_watch_roster_failures_total().add(1, &[KeyValue::new("game", game.key())]);
+    }
+
+    fn door_watch_chat_room_failures_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_watch_chat_room_failures_total")
+                .with_description(
+                    "Failures to resolve a player's watch-chat room (the lookup or its first create), by game",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_door_watch_chat_room_failure(game: DoorGame) {
+        door_watch_chat_room_failures_total().add(1, &[KeyValue::new("game", game.key())]);
+    }
+
     fn online_time_flush_result_label(result: OnlineTimeFlushResult) -> &'static str {
         match result {
             OnlineTimeFlushResult::Flushed => "flushed",
@@ -2668,16 +2742,16 @@ mod inner {
     use super::XMediaLookup;
     use super::{
         ActivityGame, ArcadeDifficulty, ArcadeFinish, ArcadeMode, AwardAnnouncementOutcome,
-        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, FightBeat,
-        FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult, GalleryHangResult,
-        GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal, GildTier,
-        JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult, NewsShareReward,
-        NightcapHouseFailure, NightcapOrderResult, OldSignalPayout, OnlineTimeFlushResult,
-        PaperOpenResult, PaperPrintResult, Place, PoolShotOutcome, PotRefusal, PotReminderOutcome,
-        Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome, RenderReason, RoundRefusal,
-        RunnerDoor, Screen, SessionStartStage, SessionUser, SnapshotRowError, SongQueueReward,
-        SshRejectReason, SummaryResult, TailorBeat, ThumbnailFetch, TranslationResult,
-        VizWireBands,
+        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, DoorWatchOutcome,
+        FightBeat, FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult,
+        GalleryHangResult, GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal,
+        GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OldSignalPayout,
+        OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, Place, PoolShotOutcome,
+        PotRefusal, PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh,
+        RefreshOutcome, RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage,
+        SessionUser, SnapshotRowError, SongQueueReward, SshRejectReason, SummaryResult, TailorBeat,
+        ThumbnailFetch, TranslationResult, VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
     use super::{NewcomerMinuteResult, ReferralAttachOutcome, ReferralSettlement, ReferralSource};
@@ -2774,6 +2848,9 @@ mod inner {
     pub fn record_gallery_splash_queue_depth(_depth: i64) {}
     pub fn record_door_ingest_line(_game: DoorGame) {}
     pub fn record_door_ingest_session_failure(_game: DoorGame) {}
+    pub fn record_door_watch_stream(_game: DoorGame, _outcome: DoorWatchOutcome) {}
+    pub fn record_door_watch_roster_failure(_game: DoorGame) {}
+    pub fn record_door_watch_chat_room_failure(_game: DoorGame) {}
     pub fn record_online_time_flush(_result: OnlineTimeFlushResult) {}
 }
 

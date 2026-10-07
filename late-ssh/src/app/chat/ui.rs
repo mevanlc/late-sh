@@ -202,10 +202,24 @@ pub(crate) struct ComposerBlockView<'a> {
     /// When true, Enter sends without closing the composer and Alt+S is a
     /// no-op. Drives the title-hint tier swap.
     pub keep_composer_focused: bool,
-    /// A composer that takes no keys: a Zen chat tile that is not the
-    /// focused one keeps its strip so the rows never jump, but `i`, `j`,
-    /// and `k` act on the focused tile, so it must not advertise them.
-    pub inert: bool,
+    /// Whether the composer takes keys, and if not, what focuses it.
+    pub inert: ComposerInert,
+}
+
+/// A composer that takes no keys keeps its strip so the rows never jump,
+/// and its title and placeholder say what focuses it instead of naming keys
+/// that act elsewhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposerInert {
+    /// The composer takes keys (or is the screen's one composer).
+    No,
+    /// A Zen chat tile that is not the focused one: `i`, `j` and `k` act on
+    /// the focused tile.
+    ZenTile,
+    /// The pane beside a player's own running roguelike: every key is the
+    /// game's until F2 or a click on the pane opens the composer
+    /// (`door/spectate`).
+    OwnWatchChat,
 }
 
 /// Pick the longest tier whose display width fits inside a titled `Block`
@@ -247,8 +261,18 @@ fn composer_title(view: &ComposerBlockView<'_>, block_width: u16) -> String {
 }
 
 fn pick_composer_title_text(view: &ComposerBlockView<'_>, block_width: u16) -> String {
-    if view.inert {
-        return pick_title_that_fits(block_width, &[" watching ", ""]).to_string();
+    match view.inert {
+        ComposerInert::ZenTile => {
+            return pick_title_that_fits(block_width, &[" watching ", ""]).to_string();
+        }
+        ComposerInert::OwnWatchChat => {
+            return pick_title_that_fits(
+                block_width,
+                &[" Compose (F2 or click) ", " (F2 or click) ", " F2 ", ""],
+            )
+            .to_string();
+        }
+        ComposerInert::No => {}
     }
     if !view.composing {
         return pick_title_that_fits(
@@ -456,11 +480,21 @@ fn reaction_picker_placeholder_lines(dim: Style, width: usize) -> Vec<Line<'stat
 fn empty_composer_placeholder(view: &ComposerBlockView<'_>, width: usize) -> Paragraph<'static> {
     let dim = Style::default().fg(theme::TEXT_DIM());
 
-    if view.inert {
-        return Paragraph::new(Line::from(Span::styled(
-            "Tab or a click focuses this tile · i writes",
-            dim,
-        )));
+    match view.inert {
+        ComposerInert::ZenTile => {
+            return Paragraph::new(Line::from(Span::styled(
+                "Tab or a click focuses this tile · i writes",
+                dim,
+            )));
+        }
+        ComposerInert::OwnWatchChat => {
+            return Paragraph::new(Line::from(Span::styled(
+                // Fits the 40-column pane: 38 cells of text.
+                "F2 or click: write to your watchers",
+                dim,
+            )));
+        }
+        ComposerInert::No => {}
     }
 
     if view.composing {
@@ -1150,7 +1184,7 @@ pub fn draw_dashboard_chat_card(
                 mention_matches: view.mention_matches,
                 mention_selected: view.mention_selected,
                 keep_composer_focused: view.keep_composer_focused,
-                inert: false,
+                inert: ComposerInert::No,
             },
             composer_text_width,
         ));
@@ -1302,7 +1336,7 @@ pub fn draw_dashboard_chat_card(
             mention_matches: view.mention_matches,
             mention_selected: view.mention_selected,
             keep_composer_focused: view.keep_composer_focused,
-            inert: false,
+            inert: ComposerInert::No,
         },
     );
     record_composer_mouse_target(
@@ -3268,10 +3302,9 @@ pub struct EmbeddedRoomChatView<'a> {
     pub highlighted_message_id: Option<Uuid>,
     pub reaction_picker_active: bool,
     pub composer: &'a TextArea<'static>,
-    /// The composer strip is drawn but takes no keys: a Zen chat tile that
-    /// is not the focused one. It keeps its strip so the rows never jump
-    /// and says so instead of naming keys that act on the focused tile.
-    pub composer_inert: bool,
+    /// Whether the composer strip takes keys, and if not, what focuses it
+    /// (the strip stays either way, so the rows never jump).
+    pub composer_inert: ComposerInert,
     pub composing: bool,
     pub mention_matches: &'a [MentionMatch],
     pub mention_selected: usize,
@@ -3350,12 +3383,15 @@ pub(crate) fn embedded_chat_layout(
     }
 }
 
+/// An embedded room chat: messages above, the composer block at the bottom.
+/// Returns the composer block's rect, for a surface that joins its own rules
+/// into the block's borders.
 pub fn draw_embedded_room_chat(
     frame: &mut Frame,
     area: Rect,
-    view: EmbeddedRoomChatView<'_>,
+    mut view: EmbeddedRoomChatView<'_>,
     terminal_images: &mut TerminalImageFrame,
-) {
+) -> Rect {
     let composer_text_width = area.width.saturating_sub(2).max(1) as usize;
     let total_composer_lines = chat_composer_lines_for_height(view.composer, composer_text_width)
         .max(composer_placeholder_lines(
@@ -3377,6 +3413,61 @@ pub fn draw_embedded_room_chat(
         ));
     let composer_height = total_composer_lines.min(4) as u16 + 2;
     let (messages_area, composer_area) = split_chat_and_composer(area, composer_height);
+    draw_embedded_messages(frame, messages_area, &mut view, terminal_images);
+
+    draw_composer_block(
+        frame,
+        composer_area,
+        &ComposerBlockView {
+            composer: view.composer,
+            composing: view.composing,
+            selected_message: view.selected_message_id.is_some(),
+            selected_image_message: view.selected_image_message,
+            reaction_picker_active: view.reaction_picker_active,
+            reply_author: view.reply_author,
+            is_editing: view.is_editing,
+            mention_active: view.mention_active,
+            mention_matches: view.mention_matches,
+            mention_selected: view.mention_selected,
+            keep_composer_focused: view.keep_composer_focused,
+            inert: view.composer_inert,
+        },
+    );
+    record_composer_mouse_target(
+        view.composer,
+        composer_area,
+        view.composer_rect_slot,
+        view.composer_viewport_top_slot,
+    );
+    composer_area
+}
+
+/// An embedded room drawn to be read and nothing else: its messages fill
+/// `area`, and there is no composer, selection, overlay or click target.
+/// The door watch chat as the player being watched sees it
+/// (`app/door/spectate`): every key they press belongs to their game.
+pub fn draw_embedded_room_messages(
+    frame: &mut Frame,
+    area: Rect,
+    mut view: EmbeddedRoomChatView<'_>,
+    terminal_images: &mut TerminalImageFrame,
+) {
+    view.overlay = None;
+    view.image_modal = None;
+    view.chat_hit_slot = None;
+    view.selected_message_id = None;
+    view.highlighted_message_id = None;
+    draw_embedded_messages(frame, area, &mut view, terminal_images);
+}
+
+/// The message half of an embedded room chat: the voice strip when the room
+/// has one, then the message rows, the overlay and the image modal.
+fn draw_embedded_messages(
+    frame: &mut Frame,
+    messages_area: Rect,
+    view: &mut EmbeddedRoomChatView<'_>,
+    terminal_images: &mut TerminalImageFrame,
+) {
     let layout = embedded_chat_layout(
         messages_area,
         view.messages_inset,
@@ -3468,31 +3559,6 @@ pub fn draw_embedded_room_chat(
     if let Some(image_modal) = view.image_modal {
         draw_image_modal(frame, messages_text_area, image_modal, terminal_images);
     }
-
-    draw_composer_block(
-        frame,
-        composer_area,
-        &ComposerBlockView {
-            composer: view.composer,
-            composing: view.composing,
-            selected_message: view.selected_message_id.is_some(),
-            selected_image_message: view.selected_image_message,
-            reaction_picker_active: view.reaction_picker_active,
-            reply_author: view.reply_author,
-            is_editing: view.is_editing,
-            mention_active: view.mention_active,
-            mention_matches: view.mention_matches,
-            mention_selected: view.mention_selected,
-            keep_composer_focused: view.keep_composer_focused,
-            inert: view.composer_inert,
-        },
-    );
-    record_composer_mouse_target(
-        view.composer,
-        composer_area,
-        view.composer_rect_slot,
-        view.composer_viewport_top_slot,
-    );
 }
 
 struct RoomListRows {
@@ -3588,7 +3654,7 @@ fn chat_selection_mode(view: &ChatRenderInput<'_>, area: Rect) -> ChatSelectionM
                         mention_matches: view.mention_matches,
                         mention_selected: view.mention_selected,
                         keep_composer_focused: view.keep_composer_focused,
-                        inert: false,
+                        inert: ComposerInert::No,
                     },
                     composer_text_width,
                 ),
@@ -5650,7 +5716,7 @@ fn draw_selected_content(
                 mention_matches: view.mention_matches,
                 mention_selected: view.mention_selected,
                 keep_composer_focused: view.keep_composer_focused,
-                inert: false,
+                inert: ComposerInert::No,
             },
         );
         record_composer_mouse_target(

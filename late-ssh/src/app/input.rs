@@ -82,7 +82,9 @@ impl InputContext {
 fn screen_has_chat_pane(screen: Screen) -> bool {
     matches!(
         screen,
-        Screen::Dashboard | Screen::DailyMatch | Screen::HouseTable | Screen::Zen
+        // Games draws a pane only while this session has a watch open (the
+        // watch chat); the hub proper and a preview resolve to no room.
+        Screen::Dashboard | Screen::DailyMatch | Screen::HouseTable | Screen::Zen | Screen::Games
     )
 }
 
@@ -90,7 +92,20 @@ fn screen_has_chat_pane(screen: Screen) -> bool {
 /// plus the Clubhouse, which composes into #lounge (speech bubbles) without
 /// drawing a pane. Used for the composer-priority gate and chat overlays.
 fn screen_composes_chat(screen: Screen) -> bool {
-    screen_has_chat_pane(screen) || matches!(screen, Screen::Clubhouse | Screen::Nightcap)
+    screen_has_chat_pane(screen)
+        || matches!(
+            screen,
+            Screen::Clubhouse
+                | Screen::Nightcap
+                // A roguelike's player composes into their own watch-chat
+                // room, opened by F2 or a click on its pane ahead of the
+                // game's passthrough (`App::handle_input`). The composer
+                // only opens from a running game, so with none open these
+                // screens behave as before.
+                | Screen::Nethack
+                | Screen::Dcss
+                | Screen::Brogue
+        )
 }
 
 fn is_chat_composer_context(ctx: InputContext) -> bool {
@@ -1245,10 +1260,11 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     }
 }
 
-/// Games hub keys. Up/down (or j/k, h/l) move the selection in the grouped
-/// sidebar; Enter launches it; `d` opens the reset prompt for the saved-
-/// character doors. Returns `false` for keys it does not own (digit/Tab nav,
-/// `q`, `?`) so they fall through to the global handlers.
+/// Games hub keys. Up/down (or j/k, h/l) move the selection along the rail
+/// (the grouped cards, then the live games, wrapping); Enter launches the
+/// selected card; `d` opens the reset prompt for the saved-character doors.
+/// Returns `false` for keys it does not own (digit/Tab nav, `q`, `?`) so
+/// they fall through to the global handlers.
 /// The key byte a door launcher should see, if the event carries one. The vt
 /// parser emits printables as `Char` and control bytes (Enter, backspace) as
 /// `Byte`; the arcade-name claim prompt needs both.
@@ -1260,11 +1276,58 @@ fn launcher_key_byte(event: &ParsedInput) -> Option<u8> {
     }
 }
 
+/// The live row this session is watching, as its index among `live`; `None`
+/// when it is not watching, or the roster no longer lists the game.
+fn watched_live_row(
+    app: &App,
+    live: &[crate::app::door::spectate::state::LiveRow],
+) -> Option<usize> {
+    app.spectate_state.as_ref()?.row_in(live)
+}
+
+/// Move the hub's rail selection to `entry`: a card ends any watch and
+/// becomes the selected card, a live row previews that game.
+fn select_rail_entry(
+    app: &mut App,
+    roster: &[crate::app::door::hub::state::HubGame],
+    live: &[crate::app::door::spectate::state::LiveRow],
+    entry: crate::app::door::hub::state::RailEntry,
+) {
+    use crate::app::door::hub::state::RailEntry;
+    match entry {
+        RailEntry::Card(index) => {
+            app.stop_spectating();
+            app.games_hub_state.select(roster, index);
+        }
+        RailEntry::Live(index) => {
+            // Re-selecting the row already being watched keeps its stream.
+            if watched_live_row(app, live) != Some(index) {
+                let row = &live[index];
+                app.start_spectating(row.game, row.entry.playname.clone());
+            }
+        }
+    }
+}
+
 fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
-    use crate::app::door::hub::state::HubGame;
+    use crate::app::door::hub::state::{HubGame, RailEntry, rail_step};
 
     let roster = HubGame::roster(app.is_runner());
     let selected = app.games_hub_state.selected_game(roster);
+
+    // An open watch owns the page and every event on it. A preview is the
+    // rail sitting on a live row: it gets each event first (Enter opens it),
+    // and what it leaves falls to the rail keys below.
+    {
+        use crate::app::door::spectate::{input as spectate_input, state::WatchMode};
+        match spectate_input::mode(app) {
+            Some(WatchMode::Open) => return spectate_input::handle_open_event(app, event),
+            Some(WatchMode::Preview) if spectate_input::handle_preview_event(app, event) => {
+                return true;
+            }
+            Some(WatchMode::Preview) | None => {}
+        }
+    }
 
     // The rc config modal is fully modal while open: `x` clears the stored
     // config, paste replaces it (handle_bracketed_paste), Esc closes it
@@ -1288,22 +1351,26 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
         };
     }
 
-    // Click on a sidebar row jumps to that game; the hit test mirrors the
-    // hub's own layout against the same content area the renderer gets.
+    // Click on a rail row jumps to that card or live game; the hit test
+    // mirrors the hub's own layout against the same content area the
+    // renderer gets.
     if let ParsedInput::Mouse(mouse) = event
         && matches!(mouse.kind, MouseEventKind::Down)
         && matches!(mouse.button, Some(MouseButton::Left))
     {
         let body = app_content_area(app);
-        if let Some(idx) = crate::app::door::hub::ui::sidebar_hit_test(
+        let live = app.live_games.live_rows();
+        if let Some(entry) = crate::app::door::hub::ui::sidebar_hit_test(
             body,
             roster,
             app.games_hub_state.selected(roster),
+            live.len(),
+            watched_live_row(app, &live),
             mouse.x.saturating_sub(1),
             mouse.y.saturating_sub(1),
         ) {
             app.door_delete_confirm = false;
-            app.games_hub_state.select(roster, idx);
+            select_rail_entry(app, roster, &live, entry);
             return true;
         }
         return false;
@@ -1360,6 +1427,34 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
         };
     }
 
+    // The rail keys: Down/Right or j/l step forward, Up/Left or k/h step
+    // back, through the cards and then the live games, wrapping at both
+    // ends.
+    let step = match event {
+        ParsedInput::Byte(b'l' | b'j')
+        | ParsedInput::Char('l' | 'j')
+        | ParsedInput::Arrow(b'C' | b'B') => Some(true),
+        ParsedInput::Byte(b'h' | b'k')
+        | ParsedInput::Char('h' | 'k')
+        | ParsedInput::Arrow(b'D' | b'A') => Some(false),
+        _ => None,
+    };
+    if let Some(forward) = step {
+        let live = app.live_games.live_rows();
+        let current = match watched_live_row(app, &live) {
+            Some(index) => RailEntry::Live(index),
+            None => RailEntry::Card(app.games_hub_state.selected(roster)),
+        };
+        let next = rail_step(roster.len(), live.len(), current, forward);
+        select_rail_entry(app, roster, &live, next);
+        return true;
+    }
+
+    // Everything below belongs to the selected card, and a watch has none.
+    if app.spectate_state.is_some() {
+        return false;
+    }
+
     match event {
         ParsedInput::Byte(b'\r') => {
             launch_games_hub_selection(app, selected);
@@ -1374,20 +1469,6 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
         }
         ParsedInput::Byte(b'\n') | ParsedInput::CtrlArrow(b'B') => {
             app.games_hub_state.scroll_down();
-            true
-        }
-        // Right: l, j, or Right/Down arrow.
-        ParsedInput::Byte(b'l' | b'j')
-        | ParsedInput::Char('l' | 'j')
-        | ParsedInput::Arrow(b'C' | b'B') => {
-            app.games_hub_state.select_next(roster);
-            true
-        }
-        // Left: h, k, or Left/Up arrow.
-        ParsedInput::Byte(b'h' | b'k')
-        | ParsedInput::Char('h' | 'k')
-        | ParsedInput::Arrow(b'D' | b'A') => {
-            app.games_hub_state.select_prev(roster);
             true
         }
         // Lateania has multiple character slots now, so its own landing (with
@@ -1406,8 +1487,25 @@ fn handle_games_hub_input(app: &mut App, event: &ParsedInput) -> bool {
             app.door_rc_modal = selected.rc_game();
             true
         }
+        ParsedInput::Byte(b't' | b'T') | ParsedInput::Char('t' | 'T')
+            if selected.spectate_game().is_some() =>
+        {
+            toggle_show_watch_chat(app);
+            true
+        }
         _ => false,
     }
+}
+
+/// The `t` key on a watchable door's landing: flip whether this player sees
+/// their watchers' chat beside their own game. It is the player's view only;
+/// the watchers keep talking either way.
+fn toggle_show_watch_chat(app: &mut App) {
+    let message = match app.profile_state.toggle_show_watch_chat() {
+        true => "Watcher chat shown beside your game.",
+        false => "Watcher chat hidden. Your watchers can still talk to each other.",
+    };
+    app.banner = Some(crate::app::common::primitives::Banner::success(message));
 }
 
 /// Jump to the Games hub with `game` selected in the sidebar and its rc config
@@ -2368,10 +2466,24 @@ fn dispatch_escape(app: &mut App) {
         app.set_screen(Screen::Dashboard);
         return;
     }
-    // Esc from the Games hub closes the rc config modal, cancels a pending
-    // reset prompt, and otherwise drops back to Home.
+    // Esc in a running roguelike with the player's own watch-chat composer
+    // open discards it and hands the keys back to the game. No other Esc on
+    // those screens reaches here while a game runs: it is the game's
+    // (`App::handle_input`).
+    if crate::app::door::spectate::state::SpectateGame::of_screen(ctx.screen).is_some()
+        && app.chat.composing
+    {
+        app.chat.reset_composer();
+        return;
+    }
+    // Esc from the Games hub peels the watch (a selected chat message, an
+    // open watch back to its preview, then the preview), closes the rc
+    // config modal, cancels a pending reset prompt, and otherwise drops back
+    // to Home.
     if ctx.screen == Screen::Games {
-        if app.door_rc_modal.is_some() {
+        if app.spectate_state.is_some() {
+            crate::app::door::spectate::input::handle_escape(app);
+        } else if app.door_rc_modal.is_some() {
             app.door_rc_modal = None;
         } else if app.door_delete_confirm {
             app.door_delete_confirm = false;
@@ -2943,13 +3055,15 @@ pub(crate) struct PendingChatProfileOpen {
 /// clicks, message-scroll clicks, wheel/page scroll — so they always agree
 /// on which room an interaction belongs to. Screens outside
 /// `screen_has_chat_pane` resolve to `None`, as do pane screens with no
-/// room on show (no active table, pre-109 match, synthetic Home entry).
+/// room on show (no active table, pre-109 match, synthetic Home entry, a
+/// Games hub with no open watch).
 fn embedded_chat_room_id(app: &App, screen: Screen) -> Option<Uuid> {
     match screen {
         Screen::Dashboard => app.chat.selected_room_id,
         Screen::DailyMatch => app.daily.board_chat_room_id(),
         Screen::HouseTable => app.house.chat_room_id(),
         Screen::Zen => app.zen_chat_room_id(),
+        Screen::Games => crate::app::door::spectate::input::chat_room_id(app),
         _ => None,
     }
 }
@@ -3174,7 +3288,7 @@ fn handle_status_bar_click(app: &mut App, mouse: MouseEvent) -> bool {
     true
 }
 
-fn app_content_area(app: &App) -> Rect {
+pub(crate) fn app_content_area(app: &App) -> Rect {
     let area = Rect::new(0, 0, app.size.0, app.size.1);
     let inner = Block::default().borders(Borders::ALL).inner(area);
     let (_, right_sidebar_mode) = app.rail_modes();

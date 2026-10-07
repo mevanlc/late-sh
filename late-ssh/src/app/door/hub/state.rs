@@ -2,8 +2,15 @@
 //! (Lateania, DCSS, NetHack, Green Dragon, ...). It is a selector, a grouped
 //! sidebar of games on the left with the selected game's full landing page
 //! rendered beside it — not a scroll. Up/down (or j/k, h/l) change the
-//! selection; Enter launches the selected game; Ctrl+J/K (or Ctrl+Down/Up)
-//! scroll a landing too long for the terminal. Adding a future door game is a
+//! selection, wrapping at both ends; Enter launches the selected game;
+//! Ctrl+J/K (or Ctrl+Down/Up) scroll a landing too long for the terminal.
+//! Under the cards the rail pins a `live` section: one row per game someone
+//! is playing right now on a door whose host serves watch sessions. Those
+//! rows are part of the same selection ([`rail_step`]); sitting on one
+//! previews that game in the landing's place, Enter opens the full watch
+//! with its chat (`door::spectate`), and `t` on a watchable card flips
+//! whether the player sees their own watchers' chat.
+//! Adding a future door game is a
 //! new `HubGame` entry with a `group()` arm plus a `draw_landing` for it, not a
 //! new top-level screen. Minecraft is the one card with nothing to launch: the
 //! server is played from the game client, so its landing is information only.
@@ -147,6 +154,27 @@ impl HubGame {
         }
     }
 
+    /// The watchable door behind this card, for the doors whose hosts serve
+    /// watch sessions (the hub's `s` key).
+    pub fn spectate_game(self) -> Option<crate::app::door::spectate::state::SpectateGame> {
+        use crate::app::door::spectate::state::SpectateGame;
+        match self {
+            HubGame::Dcss => Some(SpectateGame::Dcss),
+            HubGame::Nethack => Some(SpectateGame::Nethack),
+            HubGame::Brogue => Some(SpectateGame::Brogue),
+            HubGame::NightCity
+            | HubGame::Lateania
+            | HubGame::Minecraft
+            | HubGame::Rebels
+            | HubGame::Usurper
+            | HubGame::GreenDragon
+            | HubGame::Dopewars
+            | HubGame::Bashquest
+            | HubGame::Codekeep
+            | HubGame::Darkroom => None,
+        }
+    }
+
     /// The screen a live session of this game resumes on, or `None` when the
     /// game is not live right now. This is the one definition of door
     /// liveness: the backtick cycle's door leg ([`live_doors`]) and the
@@ -220,6 +248,33 @@ pub(crate) fn live_doors(app: &App) -> Vec<Screen> {
         .collect()
 }
 
+/// One selectable row of the rail: a game card (its index in the session's
+/// roster), or a live game (its index among the live rows under the cards).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RailEntry {
+    Card(usize),
+    Live(usize),
+}
+
+/// One step along the rail from `current`: `cards` cards first, then `live`
+/// live rows, wrapping at both ends. Up from the first card lands on the last
+/// live row (the last card when nobody is playing).
+pub fn rail_step(cards: usize, live: usize, current: RailEntry, forward: bool) -> RailEntry {
+    let total = cards + live;
+    let at = match current {
+        RailEntry::Card(index) => index,
+        RailEntry::Live(index) => cards + index,
+    };
+    let next = match forward {
+        true => (at + 1) % total,
+        false => (at + total - 1) % total,
+    };
+    match next.checked_sub(cards) {
+        Some(index) => RailEntry::Live(index),
+        None => RailEntry::Card(next),
+    }
+}
+
 /// Per-session hub state: which game card is selected, and how far its
 /// landing is scrolled. Every selection call takes the session's roster
 /// ([`HubGame::roster`]): it changes when a runner joins or leaves
@@ -250,19 +305,6 @@ impl State {
 
     pub fn selected_game(&self, roster: &[HubGame]) -> HubGame {
         roster[self.selected(roster)]
-    }
-
-    /// Move the selection one game down the sidebar, clamped at the last game.
-    pub fn select_next(&mut self, roster: &[HubGame]) {
-        let last = roster.len() - 1;
-        let index = self.selected(roster).saturating_add(1).min(last);
-        self.select_game(roster, roster[index]);
-    }
-
-    /// Move the selection one game up the sidebar, clamped at the first game.
-    pub fn select_prev(&mut self, roster: &[HubGame]) {
-        let index = self.selected(roster).saturating_sub(1);
-        self.select_game(roster, roster[index]);
     }
 
     pub fn select(&mut self, roster: &[HubGame], index: usize) {
