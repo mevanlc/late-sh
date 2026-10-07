@@ -5,8 +5,6 @@ use chrono::{DateTime, NaiveDate, Utc};
 use tokio_postgres::{Client, GenericClient, Transaction};
 use uuid::Uuid;
 
-use crate::models::drink_round::Bar;
-
 pub const CHIP_FLOOR: i64 = 100;
 pub const INITIAL_CHIP_BALANCE: i64 = 1_000;
 pub const CHIP_USER_CHANGED_CHANNEL: &str = "chip_user_changed";
@@ -462,7 +460,10 @@ impl ChipMove {
     /// chips into one player at no cost to the board; and the starting
     /// stipend, which everyone gets once. Referral payouts stay out too:
     /// one is worth a month of anything else, so a single invite would
-    /// decide the board. Gilds received stay in: a gild
+    /// decide the board. Monthly prizes stay out, every one, today's
+    /// gallery prize and any added later: a prize is the result of a
+    /// month's board, never an earning on Top Chips, and one first place
+    /// would decide the next month. Gilds received stay in: a gild
     /// burns a third on the way, so it cannot funnel for free, and it is
     /// paid for a message other people rated. The pot stays in: the house
     /// mints it. Admin grants never reach the ledger at all
@@ -488,7 +489,8 @@ impl ChipMove {
             | Self::ShopPurchase
             | Self::SsnakeArenaLost
             | Self::ReferralReward
-            | Self::ReferralWelcome => false,
+            | Self::ReferralWelcome
+            | Self::ArtboardPrize => false,
             Self::BonsaiWatered
             | Self::PetFed
             | Self::AquariumFed
@@ -496,7 +498,6 @@ impl ChipMove {
             | Self::GildReceived
             | Self::PotWon
             | Self::NewsShared
-            | Self::ArtboardPrize
             | Self::SongQueued
             | Self::QuestReward
             | Self::DailyQuestStreakReward
@@ -568,15 +569,6 @@ impl ChipLedgerEntry {
     pub fn chip_move(&self) -> Option<ChipMove> {
         ChipMove::from_reason(&self.reason)
     }
-}
-
-/// One line of the tab board, from [`UserChips::top_round_buyers`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RoundBuyer {
-    pub user_id: Uuid,
-    pub username: String,
-    pub rounds: i64,
-    pub chips: i64,
 }
 
 /// A user's chips this UTC month, from [`UserChips::month_figures`].
@@ -978,41 +970,6 @@ impl UserChips {
             earned: row.get("earned"),
             net: row.get("net"),
         })
-    }
-
-    /// The biggest round buyers at one bar, all time, by chips spent: the
-    /// tab board out back counts what the Nightcap sold and nothing else.
-    /// The ledger row does not say which bar took the order, so the round it
-    /// is keyed on does ([`Bar`], `source_ref` = the round id). Rounds
-    /// bought before that column exists read as the tavern's.
-    pub async fn top_round_buyers(
-        client: &Client,
-        bar: Bar,
-        limit: i64,
-    ) -> Result<Vec<RoundBuyer>> {
-        let rows = client
-            .query(
-                "SELECT l.user_id, u.username, count(*) AS rounds, sum(-l.delta)::BIGINT AS chips
-                 FROM chip_ledger l
-                 JOIN drink_rounds r ON r.id::TEXT = l.source_ref
-                 JOIN users u ON u.id = l.user_id
-                 WHERE l.reason = $1
-                   AND r.bar = $2
-                 GROUP BY l.user_id, u.username
-                 ORDER BY chips DESC, rounds DESC, u.username ASC
-                 LIMIT $3",
-                &[&ChipMove::RoundPurchase.reason(), &bar.as_str(), &limit],
-            )
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| RoundBuyer {
-                user_id: row.get("user_id"),
-                username: row.get("username"),
-                rounds: row.get("rounds"),
-                chips: row.get("chips"),
-            })
-            .collect())
     }
 
     /// All user chip balances (for per-user lookup in leaderboard refresh).

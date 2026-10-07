@@ -22,7 +22,7 @@ use late_core::models::profile_award::{
 use late_core::models::quest;
 use late_core::models::showcase::Showcase;
 use late_core::models::user::{
-    FirstContactHitCaps, FirstContactHitClaim, User, sanitize_username_input,
+    FirstContactHitCaps, FirstContactHitClaim, InteractionMode, User, sanitize_username_input,
 };
 use late_core::models::user_ssh_key::{KeyLayout, UserSshKey};
 use tokio_postgres::error::SqlState;
@@ -45,6 +45,8 @@ use crate::usernames::{self, UsernameDirectory};
 pub struct ProfileService {
     db: Db,
     snapshot_txs: Arc<Mutex<HashMap<Uuid, watch::Sender<ProfileSnapshot>>>>,
+    interaction_mode_writes: Arc<Mutex<HashMap<Uuid, watch::Sender<InteractionMode>>>>,
+    profile_edit_writes: Arc<Mutex<HashMap<Uuid, watch::Sender<ProfileParams>>>>,
     evt_tx: broadcast::Sender<ProfileEvent>,
     active_users: ActiveUsers,
     username_directory: Option<UsernameDirectory>,
@@ -175,6 +177,8 @@ impl ProfileService {
         Self {
             db,
             snapshot_txs: Arc::new(Mutex::new(HashMap::new())),
+            interaction_mode_writes: Arc::new(Mutex::new(HashMap::new())),
+            profile_edit_writes: Arc::new(Mutex::new(HashMap::new())),
             evt_tx,
             active_users,
             username_directory: None,
@@ -359,20 +363,41 @@ impl ProfileService {
         Ok(())
     }
 
+    /// Persist the latest profile draft with one background writer per user.
+    /// Every save carries the whole draft, so saves land in order and a burst
+    /// collapses into its newest draft instead of racing an older one.
     pub fn edit_profile(&self, user_id: Uuid, params: ProfileParams) {
+        let mut writers = self.profile_edit_writes.lock_recover();
+        if let Some(writer) = writers.get(&user_id) {
+            writer.send_replace(params);
+            return;
+        }
+        let (writer, mut pending) = watch::channel(params);
+        writers.insert(user_id, writer);
+        drop(writers);
         let service = self.clone();
         tokio::spawn(
             async move {
-                if let Err(e) = service.do_edit_profile(user_id, params).await {
-                    late_core::error_span!(
-                        "profile_edit_failed",
-                        error = ?e,
-                        "failed to edit profile"
-                    );
-                    service.publish_event(ProfileEvent::Error {
-                        user_id,
-                        message: profile_error_message(&e).to_string(),
-                    });
+                loop {
+                    let params = pending.borrow_and_update().clone();
+                    if let Err(e) = service.do_edit_profile(user_id, params).await {
+                        late_core::error_span!(
+                            "profile_edit_failed",
+                            error = ?e,
+                            "failed to edit profile"
+                        );
+                        service.publish_event(ProfileEvent::Error {
+                            user_id,
+                            message: profile_error_message(&e).to_string(),
+                        });
+                    }
+                    // Share the enqueue lock so a new draft cannot arrive
+                    // between checking for work and retiring this writer.
+                    let mut writers = service.profile_edit_writes.lock_recover();
+                    if !pending.has_changed().unwrap_or(false) {
+                        writers.remove(&user_id);
+                        break;
+                    }
                 }
             }
             .instrument(info_span!("profile.edit_task", user_id = %user_id)),
@@ -667,22 +692,36 @@ impl ProfileService {
         );
     }
 
-    /// Persist the chosen interaction mode (keyboard / mouse / hybrid).
-    pub fn set_interaction_mode(
-        &self,
-        user_id: Uuid,
-        mode: late_core::models::user::InteractionMode,
-    ) {
+    /// Persist the latest interaction mode with one background writer per user.
+    pub fn set_interaction_mode(&self, user_id: Uuid, mode: InteractionMode) {
+        let mut writers = self.interaction_mode_writes.lock_recover();
+        if let Some(writer) = writers.get(&user_id) {
+            writer.send_replace(mode);
+            return;
+        }
+        let (writer, mut pending) = watch::channel(mode);
+        writers.insert(user_id, writer);
+        drop(writers);
         let service = self.clone();
         tokio::spawn(
             async move {
-                let result = async {
-                    let client = service.db.get().await?;
-                    User::set_interaction_mode(&client, user_id, mode).await
-                }
-                .await;
-                if let Err(e) = result {
-                    tracing::warn!(error = ?e, "failed to persist interaction mode");
+                loop {
+                    let mode = *pending.borrow_and_update();
+                    let result = async {
+                        let client = service.db.get().await?;
+                        User::set_interaction_mode(&client, user_id, mode).await
+                    }
+                    .await;
+                    if let Err(e) = result {
+                        tracing::warn!(error = ?e, "failed to persist interaction mode");
+                    }
+                    // Share the enqueue lock so a new choice cannot arrive
+                    // between checking for work and retiring this writer.
+                    let mut writers = service.interaction_mode_writes.lock_recover();
+                    if !pending.has_changed().unwrap_or(false) {
+                        writers.remove(&user_id);
+                        break;
+                    }
                 }
             }
             .instrument(info_span!("profile.interaction_mode_task", user_id = %user_id)),

@@ -22,6 +22,7 @@ room is the chat surface, and the full history lives in #lounge on Home.
 | `crowd.rs` | Pure: the room derived from presence records (`crowd`: one `Patron` per user, contested spots settled, the door stack, emotes, the last pet), `pick_spot` / `first_stand` (where a session sits), `dog_at` (the dog as a function of the wall clock). |
 | `drunk.rs` | `DrunkMap`, the process's mirror of `user_drinks` (seeded by the ghost task, bumped on every local pour). |
 | `state.rs` | Per-session state: this session's own stand (its part of its presence record), `settle` (follow a newer stand on another device, pick again after losing a spot or when a seat frees), the derived `Crowd`, camera target, animation clock, arrival/departure door events, the `Tutorial` state machine. |
+| `fight.rs` | The tour's dungeon stop: a scripted fight as pure data (`BEATS`) plus its renderer. Not a game; see §5. |
 | `input.rs` | Walking (arrows/hjkl), `i` composer, `w`/`x` emotes, `t` bartender mention, `n` out back to Nightcap (the avatar first steps onto `map::BACK_DOOR_MAT`, in its published stand too, so the room sees them leave by the door), Enter on landmarks/dog/the back door, tutorial Enter. Returns `false` for globals. |
 | `ui.rs` | Renderer: camera pan, base-grid styling, animations, crowd placement, emote frames, speech bubbles, door ambience, tutorial overlays, prop popovers, composer footer, and any chat overlay that lands here (a `/summary` or reaction list requested on Home; it owns input via `screen_composes_chat`, so it must be drawn). |
 | `nightcap/` | Nightcap, the small bar out back (`n` from the tavern or Enter at the back door, `map::BACK_DOOR`, past the end of the counter; Esc back): its own `Screen::Nightcap`, the stools from presence (`stools.rs`), `SharedWall`, and `CONTEXT.md`. A sub-slice, not a sibling domain. The generator script carries the door art (`back_door`), but `RUST_TEMPLATE` still lacks the `BACK_DOOR` zone and the `Interactive::BackDoor` arm, same drift as the rest. |
@@ -141,10 +142,12 @@ room is the chat surface, and the full history lives in #lounge on Home.
   drinks and refuses any out-of-range or unaffordable
   price (served uncharged, so the debit always matches the quoted line),
   floor-guards, and debits via
-  `ChipService::buy_drink` (atomic with the `user_drinks` buzz upsert;
+  `ChipService::buy_drink` (atomic with the `user_drinks` upsert and the
+  `drink_pours` history row; non-intoxicating drinks log zero buzz points;
   ledger reason `drink_purchase`, source_ref = drink name). Unaffordable or
-  chatty mentions charge nothing. The exact phrase `@bartender buy @user a drink`
-  instead leaves one 200-chip credit on that person's tab, even while they
+  chatty mentions charge nothing. A gift phrase naming one person
+  (`@bartender buy @user a drink`, `one for @user`, `@user's next one is on
+  me`, the closed `GIFT_PHRASES` list) instead leaves one 200-chip credit on that person's tab, even while they
   are offline, without pouring the buyer. The recipient claims it on their
   own order; see `app/chat/CONTEXT.md` §9d. The tutorial greeting stays free.
 - Message selection/reactions/scroll do not exist on this screen; Home owns
@@ -156,41 +159,75 @@ room is the chat surface, and the full history lives in #lounge on Home.
 - Armed by `!extract_clubhouse_tutorial_done(user.settings)`
   (`users.settings.clubhouse_tutorial_done`, late-core). Fires once on the
   first clubhouse entry: a centered box at the door pitches what late.sh is
-  (`Tutorial::Welcome`), then the tour walks every top-level page in number
-  order with two Enter interludes for the features that have no page of
-  their own: `VisitChat` (1) -> `VisitMusic` (Enter, still on Home: the
-  sources, the Music Booth, and the two ways to actually hear sound:
-  late.sh/listen or the `late` CLI) -> `VisitArcade` (2) -> `VisitLobby`
-  (Enter, still on The Arcade: the Ctrl+G daily duels and live tables) ->
-  `VisitGames` (3) -> `VisitArtboard` (4) -> `VisitDirectory` (5) ->
-  `VisitLeaderboard` (6) -> `VisitZen` (`Ctrl+F`: Zen has no digit, so the
-  stop teaches the chord and the main tile keys) -> `Homecoming` (0, back in
-  the tavern). Each stop
-  draws a centered pitch box over the real page (`ui::draw_tour_overlay`,
-  called from `render.rs`) ending in the next key; `Homecoming`'s Enter
-  finishes the tour in place and frees input: the player stays in the
-  tavern. Hold the line at these two interludes and the Zen stop: pages are
-  self-evidencing, and every extra forced stop taxes all future newcomers.
+  (`Tutorial::Welcome`), then **Enter moves every stop on** and the tour
+  walks the newcomer to the next page itself: `VisitChat` (Home) ->
+  `VisitMusic` (still on Home) -> `VisitArcade` -> `VisitLobby` (still on
+  The Arcade) -> `VisitTable` -> `VisitGames` -> `VisitDungeon` (still on Games) -> `VisitArtboard` -> `VisitDirectory` ->
+  `VisitLeaderboard` -> `VisitZen` -> `Homecoming` (back in the tavern).
+  `State::tutorial_advance` is the only thing that moves the stage; it
+  returns a `TourMove` telling the gate where the next stop lives.
+  `Homecoming`'s Enter finishes the tour in place and frees input.
+- **Every stop is one `ui::TourHeader`,** drawn one way: a title, the
+  pitch, a blank row, then a breaker with the stop's keys flush right, two columns in
+  from the frame (`TOUR_SIDE_PADDING`) with a breathing row above and
+  below. Only where it lands differs.
+- **Boxed stops** (`TourHeader::draw_box`): the welcome and homecoming
+  boxes in the tavern (`ui::draw_tutorial`) and the page stops, centered
+  over the real page (`ui::draw_tour_overlay`, called from `render.rs`). A
+  page stop's title carries the page's own key (`[3] the games`), since
+  the newcomer never presses it.
+- **Surface stops** hold a real surface open and take the header at its
+  top (`ui::tour_header`). The music stop holds the Stations modal, the
+  lobby stop holds the Lobby modal (`State::tour_modal`, kept in step by
+  `sync_tour_modal` in `app/input.rs`); both modals take the header as an
+  argument and drop their own footer, because none of its keys work
+  mid-tour. Nothing in a held modal moves on its own.
+- **The practice table.** Enter at the lobby stop opens `VisitTable`: a
+  pool table that exists only in this session
+  (`DailyState::open_practice_table`, see `app/lobby/daily/CONTEXT.md`),
+  with the same header drawn above the board. The break is part of the
+  route, not an option: Enter or Space plays it (`TourStep::Table`), and
+  Enter moves on only once it has been struck. The one exception is a
+  terminal the table does not fit (`pool_ui::fits` on the room left under
+  the header, about 112x36 of content area): `ui::table_stop` answers
+  `TableStop::TooSmall`, the header says so, and Enter walks on. The gate
+  and the header both read `table_stop`, so they cannot disagree.
+- **A quit confirm outranks a held modal.** `q` mid-tour raises the quit
+  confirm while `sync_tour_modal` keeps the stop's modal open, so
+  `render.rs` skips the Stations modal while the confirm is up (it draws
+  later and would cover the prompt).
+- **The dungeon stop.** `VisitDungeon` shows what the roguelikes behind
+  the Games page feel like without running one: `fight.rs` is a scripted
+  four-beat scene drawn as the whole DCSS screen (the view of the level
+  centred on the hero, lit cells against remembered ones, the character
+  panel under the newcomer's own name down the right, the crawl-worded
+  message window underneath). Nothing is simulated or saved;
+  `Fight::strike` plays the next beat. It takes the Games page over the
+  way the practice table takes the board: `render.rs` draws the header
+  across the top (`TourHeader::draw_above`) and the fight in the rest of
+  the content area instead of the hub. Enter or Space is a blow
+  (`TourStep::Fight`), and Enter moves on only once the dragon is down.
 - **The tour is forced.** While `State::tutorial_forced_step` is `Some`,
   `handle_tour_gate` in `app/input.rs` (sitting above the reserved chords,
   below the quit-confirm modal) swallows every input, mouse and chords
-  included, except the named digit (which runs `set_screen`; the stage
-  advances in `State::tutorial_screen_entered`, hooked there), `Ctrl+F` at
-  the Zen stop (`TourStep::Zen`, which runs the real `toggle_zen_globally`
-  so the page opens exactly as it does everywhere; Enter runs the same
-  toggle there, because the gate also blocks the `/zen` fallback and a
-  terminal that swallows the chord would otherwise trap the newcomer), Enter where
-  the box names it (the two interludes advance via `tutorial_advance`
-  without persisting; only the homecoming Enter finishes and persists),
-  and `q` (quitting always works; Esc's lone-byte path can still arm the
-  quit confirm). There is no skip. Completion persists once via
-  `ProfileService::set_clubhouse_tutorial_done` (fire-and-forget, failure
-  only logged: worst case the tour runs again next session).
+  included, except Enter, Space at the practice table and the fight, and `q` (quitting always works). A lone Esc reaches
+  `dispatch_escape` without passing the gate, so that returns early while a
+  stop is up, after the quit-confirm arm. There is no skip. Completion
+  persists once via `ProfileService::set_clubhouse_tutorial_done`
+  (fire-and-forget, failure only logged: worst case the tour runs again
+  next session).
+- **`/onboard` runs it again** for anyone, from any composer that runs
+  commands (so not the Lounge's): the chat state raises a request,
+  `start_tour` in `app/input.rs` walks to the tavern and calls
+  `State::begin_tutorial` with `TourStart::Rerun`, the same route the first
+  visit gets (welcome box at the door, a fresh fight). It is just as
+  forced. Only `TourStart::FirstVisit` offers the welcome pour, so a
+  regular's rerun ends with no glow and no scripted greeting.
 - **The hidden treasure:** the bartender is deliberately absent from the
   route. His scripted welcome (`ghost::bartender_tutorial_greeting`, local
   banner only, never posted to #lounge) plus the comped welcome pour fire
-  the first time the newcomer walks up to the counter
-  (`State::welcome_pour_due`); since walking is gated until the homecoming
+  the first time the newcomer walks up to the counter in the session of
+  their first visit (`State::welcome_pour_due`); since walking is gated until the homecoming
   Enter, in practice that is after the send-off. The homecoming box ends
   with a whispered pointer at it, and the bar sign pulses until the pour is
   claimed (`State::bar_glow`). The once-ever guarantee is

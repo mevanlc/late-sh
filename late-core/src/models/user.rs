@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use super::marketplace::{CHAT_BADGE_SLOT, CHAT_FLAG_SLOT};
 use super::profile_award::{
-    MILESTONE_AWARD_CATEGORIES, PROFILE_AWARD_RANK_LIMIT, top_badge_per_game,
+    CROWN_AWARD_CATEGORY, MILESTONE_AWARD_CATEGORIES, PROFILE_AWARD_RANK_LIMIT, top_badge_per_game,
 };
 use super::statusline::{
     StatusComponentSetting, default_statusline_components, parse_statusline_components,
@@ -18,10 +18,10 @@ use super::statusline::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AudioSource {
-    Icecast,
     Youtube,
-    /// Nightride FM direct streams. The default for users who never picked
-    /// a source, so fresh `late` sessions land on the radio.
+    /// Direct station streams from the radio catalogue (`crate::radio`).
+    /// The default for users who never picked a source, so fresh `late`
+    /// sessions land on the radio.
     #[default]
     Radio,
 }
@@ -29,16 +29,16 @@ pub enum AudioSource {
 impl AudioSource {
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Icecast => "icecast",
             Self::Youtube => "youtube",
             Self::Radio => "radio",
         }
     }
 
+    /// `icecast` is the retired house-stream source; migration 220 moved
+    /// its users to `radio` on the mount they had.
     pub fn from_settings_str(value: &str) -> Self {
         match value {
             "youtube" => Self::Youtube,
-            "icecast" => Self::Icecast,
             _ => Self::Radio,
         }
     }
@@ -90,66 +90,7 @@ impl InteractionMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IcecastStream {
-    #[default]
-    Chill,
-    Classical,
-}
-
-impl IcecastStream {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chill => "chill",
-            Self::Classical => "classical",
-        }
-    }
-
-    pub fn from_settings_str(value: &str) -> Self {
-        match value {
-            "classical" => Self::Classical,
-            _ => Self::Chill,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RadioStation {
-    #[default]
-    Chillsynth,
-    Nightride,
-    Datawave,
-    Spacesynth,
-    Ambient,
-}
-
-impl RadioStation {
-    /// Settings/persistence key, also used to look up live now-playing
-    /// metadata in the Nightride `/meta` feed. The feed keys stations by
-    /// their stream filename, so `Ambient` must key on `"rektify"` (its
-    /// `rektify.mp3` stream) even though its display label is `"ambient"`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Chillsynth => "chillsynth",
-            Self::Nightride => "nightride",
-            Self::Datawave => "datawave",
-            Self::Spacesynth => "spacesynth",
-            Self::Ambient => "rektify",
-        }
-    }
-
-    pub fn from_settings_str(value: &str) -> Self {
-        match value {
-            "nightride" => Self::Nightride,
-            "datawave" => Self::Datawave,
-            "spacesynth" => Self::Spacesynth,
-            "rektify" => Self::Ambient,
-            _ => Self::Chillsynth,
-        }
-    }
-}
+pub use crate::radio::{RADIO_SLOTS, RadioSlots, RadioStation};
 
 crate::model! {
     table = "users";
@@ -202,11 +143,11 @@ impl RightSidebarMode {
         }
     }
 
-    pub fn cycle(self, _forward: bool) -> Self {
-        match self {
-            Self::On => Self::Off,
-            Self::Off => Self::Auto,
-            Self::Auto => Self::On,
+    pub fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::On, true) | (Self::Auto, false) => Self::Off,
+            (Self::Off, true) | (Self::On, false) => Self::Auto,
+            (Self::Auto, true) | (Self::Off, false) => Self::On,
         }
     }
 }
@@ -371,11 +312,11 @@ impl RoomListMode {
         }
     }
 
-    pub fn cycle(self, _forward: bool) -> Self {
-        match self {
-            Self::On => Self::Off,
-            Self::Off => Self::Auto,
-            Self::Auto => Self::On,
+    pub fn cycle(self, forward: bool) -> Self {
+        match (self, forward) {
+            (Self::On, true) | (Self::Auto, false) => Self::Off,
+            (Self::Off, true) | (Self::On, false) => Self::Auto,
+            (Self::Auto, true) | (Self::Off, false) => Self::On,
         }
     }
 }
@@ -515,8 +456,8 @@ const FRIEND_USER_IDS_KEY: &str = "friend_user_ids";
 const INTERACTION_MODE_KEY: &str = "interaction_mode";
 const THEME_ID_KEY: &str = "theme_id";
 const AUDIO_SOURCE_KEY: &str = "audio_source";
-const ICECAST_STREAM_KEY: &str = "icecast_stream";
 const RADIO_STATION_KEY: &str = "radio_station";
+const RADIO_SLOTS_KEY: &str = "radio_slots";
 const NOTIFY_KINDS_KEY: &str = "notify_kinds";
 const NOTIFY_BELL_KEY: &str = "notify_bell";
 const NOTIFY_COOLDOWN_MINS_KEY: &str = "notify_cooldown_mins";
@@ -536,6 +477,7 @@ const KEEP_COMPOSER_FOCUSED_KEY: &str = "keep_composer_focused";
 const START_WITH_MUSIC_MUTED_KEY: &str = "start_with_music_muted";
 const LANDING_PAGE_KEY: &str = "landing_page";
 const PAPER_AT_LOGIN_KEY: &str = "paper_at_login";
+const SHOW_WATCH_CHAT_KEY: &str = "show_watch_chat";
 const TERMINAL_IMAGES_KEY: &str = "terminal_images";
 /// Award categories the user keeps off their chat label. Read by the chat
 /// label SQL straight from `users.settings`, so the key is spelled there too.
@@ -809,8 +751,8 @@ impl User {
                           -- Monthly like the boards below, rankless like the
                           -- milestones above: one holder, so no rank digit
                           -- (`profile_award::is_rankless_award`).
-                          WHEN 'crown' THEN 'CRWN'
                           WHEN 'late_time' THEN 'LATE'
+                          WHEN 'top_drinkers' THEN 'DRNK'
                           ELSE (
                             CASE category
                               WHEN 'top_chips' THEN 'CHIP'
@@ -828,9 +770,9 @@ impl User {
                                  CASE category
                                    WHEN 'arcade_wins' THEN 0
                                    WHEN 'top_chips' THEN 1
-                                   WHEN 'crown' THEN 5
                                    WHEN 'artboard' THEN 6
                                    WHEN 'late_time' THEN 7
+                                   WHEN 'top_drinkers' THEN 8
                                    WHEN 'tetris' THEN 2
                                    WHEN 'twenty_forty_eight' THEN 3
                                    WHEN 'snake' THEN 4
@@ -858,6 +800,10 @@ impl User {
                       -- (`extract_hidden_award_categories`). Hiding the top
                       -- rung of a game ladder lets the next one show.
                       AND NOT (COALESCE(u.settings->'hidden_award_categories', '[]'::jsonb) ? pa.category)
+                      -- The crown never joins the group: chat paints last
+                      -- month's winner as a glyph before the name instead
+                      -- (`profile_award::chat_award_categories`).
+                      AND pa.category <> $6
                       AND (
                         pa.period_month = (date_trunc('month', now() AT TIME ZONE 'UTC')::date - INTERVAL '1 month')::date
                         OR pa.category = ANY($5)
@@ -870,6 +816,7 @@ impl User {
                     &CHAT_FLAG_SLOT,
                     &PROFILE_AWARD_RANK_LIMIT,
                     &milestone_categories,
+                    &CROWN_AWARD_CATEGORY,
                 ],
             )
             .await?;
@@ -989,9 +936,9 @@ impl User {
         Ok(extract_audio_source(&settings))
     }
 
-    pub async fn icecast_stream(client: &Client, user_id: Uuid) -> Result<IcecastStream> {
+    pub async fn radio_slots(client: &Client, user_id: Uuid) -> Result<RadioSlots> {
         let settings = Self::settings_for_user(client, user_id).await?;
-        Ok(extract_icecast_stream(&settings))
+        Ok(extract_radio_slots(&settings))
     }
 
     pub async fn radio_station(client: &Client, user_id: Uuid) -> Result<RadioStation> {
@@ -1419,19 +1366,53 @@ impl User {
         Ok(())
     }
 
-    pub async fn set_icecast_stream(
+    /// Write one pinned slot: `Some(station)` pins it there and vacates any
+    /// other slot it held, `None` empties the slot. One statement against
+    /// the stored slots (the defaults when none are saved), never a whole
+    /// array from session memory, so two sessions pinning different slots
+    /// both land.
+    pub async fn set_radio_slot(
         client: &Client,
         user_id: Uuid,
-        stream: IcecastStream,
+        index: usize,
+        slot: Option<RadioStation>,
     ) -> Result<()> {
-        let value = stream.as_str();
+        if index >= RADIO_SLOTS {
+            bail!("radio slot {index} is out of range");
+        }
+        let position = index as i32 + 1;
+        let value = match slot {
+            Some(station) => Value::String(station.as_str().to_string()),
+            None => Value::Null,
+        };
         let updated = client
             .execute(
                 "UPDATE users
-                 SET settings = settings || jsonb_build_object($1::text, $2::text),
+                 SET settings = settings || jsonb_build_object($1::text, (
+                         SELECT jsonb_agg(
+                                    CASE
+                                        WHEN n = $4::int THEN $5::jsonb
+                                        WHEN stored.slots -> (n - 1) = $5::jsonb THEN 'null'::jsonb
+                                        ELSE coalesce(stored.slots -> (n - 1), 'null'::jsonb)
+                                    END
+                                    ORDER BY n)
+                         FROM generate_series(1, $6::int) AS n,
+                              (SELECT CASE
+                                          WHEN jsonb_typeof(settings -> $1::text) = 'array'
+                                          THEN settings -> $1::text
+                                          ELSE $2::jsonb
+                                      END AS slots) AS stored
+                     )),
                      updated = current_timestamp
                  WHERE id = $3",
-                &[&ICECAST_STREAM_KEY, &value, &user_id],
+                &[
+                    &RADIO_SLOTS_KEY,
+                    &RadioSlots::default().to_json(),
+                    &user_id,
+                    &position,
+                    &value,
+                    &(RADIO_SLOTS as i32),
+                ],
             )
             .await?;
         if updated == 0 {
@@ -1749,19 +1730,21 @@ pub fn extract_audio_source(settings: &Value) -> AudioSource {
         .unwrap_or_default()
 }
 
-pub fn extract_icecast_stream(settings: &Value) -> IcecastStream {
-    settings
-        .get(ICECAST_STREAM_KEY)
-        .and_then(Value::as_str)
-        .map(IcecastStream::from_settings_str)
-        .unwrap_or_default()
-}
-
 pub fn extract_radio_station(settings: &Value) -> RadioStation {
     settings
         .get(RADIO_STATION_KEY)
         .and_then(Value::as_str)
         .map(RadioStation::from_settings_str)
+        .unwrap_or_default()
+}
+
+/// The user's pinned slots, or the defaults when they never pinned
+/// anything. The defaults do not depend on the current station, so a slot
+/// never moves because the user retuned.
+pub fn extract_radio_slots(settings: &Value) -> RadioSlots {
+    settings
+        .get(RADIO_SLOTS_KEY)
+        .and_then(RadioSlots::from_json)
         .unwrap_or_default()
 }
 
@@ -2026,6 +2009,16 @@ pub fn extract_terminal_images(settings: &Value) -> TerminalImagesMode {
 pub fn extract_paper_at_login(settings: &Value) -> bool {
     settings
         .get(PAPER_AT_LOGIN_KEY)
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+/// Whether a player sees their watchers' chat beside a running door game
+/// (toggled from the door's landing). Defaults to true; off hides it from
+/// the player only, the watchers keep talking.
+pub fn extract_show_watch_chat(settings: &Value) -> bool {
+    settings
+        .get(SHOW_WATCH_CHAT_KEY)
         .and_then(Value::as_bool)
         .unwrap_or(true)
 }
@@ -2353,8 +2346,12 @@ pub fn sanitize_username_input(username: &str) -> String {
         return "user".to_string();
     }
 
+    // A trailing dot goes with the trailing underscores: "thanks @alice."
+    // must read as alice and a full stop, never as a longer handle.
     let truncated = truncate_to_boundary(normalized, USERNAME_MAX_LEN);
-    let truncated = truncated.trim_matches('_');
+    let truncated = truncated
+        .trim_start_matches('_')
+        .trim_end_matches(['_', '.']);
     if truncated.is_empty() {
         "user".to_string()
     } else {

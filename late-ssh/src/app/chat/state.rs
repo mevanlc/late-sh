@@ -39,9 +39,11 @@ use crate::app::common::{
     composer, mentions,
     primitives::{Banner, Screen},
 };
+use crate::app::crown::svc::CrownBid;
 use crate::app::help_modal::data::HelpTopic;
 use crate::app::notify::{Notification, Notifier};
 use crate::authz::Permissions;
+use crate::metrics::HomeRoom;
 use crate::moderation::{
     command::{RoomModAction, ServerUserAction, parse_optional_duration},
     event::ModerationEvent,
@@ -366,22 +368,38 @@ pub(crate) enum CrownCommand {
     /// `/crown`: who wears it, for how long, and what taking it costs.
     Status,
     /// `/crown take`: buy it at whatever the ladder says right now.
-    Take,
+    /// `/crown take N`: bid N, which the service checks against the price.
+    Take { bid: CrownBid },
 }
 
-/// `Some(Some(command))` on `/crown` or `/crown take`, `Some(None)` on
-/// anything else after `/crown` (usage banner), `None` when the line is not
-/// a crown command at all.
+/// `Some(Some(command))` on `/crown`, `/crown take` or `/crown take N`,
+/// `Some(None)` on anything else after `/crown` (usage banner), `None` when
+/// the line is not a crown command at all. A bid must be a positive whole
+/// number of chips; whether it beats the price is the service's call, under
+/// the lock, since the price can move between typing and landing.
 fn parse_crown_command(body: &str) -> Option<Option<CrownCommand>> {
     let rest = body.trim().strip_prefix("/crown")?;
     if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
         return None;
     }
-    Some(match rest.trim() {
-        "" => Some(CrownCommand::Status),
-        "take" => Some(CrownCommand::Take),
-        _ => None,
-    })
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some(Some(CrownCommand::Status));
+    }
+    if rest == "take" {
+        return Some(Some(CrownCommand::Take {
+            bid: CrownBid::AtPrice,
+        }));
+    }
+    let Some(offer) = rest.strip_prefix("take ") else {
+        return Some(None);
+    };
+    match offer.trim().parse::<i64>() {
+        Ok(offer) if offer > 0 => Some(Some(CrownCommand::Take {
+            bid: CrownBid::Offer(offer),
+        })),
+        Ok(_) | Err(_) => Some(None),
+    }
 }
 
 /// The pot, requested from the composer. `App` owns the pot service, so the
@@ -748,6 +766,20 @@ pub(crate) fn is_chat_list_room(room: &ChatRoom) -> bool {
     room.kind == "dm" || room.permanent || matches!(room.visibility.as_str(), "public" | "private")
 }
 
+/// The kind of room for the Home attention metric, read off `kind` and
+/// `visibility`. A kind this match does not name is `OtherRoom`.
+pub(crate) fn home_room_kind(room: &ChatRoom) -> HomeRoom {
+    match (room.kind.as_str(), room.visibility.as_str()) {
+        ("lounge", _) => HomeRoom::Lounge,
+        ("language", _) => HomeRoom::Language,
+        ("topic", "public") => HomeRoom::PublicTopic,
+        ("topic", "private") => HomeRoom::PrivateTopic,
+        ("dm", _) => HomeRoom::Dm,
+        (late_core::models::chat_room::DEADCHANNEL_KIND, _) => HomeRoom::Deadchannel,
+        _ => HomeRoom::OtherRoom,
+    }
+}
+
 /// The haunted channel (`app/deadchannel`, GAME.md): joined by invitation
 /// only, and once joined it sits at the bottom of Core, above Discover,
 /// never in Channels. The rail builders in `ui.rs` and
@@ -1037,6 +1069,7 @@ pub struct ChatState {
     requested_room_info_modal: Option<RoomInfoRequest>,
     requested_settings_modal: bool,
     requested_shop_modal: bool,
+    requested_onboard: bool,
     requested_lobby_toggle: bool,
     requested_zen_toggle: bool,
     requested_guide: bool,
@@ -1067,7 +1100,7 @@ pub struct ChatState {
     requested_crown: Option<CrownCommand>,
     requested_pot: Option<PotCommand>,
     /// Set by an admin's /haunt; consumed by `deadchannel::haunt::svc`
-    /// (which owns the whisper and the kill switch).
+    /// (which owns the whisper).
     requested_haunt: Option<crate::app::deadchannel::haunt::state::HauntCommand>,
     /// Set by `/paper`; consumed by `paper::svc::tick` every tick.
     requested_paper: Option<crate::app::paper::state::PaperCommand>,
@@ -1395,6 +1428,7 @@ impl ChatState {
             requested_room_info_modal: None,
             requested_settings_modal: false,
             requested_shop_modal: false,
+            requested_onboard: false,
             requested_lobby_toggle: false,
             requested_zen_toggle: false,
             requested_guide: false,
@@ -2093,6 +2127,10 @@ impl ChatState {
 
     pub fn take_requested_shop_modal(&mut self) -> bool {
         std::mem::take(&mut self.requested_shop_modal)
+    }
+
+    pub fn take_requested_onboard(&mut self) -> bool {
+        std::mem::take(&mut self.requested_onboard)
     }
 
     pub fn take_requested_lobby_toggle(&mut self) -> bool {
@@ -3071,6 +3109,27 @@ impl ChatState {
         current_slot_from_state(self.selected_slot_state())
     }
 
+    /// What Home shows, for the attention metric. None while nothing is
+    /// selected or the selected room has not loaded.
+    pub(crate) fn home_room(&self) -> Option<HomeRoom> {
+        match self.current_slot() {
+            None => None,
+            Some(RoomSlot::Room(room_id)) => self.room_by_id(room_id).map(home_room_kind),
+            Some(RoomSlot::Feeds) => Some(HomeRoom::Feeds),
+            Some(RoomSlot::News) => Some(HomeRoom::News),
+            Some(
+                RoomSlot::Cyberspace
+                | RoomSlot::CyberspaceNotifications
+                | RoomSlot::CyberspaceMail(_)
+                | RoomSlot::CyberspaceRoom(_),
+            ) => Some(HomeRoom::Cyberspace),
+            Some(RoomSlot::Notifications) => Some(HomeRoom::Notifications),
+            Some(RoomSlot::Discover) => Some(HomeRoom::Discover),
+            Some(RoomSlot::Showcase) => Some(HomeRoom::Showcase),
+            Some(RoomSlot::Work) => Some(HomeRoom::Work),
+        }
+    }
+
     /// Drop the rail scroll once the selection has left the slot it was
     /// scrolled on. Without this, coming back to that slot later revives
     /// the old scroll. Runs after every input event and chat tick, the only
@@ -3675,6 +3734,12 @@ impl ChatState {
             return None;
         }
 
+        if body.trim() == "/onboard" {
+            self.clear_composer_after_submit();
+            self.requested_onboard = true;
+            return None;
+        }
+
         // Typed fallbacks for the global chords (Ctrl+G, Ctrl+F, Ctrl+R, ?), for
         // terminals and multiplexers that swallow those keys. Each one runs
         // exactly what its key runs.
@@ -3884,19 +3949,21 @@ impl ChatState {
         if let Some(parsed) = parse_crown_command(&body) {
             self.clear_composer_after_submit();
             let Some(command) = parsed else {
-                return Some(Banner::error("Usage: /crown, or /crown take"));
+                return Some(Banner::error(
+                    "Usage: /crown, /crown take, or /crown take N",
+                ));
             };
             self.requested_crown = Some(command);
             return None;
         }
 
-        // `/paper` opens The Late Edition for anyone; the switches after it
+        // `/paper` opens The Late Edition for anyone; the press commands after it
         // are admin-only and say so, unlike `/haunt`, which hides.
         if let Some(parsed) = crate::app::paper::state::parse_paper_command(&body) {
             self.clear_composer_after_submit();
             let Some(command) = parsed else {
                 return Some(Banner::error(
-                    "Usage: /paper, or /paper on|off|outside on|outside off|print|preview|reset",
+                    "Usage: /paper, /paper YYYY-MM-DD, or /paper print|preview|reset",
                 ));
             };
             if command.admin_only() && !self.is_admin {
@@ -3912,7 +3979,7 @@ impl ChatState {
             self.clear_composer_after_submit();
             let Some(command) = parsed else {
                 return Some(Banner::error(
-                    "Usage: /jobs, /jobs post, or /jobs pull|release|on|off",
+                    "Usage: /jobs, /jobs post, or /jobs pull|release",
                 ));
             };
             if command.admin_only() && !self.is_admin {
@@ -3931,7 +3998,7 @@ impl ChatState {
             self.clear_composer_after_submit();
             let Some(command) = parsed else {
                 return Some(Banner::error(
-                    "Usage: /haunt, or /haunt on|off|live on|live off|glitch|name|replay|invite|reset|welcome",
+                    "Usage: /haunt, or /haunt arm|glitch|name|replay|invite|reset|welcome",
                 ));
             };
             self.requested_haunt = Some(command);
@@ -4145,19 +4212,34 @@ impl ChatState {
         if let Some(rest) = body.trim().strip_prefix("/brb")
             && (rest.is_empty() || rest.starts_with(char::is_whitespace))
         {
+            let chat_body = match rest.trim() {
+                "" => "🌙 brb".to_string(),
+                reason => format!("🌙 brb: {reason}"),
+            };
+            // Snapshot the composer's room before `clear_composer_after_submit`
+            // wipes it. Only the composer's room, like `/me`: a stale visible
+            // or selected room would post the announcement somewhere unseen.
+            let room_id = self.composer_room_id;
             self.clear_composer_after_submit();
+            let Some(room_id) = room_id else {
+                return Some(Banner::error("Use /brb from inside a room"));
+            };
+            let request_id = Uuid::now_v7();
+            self.service
+                .send_message_with_reply_task(super::svc::SendMessageTask {
+                    user_id: self.user_id,
+                    room_id,
+                    room_slug: self.room_slug(room_id),
+                    body: chat_body,
+                    reply_to_message_id: None,
+                    request_id,
+                    is_admin: self.is_admin,
+                });
+            self.pending_send_notices.push_back(request_id);
             // `/brb` goes away now instead of after the idle threshold, and
-            // the next key comes back. Trailing text is told why rather than
-            // "unknown".
-            match rest.trim() {
-                "" => {
-                    self.requested_brb = true;
-                    return None;
-                }
-                _ => {
-                    return Some(Banner::error("/brb takes no message"));
-                }
-            }
+            // the next key comes back.
+            self.requested_brb = true;
+            return None;
         }
 
         if let Some((kind, text)) = parse_report_command(&body) {

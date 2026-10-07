@@ -26,7 +26,16 @@ pub const DEADCHANNEL_RUNNER_CHANGED_CHANNEL: &str = "deadchannel_runner_changed
 // set beside `marks` in the kill's transaction, cleared by `settle_mark`
 // once the grant answers, standing while it errors so the next touch on
 // the row retries it. `stash` (the locker) and `debt` (the bits machine)
-// are migration 214, whole bits, never negative.
+// are migration 214, whole bits, never negative. `crystals` (the rare
+// currency) and `drink` (today's glass at the bar, a code the app parses,
+// cleared by the day roll) are migration 221. `reset_generation` (migration
+// 223) counts the nukes the row has been through; only the nuke writes it,
+// and the Old Signal's payout key carries it. `road` (migration 225) is
+// the day's run on the road, JSON the app parses, `None` before the first
+// step and after the day roll. `cards` (migration 226) is the cards drafted
+// on the way up, a JSON list of card names the app parses, `None` before
+// the first draft and after a mark or the ledge. A stored `fight` always
+// has `piles` (the check of migration 228).
 crate::model! {
     table = "deadchannel_runners";
     params = DeadchannelRunnerParams;
@@ -50,7 +59,12 @@ crate::model! {
         pub marks: i32,
         pub unpaid_mark: Option<i32>,
         pub stash: i64,
-        pub debt: i64;
+        pub debt: i64,
+        pub crystals: i32,
+        pub drink: Option<String>,
+        pub reset_generation: i32,
+        pub road: Option<serde_json::Value>,
+        pub cards: Option<serde_json::Value>;
 
         @data
         pub user_id: Uuid,
@@ -81,6 +95,10 @@ pub struct SheetWrite {
     pub unpaid_mark: Option<i32>,
     pub stash: i64,
     pub debt: i64,
+    pub crystals: i32,
+    pub drink: Option<String>,
+    pub road: Option<serde_json::Value>,
+    pub cards: Option<serde_json::Value>,
 }
 
 /// What the directory serves per standing runner: the look as stored, the
@@ -250,7 +268,8 @@ impl DeadchannelRunner {
                      armor_tier = $6, bits = $7, rations_left = $8, day = $9,
                      fight = $10, kills = $11, kills_today = $12, runs_today = $13,
                      peak_level = $14, marks = $15, unpaid_mark = $16,
-                     stash = $17, debt = $18, updated = current_timestamp
+                     stash = $17, debt = $18, crystals = $19, drink = $20,
+                     road = $21, cards = $22, updated = current_timestamp
                  WHERE user_id = $1
                  RETURNING *",
                 &[
@@ -272,6 +291,10 @@ impl DeadchannelRunner {
                     &write.unpaid_mark,
                     &write.stash,
                     &write.debt,
+                    &write.crystals,
+                    &write.drink,
+                    &write.road,
+                    &write.cards,
                 ],
             )
             .await

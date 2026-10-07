@@ -14,7 +14,7 @@ This file owns chat-specific context; the root `CONTEXT.md` keeps only the map a
 
 Included here:
 - Home chat rooms, DMs, public/private topic rooms, synthetic entries, and game-backed room chat.
-- Home/Dashboard chat center, room rail, and the embedded game-chat surfaces (house tables, daily match boards).
+- Home/Dashboard chat center, room rail, and the embedded game-chat surfaces (house tables, daily match boards, the door watch view).
 - Message composer, replies, edits, deletes, reactions, ignores, overlays, and autocomplete.
 - Synthetic chat entries: RSS, News, Mentions/Notifications, and Discover. Voice is not a synthetic room slot: the dedicated `#voice` room is a real, permanent, public chat room pinned at the bottom of Core (above Discover). Any voice-enabled chat/game room (including `#voice`) renders an embedded voice strip and exposes `/voice`/`/mute` controls while you are inside it. Showcase/Projects and Work/Profiles keep their feed services and state here, but their UI and their editor (`app/directory/editor`) live on Profiles page 5.
 - Chat service refresh/tail/event contracts, DB model constraints, keybindings, tests, and gotchas.
@@ -278,12 +278,13 @@ Room favorites:
 Home presence:
 - The top activity/multiplayer/quest strip was removed; presence (online count + connected friends) lives in the right sidebar's pinned core block, and the public activity feed ships into #lounge as system messages (`app/activity/lounge.rs`; the sidebar Activity panel is retired) surfaced in the TUI as the one-row activity ticker above the composer, never as chat rows. The `b1`-`b4` recent-room jump keys died with the Rooms demolition.
 
-`App::sync_visible_chat_room()` is the read/tail-load bridge. It computes the visible chat room from the current screen (Home/Dashboard, house table, daily board, Clubhouse), stores it in `ChatState`, marks it read, and requests a tail on change. Call it after screen, selected room/synthetic entry, room favorite, or open-surface changes.
+`App::sync_visible_chat_room()` is the read/tail-load bridge. It computes the visible chat room from the current screen (Home/Dashboard, house table, daily board, Clubhouse, the Games hub while it has a door-game watch open, a player's own running DCSS, NetHack or Brogue game), stores it in `ChatState`, marks it read, and requests a tail on change. Call it after screen, selected room/synthetic entry, room favorite, or open-surface changes.
 
 There are separate `ChatRowsCache` instances on `App` for:
 - Home lounge dashboard chat.
 - Home chat center for the selected real room/synthetic entry.
 - Embedded game chat (house tables, daily match boards).
+- The door watch view's chat (`app/door/spectate`, the watched player's room).
 
 Do not share a row cache across surfaces unless width and visible messages are guaranteed identical.
 
@@ -337,7 +338,7 @@ User commands:
 - `/dm @user` opens/creates a DM.
 - `/exit` opens quit confirm.
 - `/golive [title]` registers this user's "watch me" stream (`/golive stop` ends it) and `/watch @user` opens a live stream. Both are parsed in `submit_composer` (`parse_golive_command` / `parse_user_command`) and drained by `App::tick_stream`, which owns the stream service, the publisher URL modal, and the paired-CLI `open_url` control; the domain contract is `late-ssh/src/app/stream/CONTEXT.md`.
-- `/crown` prints who wears the crown, how long they have, and what taking it costs; `/crown take` buys it. Parsed in `submit_composer` (`parse_crown_command`) and drained by `App::tick_crown`, which owns the crown service and both banners. §9c.
+- `/crown` prints who wears the crown, how long they have, and what taking it costs; `/crown take` buys it at that price, `/crown take N` bids N (at least the price). Parsed in `submit_composer` (`parse_crown_command`) and drained by `App::tick_crown`, which owns the crown service and both banners. §9c.
 - `/pot` prints the weekly pot's size, the tickets in it, what you hold and what it cost, how many more you may buy today, and the time to the draw; `/pot buy N` buys N tickets. Parsed in `submit_composer` (`parse_pot_command`, which is also the boundary that rejects any count outside `1..=10`, the daily cap) and drained by `App::tick_pot`, which owns the pot service and the banners. The status line is answered straight from the process-shared snapshot, so `/pot` costs no query; the domain contract is `late-ssh/src/app/pot/CONTEXT.md`.
 - `/icons` opens the icon picker (same as `Ctrl+]`).
 - `/picker` opens the room picker (same as `Ctrl+/`); drained via `take_requested_room_picker` into `open_room_search_modal_globally`. On Zen with a chat tile focused, the pick binds that tile (see the Zen CONTEXT).
@@ -349,7 +350,7 @@ User commands:
 - `/roll [NdM ...]` rolls dice into the current room; bare `/roll` defaults to `d20`, caps are 100 dice per group and 1000 sides.
 - `/search [query]` opens the Ctrl+/ modal in message-search mode, pre-filled with `?query`. Parsed in `submit_composer`, drained via `take_requested_message_search` in `handle_post_submit_requests` (the modal is App-owned).
 - `/summary` asks the AI for a catch-up of the visible public room, from when you last left the app on this device (24h when the device has no mark), or exactly the window you type (`/summary 6h`, `/summary 90m`, up to 48h); see §14 Summary. `/history` opens the scroll-back modal, at the first message you missed when this session has an AFK line for the room; see §14 History Modal.
-- `/paper` opens The Late Edition, @graybeard's daily paper (`app/paper`, App-owned modal); `/paper on|off`, `/paper outside on|off`, `/paper print|preview|reset` are admin-only and banner for anyone else. Parsed in `submit_composer` into `requested_paper`, drained by `paper::svc::tick`.
+- `/paper` opens The Late Edition, @graybeard's daily paper (`app/paper`, App-owned modal); `/paper YYYY-MM-DD` opens an older edition if one was printed (`←`/`→` inside the paper leaf between editions, all in `app/paper`); `/paper print|preview|reset` are admin-only and banner for anyone else. Parsed in `submit_composer` into `requested_paper`, drained by `paper::svc::tick`.
 - `/voice` joins the enabled voice channel for the active room; `/mute` toggles paired-CLI mic mute.
 - `/ultimate` opens owned Ultimate Spells.
 - Staff-only `/audio`, `/audio fallback`, and `/audio skip` route trusted music controls.
@@ -364,11 +365,12 @@ User commands:
   for the selected full UUID; earlier output remains scrollable and any command draft stays intact.
 - `/paste-image` asks a paired `late` CLI with `clipboard_image` capability to read the local system clipboard image, sends it back over `/api/ws/pair`, uploads the PNG bytes through the normal image upload path, and inserts the resulting public URL into the composer. Pending clipboard requests time out after 15s so a dead paired client cannot wedge the command.
 - `/petname [name]` shows or sets the user's cat name; `/petname clear` removes it.
-- `/brb` sends this session away now instead of after 30 quiet minutes; the next key brings it back. No announcement message, no free-text note (trailing text gets a usage banner), no audio muting. Parsed in `submit_composer`, drained via `take_requested_brb` into `App::sent_away`. See away above.
+- `/brb [reason]` posts `🌙 brb` (or `🌙 brb: <reason>`) to the composer's room, then sends this session away now instead of after 30 quiet minutes; the next key brings it back. Only the composer's room, like `/me`: with none it banners `Use /brb from inside a room` and does not go away, rather than posting into a stale visible or selected room. The post is a normal send through `send_message_with_reply_task`, so a failed send (e.g. a non-staff `/brb` in a report-only room) shows the usual send notice while the session still goes away. It does not mute audio. Parsed in `submit_composer`, drained via `take_requested_brb` into `App::sent_away`. See away above.
 - `/bug <text>` and `/suggest <text>` post a report card into `#bugs` / `#suggestions` regardless of the composer's current room (`ChatService::send_report_task` resolves the room by slug and joins the caller first). A report is a normal chat message whose body starts with `ReportKind::marker()` (`---BUG---` / `---SUGGESTION---`), so reactions, replies, pins, and deletes work unchanged; `ui_text::wrap_report_to_lines` renders the card. Text under 10 chars (`REPORT_MIN_CHARS`) banners usage instead of posting. Those two rooms are report-only: `send_message` rejects free-text sends from non-staff (`report-only:<slug>` error, covers IRC too since it checks the DB slug), while admins/moderators keep plain text so they can reply under a report; everyone keeps reactions ("+1"). The staff-flag DB lookup runs only on that rare gated path.
 - `/coffee` and `/tea` post a small ASCII-cup chat message to the current room as a coffee/tea-break ritual. No arguments. Steam pattern rotates per invocation through `CUP_VARIANT_COUNT` variants tracked on `ChatState::next_cup_variant` (session-local, not persisted). Routes through the normal `send_message_with_reply_task` send path — the body is a regular chat message subject to the same length/visibility rules.
 - `/private #room` creates a private topic room and joins the caller.
 - `/profile [@user]` opens a user's read-only profile modal. Bare `/profile` opens the caller's own profile as others see it. `@username` autocompletion is available after `/profile `. `/chips [@user]` is the same modal opened on its chips ledger (`ProfileSection::Chips` rides on `OpenProfileResolved` and the `requested_open_profile` handoff; the modal scrolls there on its first measured draw).
+- `/onboard` starts the first-visit tour again from the tavern door (`app/clubhouse/CONTEXT.md` §5).
 - `/public #room` (alias `/join #room`) opens or creates an opt-in public room for the caller only (`auto_join=false`).
 - `/sheet [@user]` (room-scoped to `#dnd`) opens the character sheet modal: bare form opens your own sheet editable (name + freeform body, saved per user per room on field submit via `ChatService::save_sheet_task`); targeted form opens another user's sheet read-only, or banners if they have none. Resolution and fetch happen in `ChatService::open_sheet_task`; saves and reads validate the shared `RoomScopedCommand` metadata plus room membership in `ChatService::ensure_room_scoped_command_access`; the modal lives in `app/sheet_modal`.
 - `/settings` opens settings.
@@ -377,7 +379,7 @@ User commands:
 - `/upload <url>` downloads a public image URL server-side, reuploads it to configured public file storage, and inserts the resulting URL into the composer for the user to send.
 
 Admin commands:
-- `/haunt [on|off|live on|live off|glitch|name|replay|invite|reset]` controls the
+- `/haunt [arm|glitch|name|replay|invite|reset|welcome]` controls the
   first-contact haunting. Parsed in `submit_composer` **only when
   `is_admin`** (enum + parser live in `deadchannel/haunt/state.rs`): for
   everyone else, moderators included even though the ladder now runs
@@ -449,7 +451,6 @@ retains its usual colors, and help colors follow the active theme at render time
   user names omit `@`, and column widths use Ratatui's display measurements.
 - `artboard safety [admin] <nsfw|sfw|none> <piece-id-prefix> [reason...]` (staff; moderator tier by default even for admins, explicit `admin` selects admin tier; one mark per account and piece, replacing previous mark/tier; `none` clears only the selected tier; own art allowed)
 - `artboard safety none <piece-id-prefix> by <@user|user-id> [reason...]` (admin only; removes that actor's stored mark at either tier, another admin's included)
-- `artboard gallery <on|off>` (admin; the `artboard_gallery_enabled` switch)
 - `room-voice <#room> <on|off>`
 - `kick <server|voice|stream|#room> @name [reason...]`
 - `ban <server|#room|art|audio|stream> @name [duration] [reason...]`
@@ -613,9 +614,10 @@ cannot cover; the floor guard in the chip move is what actually decides.
 
 ## 9c. The Crown
 
-One slot, one holder, one 👑 after their name. The crown is not a rental and
+One slot, one holder, one 💎 after their name; last month's winner, the
+laureate, wears a 👑 before theirs all month. The crown is not a rental and
 not a Shop item: it is a single row you take off whoever has it by paying
-more than they did, and every chip is destroyed.
+at least the next rung, and every chip is destroyed.
 `late-core/src/models/crown.rs` owns the table (migration 156) and the price
 ladder; `late-ssh/src/app/crown/svc.rs` owns the transaction, the refusals,
 the telemetry, and the #lounge line. It lives outside `chat/` because it is
@@ -626,6 +628,13 @@ its own domain; only the command and the glyph are chat's.
   starts on day one. The ladder from empty is 500 / 750 / 1,125 / 1,688 /
   2,532 / 3,798 / 5,697 / 8,546. Nobody tunes it: it ratchets with whoever
   last paid, and the ratchet, not the floor, is what makes it dear.
+- **Bids.** `/crown take` pays the price (`CrownBid::AtPrice`); `/crown
+  take N` pays exactly N (`CrownBid::Offer`) when N is at least the price.
+  The reign records what was paid, so the next rung is 1.5x the bid: an
+  overbid is how a holder puts the crown out of a rival's reach. The bid is
+  checked under the take's lock (`CrownBid::charge`), so an offer a racing
+  take overtook is refused (`BidTooLow`), never charged at a rung the bidder
+  never saw. The composer only admits a positive whole number.
 - **Burn.** `ChipMove::CrownTaken` is a floor-guarded debit with
   `source_ref` = the reign id, and there is no matching credit reason
   anywhere. The whole price leaves the money supply, so the burn is the
@@ -634,14 +643,15 @@ its own domain; only the command and the glyph are chat's.
   earnings and a debit never counts (pinned by
   `chips_test::earning_exclusions_and_reason_uniqueness`).
 - **Guards** (`CrownService::take`, one closed `CrownRefusal` enum with the
-  wording): you already wear it, and the chip floor. That is all: there is
+  wording): you already wear it, a bid under the price, and the chip floor.
+  That is all: there is
   **no hold or cooldown**. A reign is takeable the moment it exists, at the
   next rung, so the month end is a real auction (the last take before
   midnight wins the badge) rather than a clock game around a hold window.
   The 1.5x ladder is the only throttle on a war, and a war is the story.
-  Known cost: a take that races another one pays the rung the other just
-  set, not the price `/crown` quoted a moment earlier; the receipt banner
-  says what was paid. Every refusal is uncharged, and a refusal drops the
+  Known cost: a bare take that races another one pays the rung the other
+  just set, not the price `/crown` quoted a moment earlier; the receipt
+  banner says what was paid (a bid caps that). Every refusal is uncharged, and a refusal drops the
   transaction, so nothing is left behind.
 - **Transaction** (`CrownReign::lock_open` then close, open, debit, notify).
   Two locks, and neither replaces the other: `pg_advisory_xact_lock` is what
@@ -670,8 +680,14 @@ its own domain; only the command and the glyph are chat's.
   stopped counting; a history reader wants `LEAST(ended_at, month + 1
   month)`.
 - **Distribution.** `CrownService` holds a process-shared
-  `watch<Option<CrownHolder>>` (user id plus month), seeded by the listener
-  and refreshed on the `crown_changed` notify
+  `watch<CrownWearers>`: the open reign and the last reign of each of the
+  two newest months (`CrownReign::last_of_recent_months`), each a
+  `CrownHolder` (user id plus month). `holder(now)` and `laureate(now)`
+  resolve both at read time, so the rollover turns the last holder into the
+  laureate with no refresh. The laureate is the same rule as the `CRWN`
+  award's CTE, read from `crown_reigns` so the glyph does not wait on the
+  award snapshot loop. The watch is seeded by the listener and refreshed on
+  the `crown_changed` notify
   (`start_notify_worker` over the process listener, `pg_listener.rs`,
   resyncing after a reconnect). The notify payload is a
   `CrownChange` (taker name, price, deposed id): the holder is re-read from
@@ -681,25 +697,26 @@ its own domain; only the command and the glyph are chat's.
   tells its own deposed holder, the same way a second replica does
   (`svc_test::a_listening_replica_learns_the_holder_and_tells_the_deposed`).
 - **Rendering.** `App::tick` reads the watch on the same once-a-second edge
-  as the flair directory, filters it through `CrownHolder::if_current`, and
-  passes the holder into
-  `common/username_effect.rs::resolve_all`, which sets `ResolvedName.crown`.
-  Every surface that already reads `name_flair` therefore gets the crown for
-  free and no render ever queries for it; a holder who has bought nothing
-  else gets an entry of their own. The glyph follows the name after one
-  space (`bob 👑, the night clerk 🐱`): it sits ahead of a rented title and
-  ahead of the badge stack, carries no clickable segment of its own, and is
-  painted in `AMBER_GLOW` rather than taking the name's effect
-  (`ui.rs::build_author_prefix_and_segments_with_chat_badges` builds the
-  range, `ui_text.rs::push_author_prefix_spans` paints it). The glyph is an
-  emoji, two cells wide; chat measures it with `unicode_width`. The
-  Clubhouse floor label does the same (`clubhouse/ui.rs::clubhouse_label`
-  glues the glyph on, `put_label_styled` paints the char at `name_len`
-  amber), and since the floor is one char per cell it spends two cells on
-  it: the emoji plus a `WIDE_TAIL` sentinel the row flush skips, so the
-  walls stay aligned. It is the only wide char a floor label can hold;
-  names and titles are folded to single width.
-- **Commands.** `/crown` and `/crown take` are parsed in `submit_composer`
+  as the flair directory and passes `holder(now)` and `laureate(now)` into
+  `common/username_effect.rs::resolve_all`, which sets `ResolvedName.crown`
+  and `ResolvedName.laureate`. Every surface that already reads `name_flair`
+  therefore gets both for free and no render ever queries for them; a holder
+  or laureate who has bought nothing else gets an entry of their own. The
+  holder's `CROWN_GLYPH` (💎, two cells) follows the name after one space
+  (`👑 bob 💎, the night clerk 🐱` for someone who is both): it sits ahead of
+  a rented title and ahead of the badge stack, carries no clickable segment
+  of its own, and is painted in `AMBER_GLOW` rather than taking the name's
+  effect (`ui.rs::build_author_prefix_and_segments_with_chat_badges` builds
+  the range, `ui_text.rs::push_author_prefix_spans` paints it). The
+  laureate's `CROWN_LAUREATE_GLYPH` (👑, two cells) leads the name, after
+  the friend star, in the author style, with no segment of its own. Chat
+  measures both with `unicode_width`. The Clubhouse floor label shows the
+  holder's glyph only (`clubhouse/ui.rs::clubhouse_label` glues it on,
+  `put_label_styled` paints the char at `name_len` amber and spends two
+  cells on it, the emoji plus a `WIDE_TAIL` sentinel the row flush skips,
+  so the walls stay aligned); names and titles there are folded to single
+  width.
+- **Commands.** `/crown`, `/crown take` and `/crown take N` are parsed in `submit_composer`
   and drained by `App::tick_crown`. Both answers arrive as banners off
   `CrownEvent`, because the crown service is not `ChatService` and has its
   own broadcast (the `StreamService` shape). The deposed holder is told who
@@ -710,7 +727,7 @@ its own domain; only the command and the glyph are chat's.
   line ("tom stole the crown from mira for 1,688", `· `-prefixed, diverted
   into the one-row ticker like every system line) and a **headline**, a
   real message from `system` with no prefix, so it renders as a chat row
-  and stays in history: "👑 @tom stole the crown from @mira for 1,688
+  and stays in history: "💎 @tom stole the crown from @mira for 1,688
   chips. Next price: 2,532 chips." (`activity/filter.rs::lounge_headline`, the
   exhaustive twin of `lounge_includes`; posted by the lounge feed task right
   after the ticker line, behind the same repeat gate, keyed on the reign
@@ -723,10 +740,12 @@ its own domain; only the command and the glyph are chat's.
   `crown`, granted by the existing monthly snapshot
   (`snapshot_previous_month_profile_awards`, a `crown_holder` CTE reading
   last month's latest reign). The badge is `CRWN` with no rank digit
-  (`profile_award::is_rankless_award`), and it is *not* a milestone, so it
-  shows for the month after and then makes way for the next holder's.
-- **IRC sees nothing, and cannot play.** The glyph is a TUI author-header
-  span, so IRC clients get the message body and nothing else, and `/crown`
+  (`profile_award::is_rankless_award`), and it is *not* a milestone. Chat
+  never prints it: the label query skips the category and
+  `profile_award::chat_award_categories` keeps it out of the Chat badges
+  picker, since the laureate's 👑 already says it. The profile lists it.
+- **IRC sees nothing, and cannot play.** The glyphs are TUI author-header
+  spans, so IRC clients get the message body and nothing else, and `/crown`
   is composer-parsed (`submit_composer`), which the ircd send path never
   reaches.
 
@@ -737,8 +756,19 @@ its own domain; only the command and the glyph are chat's.
 One patron buys everyone at the bar a drink. The chips are burned like the
 crown's; what the room gets is a #lounge line and a free drink each.
 The same credit also serves a one-person gift: `@bartender buy @user a drink`
-is an exact, whole-message instruction (`drink_round::gift_drink_target`,
-protected from drunk-text slurring) resolved against the account username.
+or another entry on the closed `GIFT_PHRASES` list (a verb, the name and what
+is bought: "get @user a beer", "send @user a round", "pour @user one"; what is
+bought for whom: "drink for @user", "one for @user"; or whose is on whom:
+"@user's next one is on me"), read on the
+round's rules (any case, opening a clause anywhere in the message, not a
+`?` sentence, not in backticks; see "The trigger is a literal phrase" below) by
+`drink_round::gift_drink_target`, which also refuses a message naming any
+second handle besides the bartender's, so the recipient is never a guess. A
+message places one order at most: `drink_round::bar_order` reads both lists
+once for the bartender, and a gift and a round in the same message ring up
+neither and go to the model as talk. The handle is resolved against the
+account username, trailing dots dropped as sentence punctuation (a username
+never ends in one, `sanitize_username_input`).
 It costs 200 chips (`GIFT_DRINK_PRICE`, twice a round's head, since the one
 person it is aimed at will drink it), pours the recipient the same 400 points
 a round does, works for offline humans, shares the 24h expiry and
@@ -766,8 +796,10 @@ credit is good at either bar and is worth what its seller wrote.
 | Gift ("@bartender buy @user a drink") | `GIFT_DRINK_PRICE` (200) | 400 | no | `drink_gift`, bar `tavern` |
 | Nightcap round (`r` on the stools) | `ROUND_PRICE_PER_PATRON` (100) a stool | 100 | yes, 100 | `round_purchase`, bar `nightcap` |
 
-The Nightcap tab board filters on both the round reason and its own bar, so
-gifts and tavern rounds never reach it (`clubhouse/nightcap/CONTEXT.md` §5).
+Every drink taken off a round, the buyer's own included, is logged in
+`drink_pours` like any other pour (`UserDrinks::record_pour`), under the bar
+that poured it, not the bar that sold it; buying a round or a gift counts
+nothing for the buyer beyond their own drink.
 
 `late-core/src/models/drink_round.rs` owns both tables (migrations 164 and
 168), the price, the cap, and the phrase list; `GhostService::bartender_round`
@@ -777,15 +809,29 @@ It touches chat twice, which is why it is documented here: the phrase gate
 reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
 
 - **The trigger is a literal phrase.** `ROUND_PHRASES` ("round for everyone",
-  "round for all", "round for the house", ...) matched case-insensitively on
-  word boundaries, so "turn around for all of us" is not an order. No model
+  "drinks for the house", "everyone a drink", "drinks on me", "round's on
+  me", ...) matched case-insensitively on word boundaries, so "turn around
+  for all of us" is not an order. Every entry names the whole house or says
+  "on me"; a bare "a round" is not on the list. No model
   decides this: it is the only bartender action that spends more than one
   drink's worth, the price is the size of the room, so the phrase is the
   confirmation. An order is a statement: `contains_round_request` rejects a
   phrase whose sentence runs on to a `?` and never looks inside backticks, so
   "how much is a round for everyone?" is a question the model answers, not a
-  bill. (`round_phrase_spans`, the slur guard's view, still protects the
-  words wherever they appear.) It also means a round costs no model call.
+  bill. The `?` scan reads the whole message and skips code spans, so
+  "round for everyone in `#lounge`?" is a question too. An order also has to
+  open its clause (`is_order`, shared with the gift): between the last
+  `, . ! ? ; :` or line break and the phrase there may only be the
+  bartender's `@name` and entries from the closed `LEAD_INS` list: small
+  talk ("a", "another", "please", "the next"), saying you are about to order
+  ("I'll", "I'd like to", "let's", "can I"), and the verb when the phrase
+  starts at what is bought ("buy", "get", "do", "put"). Nothing negative,
+  past or conditional is on it. "I'll buy a round for everyone", "let's do a
+  round for the house" and "don't worry, round on me" order; "no round for
+  everyone tonight", "he said round on me", "we had drinks for everyone" and
+  "@alice drinks on me" spend nothing and the model gives the words to say.
+  (`round_phrase_spans`, the slur guard's view, still protects the words
+  wherever they appear.) It also means a round costs no model call.
 - **A settled round answers ahead of the mention ladder**, in both the event
   loop's pre-filter and the reply, because throttling a paid action would
   swallow a purchase in silence. A refusal is free, so it steps the ladder
@@ -795,9 +841,13 @@ reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
   (§14 Drunk Text), so a wasted patron's order would otherwise reach the
   matcher as "ronud for eevryone" and the feature would break for exactly the
   people most likely to use it. `slur_segment` passes any token overlapping a
-  `round_phrase_spans` range through untouched, and `with_hiccup` will not
-  drop a `*hic*` inside one. Both the guard and the matcher read the one list
-  in `drink_round.rs`, so they cannot drift apart. The words around the order
+  `spending_phrase_spans` range (the round phrases and the gift phrases,
+  each widened back over the lead-in words it opens its clause with, so a
+  scrambled "please" cannot stop an order being one) through untouched, and
+  `with_hiccup` will not drop a `*hic*` inside one; a hiccup right before the
+  lead-in is itself on `LEAD_INS`.
+  The guard and the matchers read the same lists in `drink_round.rs`, so they
+  cannot drift apart. The words around the order
   still take their beating.
 - **Price** 100 (`ROUND_PRICE_PER_PATRON`) for every credit that actually
   landed, never for the heads counted: the grant's own `RETURNING` is what
@@ -913,7 +963,7 @@ Synthetic entries are selected from the room list but are not normal `ChatRoom`s
 - The reward is capped at one per URL per user and at `NEWS_SHARE_MAX_PAID_PER_DAY` (3) paid shares per UTC day, and the `chip_ledger` row is what enforces both, keyed on `(user_id, url)` and counted by `created_at` date like pot tickets (hence `source_ref` holds the URL, not an article id; migration 163 indexes the lookup). The `articles` row cannot be the record of payment: deleting a story frees its URL, so paying on insert alone would let one player share, delete, and re-share the same link forever. `articles.url` is unique, so while a story is live only its first sharer was paid.
 - A repeat or capped share still succeeds and still goes up on the live strip; it just mints nothing. `Article::create_shared` returns a closed `NewsShareReward` (`Paid` / `RepeatUrl` / `DailyCapReached`) that rides `ArticleEvent::Created` and `FeedEvent::EntryShared`, so `news::state::news_share_banner` says what the ledger did ("+500 chips" / "Already paid for this link" / "Today's 3 paid shares are used up") and `metrics::record_news_shared` labels `late_ssh_news_shares_total` by the same outcome. An RSS entry marked shared because its link was already in News carries `reward: None` and raises no second banner over "Already shared.".
 - Insert, ledger lookup, and credit are one transaction under a `pg_advisory_xact_lock` keyed on `('news_share', user_id)`, the shape `GamePayout` and the pot use: a failed credit leaves no orphan article squatting on a globally unique URL, and two shares by one person landing together serialize, so the day cap is exact rather than read-then-write.
-- Every snapshot article is a live strip candidate, stamped with its `created` (`news/live.rs`, `../live/CONTEXT.md`): a share joins the strip's News lane, which goes ahead of everything else at the next handover, and stays up exactly five minutes. `o` there opens the article modal (`ChatState::open_news_modal_for_article`); `r` opens the #lounge composer replying to it (`ChatState::begin_reply_to_article`, `ReplyTo::Article`), and the sent message carries `> @sharer: 📰 Title` with no `reply_to_message_id`, since there is no message to point at.
+- Every snapshot article is a live strip candidate, stamped with its `created` (`news/live.rs`, `../live/CONTEXT.md`): a share joins the strip's News lane, which goes ahead of everything else at the next handover, and stays up exactly five minutes. `o` there opens the article modal (`ChatState::open_news_modal_for_article`); `r` opens the #lounge composer replying to it (`ChatState::begin_reply_to_article`, `ReplyTo::Article`), and the sent message carries `> @sharer: 📰 Title` with no `reply_to_message_id`, since there is no message to point at. `r` on the selected article in the News room starts the same reply and switches to #lounge (`news/input.rs`).
 - A share has no chat message. Old #lounge rows whose body starts with `---NEWS---` (the cards shares used to post) are still in `chat_messages`; nothing writes, parses, or deletes them, so they render as plain text.
 - Delete removes the article (its author, or an admin with an audit row); there is no chat-side cleanup.
 - URL processing has a 5-minute timeout. Image ASCII fetch has byte, pixel, and time limits.
@@ -992,6 +1042,7 @@ Embedded game chat:
 - Uses `EmbeddedRoomChatView`.
 - Composer is capped at 4 visible lines.
 - Game-backed chat rooms are joined through their surface's idempotent `join_game_room_chat` (fired from `App::tick`), not the Home room rail.
+- The door watch view (`app/door/spectate`) is the one pane that lives inside another page: `Screen::Games` is in the pane roster (`app/input.rs::screen_has_chat_pane`) but resolves to a room only while the session has a watch open (a preview beside the rail has no chat) and the pane is docked. `draw_embedded_room_chat` returns its composer rect so the watch can tee its rule into the composer's borders. The player being watched gets the same room beside their own game through `draw_embedded_room_messages` (the message half of `draw_embedded_room_chat`: no selection, overlay or click target) with the room's ordinary composer strip always at its foot, inert (`ComposerInert::OwnWatchChat`) until F2 or a click on the pane opens it, or its newest message as one read-only row on a narrow terminal (`door/spectate/CONTEXT.md` §1).
 
 Message rendering:
 - Local message storage is newest-first.
@@ -1096,7 +1147,7 @@ modals and the icon picker). Username profile-opens are debounced via
 
 | Entry | Keys |
 |-------|------|
-| News | `j/k` navigate, `i` paste URL, Enter copy/submit URL, `d` delete own/admin article, `/` toggle filter to mine, `Esc` cancel |
+| News | `j/k` navigate, `i` paste URL, Enter copy/submit URL, `r` reply in #lounge to the selected article, `d` delete own/admin article, `/` toggle filter to mine, `Esc` cancel |
 | Directory Projects | `j/k` navigate, `i` create, `e` edit own/admin, `d` delete own/admin, Enter copy/submit, Tab cycle fields while composing, `/` toggle filter to mine, `Esc` cancel |
 | Directory Profiles | `j/k` navigate, `i` create/edit own, `e` edit own/admin, `d` delete own/admin, Enter/`c` copy public profile link, Tab cycle fields while composing, `/` toggle filter to mine, `Esc` cancel |
 | Cyberspace feeds | `j/k` navigate, Enter open thread (or link modal when unlinked), `p` post, `c` copy entry link, `n` notifications, `r` refresh/reply, `b` back |
@@ -1281,7 +1332,7 @@ Test gaps:
 - Reaction tasks are async; UI should not assume optimistic success.
 - A gild marker repaints off the Postgres notify, not off `evt_tx`. If `start_notify_worker` and the process listener are not running (tests, or a process wired without it) the marker only appears on the next room tail load. Do not "fix" that by broadcasting locally as well: two paths would mean two repaints and a marker that behaves differently on the replica that sold it.
 - Poll create/vote tasks are async; `ChatEvent::PollUpdated` patches the local active-poll map and `ChatSnapshot.active_polls` refreshes authoritative visibility. Successful poll creation spawns a sleep-until-expiry finalizer that atomically claims the expired poll in Postgres, marks it inactive, and posts compact results into the room as the poll creator. `ChatService::start_poll_finalizer_recovery_task` runs a coarse 10-minute recovery scan for expired active polls so restarts/redeploys do not strand result posts; the DB claim is the cross-replica duplicate guard.
-- Poll vote shortcuts use `va/vb/vc` when the selected/visible real room has an active poll, leaving music `v1/v2/v3` selectors available.
+- Poll vote shortcuts use `va/vb/vc` when the selected/visible real room has an active poll, leaving music `v1`..`v5` selectors available.
 - Room visual order must stay consistent between state and UI hit-testing/row-building.
 - Mouse hit-testing reconstructs a temporary `ChatRenderInput`; room-list layout changes must keep hit tests in sync.
 - Chat-scroll mouse hit-testing is driven by `ChatRowsCache` extras (`row_message`, `row_kind`, `header_segments`) and a per-frame `ChatHitLayout` published into `ChatState::last_chat_hit_layout`. If you change how author headers, inline images, or reaction footers contribute rows in `ensure_chat_rows_cache` / `wrap_chat_entry_to_lines`, update both the parallel `row_*` vectors and the segment math in `build_author_prefix_and_segments` so a click still resolves to the right message/segment.

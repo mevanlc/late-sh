@@ -6,6 +6,8 @@ use late_core::models::media_queue_item::SongQueueReward;
 use crate::app::activity::event::ActivityGame;
 use crate::app::arcade::share::ShareCardKind;
 use crate::app::arcade::sliding_puzzle::svc::SlidingPuzzleArtLoad;
+use crate::app::audio::radio_meta::polled::PolledFeed;
+use crate::app::audio::radio_meta::svc::PollOutcome;
 use crate::app::audio::svc::ThumbnailFetch;
 use crate::app::bonsai::state::BonsaiAction;
 use crate::app::bonsai::svc::BonsaiActionResult;
@@ -77,18 +79,20 @@ pub enum PaperPrintResult {
     Failed,
 }
 
-/// How a request to open the paper resolved. `Login` and `Command` are the
-/// two ways a reader got it; the rest are why they did not.
+/// How a request to open the paper resolved. `Login`, `Command`, and
+/// `Browse` (`←`/`→` in the open paper) are the ways a reader got it; the
+/// rest are why they did not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaperOpenResult {
     Login,
     Command,
+    Browse,
     /// Nothing printed for today's edition.
     Empty,
+    /// `/paper YYYY-MM-DD` named an edition the press never printed.
+    NotPrinted,
     /// This account's login pop for the edition was already claimed.
     AlreadyShown,
-    /// The paper's kill switch is off, or AI is unconfigured here.
-    Unavailable,
     Failed,
 }
 
@@ -214,8 +218,20 @@ pub enum FirstContactBeat {
 pub enum FightBeat {
     Started,
     SteppedDown,
+    /// A step onto a bright glyph's node.
+    Bright,
     Resumed,
+    /// A card played, the fight still on.
+    Played,
+    /// A turn ended, both standing.
     Round,
+    /// A card drafted into the deck.
+    Drafted,
+    /// A rest on the road spent on the signal, or on the deck.
+    Mended,
+    Cleared,
+    /// A cache on the road taken.
+    Cached,
     Won,
     /// The Old Signal put down: a mark and the reset.
     Slain,
@@ -228,6 +244,10 @@ pub enum FightBeat {
     Borrowed,
     Repaid,
     Reset,
+    /// A glass poured at Dead Air.
+    Drank,
+    /// A piece bought off the blade cart.
+    Carted,
     Refused,
     Failed,
 }
@@ -335,6 +355,49 @@ pub enum Presence {
     Idle,
 }
 
+/// Where inside a screen a session's attention landed. Most screens are one
+/// place (`Whole`); Home splits by what the chat pane shows, the Arcade and
+/// the House Table by open game, Profiles by shelf, the Artboard by what
+/// fills the board area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// A one-place screen, the Arcade lobby, the House Table with no table
+    /// open, a Home room not loaded yet, or an Artboard not yet joined.
+    Whole,
+    Home(HomeRoom),
+    /// The open Arcade board or House Table game.
+    Game(ActivityGame),
+    PeopleShelf,
+    JobsShelf,
+    ArtboardCanvas,
+    /// The gallery pane (a section's list or one piece) over the board.
+    ArtboardGallery,
+}
+
+/// What fills Home: one kind of chat room or a synthetic rail entry. A kind,
+/// never a room id, so the label set stays closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HomeRoom {
+    /// #lounge, drawn as the Home card.
+    Lounge,
+    Language,
+    PublicTopic,
+    PrivateTopic,
+    Dm,
+    Deadchannel,
+    /// A room whose kind has no name here yet.
+    OtherRoom,
+    Feeds,
+    News,
+    /// Any cyberspace entry: the feed, its notifications, a pinned room or
+    /// C-Mail conversation.
+    Cyberspace,
+    Notifications,
+    Discover,
+    Showcase,
+    Work,
+}
+
 /// How one attempt of a notify-driven re-read (`pg_listener::read_until_ok`)
 /// ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -388,6 +451,18 @@ pub enum SshRejectReason {
     GlobalLimit,
 }
 
+/// How a viewer's watch stream of a live door game ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DoorWatchOutcome {
+    /// The host closed the stream: the game ended, or was never live.
+    Closed,
+    /// The viewer ended the watch: another rail row, leaving the hub with a
+    /// preview, the off-screen window running out.
+    Left,
+    /// Connect, auth, or a broken frame stream.
+    Failed,
+}
+
 /// The band count a paired CLI's `viz` frame arrived with. CLIs from before
 /// the 16-band analyzer send 8, which the pair socket stretches to 16.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,24 +483,26 @@ mod inner {
 
     use crate::app::activity::event::GameFamily;
 
+    use super::HomeRoom;
     use super::ShareCardKind;
     use super::SlidingPuzzleArtLoad;
     use super::XMediaLookup;
     use super::{
         ActivityGame, ArcadeDifficulty, ArcadeFinish, ArcadeMode, AwardAnnouncementOutcome,
-        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, FightBeat,
-        FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult, GalleryHangResult,
-        GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal, GildTier,
-        JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult, NewsShareReward,
-        NightcapHouseFailure, NightcapOrderResult, OldSignalPayout, OnlineTimeFlushResult,
-        PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal, PotReminderOutcome,
-        Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome, RenderReason, RoundRefusal,
-        RunnerDoor, Screen, SessionStartStage, SessionUser, SnapshotRowError, SongQueueReward,
-        SshRejectReason, SummaryResult, TailorBeat, ThumbnailFetch, TranslationResult,
-        VizWireBands,
+        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, DoorWatchOutcome,
+        FightBeat, FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult,
+        GalleryHangResult, GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal,
+        GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OldSignalPayout,
+        OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, Place, PoolShotOutcome,
+        PotRefusal, PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh,
+        RefreshOutcome, RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage,
+        SessionUser, SnapshotRowError, SongQueueReward, SshRejectReason, SummaryResult, TailorBeat,
+        ThumbnailFetch, TranslationResult, VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
     use super::{NewcomerMinuteResult, ReferralAttachOutcome, ReferralSettlement, ReferralSource};
+    use super::{PollOutcome, PolledFeed};
     use crate::app::bonsai::state::BranchAction;
     use crate::app::referral::state::AttachRefusal;
 
@@ -647,6 +724,7 @@ mod inner {
         match refusal {
             CrownRefusal::AlreadyYours => "already_yours",
             CrownRefusal::InsufficientChips { .. } => "insufficient_chips",
+            CrownRefusal::BidTooLow { .. } => "bid_too_low",
         }
     }
 
@@ -1112,6 +1190,16 @@ mod inner {
         })
     }
 
+    fn radio_meta_polls_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_radio_meta_polls_total")
+                .with_description("Now-playing polls of third-party radio providers")
+                .build()
+        })
+    }
+
     fn booth_thumbnails_total() -> &'static Counter<u64> {
         static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
         METRIC.get_or_init(|| {
@@ -1202,7 +1290,7 @@ mod inner {
             meter()
                 .f64_counter("late_ssh_attention_seconds_total")
                 .with_description(
-                    "Session seconds spent per screen (and Arcade game), split by recent input",
+                    "Session seconds spent per screen and place inside it, split by recent input",
                 )
                 .with_unit("s")
                 .build()
@@ -1299,7 +1387,7 @@ mod inner {
             meter()
                 .u64_counter("late_ssh_first_contact_gate_total")
                 .with_description(
-                    "First-contact eligibility gate evaluations at connect (one per session, not per person), by verdict and audience",
+                    "First-contact eligibility gate evaluations at connect (one per session, not per person), by verdict",
                 )
                 .build()
         })
@@ -1359,8 +1447,14 @@ mod inner {
         match beat {
             FightBeat::Started => "started",
             FightBeat::SteppedDown => "stepped_down",
+            FightBeat::Bright => "bright",
             FightBeat::Resumed => "resumed",
+            FightBeat::Played => "played",
             FightBeat::Round => "round",
+            FightBeat::Drafted => "drafted",
+            FightBeat::Mended => "mended",
+            FightBeat::Cleared => "cleared",
+            FightBeat::Cached => "cached",
             FightBeat::Won => "won",
             FightBeat::Slain => "slain",
             FightBeat::Lost => "lost",
@@ -1371,6 +1465,8 @@ mod inner {
             FightBeat::Withdrew => "withdrew",
             FightBeat::Borrowed => "borrowed",
             FightBeat::Repaid => "repaid",
+            FightBeat::Drank => "drank",
+            FightBeat::Carted => "carted",
             FightBeat::Reset => "reset",
             FightBeat::Refused => "refused",
             FightBeat::Failed => "failed",
@@ -1443,16 +1539,15 @@ mod inner {
         );
     }
 
-    /// One gate evaluation at connect. `staff` splits admins and
-    /// moderators (haunted while the fuse is unlit) from everyone else.
-    pub fn record_first_contact_gate(verdict: GateVerdict, staff: bool) {
-        let audience = if staff { "staff" } else { "public" };
+    /// One gate evaluation at connect. Only staff (admins and moderators)
+    /// reach the gate, so the verdict is the whole label set.
+    pub fn record_first_contact_gate(verdict: GateVerdict) {
         first_contact_gate_total().add(
             1,
-            &[
-                KeyValue::new("verdict", first_contact_gate_verdict_label(verdict)),
-                KeyValue::new("audience", audience),
-            ],
+            &[KeyValue::new(
+                "verdict",
+                first_contact_gate_verdict_label(verdict),
+            )],
         );
     }
 
@@ -1608,7 +1703,6 @@ mod inner {
 
     fn refresh_label(refresh: Refresh) -> &'static str {
         match refresh {
-            Refresh::AppFlags => "app_flags",
             Refresh::RunnerLooks => "runner_looks",
             Refresh::CrownHolder => "crown_holder",
             Refresh::DailyMatches => "daily_matches",
@@ -1732,22 +1826,66 @@ mod inner {
         }
     }
 
-    pub fn record_attention(
-        screen: Screen,
-        arcade_game: Option<ActivityGame>,
-        presence: Presence,
-        seconds: f64,
-    ) {
-        let game = match arcade_game {
-            Some(game) => game_label(game),
-            None => "none",
-        };
+    fn home_room_label(room: HomeRoom) -> &'static str {
+        match room {
+            HomeRoom::Lounge => "lounge",
+            HomeRoom::Language => "language",
+            HomeRoom::PublicTopic => "topic_public",
+            HomeRoom::PrivateTopic => "topic_private",
+            HomeRoom::Dm => "dm",
+            HomeRoom::Deadchannel => "deadchannel",
+            HomeRoom::OtherRoom => "other_room",
+            HomeRoom::Feeds => "feeds",
+            HomeRoom::News => "news",
+            HomeRoom::Cyberspace => "cyberspace",
+            HomeRoom::Notifications => "notifications",
+            HomeRoom::Discover => "discover",
+            HomeRoom::Showcase => "showcase",
+            HomeRoom::Work => "work",
+        }
+    }
+
+    fn place_label(place: Place) -> &'static str {
+        match place {
+            Place::Whole => "none",
+            Place::Home(room) => home_room_label(room),
+            Place::Game(game) => game_label(game),
+            Place::PeopleShelf => "people",
+            Place::JobsShelf => "jobs",
+            Place::ArtboardCanvas => "canvas",
+            Place::ArtboardGallery => "gallery",
+        }
+    }
+
+    pub fn record_attention(screen: Screen, place: Place, presence: Presence, seconds: f64) {
         attention_seconds_total().add(
             seconds,
             &[
                 KeyValue::new("screen", screen_label(screen)),
-                KeyValue::new("game", game),
+                KeyValue::new("place", place_label(place)),
                 KeyValue::new("presence", presence_label(presence)),
+            ],
+        );
+    }
+
+    fn place_visits_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_place_visits_total")
+                .with_description(
+                    "Arrivals on a screen (and place inside it), sampled on the 1Hz attention edge",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_place_visit(screen: Screen, place: Place) {
+        place_visits_total().add(
+            1,
+            &[
+                KeyValue::new("screen", screen_label(screen)),
+                KeyValue::new("place", place_label(place)),
             ],
         );
     }
@@ -1772,6 +1910,7 @@ mod inner {
             ShareCardKind::RubiksCube => "rubiks_cube",
             ShareCardKind::SlidingPuzzle => "sliding_puzzle",
             ShareCardKind::Day => "day",
+            ShareCardKind::Road => "road",
         }
     }
 
@@ -1916,6 +2055,34 @@ mod inner {
             ThumbnailFetch::Fetched => "fetched",
             ThumbnailFetch::Failed => "failed",
         }
+    }
+
+    pub fn record_radio_meta_poll(feed: PolledFeed, outcome: PollOutcome) {
+        let feed = match feed {
+            PolledFeed::Plaza => "plaza",
+            PolledFeed::CodeRadio => "coderadio",
+            PolledFeed::ParadiseMain => "paradise_main",
+            PolledFeed::ParadiseMellow => "paradise_mellow",
+            PolledFeed::ParadiseRock => "paradise_rock",
+            PolledFeed::ParadiseGlobe => "paradise_globe",
+            PolledFeed::ParadiseBeyond => "paradise_beyond",
+            PolledFeed::ParadiseKfat => "paradise_kfat",
+            PolledFeed::FipJazz => "fip_jazz",
+            PolledFeed::SwissJazz => "swiss_jazz",
+            PolledFeed::SwissClassic => "swiss_classic",
+        };
+        let outcome = match outcome {
+            PollOutcome::Updated => "updated",
+            PollOutcome::NoTrack => "no_track",
+            PollOutcome::Failed => "failed",
+        };
+        radio_meta_polls_total().add(
+            1,
+            &[
+                KeyValue::new("feed", feed),
+                KeyValue::new("outcome", outcome),
+            ],
+        );
     }
 
     pub fn record_booth_thumbnail(outcome: ThumbnailFetch) {
@@ -2155,9 +2322,10 @@ mod inner {
         match result {
             PaperOpenResult::Login => "login",
             PaperOpenResult::Command => "command",
+            PaperOpenResult::Browse => "browse",
             PaperOpenResult::Empty => "empty",
+            PaperOpenResult::NotPrinted => "not_printed",
             PaperOpenResult::AlreadyShown => "already_shown",
-            PaperOpenResult::Unavailable => "unavailable",
             PaperOpenResult::Failed => "failed",
         }
     }
@@ -2475,6 +2643,68 @@ mod inner {
         door_ingest_session_failures_total().add(1, &[KeyValue::new("game", game.key())]);
     }
 
+    fn door_watch_outcome_label(outcome: DoorWatchOutcome) -> &'static str {
+        match outcome {
+            DoorWatchOutcome::Closed => "closed",
+            DoorWatchOutcome::Left => "left",
+            DoorWatchOutcome::Failed => "failed",
+        }
+    }
+
+    fn door_watch_streams_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_watch_streams_total")
+                .with_description(
+                    "Viewer watch streams of a live door game, by game and how they ended",
+                )
+                .build()
+        })
+    }
+
+    fn door_watch_roster_failures_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_watch_roster_failures_total")
+                .with_description(
+                    "Door live-game roster stream failures (connect or mid-stream) before a retry, by game",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_door_watch_stream(game: DoorGame, outcome: DoorWatchOutcome) {
+        door_watch_streams_total().add(
+            1,
+            &[
+                KeyValue::new("game", game.key()),
+                KeyValue::new("outcome", door_watch_outcome_label(outcome)),
+            ],
+        );
+    }
+
+    pub fn record_door_watch_roster_failure(game: DoorGame) {
+        door_watch_roster_failures_total().add(1, &[KeyValue::new("game", game.key())]);
+    }
+
+    fn door_watch_chat_room_failures_total() -> &'static Counter<u64> {
+        static METRIC: OnceLock<Counter<u64>> = OnceLock::new();
+        METRIC.get_or_init(|| {
+            meter()
+                .u64_counter("late_ssh_door_watch_chat_room_failures_total")
+                .with_description(
+                    "Failures to resolve a player's watch-chat room (the lookup or its first create), by game",
+                )
+                .build()
+        })
+    }
+
+    pub fn record_door_watch_chat_room_failure(game: DoorGame) {
+        door_watch_chat_room_failures_total().add(1, &[KeyValue::new("game", game.key())]);
+    }
+
     fn online_time_flush_result_label(result: OnlineTimeFlushResult) -> &'static str {
         match result {
             OnlineTimeFlushResult::Flushed => "flushed",
@@ -2512,19 +2742,20 @@ mod inner {
     use super::XMediaLookup;
     use super::{
         ActivityGame, ArcadeDifficulty, ArcadeFinish, ArcadeMode, AwardAnnouncementOutcome,
-        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, FightBeat,
-        FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult, GalleryHangResult,
-        GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal, GildTier,
-        JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult, NewsShareReward,
-        NightcapHouseFailure, NightcapOrderResult, OldSignalPayout, OnlineTimeFlushResult,
-        PaperOpenResult, PaperPrintResult, PoolShotOutcome, PotRefusal, PotReminderOutcome,
-        Presence, PresenceScope, PresenceWire, Refresh, RefreshOutcome, RenderReason, RoundRefusal,
-        RunnerDoor, Screen, SessionStartStage, SessionUser, SnapshotRowError, SongQueueReward,
-        SshRejectReason, SummaryResult, TailorBeat, ThumbnailFetch, TranslationResult,
-        VizWireBands,
+        BioScreenOutcome, CrownRefusal, DailyPuzzle, DailyWinPayout, DoorGame, DoorWatchOutcome,
+        FightBeat, FirstContactBeat, GalleryApplauseResult, GalleryContentRatingResult,
+        GalleryHangResult, GalleryTakeDownResult, GateVerdict, GiftDrinkRefusal, GildRefusal,
+        GildTier, JobsFetchResult, JobsPostResult, JobsPressResult, JobsReadResult,
+        NewsShareReward, NightcapHouseFailure, NightcapOrderResult, OldSignalPayout,
+        OnlineTimeFlushResult, PaperOpenResult, PaperPrintResult, Place, PoolShotOutcome,
+        PotRefusal, PotReminderOutcome, Presence, PresenceScope, PresenceWire, Refresh,
+        RefreshOutcome, RenderReason, RoundRefusal, RunnerDoor, Screen, SessionStartStage,
+        SessionUser, SnapshotRowError, SongQueueReward, SshRejectReason, SummaryResult, TailorBeat,
+        ThumbnailFetch, TranslationResult, VizWireBands,
     };
     use super::{BonsaiAction, BonsaiActionResult};
     use super::{NewcomerMinuteResult, ReferralAttachOutcome, ReferralSettlement, ReferralSource};
+    use super::{PollOutcome, PolledFeed};
 
     pub fn record_ssh_connection() {}
     pub fn record_ssh_connection_rejected(_reason: SshRejectReason) {}
@@ -2536,7 +2767,7 @@ mod inner {
     pub fn record_presence_records(_scope: PresenceScope, _count: usize) {}
     pub fn record_runner_door(_door: RunnerDoor) {}
     pub fn record_first_contact_bio_screen(_outcome: BioScreenOutcome) {}
-    pub fn record_first_contact_gate(_verdict: GateVerdict, _staff: bool) {}
+    pub fn record_first_contact_gate(_verdict: GateVerdict) {}
     pub fn record_render(_reason: RenderReason) {}
     pub fn record_render_skipped_clean() {}
     pub fn add_ssh_session(_delta: i64) {}
@@ -2565,13 +2796,8 @@ mod inner {
         _finish: ArcadeFinish,
     ) {
     }
-    pub fn record_attention(
-        _screen: Screen,
-        _arcade_game: Option<ActivityGame>,
-        _presence: Presence,
-        _seconds: f64,
-    ) {
-    }
+    pub fn record_attention(_screen: Screen, _place: Place, _presence: Presence, _seconds: f64) {}
+    pub fn record_place_visit(_screen: Screen, _place: Place) {}
     pub fn record_share_card(_kind: ShareCardKind) {}
     pub fn record_sliding_puzzle_art(_load: SlidingPuzzleArtLoad) {}
     pub fn record_daily_win_payout(_payout: DailyWinPayout) {}
@@ -2581,6 +2807,7 @@ mod inner {
     pub fn record_news_x_media_lookup(_lookup: XMediaLookup) {}
     pub fn record_song_queued(_reward: SongQueueReward) {}
     pub fn record_booth_thumbnail(_outcome: ThumbnailFetch) {}
+    pub fn record_radio_meta_poll(_feed: PolledFeed, _outcome: PollOutcome) {}
     pub fn record_gild_bought(_tier: GildTier) {}
     pub fn record_gild_refused(_refusal: GildRefusal) {}
     pub fn record_bonsai_action(_action: BonsaiAction, _result: BonsaiActionResult) {}
@@ -2621,6 +2848,9 @@ mod inner {
     pub fn record_gallery_splash_queue_depth(_depth: i64) {}
     pub fn record_door_ingest_line(_game: DoorGame) {}
     pub fn record_door_ingest_session_failure(_game: DoorGame) {}
+    pub fn record_door_watch_stream(_game: DoorGame, _outcome: DoorWatchOutcome) {}
+    pub fn record_door_watch_roster_failure(_game: DoorGame) {}
+    pub fn record_door_watch_chat_room_failure(_game: DoorGame) {}
     pub fn record_online_time_flush(_result: OnlineTimeFlushResult) {}
 }
 

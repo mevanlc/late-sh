@@ -8,10 +8,11 @@
 //! After the commit, the wire (GAME.md, "The three surfaces"): the room
 //! sees the news, never the play-by-play. `Sheet::news` decides what is
 //! news (a dropped signal, a level gained, the Old Signal put down, a step
-//! off the ledge, a first kill, a near miss, the last ration of the day);
+//! off the ledge, a first kill, a bright glyph put down, a near miss, the
+//! day's road walked to its end);
 //! this file words it and posts it to #deadchannel as messages from the
-//! voice. An ordinary kill, a round, a run, a purchase, the locker, and the
-//! bits machine post nothing. The Old Signal also pays the mark's
+//! voice. An ordinary kill, a card, a turn, a run, a rest, a cache, a
+//! purchase, a glass, the locker, and the bits machine post nothing. The Old Signal also pays the mark's
 //! chips after the commit (`pay_mark`: once per mark and at most once a
 //! month, the door milestones' two gates; the debt is on the row as
 //! `unpaid_mark` until the grant answers, so a grant that errors is
@@ -71,6 +72,7 @@ pub struct FightService {
 /// happened.
 struct Acted {
     runner_id: Uuid,
+    generation: i32,
     sheet: Sheet,
     outcome: Outcome,
 }
@@ -79,6 +81,7 @@ struct Acted {
 /// sheet as settled.
 struct Reloaded {
     runner_id: Uuid,
+    generation: i32,
     sheet: Sheet,
 }
 
@@ -103,17 +106,18 @@ impl FightService {
                 let outcome = match svc.act(user_id, command).await {
                     Ok(Some(Acted {
                         runner_id,
+                        generation,
                         sheet,
                         mut outcome,
                     })) => {
                         metrics::record_deadchannel_fight(beat_for(&outcome.applied));
-                        tracing::info!(applied = ?outcome.applied, level = sheet.level, signal = sheet.signal, rations_left = sheet.rations_left, bits = sheet.bits, "fight command applied");
+                        tracing::info!(applied = ?outcome.applied, level = sheet.level, signal = sheet.signal, rations_left = sheet.rations_left, bits = sheet.bits, crystals = sheet.crystals, "fight command applied");
                         svc.post_news(&username, &sheet, &outcome.applied).await;
                         // The debt on the row: this kill's mark, or one an
                         // earlier grant failed to settle. Either way the
                         // line lands under this answer.
                         if let Some(mark) = sheet.unpaid_mark {
-                            outcome.lines.push(svc.pay_mark(user_id, runner_id, mark).await);
+                            outcome.lines.push(svc.pay_mark(user_id, runner_id, generation, mark).await);
                         }
                         if let Applied::Slain { marks } = outcome.applied {
                             svc.grant_old_signal_badge(user_id, marks).await;
@@ -156,6 +160,7 @@ impl FightService {
         tx.commit().await?;
         Ok(Some(Acted {
             runner_id: row.id,
+            generation: row.reset_generation,
             sheet,
             outcome,
         }))
@@ -163,7 +168,9 @@ impl FightService {
 
     /// The mark's chips, after the kill's commit, on the door milestones'
     /// two gates (`DEADCHANNEL_OLD_SIGNAL_REWARD_KEY`): once per mark, keyed
-    /// `<runner row id>:<mark>`, and at most once every 30 days per account.
+    /// `<runner row id>:<generation>:<mark>` (the row's `reset_generation`,
+    /// so a mark earned again after a nuke claims under a key of its own),
+    /// and at most once every 30 days per account.
     /// Returns the line the scene prints under the answer.
     ///
     /// The row owes the mark (`unpaid_mark`, migration 210) until the grant
@@ -173,8 +180,8 @@ impl FightService {
     /// key, which the unique gate makes safe to repeat. A settle that fails
     /// after a paid grant is the one double call the gate absorbs: the
     /// retry is refused and settles then.
-    async fn pay_mark(&self, user_id: Uuid, runner_id: Uuid, mark: i32) -> String {
-        let event_key = format!("{runner_id}:{mark}");
+    async fn pay_mark(&self, user_id: Uuid, runner_id: Uuid, generation: i32, mark: i32) -> String {
+        let event_key = format!("{runner_id}:{generation}:{mark}");
         let grant = self
             .chips
             .credit_run_cooldown_reward_template(
@@ -244,12 +251,12 @@ impl FightService {
     async fn post_news(&self, username: &str, sheet: &Sheet, applied: &Applied) {
         for news in sheet.news(applied) {
             let body = match news {
-                News::Dropped { bits_lost } => {
+                News::Dropped { bits_lost, step } => {
                     let took = match bits_lost {
                         0 => "the street found nothing on them.".to_string(),
                         n => format!("the street took {n} bits."),
                     };
-                    format!("{username}'s signal dropped at the end of the row. {took}")
+                    format!("{username}'s signal dropped at step {step} of the road. {took}")
                 }
                 News::Leveled { level } => {
                     self.with_face(sheet.user_id, format!("{username} is level {level}."))
@@ -271,10 +278,13 @@ impl FightService {
                 News::FirstBlood { foe } => {
                     format!("{username} put down their first {foe}. the static will remember.")
                 }
+                News::BrightDown { foe } => {
+                    format!("{username} put down a bright {foe}. it left a crystal.")
+                }
                 News::NearMiss { foe, signal } => {
                     format!("{username} put down the {foe} with {signal} signal left.")
                 }
-                News::LastRation {
+                News::RoadWalked {
                     kills,
                     runs,
                     signal,
@@ -290,7 +300,7 @@ impl FightService {
                         n => format!(", {n} runs"),
                     };
                     format!(
-                        "{username} spent the last ration. {glyphs}{runs}, signal {signal}/{max_signal}."
+                        "{username} walked the road. {glyphs}{runs}, signal {signal}/{max_signal}."
                     )
                 }
             };
@@ -371,9 +381,13 @@ impl FightService {
         tokio::spawn(
             async move {
                 match svc.reload(user_id).await {
-                    Ok(Some(Reloaded { runner_id, sheet })) => {
+                    Ok(Some(Reloaded {
+                        runner_id,
+                        generation,
+                        sheet,
+                    })) => {
                         if let Some(mark) = sheet.unpaid_mark {
-                            let line = svc.pay_mark(user_id, runner_id, mark).await;
+                            let line = svc.pay_mark(user_id, runner_id, generation, mark).await;
                             tracing::info!(mark, line = %line, "old signal mark settled on reload");
                         }
                         let _ = reply.send(FightOutcome::Reloaded { sheet });
@@ -407,6 +421,7 @@ impl FightService {
         tx.commit().await?;
         Ok(Some(Reloaded {
             runner_id: row.id,
+            generation: row.reset_generation,
             sheet,
         }))
     }
@@ -421,8 +436,14 @@ fn beat_for(applied: &Applied) -> FightBeat {
         Applied::Refused(_) => FightBeat::Refused,
         Applied::Started { pick: Pick::Fair } => FightBeat::Started,
         Applied::Started { pick: Pick::Lower } => FightBeat::SteppedDown,
+        Applied::Started { pick: Pick::Bright } => FightBeat::Bright,
         Applied::Resumed => FightBeat::Resumed,
+        Applied::Played { .. } => FightBeat::Played,
         Applied::Round => FightBeat::Round,
+        Applied::Drafted { .. } => FightBeat::Drafted,
+        Applied::Mended { .. } => FightBeat::Mended,
+        Applied::Cleared { .. } => FightBeat::Cleared,
+        Applied::Cached { .. } => FightBeat::Cached,
         Applied::Won { .. } => FightBeat::Won,
         Applied::Slain { .. } => FightBeat::Slain,
         Applied::Lost { .. } => FightBeat::Lost,
@@ -434,6 +455,8 @@ fn beat_for(applied: &Applied) -> FightBeat {
         Applied::Borrowed { .. } => FightBeat::Borrowed,
         Applied::Repaid { .. } => FightBeat::Repaid,
         Applied::Reset => FightBeat::Reset,
+        Applied::Drank { .. } => FightBeat::Drank,
+        Applied::Carted { .. } => FightBeat::Carted,
     }
 }
 

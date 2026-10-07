@@ -84,6 +84,52 @@ fn parse_pot_command_only_admits_a_buyable_count() {
     assert_eq!(parse_pot_command("hello"), None);
 }
 
+/// The crown's composer boundary: a bare take pays the ladder, a number is a
+/// bid, and only a positive whole number gets through. Whether the bid beats
+/// the price is not decided here: the price can move before the take lands.
+#[test]
+fn parse_crown_command_admits_a_ladder_take_or_a_positive_bid() {
+    use crate::app::crown::svc::CrownBid;
+
+    assert_eq!(
+        parse_crown_command("/crown"),
+        Some(Some(CrownCommand::Status))
+    );
+    assert_eq!(
+        parse_crown_command("  /crown take  "),
+        Some(Some(CrownCommand::Take {
+            bid: CrownBid::AtPrice
+        }))
+    );
+    assert_eq!(
+        parse_crown_command("/crown take 5000"),
+        Some(Some(CrownCommand::Take {
+            bid: CrownBid::Offer(5_000)
+        }))
+    );
+    assert_eq!(
+        parse_crown_command("/crown take   1"),
+        Some(Some(CrownCommand::Take {
+            bid: CrownBid::Offer(1)
+        }))
+    );
+
+    for junk in [
+        "/crown take 0",
+        "/crown take -500",
+        "/crown take lots",
+        "/crown take 5k",
+        "/crown take 1.5",
+        "/crown take 99999999999999999999",
+        "/crown give",
+    ] {
+        assert_eq!(parse_crown_command(junk), Some(None), "{junk}");
+    }
+
+    assert_eq!(parse_crown_command("/crowns"), None);
+    assert_eq!(parse_crown_command("/pot buy 5"), None);
+}
+
 #[test]
 fn parse_gift_command_accepts_at_optional_username() {
     assert_eq!(
@@ -350,7 +396,7 @@ fn username_presence_lowercases_names_and_reads_away() {
     let user = |username: &str, sessions: Vec<ActiveSession>| ActiveUser {
         username: username.to_string(),
         fingerprint: None,
-        audio_source: late_core::models::user::AudioSource::Icecast,
+        audio_source: late_core::models::user::AudioSource::Radio,
         connection_count: sessions.len().max(1),
         sessions,
         last_login_at: Instant::now(),
@@ -770,6 +816,30 @@ fn make_room(
         },
         Vec::new(),
     )
+}
+
+/// Home's attention label is read off the room's kind and visibility; a
+/// kind it does not name lands on `OtherRoom` rather than a room label.
+#[test]
+fn home_room_kind_names_every_listed_kind() {
+    let kinds = [
+        ("lounge", "public", HomeRoom::Lounge),
+        ("language", "public", HomeRoom::Language),
+        ("topic", "public", HomeRoom::PublicTopic),
+        ("topic", "private", HomeRoom::PrivateTopic),
+        ("dm", "dm", HomeRoom::Dm),
+        ("deadchannel", "private", HomeRoom::Deadchannel),
+        ("game", "public", HomeRoom::OtherRoom),
+    ];
+    let named: Vec<_> = kinds
+        .iter()
+        .map(|(kind, visibility, _)| {
+            let (room, _) = make_room(Uuid::from_u128(40), kind, visibility, false, None);
+            home_room_kind(&room)
+        })
+        .collect();
+    let expected: Vec<_> = kinds.iter().map(|(_, _, home)| *home).collect();
+    assert_eq!(named, expected);
 }
 
 #[test]
@@ -1858,7 +1928,7 @@ fn format_active_user_lines_sorts_and_shows_session_counts() {
             ActiveUser {
                 username: "zoe".to_string(),
                 fingerprint: None,
-                audio_source: late_core::models::user::AudioSource::Icecast,
+                audio_source: late_core::models::user::AudioSource::Radio,
                 sessions: Vec::new(),
                 connection_count: 2,
                 last_login_at: std::time::Instant::now(),
@@ -1869,7 +1939,7 @@ fn format_active_user_lines_sorts_and_shows_session_counts() {
             ActiveUser {
                 username: "alice".to_string(),
                 fingerprint: None,
-                audio_source: late_core::models::user::AudioSource::Icecast,
+                audio_source: late_core::models::user::AudioSource::Radio,
                 sessions: Vec::new(),
                 connection_count: 1,
                 last_login_at: std::time::Instant::now(),
@@ -2800,36 +2870,84 @@ fn parse_pair_command_ignores_unrelated_input() {
     assert_eq!(parse_pair_command("/challenge @alice"), None);
 }
 
-/// `/brb` sends the session away now instead of after the idle threshold.
-#[tokio::test]
-async fn brb_requests_going_away() {
-    let test_db = crate::test_helpers::new_test_db().await;
-    let user = late_core::test_utils::create_test_user(&test_db.db, "brb_bare").await;
-    let mut state = chat_state_with_cyberspace(&test_db, user.id).0;
+/// Submits `command` from the composer of a joined public room and returns
+/// the body the room received, with the state left for away assertions.
+async fn submit_brb_in_room(username: &str, command: &str) -> (ChatState, String) {
+    use late_core::models::chat_room::ChatRoom;
+    use late_core::models::chat_room_member::ChatRoomMember;
 
-    state.composer.insert_str("/brb");
+    let test_db = crate::test_helpers::new_test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let user = late_core::test_utils::create_test_user(&test_db.db, username).await;
+    let room = ChatRoom::get_or_create_public_room(&client, &format!("{username}-room"))
+        .await
+        .expect("room");
+    ChatRoomMember::join(&client, room.id, user.id)
+        .await
+        .expect("join room");
+    let mut state = chat_state_with_cyberspace(&test_db, user.id).0;
+    let mut events = state.service.subscribe_events();
+
+    state.start_composing_in_room(room.id);
+    state.composer.insert_str(command);
     assert!(
         state
             .submit_composer(false, ComposerCommands::Enabled)
             .is_none()
     );
+
+    let body = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            match events.recv().await.expect("chat event") {
+                ChatEvent::MessageCreated { message, .. } if message.room_id == room.id => {
+                    return message.body;
+                }
+                ChatEvent::SendFailed { message, .. } => panic!("brb send failed: {message}"),
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("brb message timeout");
+    (state, body)
+}
+
+/// `/brb` announces the break in the composer's room and sends this session
+/// away immediately.
+#[tokio::test]
+async fn brb_posts_to_the_room_and_requests_going_away() {
+    let (mut state, body) = submit_brb_in_room("brb_bare", "/brb").await;
+
+    assert_eq!(body, "🌙 brb");
     assert!(state.take_requested_brb());
     assert!(!state.take_requested_brb(), "the request is taken once");
 }
 
-/// The `/brb <message>` habit gets a usage banner, not "Unknown command:
-/// /brb" for a command the guide lists.
+/// `/brb <reason>` carries the reason into the announcement and still marks
+/// the session away.
 #[tokio::test]
-async fn brb_with_a_message_explains_instead_of_calling_it_unknown() {
-    let test_db = crate::test_helpers::new_test_db().await;
-    let user = late_core::test_utils::create_test_user(&test_db.db, "brb_message").await;
-    let mut state = chat_state_with_cyberspace(&test_db, user.id).0;
+async fn brb_with_a_reason_posts_it_and_requests_going_away() {
+    let (mut state, body) = submit_brb_in_room("brb_message", "/brb back in 5").await;
 
-    state.composer.insert_str("/brb back in 5");
+    assert_eq!(body, "🌙 brb: back in 5");
+    assert!(state.take_requested_brb());
+}
+
+/// Without a composer room `/brb` refuses instead of posting into a stale
+/// visible or selected room, and does not go away.
+#[tokio::test]
+async fn brb_without_a_composer_room_is_refused() {
+    let test_db = crate::test_helpers::new_test_db().await;
+    let user = late_core::test_utils::create_test_user(&test_db.db, "brb_roomless").await;
+    let mut state = chat_state_with_cyberspace(&test_db, user.id).0;
+    state.set_visible_room_id(Some(Uuid::new_v4()));
+
+    state.composer.insert_str("/brb");
     let banner = state
         .submit_composer(false, ComposerCommands::Enabled)
         .expect("banner");
-    assert_eq!(banner.message, "/brb takes no message");
+
+    assert_eq!(banner.message, "Use /brb from inside a room");
     assert!(!state.take_requested_brb(), "nothing is requested");
 }
 

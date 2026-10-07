@@ -212,62 +212,82 @@ fn tutorial_tours_every_page_then_comes_home() {
     assert_eq!(state.tutorial, Tutorial::Welcome);
     assert_eq!((state.player_x, state.player_y), map::SPAWN);
 
-    // Every stop forces exactly one input: a page digit whose screen
-    // advances the route, Enter on the two mid-route interlude boxes (the
-    // music on Home, the lobby on The Arcade), or the Ctrl+F chord into Zen.
-    for (step, next_stage) in [
-        (TourStep::Page(b'1', Screen::Dashboard), Tutorial::VisitChat),
-        (TourStep::Enter, Tutorial::VisitMusic),
-        (TourStep::Page(b'2', Screen::Arcade), Tutorial::VisitArcade),
-        (TourStep::Enter, Tutorial::VisitLobby),
-        (TourStep::Page(b'3', Screen::Games), Tutorial::VisitGames),
+    // Enter moves every stop on, and says where the next one lives.
+    for (went, next_stage, modal) in [
         (
-            TourStep::Page(b'4', Screen::Artboard),
+            TourMove::Page(Screen::Dashboard),
+            Tutorial::VisitChat,
+            TourModal::None,
+        ),
+        (TourMove::Stay, Tutorial::VisitMusic, TourModal::Stations),
+        (
+            TourMove::Page(Screen::Arcade),
+            Tutorial::VisitArcade,
+            TourModal::None,
+        ),
+        (TourMove::Stay, Tutorial::VisitLobby, TourModal::Lobby),
+        (TourMove::Table, Tutorial::VisitTable, TourModal::None),
+        (
+            TourMove::Page(Screen::Games),
+            Tutorial::VisitGames,
+            TourModal::None,
+        ),
+        (TourMove::Stay, Tutorial::VisitDungeon, TourModal::None),
+        (
+            TourMove::Page(Screen::Artboard),
             Tutorial::VisitArtboard,
+            TourModal::None,
         ),
         (
-            TourStep::Page(b'5', Screen::Profiles),
+            TourMove::Page(Screen::Profiles),
             Tutorial::VisitDirectory,
+            TourModal::None,
         ),
         (
-            TourStep::Page(b'6', Screen::Leaderboard),
+            TourMove::Page(Screen::Leaderboard),
             Tutorial::VisitLeaderboard,
+            TourModal::None,
         ),
-        (TourStep::Zen, Tutorial::VisitZen),
+        (TourMove::Zen, Tutorial::VisitZen, TourModal::None),
         (
-            TourStep::Page(b'0', Screen::Clubhouse),
+            TourMove::Page(Screen::Clubhouse),
             Tutorial::Homecoming,
+            TourModal::None,
         ),
     ] {
-        assert_eq!(state.tutorial_forced_step(), Some(step));
-        match step {
-            TourStep::Page(_, screen) => {
-                // A wrong page never advances a stop; the route waits for
-                // its page.
-                let wrong = if screen == Screen::Games {
-                    Screen::Artboard
-                } else {
-                    Screen::Games
-                };
-                state.tutorial_screen_entered(wrong);
-                state.tutorial_screen_entered(screen);
-            }
-            TourStep::Zen => {
-                // The tavern is not the way into Zen: the stop waits for it.
-                state.tutorial_screen_entered(Screen::Clubhouse);
-                state.tutorial_screen_entered(Screen::Zen);
-            }
-            // The interludes advance without finishing the tour.
-            TourStep::Enter => assert!(!state.tutorial_advance()),
-        }
+        assert!(state.tutorial_forced_step().is_some());
+        assert_eq!(state.tutorial_advance(), went);
         assert_eq!(state.tutorial, next_stage);
+        assert_eq!(state.tour_modal(), modal);
     }
 
-    // The homecoming box forces Enter, and it finishes the tour.
-    assert_eq!(state.tutorial_forced_step(), Some(TourStep::Enter));
-    assert!(state.tutorial_advance());
+    // The homecoming Enter finishes the tour.
+    assert_eq!(state.tutorial_advance(), TourMove::Finished);
     assert_eq!(state.tutorial, Tutorial::Done);
     assert_eq!(state.tutorial_forced_step(), None);
+    assert_eq!(state.tutorial_advance(), TourMove::Stay);
+}
+
+/// The practice table and the fight are the stops Enter alone does not
+/// pass: the gate reads these steps to make the shot and the win come first.
+#[test]
+fn the_table_and_the_fight_are_their_own_steps() {
+    let mut state = state_with_lobby(true);
+    state.enter_screen(NOW);
+    let mut steps = Vec::new();
+    while let Some(step) = state.tutorial_forced_step() {
+        if step != TourStep::Enter {
+            steps.push((state.tutorial, step));
+        }
+        state.tutorial_advance();
+    }
+    assert_eq!(
+        steps,
+        [
+            (Tutorial::VisitTable, TourStep::Table),
+            (Tutorial::VisitDungeon, TourStep::Fight),
+        ]
+    );
 }
 
 #[test]
@@ -277,23 +297,11 @@ fn bar_glows_after_homecoming_until_the_pour_is_claimed() {
     // Mid-tour: nothing pours at a distance, and the bar does not glow yet.
     assert!(!state.welcome_pour_due());
     assert!(!state.bar_glow());
-    state.tutorial_screen_entered(Screen::Dashboard);
-    assert!(!state.tutorial_advance()); // the music interlude
-    state.tutorial_screen_entered(Screen::Arcade);
-    assert!(!state.tutorial_advance()); // the lobby interlude
-    for screen in [
-        Screen::Games,
-        Screen::Artboard,
-        Screen::Profiles,
-        Screen::Leaderboard,
-        Screen::Zen,
-        Screen::Clubhouse,
-    ] {
-        state.tutorial_screen_entered(screen);
+    while state.tutorial != Tutorial::Homecoming {
+        state.tutorial_advance();
     }
-    assert_eq!(state.tutorial, Tutorial::Homecoming);
     assert!(state.bar_glow());
-    assert!(state.tutorial_advance());
+    assert_eq!(state.tutorial_advance(), TourMove::Finished);
     // Done, pour unclaimed: the glow keeps pointing at the treasure.
     assert!(state.bar_glow());
 
@@ -316,6 +324,22 @@ fn returning_users_never_pour_or_glow() {
     state.player_y = 12;
     assert!(!state.welcome_pour_due());
     assert!(!state.bar_glow());
+}
+
+/// `/onboard` reruns the tour for a regular: the pour was only ever for a
+/// first visit, so the bar neither glows nor greets them at the end.
+#[test]
+fn a_tour_rerun_never_pours_or_glows_for_a_returning_user() {
+    let mut state = state_with_lobby(false);
+    state.enter_screen(NOW);
+    state.begin_tutorial(NOW, TourStart::Rerun);
+    while state.tutorial != Tutorial::Done {
+        state.tutorial_advance();
+    }
+    state.player_x = 28;
+    state.player_y = 15;
+    assert!(!state.bar_glow());
+    assert!(!state.welcome_pour_due());
 }
 
 const BARTENDER: u128 = 9;

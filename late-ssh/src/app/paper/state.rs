@@ -5,13 +5,12 @@
 
 use std::{cell::Cell, collections::HashSet};
 
-use chrono::{DateTime, Utc};
-use late_core::models::app_flag::AppFlag;
+use chrono::{DateTime, NaiveDate, Utc};
 use late_core::models::job_posting::JobPosting;
 use late_core::models::paper::{PaperEdition, PaperRoomPage, PaperSectionKind, PaperStatus};
 use late_core::models::work_profile::WorkStatus;
 use ratatui::layout::Rect;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::svc::{PaperEvent, PaperService, PaperTrigger};
@@ -38,7 +37,6 @@ pub(crate) struct PaperState {
     pub(super) awaiting: Option<PaperTrigger>,
     /// A ready paper that arrived while a newcomer's tour held the keys.
     pub(super) pending_modal: Option<PaperModal>,
-    pub(super) pending_flag_writes: Vec<PendingFlagWrite>,
 }
 
 impl PaperState {
@@ -46,38 +44,26 @@ impl PaperState {
         self.modal.is_some()
     }
 
-    /// Esc on the modal: closes it, and if it was still at the press,
-    /// forgets the request so the answer is dropped when it lands.
+    /// Esc on the modal: closes it, and if it was still at the press or
+    /// leafing to another edition, forgets the request so the answer is
+    /// dropped when it lands. A login pop still on its way keeps coming.
     pub(crate) fn close_modal(&mut self) {
-        if self.modal.take().is_some_and(|modal| modal.at_the_press) {
+        let Some(modal) = self.modal.take() else {
+            return;
+        };
+        if modal.at_the_press || self.awaiting == Some(PaperTrigger::Browse) {
             self.awaiting = None;
         }
     }
 }
 
-/// An admin's flag write in flight, answered with a banner in tick.
-pub(super) struct PendingFlagWrite {
-    pub flag: AppFlag,
-    pub enabled: bool,
-    pub done: &'static str,
-    pub rx: oneshot::Receiver<anyhow::Result<()>>,
-}
-
-/// What `/paper` asked for. The open is for everyone; the switches are
-/// admin-only, refused with a banner for anyone else.
+/// What `/paper` asked for. The open is for everyone; the press commands
+/// are admin-only, refused with a banner for anyone else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PaperCommand {
-    /// `/paper`: today's edition, from the rows.
-    Open,
-    /// `/paper on`: the presses run (the kill switch row).
-    On,
-    /// `/paper off`: stop the presses everywhere; `/paper` banners.
-    Off,
-    /// `/paper outside on`: print the Outside page from the next sweep
-    /// (the seeded state).
-    OutsideOn,
-    /// `/paper outside off`: drop it, for the day it reads like slop.
-    OutsideOff,
+    /// `/paper`: today's edition, from the rows. `/paper YYYY-MM-DD`:
+    /// that day's edition, shown only if it was already printed.
+    Open(Option<NaiveDate>),
     /// `/paper print`: sweep now instead of waiting for the interval.
     Print,
     /// `/paper preview`: lay out tomorrow's edition from today's messages
@@ -92,14 +78,8 @@ pub(crate) enum PaperCommand {
 impl PaperCommand {
     pub(crate) fn admin_only(self) -> bool {
         match self {
-            Self::Open => false,
-            Self::On
-            | Self::Off
-            | Self::OutsideOn
-            | Self::OutsideOff
-            | Self::Print
-            | Self::Preview
-            | Self::Reset => true,
+            Self::Open(_) => false,
+            Self::Print | Self::Preview | Self::Reset => true,
         }
     }
 }
@@ -112,14 +92,13 @@ pub(crate) fn parse_paper_command(body: &str) -> Option<Option<PaperCommand>> {
     }
     let words: Vec<&str> = rest.split_whitespace().collect();
     Some(match words.as_slice() {
-        [] => Some(PaperCommand::Open),
-        ["on"] => Some(PaperCommand::On),
-        ["off"] => Some(PaperCommand::Off),
-        ["outside", "on"] => Some(PaperCommand::OutsideOn),
-        ["outside", "off"] => Some(PaperCommand::OutsideOff),
+        [] => Some(PaperCommand::Open(None)),
         ["print"] => Some(PaperCommand::Print),
         ["preview"] => Some(PaperCommand::Preview),
         ["reset"] => Some(PaperCommand::Reset),
+        [date] => NaiveDate::parse_from_str(date, "%Y-%m-%d")
+            .ok()
+            .map(|date| PaperCommand::Open(Some(date))),
         _ => None,
     })
 }
@@ -134,6 +113,15 @@ pub(crate) struct PaperModal {
     drag_grab: Cell<Option<u16>>,
     /// Still waiting for `/paper`'s answer; Esc drops the request.
     pub at_the_press: bool,
+    /// Where `←`/`→` lead from here; none on the spinner and a preview.
+    pub neighbors: PaperNeighbors,
+}
+
+/// The nearest printed editions either side of the one on screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct PaperNeighbors {
+    pub earlier: Option<NaiveDate>,
+    pub later: Option<NaiveDate>,
 }
 
 /// Geometry and wrapped extent published by the draw, in frame cells.
@@ -165,10 +153,11 @@ impl PaperModal {
             viewport: Cell::new(PaperViewport::default()),
             drag_grab: Cell::new(None),
             at_the_press: true,
+            neighbors: PaperNeighbors::default(),
         }
     }
 
-    pub(crate) fn edition(layout: PaperLayout<'_>) -> Self {
+    pub(crate) fn edition(layout: PaperLayout<'_>, neighbors: PaperNeighbors) -> Self {
         Self {
             title: format!(
                 " The Late Edition · {} ",
@@ -179,6 +168,7 @@ impl PaperModal {
             viewport: Cell::new(PaperViewport::default()),
             drag_grab: Cell::new(None),
             at_the_press: false,
+            neighbors,
         }
     }
 
@@ -274,8 +264,8 @@ pub struct PaperAnnouncement {
 /// NEW WORK as read for one reader: what went active on the covered day,
 /// and this reader's card and matches. The one per-reader selection in
 /// the paper; the rows it selects from were released once for everyone.
-/// A paper with no NEW WORK section (the job feed off, a preview) carries
-/// no `PaperWork` at all.
+/// A paper with no NEW WORK section (a preview) carries no `PaperWork` at
+/// all.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaperWork {
     /// Postings released on the covered day, on the shelf now; zero on a
@@ -506,7 +496,7 @@ pub(crate) fn lay_out(layout: PaperLayout<'_>) -> Vec<PaperLine> {
     }
 
     // NEW WORK: yesterday's releases, as they concern this reader. It
-    // prints whenever the job feed is on. No card gets the one line that
+    // prints on every edition. No card gets the one line that
     // is the whole incentive to fill one; an open or casual card gets its
     // matches, or a pointer at the shelf when none carried its tags; a
     // not-looking card and a day with no release get a faint hint.

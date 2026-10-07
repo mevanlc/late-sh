@@ -137,6 +137,7 @@ pub struct State {
     pub greendragon_service: crate::app::door::greendragon::svc::GreenDragonService,
     pub darkroom_service: crate::app::door::darkroom::svc::DarkroomService,
     pub arcade_handle_service: crate::app::door::arcade::ArcadeHandleService,
+    pub live_games: crate::app::door::spectate::svc::LiveGamesService,
     pub door_rc_service: crate::app::door::rc::DoorRcService,
     pub daily_service: crate::app::lobby::daily::svc::DailyService,
     pub house_registry: crate::app::lobby::house::registry::HouseTableRegistry,
@@ -180,10 +181,6 @@ pub struct State {
     pub ssh_attempt_limiter: IpRateLimiter,
     pub ws_pair_limiter: IpRateLimiter,
     pub is_draining: Arc<std::sync::atomic::AtomicBool>,
-    /// Process-wide switches (`app_flags` rows: the first-contact kill
-    /// switch and fuse), served to every replica over Postgres. See
-    /// `app/flags` and the multi-replica rule in the root CONTEXT.md.
-    pub app_flags: crate::app::flags::svc::AppFlagService,
     /// Every runner's look (`deadchannel_runners` rows), served to every
     /// replica over Postgres so the #deadchannel portraits agree everywhere.
     /// See `app/deadchannel/runner`.

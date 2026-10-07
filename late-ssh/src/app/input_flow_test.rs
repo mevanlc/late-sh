@@ -1,6 +1,24 @@
 //! App input integration tests against a real ephemeral DB.
 
 #[tokio::test]
+async fn esc_in_the_settings_langs_picker_closes_the_picker_and_keeps_settings_open() {
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "langs-esc-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "langs-esc-flow-it");
+    app.handle_input(b"\x0f");
+    wait_for_render_contains(&mut app, "langs-esc-it").await;
+    // Username, Country, Timezone, Theme, IDE, Terminal, OS, then Langs.
+    app.handle_input(b"jjjjjjj\r");
+    wait_for_render_contains(&mut app, "[Done]").await;
+    assert!(app.tag_picker.is_open());
+
+    app.handle_input(b"\x1b");
+    wait_for_render_not_contains(&mut app, "[Done]").await;
+    assert!(!app.tag_picker.is_open());
+    assert!(app.show_settings);
+}
+
+#[tokio::test]
 async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode() {
     use late_core::models::user::{ArtSplashMode, extract_art_splash_mode};
     let test_db = new_test_db().await;
@@ -14,7 +32,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
         app.handle_input(b"j");
     }
     wait_for_render_contains(&mut app, "Show Gallery Art on Splash").await;
-    assert!(render_plain(&mut app).contains("< SFW >"));
+    assert!(render_plain(&mut app).contains("◂ SFW    ▸"));
     for (key, expected) in [
         (b"\r".as_slice(), ArtSplashMode::Always),
         (b"\x1b[C".as_slice(), ArtSplashMode::Never),
@@ -49,7 +67,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
             );
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(render_plain(&mut app).contains(&format!("< {} >", expected.label())));
+        assert!(render_plain(&mut app).contains(&format!("◂ {:<6} ▸", expected.label())));
     }
     app.handle_input(b"\x1b");
     wait_for_render_not_contains(&mut app, "Show Gallery Art on Splash").await;
@@ -59,7 +77,7 @@ async fn art_splash_tweak_is_visible_on_a_short_terminal_and_persists_every_mode
     for _ in 0..11 {
         app.handle_input(b"j");
     }
-    wait_for_render_contains(&mut app, "< Never >").await;
+    wait_for_render_contains(&mut app, "◂ Never  ▸").await;
 }
 
 #[tokio::test]
@@ -147,6 +165,99 @@ async fn art_content_dialog_routes_owner_votes_mouse_and_close_keys() {
             .unwrap()
             .owner_marked_nsfw
     );
+
+    voter.handle_input(b"n");
+    wait_for_render_contains(&mut voter, " Content rating ").await;
+    voter.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(voter.screen, Screen::Dashboard);
+    assert!(voter.dartboard_state.is_none());
+    wait_for_render_contains(&mut voter, " Home ").await;
+    voter.handle_input(b"4");
+    wait_for_render_contains(&mut voter, "GALLERY").await;
+    assert!(
+        voter
+            .dartboard_state
+            .as_ref()
+            .unwrap()
+            .gallery()
+            .rating_dialog
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn artboard_topbar_clicks_leave_framing_and_title_entry() {
+    use crate::app::{artboard::gallery::state::HangFlow, common::primitives::Screen};
+    use late_core::models::user::InteractionMode;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "artboard-topbar-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "artboard-topbar-flow-it");
+
+    for naming in [false, true] {
+        app.handle_input(b"4");
+        wait_for_render_contains(&mut app, "Mode       view").await;
+        if naming {
+            app.handle_input(b"i");
+            app.handle_input(b"\x1b[200~##########\n##########\n##########\n##########\x1b[201~");
+            app.handle_input(b"\x1b");
+            wait_for_render_contains(&mut app, "Mode       view").await;
+        }
+        app.begin_artboard_hang();
+        wait_for_render_contains(&mut app, "Frame your work").await;
+        if naming {
+            app.handle_input(b"\x1b[<0;2;2M\x1b[<32;11;5M\x1b[<0;11;5m");
+            wait_for_render_contains(&mut app, "frame 10x4").await;
+            app.handle_input(b"\r");
+            wait_for_render_contains(&mut app, "Hang it in the").await;
+            app.handle_input(b"piece 12");
+            assert!(render_plain(&mut app).contains("piece 12"));
+        }
+        assert_eq!(app.screen, Screen::Artboard);
+
+        app.interaction_mode = InteractionMode::Keyboard;
+        app.handle_input(b"\x1b[<0;15;1M");
+        assert_eq!(app.screen, Screen::Artboard);
+        app.interaction_mode = InteractionMode::Mouse;
+        // Releases, right clicks, gaps and the already-selected number stay put.
+        app.handle_input(b"\x1b[<0;15;1m\x1b[<2;15;1M\x1b[<0;14;1M\x1b[<0;21;1M");
+        assert_eq!(app.screen, Screen::Artboard);
+
+        app.handle_input(b"\x1b[<0;15;1M");
+        assert_eq!(app.screen, Screen::Dashboard, "naming={naming}");
+        assert!(app.dartboard_state.is_none());
+        wait_for_render_contains(&mut app, " Home ").await;
+        app.handle_input(b"4");
+        wait_for_render_contains(&mut app, "Mode       view").await;
+        assert_eq!(
+            app.dartboard_state.as_ref().unwrap().gallery().hang(),
+            &HangFlow::Idle
+        );
+        app.handle_input(b"1");
+    }
+}
+
+#[tokio::test]
+async fn topbar_clicks_precede_active_game_input_and_respect_app_modals() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "game-topbar-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "game-topbar-flow-it");
+    app.set_screen(Screen::Arcade);
+    app.game_selection = crate::app::state::GAME_SELECTION_2048;
+    app.handle_input(b"\r");
+    assert!(app.is_playing_game);
+
+    app.show_help = true;
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(app.screen, Screen::Arcade);
+    assert!(app.show_help);
+    app.show_help = false;
+
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(app.screen, Screen::Dashboard);
+    wait_for_render_contains(&mut app, " Home ").await;
 }
 
 #[tokio::test]
@@ -324,7 +435,8 @@ use crate::authz::Permissions;
 use crate::test_helpers::{
     assert_render_not_contains_for, chat_compose_app, make_app, make_app_in_world,
     make_app_with_chat_service, make_app_with_permissions, new_test_db, render_plain, strip_ansi,
-    wait_for_render_contains, wait_for_render_not_contains, wait_until, with_session_key,
+    wait_for_app, wait_for_render_contains, wait_for_render_not_contains, wait_until,
+    with_session_key,
 };
 use late_core::models::cyberspace_account::CyberspaceAccount;
 use late_core::models::user::{RightSidebarMode, RoomListMode};
@@ -369,6 +481,8 @@ async fn leaderboard_mouse_and_control_keys_target_rail_and_content_separately()
             .collect(),
         ..LeaderboardData::default()
     });
+    // Top Drinkers leads the rail; step down to the board the fixture fills.
+    app.leaderboard_page.select_next();
     app.render().unwrap();
     app.handle_input(b"\n\n\x0b");
     assert_eq!(app.leaderboard_page.scroll(), 1);
@@ -395,7 +509,7 @@ async fn leaderboard_mouse_and_control_keys_target_rail_and_content_separately()
 
     let board = (0..24)
         .flat_map(|y| (0..100).map(move |x| Position::new(x, y)))
-        .find(|point| app.leaderboard_page.board_at(*point) == Some(1))
+        .find(|point| app.leaderboard_page.board_at(*point) == Some(2))
         .unwrap();
     let click = format!("\x1b[<0;{};{}M", board.x + 1, board.y + 1);
     app.handle_input(click.as_bytes());
@@ -747,7 +861,8 @@ async fn games_hub_config_modal_saves_and_clears_the_door_rc() {
     // Walk the hub sidebar down to NetHack and open the config box. The step
     // count comes from the selector order itself, so a game inserted above
     // NetHack moves the cursor here instead of opening another game's config.
-    let steps = HubGame::ALL
+    // A fresh account is no runner, so its roster has no Night City.
+    let steps = HubGame::roster(false)
         .iter()
         .position(|game| *game == HubGame::Nethack)
         .expect("nethack is in the selector");
@@ -3325,13 +3440,15 @@ async fn clicking_a_status_bar_segment_opens_its_own_destination() {
 }
 
 #[tokio::test]
-async fn forced_tour_gates_input_until_each_named_key() {
+async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "tour-gate-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "tour-gate-flow-it");
+    // Room for the practice table under its header.
+    app.resize(160, 50).unwrap();
 
     // Arm the tour the way a first-ever session does: land in the tavern
     // with the walkthrough pending.
@@ -3341,8 +3458,8 @@ async fn forced_tour_gates_input_until_each_named_key() {
         .enter_screen(crate::app::presence::svc::now_ms());
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The gate swallows everything but the named key: no page hopping, no
-    // Tab, no help modal, no reserved chords (Zen's included), no composer.
+    // The gate swallows everything but Enter: no page hopping, no Tab, no
+    // help modal, no reserved chords (Zen's included), no composer.
     for bytes in [&b"2"[..], b"\t", b"?", b"\x0f", b"\x07", b"\x06", b"i"] {
         app.handle_input(bytes);
     }
@@ -3350,25 +3467,80 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert!(!app.show_help);
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
-    // The named keys walk the route in order, nothing else moves it. The
-    // two Enter interludes (the music, the lobby) stay on their page, and
-    // the last page hands over to Zen through its own chord.
-    for (bytes, screen) in [
-        (&b"1"[..], Screen::Dashboard),
-        (b"\r", Screen::Dashboard),
-        (b"2", Screen::Arcade),
-        (b"\r", Screen::Arcade),
-        (b"3", Screen::Games),
-        (b"4", Screen::Artboard),
-        (b"5", Screen::Profiles),
-        (b"0", Screen::Profiles),
-        (b"6", Screen::Leaderboard),
-        (b"0", Screen::Leaderboard),
-        (b"\x06", Screen::Zen),
-        (b"\x06", Screen::Zen),
-        (b"0", Screen::Clubhouse),
+    // Enter walks to Home, then the music stop holds the real Stations
+    // modal open; its own keys and a lone Esc do nothing to it.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Dashboard);
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+    assert!(app.stations_modal_state.is_open());
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(app.stations_modal_state.is_open());
+
+    // On to the arcade, where the lobby stop holds the real Lobby modal.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Arcade);
+    assert!(!app.stations_modal_state.is_open());
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLobby);
+    assert!(app.show_lobby_modal);
+
+    // Enter leads to the practice table, where the break has to be played:
+    // Enter strikes it rather than skipping past.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::DailyMatch);
+    assert!(!app.show_lobby_modal);
+    wait_for_esc_effect(
+        &mut app,
+        |app| {
+            app.daily
+                .board
+                .as_ref()
+                .is_some_and(|board| board.detail.is_some())
+        },
+        "practice table racked",
+    )
+    .await;
+    assert!(!app.daily.practice_played());
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::DailyMatch);
+    wait_for_esc_effect(&mut app, |app| app.daily.practice_played(), "break struck").await;
+    // One shot only: Space does not strike the rack twice.
+    app.handle_input(b" ");
+    app.tick();
+    let shots = |app: &crate::app::state::App| {
+        let board = app.daily.board.as_ref().expect("the table is open");
+        let pool = board.detail.as_ref().and_then(|detail| detail.pool());
+        pool.expect("a pool table").state.move_count()
+    };
+    assert_eq!(shots(&app), 1);
+
+    // Enter leaves the table behind for the games page.
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Games);
+    assert!(app.daily.board.is_none());
+
+    // The dungeon stop stays on that page until the fight is won: every
+    // Enter or Space is a blow, and the page only turns after the last one.
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
+    while !app.clubhouse.tour_fight.won() {
+        app.handle_input(b" ");
+        assert_eq!(app.screen, Screen::Games);
+        assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
+    }
+
+    // The rest of the route is Enter alone.
+    for screen in [
+        Screen::Artboard,
+        Screen::Profiles,
+        Screen::Leaderboard,
+        Screen::Zen,
+        Screen::Clubhouse,
     ] {
-        app.handle_input(bytes);
+        app.handle_input(b"\r");
         assert_eq!(app.screen, screen);
     }
     assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
@@ -3380,38 +3552,117 @@ async fn forced_tour_gates_input_until_each_named_key() {
     assert_eq!(app.screen, Screen::Arcade);
 }
 
-/// Some terminals and multiplexers swallow Ctrl+F, and the gate also blocks
-/// the `/zen` fallback, so the Zen stop needs a key every terminal sends.
-/// Without one the newcomer can only quit, and the tour restarts next session.
+/// The practice table needs more room than a default terminal has. There
+/// the stop says so and Enter walks on, with no break struck blind.
 #[tokio::test]
-async fn forced_tour_zen_stop_accepts_enter_when_the_chord_is_swallowed() {
+async fn forced_tour_skips_the_practice_table_on_a_small_terminal() {
     use crate::app::clubhouse::state::Tutorial;
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
-    let user = create_test_user(&test_db.db, "tour-zen-enter-it").await;
-    let mut app = make_app(test_db.db.clone(), user.id, "tour-zen-enter-flow-it");
+    let user = create_test_user(&test_db.db, "tour-small-table-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-small-table-flow-it");
+    app.resize(80, 24).unwrap();
 
     app.set_screen(Screen::Clubhouse);
     app.clubhouse.tutorial = Tutorial::Pending;
     app.clubhouse
         .enter_screen(crate::app::presence::svc::now_ms());
-    for bytes in [&b"1"[..], b"\r", b"2", b"\r", b"3", b"4", b"5", b"6"] {
-        app.handle_input(bytes);
+    for _ in 0..5 {
+        app.handle_input(b"\r");
     }
-    assert_eq!(app.screen, Screen::Leaderboard);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitLeaderboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitTable);
+    assert_eq!(app.screen, Screen::DailyMatch);
+    wait_for_esc_effect(
+        &mut app,
+        |app| {
+            app.daily
+                .board
+                .as_ref()
+                .is_some_and(|board| board.detail.is_some())
+        },
+        "practice table racked",
+    )
+    .await;
+
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("this table needs a bigger window"),
+        "frame={frame:?}"
+    );
+    assert!(frame.contains("[Enter] next: the games"), "frame={frame:?}");
 
     app.handle_input(b"\r");
-    assert_eq!(app.screen, Screen::Zen);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitZen);
+    assert_eq!(app.screen, Screen::Games);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitGames);
+    assert!(app.daily.board.is_none());
+}
 
-    // Enter is not a way past the Zen box itself: that one still names `0`.
+/// `q` at the music stop asks before quitting, and the held Stations modal
+/// stays out of the prompt's way until Esc brings the tour back.
+#[tokio::test]
+async fn forced_tour_quit_confirm_shows_over_the_held_stations_modal() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "tour-quit-music-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-quit-music-flow-it");
+    app.resize(80, 24).unwrap();
+
+    app.set_screen(Screen::Clubhouse);
+    app.clubhouse.tutorial = Tutorial::Pending;
+    app.clubhouse
+        .enter_screen(crate::app::presence::svc::now_ms());
     app.handle_input(b"\r");
-    assert_eq!(app.screen, Screen::Zen);
-    app.handle_input(b"0");
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+
+    app.handle_input(b"q");
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("Clicked by mistake, right?"),
+        "frame={frame:?}"
+    );
+    assert!(!frame.contains("the tour · the radio"), "frame={frame:?}");
+
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    let frame = render_plain(&mut app);
+    assert!(
+        !frame.contains("Clicked by mistake, right?"),
+        "frame={frame:?}"
+    );
+    assert!(frame.contains("the tour · the radio"), "frame={frame:?}");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitMusic);
+}
+
+/// `/onboard` from Home puts anyone back at the tavern door with the tour
+/// running from the top, as forced as a first visit.
+#[tokio::test]
+async fn onboard_command_starts_the_tour_again() {
+    use crate::app::clubhouse::state::Tutorial;
+    use crate::app::common::primitives::Screen;
+
+    let (_test_db, mut app) = chat_compose_app("onboard-command").await;
+    app.clubhouse.tutorial = Tutorial::Done;
+    for _ in 0..3 {
+        app.clubhouse.tour_fight.strike();
+    }
+    assert!(app.clubhouse.tour_fight.won());
+
+    app.handle_input(b"/onboard");
+    app.handle_input(b"\r");
     assert_eq!(app.screen, Screen::Clubhouse);
-    assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
+    assert!(!app.clubhouse.tour_fight.won());
+
+    app.handle_input(b"3");
+    assert_eq!(app.screen, Screen::Clubhouse);
+    app.handle_input(b"\r");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitChat);
 }
 
 /// The Lounge composer is plain speech: a `/` draft is refused with a
@@ -4284,6 +4535,201 @@ async fn backtick_from_zen_hops_through_the_games_and_comes_home_to_zen() {
     assert_eq!(app.screen, Screen::Darkroom);
     app.handle_input(b"`");
     assert_eq!(app.screen, Screen::Dashboard);
+}
+
+/// A watch opened from Zen (`o` on its Live tile showing a live door game)
+/// is a trip into the games like any other stop: backtick comes home to
+/// Zen, and Zen still knows the page its `Ctrl+F` hands back.
+#[tokio::test]
+async fn a_watch_opened_from_zen_comes_home_to_zen_on_backtick() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::door::spectate::{
+        proxy::LiveGame,
+        state::{SpectateGame, WatchMode},
+    };
+    use crate::app::zen::state::{KindPick, TileKind};
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "zen-watch-viewer").await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, viewer.id)
+        .await
+        .expect("join lounge");
+    let mut app = make_app(test_db.db.clone(), viewer.id, "zen-watch-flow-it");
+    app.resize(160, 40).expect("resize test terminal");
+    let started_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall clock after the unix epoch")
+        .as_secs()
+        - 30;
+    app.live_games.publish_roster_for_tests(
+        SpectateGame::Dcss,
+        vec![LiveGame {
+            playname: "crawler".to_string(),
+            started_unix,
+            watchers: 0,
+            status: String::new(),
+        }],
+    );
+
+    // Zen opened over the Leaderboards, with a Live tile showing the game.
+    app.set_screen(Screen::Leaderboard);
+    app.handle_input(b"\x06");
+    wait_for_render_contains(&mut app, "w tend").await;
+    app.zen.focus = app
+        .zen
+        .first_tile_of(TileKind::Lobby)
+        .expect("the default has a lobby");
+    app.zen.open_kind_picker();
+    while app.zen.kind_picker_selection() != Some(TileKind::Live) {
+        app.zen.move_kind_picker(1);
+    }
+    assert_eq!(app.zen.pick_kind(), KindPick::Changed);
+    // The tile draws the strip's one-row form.
+    wait_for_render_contains(&mut app, "dcss crawler").await;
+
+    // No render runs from here: the test door host is unreachable, so a
+    // tick would see the stream end and drop the watch.
+    app.handle_input(b"o");
+    assert_eq!(app.screen, Screen::Games, "o opens the watch");
+    assert_eq!(
+        app.spectate_state.as_ref().map(|state| state.mode()),
+        Some(WatchMode::Open)
+    );
+
+    app.handle_input(b"`");
+    assert_eq!(app.screen, Screen::Zen, "backtick comes home to Zen");
+    app.handle_input(b"\x06");
+    assert_eq!(
+        app.screen,
+        Screen::Leaderboard,
+        "and Zen still hands back the page it was opened over"
+    );
+}
+
+/// A player answers their watchers without leaving the game: F2, or a click
+/// on the pane, opens the chat composer in their own watch-chat room, the
+/// keys are the composer's until Esc hands them back, and the one-row form
+/// on a narrow terminal has no composer at all.
+#[tokio::test]
+async fn f2_or_a_click_on_the_pane_lets_a_player_write_to_their_watchers() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::door::spectate::state::SpectateGame;
+    use late_core::models::chat_room::ChatRoom;
+    use late_core::models::chat_room_member::ChatRoomMember;
+    use late_core::models::leaderboard::DoorGame;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "own-chat-f2").await;
+    // The player's watch-chat room, joined ahead of the session the way a
+    // returning player's is, so the room list the app loads carries it.
+    let client = test_db.db.get().await.expect("db client");
+    let room = ChatRoom::get_or_create_watch_room(&client, DoorGame::Nethack, "tester")
+        .await
+        .expect("the player's watch room");
+    ChatRoomMember::join(&client, room.id, user.id)
+        .await
+        .expect("join the watch room");
+    let mut app = make_app(test_db.db.clone(), user.id, "own-chat-f2-flow-it");
+    // Wide enough for NetHack's 80 columns, the rule and the 40-column pane.
+    app.resize(160, 40).expect("resize test terminal");
+    wait_for_app(&mut app, "the room list", |app| {
+        app.chat.room_by_id(room.id).is_some()
+    })
+    .await;
+    // The service has the room resolved, as after its lookup.
+    app.live_games
+        .publish_chat_room_for_tests(SpectateGame::Nethack, "tester", room.id);
+
+    // A running NetHack game under a claimed handle, as if launched from the
+    // hub. Nothing awaits from here on: the fabricated proxy's bridge task
+    // would be polled, fail to connect, and end the game.
+    app.set_screen(Screen::Games);
+    app.enter_nethack();
+    let state = app.nethack_state.as_mut().expect("nethack state");
+    state.force_claimed_handle_for_test("tester");
+    state.force_running_for_test();
+    app.set_screen(Screen::Nethack);
+    // One tick makes the player's link and takes its room.
+    app.tick();
+    let room_id = app
+        .own_watch_chat_room_id(SpectateGame::Nethack)
+        .expect("the player's own room");
+    assert_eq!(room_id, room.id);
+
+    // The frame draws the pane with its inert composer strip, which names
+    // the way in, and records where the pane is.
+    let plain = render_plain(&mut app);
+    assert!(plain.contains("Compose (F2 or click)"), "{plain}");
+    assert!(
+        plain.contains("F2 or click: write to your watchers"),
+        "{plain}"
+    );
+    let pane = app.own_chat_hit.get().expect("the pane was drawn");
+
+    // Until F2 every key is the game's: nothing composes.
+    app.handle_input(b"j");
+    assert!(!app.chat.is_composing());
+
+    app.handle_input(b"\x1bOQ");
+    assert!(app.chat.is_composing(), "F2 opens the composer");
+    assert_eq!(
+        app.chat.composer_room_id(),
+        Some(room_id),
+        "in the player's own room"
+    );
+    app.handle_input(b"hi all");
+    assert_eq!(
+        app.chat.composer().lines().join("\n"),
+        "hi all",
+        "typed keys are the composer's, not the game's"
+    );
+    let plain = render_plain(&mut app);
+    assert!(
+        plain.contains("hi all") && !plain.contains("Compose (F2 or click)"),
+        "the same strip, now open: {plain}"
+    );
+
+    // Esc discards and hands the keys back to the game. A lone Esc is held
+    // for escape-sequence disambiguation and dispatches on a later tick;
+    // backdate it and flush, since an await here would end the fabricated
+    // game.
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(!app.chat.is_composing(), "Esc closes the composer");
+    app.handle_input(b"j");
+    assert!(
+        !app.chat.is_composing(),
+        "and the keys are the game's again"
+    );
+    assert_eq!(app.screen, Screen::Nethack);
+
+    // A click on the pane opens it too (SGR coordinates are 1-based).
+    app.handle_input(format!("\x1b[<0;{};{}M", pane.x + 1, pane.y + 1).as_bytes());
+    assert!(
+        app.chat.is_composing(),
+        "a click on the pane opens the composer"
+    );
+    assert_eq!(app.chat.composer_room_id(), Some(room_id));
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    assert!(!app.chat.is_composing());
+
+    // A terminal with room for the one-row form only has no composer: F2
+    // stays the game's.
+    app.resize(100, 30).expect("resize test terminal");
+    render_plain(&mut app);
+    assert_eq!(app.own_chat_hit.get(), None, "no pane on a narrow terminal");
+    app.handle_input(b"\x1bOQ");
+    assert!(
+        !app.chat.is_composing(),
+        "F2 stays with the game without a pane"
+    );
 }
 
 #[tokio::test]
@@ -5256,7 +5702,8 @@ async fn chat_badges_picker_hides_a_whole_game_ladder() {
     wait_for_render_contains(&mut app, "Earn it, hide it. Games show their top badge.").await;
     wait_for_render_contains(&mut app, "LMG LKN LYS LKA").await;
 
-    // Picker rows in label order: the eight monthly rows, then Lateania.
+    // Picker rows in label order: the eight monthly rows (the crown is
+    // painted as a glyph, not a code, so it has no row), then Lateania.
     app.handle_input(b"jjjjjjjj\r");
     let db = test_db.db.clone();
     wait_until(
@@ -5444,7 +5891,7 @@ async fn the_first_descent_opens_the_guide_and_the_question_mark_reopens_it() {
     app.handle_input(b"0");
     // The chrome names the key, and the first descent opens the guide by
     // itself once the claim answers.
-    wait_for_render_contains(&mut app, " Undercity · f fight · p patch · ? guide ").await;
+    wait_for_render_contains(&mut app, " Undercity · f road · p patch · ? guide ").await;
     wait_for_render_contains(&mut app, "the street, explained").await;
     // It opens at the top: the whole game in one screen.
     wait_for_render_contains(&mut app, "the short version").await;
@@ -5523,8 +5970,8 @@ async fn p_opens_patch_from_anywhere_on_the_street() {
     wait_for_render_not_contains(&mut app, " Esc closes ").await;
 }
 
-/// Esc over a live fight is the run, not a way out: the exchange gets a
-/// run line (away, or caught turning) and the scene stays up either way.
+/// A scene whose last answer was the service failing is not a fight to be
+/// trapped in: Esc closes it instead of running.
 #[tokio::test]
 async fn esc_closes_a_scene_the_static_stopped_answering() {
     use crate::app::deadchannel::fight::svc::FightOutcome;
@@ -5569,9 +6016,9 @@ async fn esc_closes_a_scene_the_static_stopped_answering() {
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, " Undercity ").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[Enter] step in").await;
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[a] attack").await;
+    wait_for_render_contains(&mut app, "[a] auto turn").await;
 
     // The service fails to answer the next command: an outage, as the
     // session would hear it.
@@ -5593,7 +6040,7 @@ async fn esc_closes_a_scene_the_static_stopped_answering() {
 
 #[tokio::test]
 async fn esc_in_a_fight_is_a_run() {
-    use crate::app::deadchannel::fight::data::{RUN_FAILED_LINES, RUN_LINES};
+    use crate::app::deadchannel::fight::data::RUN_LINES;
     use crate::app::deadchannel::runner::state::Look;
     use crate::app::deadchannel::runner::svc::RunnerEntry;
     use late_core::models::deadchannel_runner::DeadchannelRunner;
@@ -5636,18 +6083,17 @@ async fn esc_in_a_fight_is_a_run() {
     app.handle_input(b"0");
     wait_for_render_contains(&mut app, " Undercity ").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[Enter] step in").await;
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
     app.handle_input(b"f");
-    wait_for_render_contains(&mut app, "[a] attack").await;
+    wait_for_render_contains(&mut app, "[a] auto turn").await;
 
-    // The roll goes either way; both answers are run lines, and neither
-    // closes the scene.
+    // No dice: the flicker's hit lands on the way out, and the runner is
+    // out. The scene stays up, over, on the getaway line.
     app.handle_input(b"\x1b");
     let deadline = Instant::now() + Duration::from_secs(5);
-    let run_lines = RUN_LINES.iter().chain(RUN_FAILED_LINES.iter());
     let frame = loop {
         let frame = render_plain(&mut app);
-        if run_lines.clone().any(|line| frame.contains(line)) {
+        if RUN_LINES.iter().any(|line| frame.contains(line)) {
             break frame;
         }
         assert!(
@@ -5661,7 +6107,251 @@ async fn esc_in_a_fight_is_a_run() {
         "expected the scene to stay up after the run; frame={frame:?}"
     );
     assert!(
-        frame.contains("[Enter] back to the street") || frame.contains("[a] attack"),
-        "expected the scene over (away) or still on (caught); frame={frame:?}"
+        frame.contains("it hits you for "),
+        "expected the hit on the way out; frame={frame:?}"
     );
+    assert!(
+        frame.contains("[Enter] back to the road"),
+        "expected the scene over; frame={frame:?}"
+    );
+
+    // Enter goes back to the road: the step is spent, the next one waits.
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, " the road ").await;
+    wait_for_render_contains(&mut app, "rations 9/10").await;
+}
+
+/// The hand takes its digits while a fight is on: `1` to `5` play the
+/// card in that slot and never switch pages, `e` ends the turn, and the
+/// glyph answers.
+#[tokio::test]
+async fn the_number_keys_play_cards_and_e_ends_the_turn() {
+    let (_test_db, mut app, _) = runner_on_the_street("undercity-cards-it", 100, 34, |_| {}).await;
+
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "[1-5] play").await;
+    wait_for_render_contains(&mut app, "energy ██ ██ ██").await;
+
+    // Whatever was dealt, slot one holds a card that costs something.
+    app.handle_input(b"1");
+    wait_for_render_not_contains(&mut app, "energy ██ ██ ██").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" Undercity "),
+        "a card key is not a page switch; frame={frame:?}"
+    );
+    assert!(
+        !frame.contains("╭ 1 "),
+        "the played slot is empty; frame={frame:?}"
+    );
+
+    // The turn ends: the flicker hits, and a full hand is back.
+    app.handle_input(b"e");
+    wait_for_render_contains(&mut app, "it hits you for ").await;
+    wait_for_render_contains(&mut app, "energy ██ ██ ██").await;
+    wait_for_render_contains(&mut app, "╭ 1 ").await;
+}
+
+/// A runner on the street: the row shaped by `shape` on today's day,
+/// the guide already seen (so the street takes the keys), the session
+/// descended through the clubhouse on a `width` by `height` terminal.
+async fn runner_on_the_street(
+    name: &str,
+    width: u16,
+    height: u16,
+    shape: impl FnOnce(&mut crate::app::deadchannel::fight::state::Sheet),
+) -> (late_core::test_utils::TestDb, crate::app::state::App, Uuid) {
+    use crate::app::deadchannel::fight::state::Sheet;
+    use crate::app::deadchannel::fight::svc::FightService;
+    use crate::app::deadchannel::runner::state::Look;
+    use crate::app::deadchannel::runner::svc::RunnerEntry;
+    use late_core::models::deadchannel_runner::DeadchannelRunner;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, name).await;
+    let client = test_db.db.get().await.expect("db client");
+    let lounge = ChatRoom::ensure_lounge(&client)
+        .await
+        .expect("ensure lounge room");
+    ChatRoomMember::join(&client, lounge.id, user.id)
+        .await
+        .expect("join lounge room");
+    let look = Look::random(1, &mut StdRng::seed_from_u64(7));
+    let (row, _) = DeadchannelRunner::ensure_for_user(&client, user.id, &look.to_json())
+        .await
+        .expect("a runner");
+    DeadchannelRunner::mark_guide_seen(&client, user.id)
+        .await
+        .expect("guide seen");
+    let mut sheet = Sheet::from_row(&row).expect("sheet");
+    sheet.day = FightService::today();
+    shape(&mut sheet);
+    DeadchannelRunner::store_sheet(&**client, sheet.to_write())
+        .await
+        .expect("store");
+    let mut app = make_app(test_db.db.clone(), user.id, &format!("{name}-flow"));
+    app.resize(width, height).unwrap();
+    app.runner_looks = Arc::new(HashMap::from([(
+        user.id,
+        RunnerEntry {
+            look,
+            level: sheet.level,
+            peak_level: sheet.peak_level,
+            marks: 0,
+        },
+    )]));
+
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Clubhouse ").await;
+    app.handle_input(b"0");
+    wait_for_render_contains(&mut app, " Undercity ").await;
+    (test_db, app, user.id)
+}
+
+/// A spent runner's `f` opens the road on the reason, and Enter (what
+/// its key row offers) lands back on the street: no scene opens only to
+/// repeat the refusal the road already showed.
+#[tokio::test]
+async fn enter_on_a_spent_runners_road_lands_back_on_the_street() {
+    let (_test_db, mut app, _) = runner_on_the_street("undercity-spent-it", 100, 30, |sheet| {
+        sheet.rations_left = 0
+    })
+    .await;
+
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "the road is walked. the static will keep").await;
+    wait_for_render_contains(&mut app, "[Enter] back to the street").await;
+
+    app.handle_input(b"\r");
+    wait_for_render_not_contains(&mut app, "the road is walked").await;
+    assert_render_not_contains_for(&mut app, " the end of the row ", Duration::from_millis(300))
+        .await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains(" Undercity "),
+        "expected the street; frame={frame:?}"
+    );
+}
+
+/// At Dead Air each glass key pours onto the row, and at the blade cart
+/// each slot key buys onto the row. A letter the open panel does not own
+/// stays with it instead of reaching a global: `w` (the cart's key, Bonsai
+/// Care everywhere else) at the bar, `m` (the paired client's mute) at
+/// both, as over the picker and the scene.
+#[tokio::test]
+async fn the_bar_and_the_cart_take_their_keys_and_keep_the_rest() {
+    use crate::app::deadchannel::city::map::Landmark;
+    use crate::app::deadchannel::fight::state::Drink;
+    use late_core::models::deadchannel_runner::DeadchannelRunner;
+
+    let (test_db, mut app, user_id) =
+        runner_on_the_street("undercity-bar-cart-it", 100, 30, |sheet| sheet.crystals = 4).await;
+    let row = || {
+        let db = test_db.db.clone();
+        async move {
+            let client = db.get().await.expect("db client");
+            DeadchannelRunner::find_by_user(&client, user_id)
+                .await
+                .expect("find")
+                .expect("row")
+        }
+    };
+
+    // Dead Air, as Enter at the bar opens it.
+    app.city.open_panel(Landmark::Bar);
+    app.fight.clear_till();
+    wait_for_render_contains(&mut app, " Esc closes ").await;
+    app.banner = None;
+    app.handle_input(b"w");
+    app.handle_input(b"m");
+    assert!(!app.show_bonsai_modal, "`w` at the bar is not Bonsai Care");
+    assert!(app.banner.is_none(), "`m` at the bar is not the mute");
+    assert_eq!(app.city.panel(), Some(Landmark::Bar), "the bar stays open");
+
+    app.handle_input(b"s");
+    wait_for_render_contains(&mut app, "static on ice. it goes down like a short circuit").await;
+    let poured = row().await;
+    assert_eq!(poured.drink.as_deref(), Some(Drink::StaticOnIce.code()));
+    assert_eq!(poured.crystals, 3, "a glass is a crystal");
+    assert_eq!(
+        poured.weapon_tier, 0,
+        "the bar's keys buy nothing at the cart"
+    );
+
+    app.handle_input(b"\r");
+    wait_for_render_not_contains(&mut app, " Esc closes ").await;
+
+    // The blade cart, the same way.
+    app.city.open_panel(Landmark::Blades);
+    app.fight.clear_till();
+    wait_for_render_contains(&mut app, " Esc closes ").await;
+    app.handle_input(b"m");
+    assert!(app.banner.is_none(), "`m` at the cart is not the mute");
+    assert_eq!(
+        app.city.panel(),
+        Some(Landmark::Blades),
+        "the cart stays open"
+    );
+
+    app.handle_input(b"w");
+    wait_for_render_contains(&mut app, "comes off the rack").await;
+    let carted = row().await;
+    assert_eq!(carted.weapon_tier, 1, "`w` is the weapon off the cart");
+    assert_eq!(carted.armor_tier, 0);
+    assert_eq!(carted.crystals, 0, "three crystals for the piece");
+    assert_eq!(
+        carted.drink.as_deref(),
+        Some(Drink::StaticOnIce.code()),
+        "the glass is untouched"
+    );
+
+    // The page digits still reach the globals from over a panel.
+    app.handle_input(b"1");
+    wait_for_render_contains(&mut app, " Home ").await;
+}
+
+/// The road and the scene both fit a classic 80 by 24 terminal under the
+/// app's frame: the map, the node under the cursor with its step-down
+/// key, and the key row are on screen, and so is the whole hand.
+#[tokio::test]
+async fn the_road_and_the_hand_fit_an_80_by_24_terminal() {
+    let (_test_db, mut app, _) = runner_on_the_street("undercity-road-24-it", 80, 24, |sheet| {
+        sheet.level = 2;
+        sheet.peak_level = 2;
+        sheet.signal = 20;
+    })
+    .await;
+
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "[Enter] fight").await;
+    let frame = render_plain(&mut app);
+    for needle in [
+        " the road ",
+        "▸ [f]",
+        "hiss  lv 2",
+        "[▚]",
+        "[g] flicker, half pay",
+        "esc back",
+    ] {
+        assert!(
+            frame.contains(needle),
+            "expected {needle:?} on an 80 by 24 road; frame={frame:?}"
+        );
+    }
+
+    app.handle_input(b"\r");
+    wait_for_render_contains(&mut app, "[1-5] play").await;
+    let frame = render_plain(&mut app);
+    for needle in ["╭ 1 ", "╭ 5 ", "energy ██ ██ ██", "[e] end turn", "[r] run"] {
+        assert!(
+            frame.contains(needle),
+            "expected {needle:?} on an 80 by 24 scene; frame={frame:?}"
+        );
+    }
 }

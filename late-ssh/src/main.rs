@@ -261,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
         db.clone(),
     );
     let arcade_handle_service = late_ssh::app::door::arcade::ArcadeHandleService::new(db.clone());
+    let live_games = late_ssh::app::door::spectate::svc::LiveGamesService::new(db.clone());
     let door_rc_service = late_ssh::app::door::rc::DoorRcService::new(db.clone());
     let house_registry = late_ssh::app::lobby::house::registry::HouseTableRegistry::new(
         chip_service.clone(),
@@ -326,44 +327,19 @@ async fn main() -> anyhow::Result<()> {
     let _chat_notify_task = chat_service.start_notify_worker(
         pg_listener.subscribe(late_ssh::app::chat::svc::ChatService::CHANNELS),
     );
-    // Process-wide switches (the haunt kill switch and fuse) cross replicas
-    // over Postgres; loaded once here, then the listener re-reads them on
-    // every (re)connect and notify.
-    // See `app/flags/svc.rs`.
-    let app_flag_service = late_ssh::app::flags::svc::AppFlagService::new(db.clone());
-    // Loaded before any service starts, so no startup pass (the splash
-    // wall, the jobs shelf, the paper press) reads the switches as off.
-    // Switches nobody can read are not worth booting over.
-    app_flag_service
-        .refresh()
-        .await
-        .context("failed to load app flags")?;
-    let _app_flag_notify_task = app_flag_service.start_notify_worker(
-        pg_listener.subscribe(late_ssh::app::flags::svc::AppFlagService::CHANNELS),
-    );
     // The Late Edition's press: every replica sweeps, the rows decide who
     // prints. See `app/paper/svc.rs`.
-    let paper_service = late_ssh::app::paper::svc::PaperService::new(
-        db.clone(),
-        ai_service.clone(),
-        app_flag_service.subscribe(),
-    );
+    let paper_service =
+        late_ssh::app::paper::svc::PaperService::new(db.clone(), ai_service.clone());
     let _paper_sweeper_task = paper_service.start_sweeper_task();
     // The job feed's press: once a night, the run row decides which
     // replica; every replica keeps its own shelf snapshot. See
     // `app/jobs/svc.rs`.
-    let jobs_service = late_ssh::app::jobs::svc::JobsService::new(
-        db.clone(),
-        ai_service.clone(),
-        app_flag_service.subscribe(),
-    );
+    let jobs_service = late_ssh::app::jobs::svc::JobsService::new(db.clone(), ai_service.clone());
     let _jobs_press_task = jobs_service.start_press_task();
     // The Artboard gallery's splash wall: every replica re-reads the day's
     // piece hourly; the first replica awake on a day assigns it. See `app/artboard/gallery/svc.rs`.
-    let gallery_service = late_ssh::app::artboard::gallery::svc::GalleryService::new(
-        db.clone(),
-        app_flag_service.subscribe(),
-    );
+    let gallery_service = late_ssh::app::artboard::gallery::svc::GalleryService::new(db.clone());
     let _gallery_splash_task = gallery_service.start_splash_refresh_task();
     // Runner looks (the #deadchannel portraits) cross replicas the same
     // way; the listener seeds this replica on every (re)connect. See
@@ -490,6 +466,7 @@ async fn main() -> anyhow::Result<()> {
         greendragon_service,
         darkroom_service,
         arcade_handle_service,
+        live_games,
         door_rc_service,
         daily_service,
         bonsai_service,
@@ -527,7 +504,6 @@ async fn main() -> anyhow::Result<()> {
         ssh_attempt_limiter,
         ws_pair_limiter,
         is_draining: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        app_flags: app_flag_service.clone(),
         runner_looks: runner_look_service.clone(),
         presence: presence_service,
     };
@@ -581,6 +557,48 @@ async fn main() -> anyhow::Result<()> {
                 host: state.config.brogue_host.clone(),
                 port: state.config.brogue_port,
                 secret: state.config.brogue_secret.clone(),
+            },
+            singleton_shutdown.clone(),
+        )
+    });
+
+    // The live-game rosters behind spectating: one roster stream per door
+    // whose host serves watch sessions, gated on that door's client flag.
+    let _dcss_roster_task = state.config.dcss_enabled.then(|| {
+        state.live_games.start_task(
+            late_ssh::app::door::spectate::state::SpectateGame::Dcss,
+            late_ssh::app::door::spectate::proxy::WatchTarget {
+                host: state.config.dcss_host.clone(),
+                port: state.config.dcss_port,
+                key: late_ssh::app::door::dcss::identity::derive_client_key(
+                    &state.config.dcss_secret,
+                ),
+            },
+            singleton_shutdown.clone(),
+        )
+    });
+    let _nethack_roster_task = state.config.nethack_enabled.then(|| {
+        state.live_games.start_task(
+            late_ssh::app::door::spectate::state::SpectateGame::Nethack,
+            late_ssh::app::door::spectate::proxy::WatchTarget {
+                host: state.config.nethack_host.clone(),
+                port: state.config.nethack_port,
+                key: late_ssh::app::door::nethack::identity::derive_client_key(
+                    &state.config.nethack_secret,
+                ),
+            },
+            singleton_shutdown.clone(),
+        )
+    });
+    let _brogue_roster_task = state.config.brogue_enabled.then(|| {
+        state.live_games.start_task(
+            late_ssh::app::door::spectate::state::SpectateGame::Brogue,
+            late_ssh::app::door::spectate::proxy::WatchTarget {
+                host: state.config.brogue_host.clone(),
+                port: state.config.brogue_port,
+                key: late_ssh::app::door::brogue::identity::derive_client_key(
+                    &state.config.brogue_secret,
+                ),
             },
             singleton_shutdown.clone(),
         )

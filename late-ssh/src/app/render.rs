@@ -181,6 +181,9 @@ struct DrawContext<'a> {
     daily_chat_view: Option<chat::ui::EmbeddedRoomChatView<'a>>,
     house: &'a crate::app::lobby::house::state::HouseState,
     house_chat_view: Option<chat::ui::EmbeddedRoomChatView<'a>>,
+    /// The Games hub cards this session sees (`HubGame::roster`): Night
+    /// City heads it for runners only.
+    games_hub_roster: &'static [crate::app::door::hub::state::HubGame],
     games_hub_selected: usize,
     /// Rows the selected Games hub landing is scrolled down.
     games_hub_scroll: u16,
@@ -211,6 +214,24 @@ struct DrawContext<'a> {
     brogue_live: bool,
     darkroom_live: bool,
     greendragon_live: bool,
+    /// The live game this session is watching; the hub draws it instead of
+    /// its selector while one is held.
+    spectate_state: Option<&'a crate::app::door::spectate::state::State>,
+    /// Every live game on a watchable door: the hub rail's live rows and
+    /// the watch view's header.
+    live_rows: Vec<crate::app::door::spectate::state::LiveRow>,
+    /// Watchers on this player's own running game on the watchable door
+    /// whose screen is up, for its chrome.
+    own_watchers: Option<usize>,
+    /// The watch chat on show: the watched player's room on the Games hub,
+    /// this player's own room beside their running game on a watchable
+    /// door's screen. `None` until this session is in the room.
+    watch_chat_view: Option<chat::ui::EmbeddedRoomChatView<'a>>,
+    /// Whether this player's running game makes room for watcher chat (the
+    /// `show_watch_chat` setting), and the newest line for the one-row form
+    /// of it.
+    show_watch_chat: bool,
+    own_watch_line: Option<crate::app::door::spectate::chat::WatchLine>,
     greendragon_state: Option<&'a crate::app::door::greendragon::state::State>,
     darkroom_state: Option<&'a crate::app::door::darkroom::state::State>,
     rebels_state: Option<&'a mut crate::app::door::rebels::state::State>,
@@ -367,12 +388,16 @@ struct DrawContext<'a> {
     booth_modal_state: &'a crate::app::audio::booth::state::BoothModalState,
     booth_snapshot: crate::app::audio::svc::QueueSnapshot,
     booth_submit_enabled: bool,
+    stations_modal_open: bool,
+    stations_modal_state: &'a crate::app::audio::stations_modal::state::StationsModalState,
+    /// Catalogue rows with live now-playing; only filled while the
+    /// stations modal is open.
+    stations_rows: Vec<crate::app::audio::stations_modal::ui::StationRow>,
     youtube_source_count: usize,
-    icecast_source_count: usize,
     radio_source_count: usize,
     paired_source: late_core::models::user::AudioSource,
-    selected_icecast_stream: late_core::models::user::IcecastStream,
     selected_radio_station: late_core::models::user::RadioStation,
+    radio_slots: late_core::models::user::RadioSlots,
     radio_now_playing: Option<&'a str>,
     /// Humans currently connected (bots excluded) plus connected friends,
     /// for the sidebar's pinned presence rows.
@@ -407,6 +432,9 @@ struct DrawContext<'a> {
     zen_care: crate::app::zen::ui::Care,
     zen_live_strip: Option<crate::app::live::state::LiveStripView<'a>>,
     live_hit: &'a std::cell::Cell<Option<(Rect, crate::app::live::pick::LiveSource)>>,
+    /// The pane beside this player's own running game, published for the
+    /// click that opens its composer; cleared every frame like the hits.
+    own_chat_hit: &'a std::cell::Cell<Option<Rect>>,
 }
 
 impl App {
@@ -421,11 +449,21 @@ impl App {
         let brogue_live = HubGame::Brogue.live_screen(self).is_some();
         let darkroom_live = HubGame::Darkroom.live_screen(self).is_some();
         let greendragon_live = HubGame::GreenDragon.live_screen(self).is_some();
+        // The watchable door whose screen is up, where this player's own
+        // game shows its watchers and their chat.
+        let own_screen_game =
+            crate::app::door::spectate::state::SpectateGame::of_screen(self.screen);
+        let own_watchers = own_screen_game.and_then(|game| {
+            let handle = crate::app::door::spectate::chat::own_running_handle(self, game)?;
+            self.live_games.watchers_of(game, &handle)
+        });
+        let games_hub_roster = HubGame::roster(self.is_runner());
         // Clear last-frame mouse hit-test rects so screens that don't draw
         // them this frame can't leave a stale target behind.
         self.last_pet_rect.set(None);
         self.last_pet_frame.set(None);
         self.live.hit.set(None);
+        self.own_chat_hit.set(None);
         self.chat.last_composer_rect.set(None);
         // `last_composer_viewport_top` is intentionally NOT reset here: it
         // replays ratatui-textarea's minimal-scroll rule, which needs the
@@ -546,20 +584,45 @@ impl App {
             .collect();
         self.zen_chat_rows_caches
             .resize_with(zen_chat_rooms.len(), Default::default);
-        // The icecast rows render the USER'S SELECTED stream's track, not a
-        // global single mount.
-        let selected_icecast_stream = self.selected_icecast_stream;
-        let now_playing: Option<NowPlaying> = self.now_playing_rx.as_mut().and_then(|rx| {
-            rx.borrow_and_update()
-                .get(selected_icecast_stream.as_str())
-                .cloned()
-        });
+        // The house jukebox for the clubhouse and nightcap pages: the
+        // USER'S SELECTED station when it is a house mount, else the house
+        // `chill` mount (the jukebox never goes quiet because someone is
+        // tuned to Nightride). Both watches are marked seen here so the
+        // tick's `has_changed` repaint gate rests.
         let selected_radio_station = self.selected_radio_station;
-        let radio_now_playing: Option<String> = self.radio_meta_rx.as_mut().and_then(|rx| {
-            rx.borrow_and_update()
-                .get(selected_radio_station.as_str())
-                .map(|meta| format!("{} - {}", meta.artist, meta.title))
+        let now_playing: Option<NowPlaying> = self.now_playing_rx.as_mut().and_then(|rx| {
+            let map = rx.borrow_and_update();
+            use late_core::radio::Provider;
+            let mount = match selected_radio_station.provider() {
+                Provider::House => selected_radio_station.as_str(),
+                Provider::Nightride
+                | Provider::Plaza
+                | Provider::CodeRadio
+                | Provider::RadioParadise
+                | Provider::Fip
+                | Provider::RadioSwiss => "chill",
+            };
+            map.get(mount).cloned()
         });
+        if let Some(rx) = self.radio_meta_rx.as_mut() {
+            rx.borrow_and_update();
+        }
+        let radio_now_playing: Option<String> = self.station_now_playing(selected_radio_station);
+        let stations_rows: Vec<crate::app::audio::stations_modal::ui::StationRow> =
+            if self.stations_modal_state.is_open() {
+                self.stations_modal_state
+                    .stations()
+                    .into_iter()
+                    .map(
+                        |station| crate::app::audio::stations_modal::ui::StationRow {
+                            now_playing: self.station_now_playing(station),
+                            station,
+                        },
+                    )
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let paired_client = self.paired_client_state();
         let eq_state =
             crate::app::audio::viz::eq_state(paired_client.as_ref(), self.audio.live_bands());
@@ -584,6 +647,31 @@ impl App {
             username_directory_snapshot.as_deref(),
         );
         let chat_usernames = &render_usernames;
+        // One watch chat is on show at a time: the watched player's room on
+        // the Games hub, this player's own room beside their running game.
+        let watch_chat_room_id = match (self.screen, own_screen_game) {
+            (Screen::Games, _) => self.spectate_chat_room_id(),
+            (_, Some(game)) => self.own_watch_chat_room_id(game),
+            (_, None) => None,
+        };
+        // The player's own composer: open in their room, on their game's
+        // screen (`App::handle_input` opens it on F2 or a click on the pane).
+        // Until then their pane's strip is inert and says so.
+        let own_chat_composing = own_screen_game.is_some()
+            && watch_chat_room_id.is_some()
+            && self.chat.is_composing()
+            && self.chat.composer_room_id() == watch_chat_room_id;
+        // The newest thing a watcher said, for the one-row form of the chat
+        // a narrow terminal shows under this player's own running game.
+        let own_watch_line = own_screen_game
+            .and_then(|game| self.own_watch_chat_room_id(game))
+            .and_then(|room_id| {
+                crate::app::door::spectate::chat::latest_line(
+                    self.chat.messages_for_room(room_id),
+                    chat_usernames,
+                    chrono::Utc::now(),
+                )
+            });
         let chat_countries = self.chat.countries();
         let bonsai_glyphs = self.chat.bonsai_glyphs();
         let chat_badges = self.chat.chat_badges();
@@ -621,6 +709,9 @@ impl App {
             .unwrap_or_default();
         let dashboard_active_poll =
             shell_active_room.and_then(|room_id| self.chat.active_poll_for_room(room_id));
+        // The live games on the watchable doors: the hub rail's live rows,
+        // and a live strip source.
+        let live_rows = self.live_games.live_rows();
         // The strip is the #lounge card's alone; another room's card, or
         // the chat center, never carries it.
         let dashboard_live_strip = if home_selected {
@@ -630,6 +721,7 @@ impl App {
                 self.paired_source,
                 self.chat.news.all_articles(),
                 &self.chat.live_streams,
+                &live_rows,
             )
         } else {
             None
@@ -645,6 +737,7 @@ impl App {
                 self.paired_source,
                 self.chat.news.all_articles(),
                 &self.chat.live_streams,
+                &live_rows,
             )
         } else {
             None
@@ -698,6 +791,7 @@ impl App {
                     self.paired_source,
                     self.chat.news.all_articles(),
                     &self.chat.live_streams,
+                    &live_rows,
                 )
                 .map(|strip| crate::app::live::ui::status_text(&strip))
         } else {
@@ -705,26 +799,17 @@ impl App {
         };
         let (status_quests_daily, status_quests_weekly) = self.quest_state.open_counts();
         let status_station_name = match self.paired_source {
-            late_core::models::user::AudioSource::Radio => {
-                crate::app::audio::stations::radio_station_display_name(selected_radio_station)
-            }
-            late_core::models::user::AudioSource::Icecast => {
-                crate::app::audio::stations::icecast_stream_display_name(selected_icecast_stream)
-            }
+            late_core::models::user::AudioSource::Radio => selected_radio_station.label(),
             late_core::models::user::AudioSource::Youtube => "youtube",
         };
         let status_youtube_track = match self.paired_source {
             late_core::models::user::AudioSource::Youtube => {
                 crate::app::common::sidebar::youtube_track(&self.audio.queue_snapshot())
             }
-            late_core::models::user::AudioSource::Radio
-            | late_core::models::user::AudioSource::Icecast => None,
+            late_core::models::user::AudioSource::Radio => None,
         };
         let status_station_track = match self.paired_source {
             late_core::models::user::AudioSource::Radio => radio_now_playing.as_deref(),
-            late_core::models::user::AudioSource::Icecast => {
-                now_playing.as_ref().map(|np| np.track.title.as_str())
-            }
             late_core::models::user::AudioSource::Youtube => status_youtube_track.as_deref(),
         };
         let dashboard_view = chat::ui::DashboardChatView {
@@ -997,7 +1082,7 @@ impl App {
                     highlighted_message_id: self.chat.highlighted_message_id,
                     reaction_picker_active: self.chat.is_reaction_leader_active(),
                     composer: self.chat.composer(),
-                    composer_inert: false,
+                    composer_inert: chat::ui::ComposerInert::No,
                     composing: self.chat.composing,
                     mention_matches: &self.chat.mention_ac.matches,
                     mention_selected: self.chat.mention_ac.selected,
@@ -1062,7 +1147,7 @@ impl App {
                     highlighted_message_id: self.chat.highlighted_message_id,
                     reaction_picker_active: self.chat.is_reaction_leader_active(),
                     composer: self.chat.composer(),
-                    composer_inert: false,
+                    composer_inert: chat::ui::ComposerInert::No,
                     composing: self.chat.composing,
                     mention_matches: &self.chat.mention_ac.matches,
                     mention_selected: self.chat.mention_ac.selected,
@@ -1084,6 +1169,76 @@ impl App {
                     chat_hit_slot: Some(&self.chat.last_chat_hit_layout),
                     selection_scroll: Some(&self.chat.selection_scroll),
                 });
+        // The watch chat: docked beside the watched screen for a watcher,
+        // read-only beside their own game for the player.
+        let watch_chat_view =
+            watch_chat_room_id.map(|chat_room_id| chat::ui::EmbeddedRoomChatView {
+                messages_inset: 1,
+                title: "Watch Chat",
+                messages: self.chat.messages_for_room(chat_room_id),
+                overlay: self.chat.overlay(),
+                image_modal,
+                rows_cache: &mut self.watch_chat_rows_cache,
+                rows_versions: chat::ui::ChatRowsVersions {
+                    room_id: Some(chat_room_id),
+                    room_version: self.chat.room_version(chat_room_id),
+                    chat_ctx_epoch: self.chat.context_epoch(),
+                    app_ctx_epoch: self.chat_ctx_epoch,
+                },
+                usernames: chat_usernames,
+                countries: chat_countries,
+                friend_user_ids: self.chat.friend_user_ids(),
+                live_user_ids: &self.chat.live_user_ids,
+                message_reactions,
+                message_gilds,
+                inline_images: &self.chat.inline_image_cache,
+                dividers: crate::app::chat::ui::ChatDividers {
+                    afk_line: self.chat.afk_lines.get(&chat_room_id).copied(),
+                    left_app: self.chat.device_left_at(),
+                },
+                current_user_id: self.user_id,
+                voice_channel_id: self
+                    .chat
+                    .voice_channels_by_room_id
+                    .get(&chat_room_id)
+                    .map(|channel| channel.id),
+                voice_snapshot,
+                voice_paired_cli_supports_voice: paired_cli_supports_voice,
+                show_flag_fallback: self.profile_state.profile().show_flag_fallback,
+                selected_message_id: self.chat.selected_message_id,
+                selected_image_message: self
+                    .chat
+                    .selected_message_has_inline_image_in_room(chat_room_id),
+                highlighted_message_id: self.chat.highlighted_message_id,
+                reaction_picker_active: self.chat.is_reaction_leader_active(),
+                composer: self.chat.composer(),
+                // The player's own pane keeps the strip inert until F2 or a
+                // click opens it; a watcher's pane (Games) composes as is.
+                composer_inert: match (own_screen_game.is_some(), own_chat_composing) {
+                    (true, false) => chat::ui::ComposerInert::OwnWatchChat,
+                    (true, true) | (false, _) => chat::ui::ComposerInert::No,
+                },
+                composing: self.chat.composing,
+                mention_matches: &self.chat.mention_ac.matches,
+                mention_selected: self.chat.mention_ac.selected,
+                mention_active: self.chat.mention_ac.active,
+                reply_author: self.chat.reply_target().map(|reply| reply.author.as_str()),
+                is_editing: self.chat.edited_message_id.is_some(),
+                bonsai_glyphs,
+                chat_badges,
+                profile_award_badges,
+                drunk_levels: &self.drunk_levels,
+                name_flair: &self.name_flair,
+                away_user_ids: &self.away_user_ids,
+                name_flicker,
+                translations: &self.chat.translations,
+                translation_hidden: &self.chat.translation_hidden,
+                keep_composer_focused: self.profile_state.profile().keep_composer_focused,
+                composer_rect_slot: Some(&self.chat.last_composer_rect),
+                composer_viewport_top_slot: Some(&self.chat.last_composer_viewport_top),
+                chat_hit_slot: Some(&self.chat.last_chat_hit_layout),
+                selection_scroll: Some(&self.chat.selection_scroll),
+            });
         // Every chat tile draws a composer, focused or not: an input box
         // that appears and disappears as the focus walks moves every row
         // under the reader. Only the active tile's composer is live, so the
@@ -1150,7 +1305,10 @@ impl App {
                     } else {
                         &idle_composer
                     },
-                    composer_inert: !active,
+                    composer_inert: match active {
+                        true => chat::ui::ComposerInert::No,
+                        false => chat::ui::ComposerInert::ZenTile,
+                    },
                     composing: active && self.chat.composing,
                     mention_matches: &self.chat.mention_ac.matches,
                     mention_selected: self.chat.mention_ac.selected,
@@ -1192,7 +1350,6 @@ impl App {
             .collect();
         let zen_track = crate::app::common::sidebar::current_track_text(
             self.paired_source,
-            now_playing.as_ref(),
             &self.audio.queue_snapshot(),
             self.selected_radio_station,
             radio_now_playing.as_deref(),
@@ -1261,7 +1418,7 @@ impl App {
             mention_matches: &self.chat.mention_ac.matches,
             mention_selected: self.chat.mention_ac.selected,
             keep_composer_focused: self.profile_state.profile().keep_composer_focused,
-            inert: false,
+            inert: chat::ui::ComposerInert::No,
         });
         let (clubhouse_composer, nightcap_composer) = match screen {
             Screen::Clubhouse => (embedded_composer, None),
@@ -1300,6 +1457,7 @@ impl App {
             || self.icon_picker_open
             || self.room_search_modal_state.is_open()
             || self.booth_modal_state.is_open()
+            || self.stations_modal_state.is_open()
             || self.stream_modal.is_some()
             || self.chat.history_modal.is_open();
         let suppress_new_raster = self.show_settings
@@ -1320,6 +1478,7 @@ impl App {
             || self.icon_picker_open
             || self.room_search_modal_state.is_open()
             || self.booth_modal_state.is_open()
+            || self.stations_modal_state.is_open()
             || self.stream_modal.is_some()
             || self.chat.history_modal.is_open();
         // No screen places a non-modal persistent raster today; the slot
@@ -1367,7 +1526,8 @@ impl App {
                         daily_chat_view,
                         house: &self.house,
                         house_chat_view,
-                        games_hub_selected: self.games_hub_state.selected(),
+                        games_hub_roster,
+                        games_hub_selected: self.games_hub_state.selected(games_hub_roster),
                         games_hub_scroll: self.games_hub_state.scroll(),
                         games_hub_max_scroll: self.games_hub_state.max_scroll(),
                         door_rc_modal: self
@@ -1391,6 +1551,12 @@ impl App {
                         brogue_live,
                         darkroom_live,
                         greendragon_live,
+                        spectate_state: self.spectate_state.as_ref(),
+                        live_rows,
+                        own_watchers,
+                        watch_chat_view,
+                        show_watch_chat: self.profile_state.profile().show_watch_chat,
+                        own_watch_line,
                         greendragon_state: self.greendragon_state.as_ref(),
                         darkroom_state: self.darkroom_state.as_ref(),
                         rebels_state: rebels_state_taken.as_mut(),
@@ -1525,12 +1691,14 @@ impl App {
                         booth_modal_state: &self.booth_modal_state,
                         booth_snapshot: self.audio.queue_snapshot(),
                         booth_submit_enabled: self.audio.booth_submit_enabled(),
+                        stations_modal_open: self.stations_modal_state.is_open(),
+                        stations_modal_state: &self.stations_modal_state,
+                        stations_rows,
                         youtube_source_count: self.audio.youtube_source_count(),
-                        icecast_source_count: self.audio.icecast_source_count(),
                         radio_source_count: self.audio.radio_source_count(),
                         paired_source: self.paired_source,
-                        selected_icecast_stream,
                         selected_radio_station,
+                        radio_slots: self.radio_slots,
                         radio_now_playing: radio_now_playing.as_deref(),
                         online_count,
                         marquee_tick: self.marquee_tick,
@@ -1579,6 +1747,7 @@ impl App {
                         zen_care,
                         zen_live_strip,
                         live_hit: &self.live.hit,
+                        own_chat_hit: &self.own_chat_hit,
                     },
                     &mut terminal_image_frame,
                 );
@@ -1811,6 +1980,20 @@ impl App {
             app_content_and_sidebar_areas(inner, ctx.show_right_sidebar)
         };
         let foreground_overlay_open = foreground_terminal_overlay_open(&ctx);
+        // The tour stops that write into a real surface: the two modals take
+        // the header themselves, the practice table and the dungeon fight
+        // get it drawn across the top of the page.
+        let tour_header = crate::app::clubhouse::ui::tour_header(
+            ctx.clubhouse_state.tutorial,
+            crate::app::clubhouse::ui::table_stop(content_area, ctx.daily.practice_played()),
+            ctx.clubhouse_state.tour_fight.won(),
+        );
+        let board_area = match (&tour_header, screen) {
+            (Some(header), Screen::DailyMatch | Screen::Games) => {
+                header.draw_above(frame, content_area)
+            }
+            (Some(_), _) | (None, _) => content_area,
+        };
         match screen {
             Screen::Dashboard => {
                 const HOME_RAIL_WIDTH: u16 = 24;
@@ -1850,11 +2033,43 @@ impl App {
                     );
                 }
             }
+            // The tour's dungeon stop plays its fight where the hub would be.
+            Screen::Games if tour_header.is_some() => crate::app::clubhouse::fight::draw(
+                frame,
+                board_area,
+                &ctx.clubhouse_state.tour_fight,
+                ctx.clubhouse_state.username(),
+            ),
+            // An open watch takes the whole page, the hub's rail included.
+            Screen::Games if ctx.spectate_state.is_some_and(|state| state.is_open()) => {
+                if let Some(state) = ctx.spectate_state {
+                    crate::app::door::spectate::ui::draw(
+                        frame,
+                        content_area,
+                        &crate::app::door::spectate::ui::SpectateView {
+                            state,
+                            entry: state
+                                .row_in(&ctx.live_rows)
+                                .map(|index| &ctx.live_rows[index].entry),
+                        },
+                        crate::app::door::spectate::ui::WatchPane::Open(
+                            ctx.watch_chat_view.take().map(Box::new),
+                        ),
+                        terminal_images,
+                    );
+                }
+            }
             Screen::Games => {
+                // The rail's selection sits on a live row while this session
+                // previews one; the preview then draws in the landing's place.
+                let live_selected = ctx
+                    .spectate_state
+                    .and_then(|state| state.row_in(&ctx.live_rows));
                 crate::app::door::hub::ui::draw_games_hub(
                     frame,
                     content_area,
                     &crate::app::door::hub::ui::HubView {
+                        roster: ctx.games_hub_roster,
                         selected: ctx.games_hub_selected,
                         scroll: ctx.games_hub_scroll,
                         max_scroll: ctx.games_hub_max_scroll,
@@ -1876,11 +2091,36 @@ impl App {
                         brogue_live: ctx.brogue_live,
                         darkroom_live: ctx.darkroom_live,
                         greendragon_live: ctx.greendragon_live,
+                        live: &ctx.live_rows,
+                        live_selected,
+                        watching: ctx.spectate_state.is_some(),
+                        show_watch_chat: ctx.show_watch_chat,
                         rc_modal: ctx.door_rc_modal.map(|(game, content)| {
                             crate::app::door::hub::ui::RcModalView { game, content }
                         }),
+                        night_city: crate::app::deadchannel::city::landing::LandingView {
+                            sheet: ctx.city_sheet,
+                            street: ctx.city_street,
+                            own_user_id: ctx.city_own_user_id,
+                            tick: ctx.marquee_tick,
+                        },
                     },
                 );
+                if let (Some(state), Some(pane)) = (
+                    ctx.spectate_state,
+                    crate::app::door::hub::ui::watch_pane_area(content_area),
+                ) {
+                    crate::app::door::spectate::ui::draw(
+                        frame,
+                        pane,
+                        &crate::app::door::spectate::ui::SpectateView {
+                            state,
+                            entry: live_selected.map(|index| &ctx.live_rows[index].entry),
+                        },
+                        crate::app::door::spectate::ui::WatchPane::Preview,
+                        terminal_images,
+                    );
+                }
             }
             Screen::Lateania => {
                 crate::app::door::lateania::screen::GAME.draw(
@@ -1927,25 +2167,71 @@ impl App {
                     crate::app::door::rebels::render::draw_page(frame, content_area, state);
                 }
             }
+            // The watchable doors: a running game makes room for its
+            // watchers' chat when the player keeps that on, a read-only pane
+            // on the right or one row underneath on a narrow terminal. The
+            // room comes off the PTY, never over the game.
             Screen::Nethack => {
                 if let Some(state) = ctx.nethack_state.as_deref_mut() {
+                    let (game_area, own_chat) = own_chat_split(
+                        crate::app::door::spectate::state::SpectateGame::Nethack,
+                        ctx.show_watch_chat && state.is_running(),
+                        content_area,
+                    );
                     // Size the child PTY to the exact widget area before blitting.
-                    state.set_viewport(content_area);
-                    crate::app::door::nethack::render::draw_page(frame, content_area, state);
+                    state.set_viewport(game_area);
+                    crate::app::door::nethack::render::draw_page(frame, game_area, state);
+                    ctx.own_chat_hit.set(own_chat.pane());
+                    crate::app::door::spectate::ui::draw_own_chat(
+                        frame,
+                        own_chat,
+                        ctx.watch_chat_view.take(),
+                        ctx.own_watch_line.as_ref(),
+                        ctx.own_watchers,
+                        terminal_images,
+                    );
                 }
             }
             Screen::Dcss => {
                 if let Some(state) = ctx.dcss_state.as_deref_mut() {
+                    let (game_area, own_chat) = own_chat_split(
+                        crate::app::door::spectate::state::SpectateGame::Dcss,
+                        ctx.show_watch_chat && state.is_running(),
+                        content_area,
+                    );
                     // Size the child PTY to the exact widget area before blitting.
-                    state.set_viewport(content_area);
-                    crate::app::door::dcss::render::draw_page(frame, content_area, state);
+                    state.set_viewport(game_area);
+                    crate::app::door::dcss::render::draw_page(frame, game_area, state);
+                    ctx.own_chat_hit.set(own_chat.pane());
+                    crate::app::door::spectate::ui::draw_own_chat(
+                        frame,
+                        own_chat,
+                        ctx.watch_chat_view.take(),
+                        ctx.own_watch_line.as_ref(),
+                        ctx.own_watchers,
+                        terminal_images,
+                    );
                 }
             }
             Screen::Brogue => {
                 if let Some(state) = ctx.brogue_state.as_deref_mut() {
+                    let (game_area, own_chat) = own_chat_split(
+                        crate::app::door::spectate::state::SpectateGame::Brogue,
+                        ctx.show_watch_chat && state.is_running(),
+                        content_area,
+                    );
                     // Size the child PTY to the exact widget area before blitting.
-                    state.set_viewport(content_area);
-                    crate::app::door::brogue::render::draw_page(frame, content_area, state);
+                    state.set_viewport(game_area);
+                    crate::app::door::brogue::render::draw_page(frame, game_area, state);
+                    ctx.own_chat_hit.set(own_chat.pane());
+                    crate::app::door::spectate::ui::draw_own_chat(
+                        frame,
+                        own_chat,
+                        ctx.watch_chat_view.take(),
+                        ctx.own_watch_line.as_ref(),
+                        ctx.own_watchers,
+                        terminal_images,
+                    );
                 }
             }
             Screen::Usurper => {
@@ -2101,7 +2387,6 @@ impl App {
                     station: crate::app::zen::ui::station_text(
                         ctx.paired_source,
                         ctx.selected_radio_station,
-                        ctx.selected_icecast_stream,
                     ),
                     eq_state: ctx.eq_state,
                     clock: ctx.sidebar_clock,
@@ -2142,7 +2427,7 @@ impl App {
             }
             Screen::DailyMatch => crate::app::lobby::daily::board_ui::draw(
                 frame,
-                content_area,
+                board_area,
                 ctx.daily,
                 ctx.terminal_image_protocol,
                 terminal_images,
@@ -2169,7 +2454,6 @@ impl App {
                 sidebar_area,
                 &SidebarProps {
                     components: &ctx.right_sidebar_components,
-                    now_playing: ctx.now_playing,
                     paired_client: ctx.paired_client,
                     eq_state: ctx.eq_state,
                     bonsai: ctx.bonsai,
@@ -2187,11 +2471,10 @@ impl App {
                     clock_text: ctx.sidebar_clock,
                     queue_snapshot: &ctx.booth_snapshot,
                     youtube_source_count: ctx.youtube_source_count,
-                    icecast_source_count: ctx.icecast_source_count,
                     radio_source_count: ctx.radio_source_count,
                     paired_source: ctx.paired_source,
-                    selected_icecast_stream: ctx.selected_icecast_stream,
                     selected_radio_station: ctx.selected_radio_station,
+                    radio_slots: ctx.radio_slots,
                     radio_now_playing: ctx.radio_now_playing,
                     daily: ctx.daily,
                     lobby_glow: ctx.lobby.glow(),
@@ -2315,7 +2598,14 @@ impl App {
         }
 
         if ctx.show_lobby_modal {
-            crate::app::lobby::modal_ui::draw(frame, inner, ctx.lobby, ctx.daily, ctx.house);
+            crate::app::lobby::modal_ui::draw(
+                frame,
+                inner,
+                ctx.lobby,
+                ctx.daily,
+                ctx.house,
+                tour_header.as_ref(),
+            );
         }
 
         // One-time arcade-name claim modal, over the door landings that need a
@@ -2453,6 +2743,23 @@ impl App {
             );
         }
 
+        // The tour holds this modal open through a quit confirm, and it would
+        // draw over the prompt.
+        if ctx.stations_modal_open && !ctx.show_quit_confirm {
+            crate::app::audio::stations_modal::ui::draw(
+                frame,
+                inner,
+                ctx.stations_modal_state,
+                &crate::app::audio::stations_modal::ui::StationsView {
+                    rows: &ctx.stations_rows,
+                    current: ctx.selected_radio_station,
+                    slots: ctx.radio_slots,
+                    source: ctx.paired_source,
+                },
+                tour_header.as_ref(),
+            );
+        }
+
         if ctx.icon_picker_open
             && let Some(catalog) = ctx.icon_catalog
         {
@@ -2517,6 +2824,29 @@ fn foreground_terminal_overlay_open(ctx: &DrawContext<'_>) -> bool {
         || ctx.chat_state.history_modal.is_open()
         || ctx.booth_modal_open
         || ctx.icon_picker_open
+}
+
+/// `· 2 watching` in a running watchable game's chrome. Being watched is
+/// never hidden from the player, whatever their watch-chat setting.
+fn own_watchers_span(watchers: Option<usize>) -> Option<Span<'static>> {
+    let watchers = watchers.filter(|n| *n > 0)?;
+    Some(Span::styled(
+        format!("\u{b7} {watchers} watching "),
+        Style::default().fg(theme::AMBER_GLOW()),
+    ))
+}
+
+/// A watchable door's content area split between its game and the player's
+/// own watch chat, when `chat_wanted` (the setting is on and the game runs).
+fn own_chat_split(
+    game: crate::app::door::spectate::state::SpectateGame,
+    chat_wanted: bool,
+    area: Rect,
+) -> (Rect, crate::app::door::spectate::ui::OwnChat) {
+    match chat_wanted {
+        true => crate::app::door::spectate::ui::own_game_split(area, game),
+        false => (area, crate::app::door::spectate::ui::OwnChat::Hidden),
+    }
 }
 
 fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
@@ -2615,7 +2945,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     // key. The chrome says so, the way the door games do.
     if screen == Screen::City {
         spans.push(Span::styled(
-            "· f fight · p patch · ? guide ",
+            "· f road · p patch · ? guide ",
             Style::default().fg(theme::TEXT_DIM()),
         ));
     }
@@ -2651,6 +2981,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 "· ? help · S save · ` step out · Ctrl-C quit ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
+            spans.extend(own_watchers_span(ctx.own_watchers));
         }
     }
 
@@ -2671,6 +3002,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 "· ? help · S save · ` step out · Ctrl-Q abandon ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
+            spans.extend(own_watchers_span(ctx.own_watchers));
         }
     }
 
@@ -2691,6 +3023,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 "\u{b7} ? help \u{b7} S save \u{b7} ` step out \u{b7} Q abandon ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
+            spans.extend(own_watchers_span(ctx.own_watchers));
         }
     }
 

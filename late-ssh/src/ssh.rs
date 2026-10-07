@@ -983,6 +983,7 @@ impl russh::server::Handler for ClientHandler {
             greendragon_service: self.state.greendragon_service.clone(),
             darkroom_service: self.state.darkroom_service.clone(),
             arcade_handle_service: self.state.arcade_handle_service.clone(),
+            live_games: self.state.live_games.clone(),
             door_rc_service: self.state.door_rc_service.clone(),
             initial_door_rcs,
             daily_service: self.state.daily_service.clone(),
@@ -1087,8 +1088,6 @@ impl russh::server::Handler for ClientHandler {
                 &user.settings,
             ),
             first_contact_gate,
-            app_flags_rx: self.state.app_flags.subscribe(),
-            app_flags: Some(self.state.app_flags.clone()),
             runner_looks_rx: self.state.runner_looks.subscribe(),
             presence: self.state.presence.clone(),
             zen_layout: late_core::models::user::extract_zen_layout(&user.settings),
@@ -1120,8 +1119,8 @@ impl russh::server::Handler for ClientHandler {
                 &user.settings,
             ),
             initial_audio_source: late_core::models::user::extract_audio_source(&user.settings),
-            initial_icecast_stream: late_core::models::user::extract_icecast_stream(&user.settings),
             initial_radio_station: late_core::models::user::extract_radio_station(&user.settings),
+            initial_radio_slots: late_core::models::user::extract_radio_slots(&user.settings),
 
             // Server state
             is_draining: self.state.is_draining.clone(),

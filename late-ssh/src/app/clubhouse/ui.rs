@@ -10,7 +10,7 @@
 
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
@@ -25,12 +25,14 @@ use crate::app::common::username_effect::{CROWN_GLYPH, NameStyle, ResolvedName, 
 use late_core::api_types::NowPlaying;
 use late_core::models::chat_message::ChatMessage;
 use late_core::models::drinks::{DRUNK_LABEL_MIN_LEVEL, DRUNK_MAX_LEVEL};
+use late_core::models::user::{RADIO_SLOTS, RadioStation};
 
 use late_core::models::presence::Emote;
 
 use super::crowd::Placement;
 use super::map;
-use super::state::{BannerLine, ClubhouseHit, State, Tutorial};
+use super::state::{BannerLine, ClubhouseHit, State, TableStop, Tutorial};
+use crate::app::lobby::daily::pool_ui;
 
 const LABEL_MAX: usize = 10;
 const FIRE_CHARS: [char; 6] = ['(', ')', '~', '^', '*', '\''];
@@ -1256,9 +1258,8 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
         .add_modifier(Modifier::BOLD);
     let text = Style::default().fg(theme::TEXT());
     let dim = Style::default().fg(theme::TEXT_DIM());
-    let border = Style::default().fg(theme::AMBER());
 
-    let (title, lines): (&str, Vec<Line>) = match view.state.tutorial {
+    let (title, lines, next_label): (&str, Vec<Line>, &str) = match view.state.tutorial {
         Tutorial::Welcome => (
             " ☾ welcome to the late lounge ☽ ",
             vec![
@@ -1284,12 +1285,8 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
                     "you're on the welcome mat. let's take the tour.",
                     text,
                 )),
-                Line::default(),
-                Line::from(vec![
-                    Span::styled("[1] ", key),
-                    Span::styled("first stop: the chat", text),
-                ]),
             ],
+            "first stop: the chat",
         ),
         Tutorial::Homecoming => (
             " ☾ make yourself at home ☽ ",
@@ -1338,12 +1335,8 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
                     "the bartender pours every new face their first drink.",
                     dim,
                 )),
-                Line::default(),
-                Line::from(vec![
-                    Span::styled("[Enter] ", key),
-                    Span::styled("settle in", dim),
-                ]),
             ],
+            "settle in",
         ),
         // Mid-loop stages never render in the tavern: the forced gate only
         // lets the route's keys through, and `0` from Zen lands straight on
@@ -1352,7 +1345,9 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
         | Tutorial::VisitMusic
         | Tutorial::VisitArcade
         | Tutorial::VisitLobby
+        | Tutorial::VisitTable
         | Tutorial::VisitGames
+        | Tutorial::VisitDungeon
         | Tutorial::VisitArtboard
         | Tutorial::VisitDirectory
         | Tutorial::VisitLeaderboard
@@ -1362,32 +1357,15 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
         | Tutorial::Done => return false,
     };
 
-    let width = (lines
-        .iter()
-        .map(Line::width)
-        .max()
-        .unwrap_or(0)
-        .max(title.chars().count())
-        + 4)
-    .min(usize::from(inner.width).saturating_sub(2)) as u16;
-    let height = (lines.len() as u16 + 2).min(inner.height.saturating_sub(1));
-    let rect = Rect {
-        x: inner.x + (inner.width.saturating_sub(width)) / 2,
-        y: inner.y + (inner.height.saturating_sub(height)) / 3,
-        width,
-        height,
-    };
-
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border)
-                .title(Span::styled(title, border.add_modifier(Modifier::BOLD))),
-        ),
-        rect,
-    );
+    TourHeader {
+        title: title.trim(),
+        lines,
+        keys: vec![
+            Span::styled("[Enter] ", key),
+            Span::styled(next_label, text),
+        ],
+    }
+    .draw_box(frame, inner);
     true
 }
 
@@ -1405,388 +1383,496 @@ pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen:
     let name = Style::default()
         .fg(theme::TEXT_BRIGHT())
         .add_modifier(Modifier::BOLD);
-    let border = Style::default().fg(theme::AMBER());
 
-    let (home, title, pitch, next_key, next_label): (Screen, &str, Vec<Line>, &str, &str) =
-        match stage {
-            Tutorial::VisitChat => (
-                Screen::Dashboard,
-                " ✦ the tour · home ",
-                vec![
-                    Line::from(vec![
-                        Span::styled("every room, thread and DM on ", text),
-                        Span::styled("late.sh", name),
-                        Span::styled(" lives here.", text),
-                    ]),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[i] ", key),
-                        Span::styled("write · ", text),
-                        Span::styled("[Ctrl+/] ", key),
-                        Span::styled("jump anywhere, type ?query to search", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("[Ctrl+]] ", key),
-                        Span::styled("pick an icon to sign your messages", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("[/dm @user] ", key),
-                        Span::styled("direct message · ", text),
-                        Span::styled("[/public #room] ", key),
-                        Span::styled("open a room", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("[/private #room] ", key),
-                        Span::styled("invite-only · your ", text),
-                        Span::styled("Mentions", name),
-                        Span::styled(" wait in the rail", text),
-                    ]),
-                ],
-                "Enter",
-                "the music",
-            ),
-            Tutorial::VisitMusic => (
-                Screen::Dashboard,
-                " ✦ the tour · the music ",
-                vec![
-                    Line::from(Span::styled(
-                        "the house has a soundtrack, always on: our own radio",
+    let (home, title, pitch, next_label): (Screen, &str, Vec<Line>, &str) = match stage {
+        Tutorial::VisitChat => (
+            Screen::Dashboard,
+            " ✦ the tour · [1] home ",
+            vec![
+                Line::from(vec![
+                    Span::styled("every room, thread and DM on ", text),
+                    Span::styled("late.sh", name),
+                    Span::styled(" lives here.", text),
+                ]),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("[i] ", key),
+                    Span::styled("write · ", text),
+                    Span::styled("[Ctrl+/] ", key),
+                    Span::styled("jump anywhere, type ?query to search", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[Ctrl+]] ", key),
+                    Span::styled("pick an icon to sign your messages", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[/dm @user] ", key),
+                    Span::styled("direct message · ", text),
+                    Span::styled("[/public #room] ", key),
+                    Span::styled("open a room", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[/private #room] ", key),
+                    Span::styled("invite-only · your ", text),
+                    Span::styled("Mentions", name),
+                    Span::styled(" wait in the rail", text),
+                ]),
+            ],
+            "the music",
+        ),
+        Tutorial::VisitArcade => (
+            Screen::Arcade,
+            " ✦ the tour · [2] the arcade ",
+            vec![
+                Line::from(vec![
+                    Span::styled("solo games: ", text),
+                    Span::styled("Lateris, Snake, 2048, Sudoku, Solitaire", name),
+                    Span::styled("...", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("daily puzzles pay ", text),
+                    Span::styled("Late Chips", name),
+                    Span::styled("; quests and streaks stack up top.", text),
+                ]),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("chips buy things. ", text),
+                    Span::styled("[/shop] ", key),
+                    Span::styled("rented badges, flags, titles, name effects,", text),
+                ]),
+                Line::from(Span::styled(
+                    "a pet companion to feed, an aquarium with real fish.",
+                    text,
+                )),
+            ],
+            "the lobby",
+        ),
+        Tutorial::VisitGames => (
+            Screen::Games,
+            " ✦ the tour · [3] the games ",
+            vec![
+                Line::from(Span::styled("the big ones live behind this door:", text)),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("Lateania", name),
+                    Span::styled(": our own MMO. one shared world, bosses, mounts.", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("DCSS", name),
+                    Span::styled(": the most played roguelike alive, for good reason.", text),
+                ]),
+                Line::from(Span::styled(
+                    "pick a species, pledge a god, dive for the Orb of Zot;",
+                    text,
+                )),
+                Line::from(Span::styled(
+                    "easy to start, years to master, no two runs alike.",
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("NetHack", name),
+                    Span::styled(
+                        ": the legend itself; the DevTeam thought of everything.",
                         text,
-                    )),
-                    Line::from(vec![
-                        Span::styled("streams, ", text),
-                        Span::styled("Nightride", name),
-                        Span::styled(" guest stations, and a community ", text),
-                        Span::styled("YouTube", name),
-                    ]),
-                    Line::from(Span::styled(
-                        "jukebox: queue tracks, vote on them, browse the history.",
-                        text,
-                    )),
-                    Line::default(),
-                    Line::from(Span::styled(
-                        "one catch: SSH carries no sound. two ways to listen:",
-                        text,
-                    )),
-                    Line::from(vec![
-                        Span::styled("late.sh/listen", name),
-                        Span::styled(" plays it in any browser, nothing to install;", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("the ", text),
-                        Span::styled("late", name),
-                        Span::styled(" CLI plays it right here in your terminal.", text),
-                    ]),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[v v] ", key),
-                        Span::styled("Music Booth · ", text),
-                        Span::styled("[v x] ", key),
-                        Span::styled("source · ", text),
-                        Span::styled("[?] ", key),
-                        Span::styled("the install guide", text),
-                    ]),
-                ],
-                "2",
-                "the arcade",
-            ),
-            Tutorial::VisitArcade => (
-                Screen::Arcade,
-                " ✦ the tour · the arcade ",
-                vec![
-                    Line::from(vec![
-                        Span::styled("solo games: ", text),
-                        Span::styled("Lateris, Snake, 2048, Sudoku, Solitaire", name),
-                        Span::styled("...", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("daily puzzles pay ", text),
-                        Span::styled("Late Chips", name),
-                        Span::styled("; quests and streaks stack up top.", text),
-                    ]),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("chips buy things. ", text),
-                        Span::styled("[/shop] ", key),
-                        Span::styled("rented badges, flags, titles, name effects,", text),
-                    ]),
-                    Line::from(Span::styled(
-                        "a pet companion to feed, an aquarium with real fish.",
-                        text,
-                    )),
-                ],
-                "Enter",
-                "the lobby",
-            ),
-            Tutorial::VisitLobby => (
-                Screen::Arcade,
-                " ✦ the tour · the lobby ",
-                vec![
-                    Line::from(vec![
-                        Span::styled("[Ctrl+G] ", key),
-                        Span::styled("opens the lobby from anywhere: all the multiplayer.", text),
-                    ]),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("daily duels: ", text),
-                        Span::styled("chess, backgammon, pool, cribbage,", name),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("gin rummy, battleship, briscola and more", name),
-                        Span::styled(". challenge anyone,", text),
-                    ]),
-                    Line::from(Span::styled(
-                        "walk away, play a move whenever; 24h on the clock per move.",
-                        text,
-                    )),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("five live tables, always open: ", text),
-                        Span::styled("Poker, Blackjack,", name),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Asterion, Tron, Super Snake", name),
-                        Span::styled(". every table seats its own", text),
-                    ]),
-                    Line::from(Span::styled("chat and voice; pull up a chair.", text)),
-                ],
-                "3",
-                "the heavy door",
-            ),
-            Tutorial::VisitGames => (
-                Screen::Games,
-                " ✦ the tour · the games ",
-                vec![
-                    Line::from(Span::styled("the big ones live behind this door:", text)),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("Lateania", name),
-                        Span::styled(": our own MMO. one shared world, bosses, mounts.", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("DCSS", name),
-                        Span::styled(": the most played roguelike alive, for good reason.", text),
-                    ]),
-                    Line::from(Span::styled(
-                        "pick a species, pledge a god, dive for the Orb of Zot;",
-                        text,
-                    )),
-                    Line::from(Span::styled(
-                        "easy to start, years to master, no two runs alike.",
-                        text,
-                    )),
-                    Line::from(vec![
-                        Span::styled("NetHack", name),
-                        Span::styled(
-                            ": the legend itself; the DevTeam thought of everything.",
-                            text,
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Brogue", name),
-                        Span::styled(": the most beautiful dungeon ASCII ever drew.", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Green Dragon", name),
-                        Span::styled(": the legendary BBS door, reborn.", text),
-                    ]),
-                    Line::default(),
-                    Line::from(Span::styled(
-                        "and much more; your wins stick to your name.",
-                        text,
-                    )),
-                ],
-                "4",
-                "the artboard",
-            ),
-            Tutorial::VisitArtboard => (
-                Screen::Artboard,
-                " ✦ the tour · the artboard ",
-                vec![
-                    Line::from(Span::styled(
-                        "one shared canvas, the whole house draws at once.",
-                        text,
-                    )),
-                    Line::from(Span::styled(
-                        "everything stays, and every glyph remembers who drew it.",
-                        text,
-                    )),
-                    Line::from(vec![
-                        Span::styled("the whole board hangs public at ", text),
-                        Span::styled("late.sh/gallery", name),
-                        Span::styled(".", text),
-                    ]),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[i] ", key),
-                        Span::styled("or a click starts drawing · ", text),
-                        Span::styled("[Ctrl+]] ", key),
-                        Span::styled("the glyph picker", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("[Esc] ", key),
-                        Span::styled("the rail: gallery and archives · ", text),
-                        Span::styled("[?] ", key),
-                        Span::styled("the local guide, here and everywhere", text),
-                    ]),
-                ],
-                "5",
-                "the profiles",
-            ),
-            Tutorial::VisitDirectory => (
-                Screen::Profiles,
-                " ✦ the tour · the profiles ",
-                vec![
-                    Line::from(Span::styled(
-                        "the people: everyone who ships a project or posts a work card.",
-                        text,
-                    )),
-                    Line::from(vec![
-                        Span::styled("your profile gets a public page at ", text),
-                        Span::styled("late.sh/profiles", name),
-                        Span::styled(".", text),
-                    ]),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[Ctrl+O] ", key),
-                        Span::styled("fill yours in: bio, links, what you're building.", text),
-                    ]),
-                ],
-                "6",
-                "the leaderboards",
-            ),
-            Tutorial::VisitLeaderboard => (
-                Screen::Leaderboard,
-                " ✦ the tour · the leaderboards ",
-                vec![
-                    Line::from(Span::styled(
-                        "every game keeps score: chips, wins, streaks, high scores,",
-                        text,
-                    )),
-                    Line::from(Span::styled(
-                        "monthly and all-time. each month's top three wear badges",
-                        text,
-                    )),
-                    Line::from(Span::styled(
-                        "beside their name in chat, for everyone to see.",
-                        text,
-                    )),
-                    Line::default(),
-                    Line::from(Span::styled(
-                        "your name lands here sooner than you think.",
-                        text,
-                    )),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[Enter] ", key),
-                        Span::styled("works too, if your terminal eats Ctrl+F.", text),
-                    ]),
-                ],
-                "Ctrl+F",
-                "zen",
-            ),
-            Tutorial::VisitZen => (
-                Screen::Zen,
-                " ✦ the tour · zen ",
-                vec![
-                    Line::from(Span::styled(
-                        "the whole house cut down to what you keep alive:",
-                        text,
-                    )),
-                    Line::from(vec![
-                        Span::styled("your ", text),
-                        Span::styled("bonsai", name),
-                        Span::styled(", the ", text),
-                        Span::styled("reef", name),
-                        Span::styled(", a ", text),
-                        Span::styled("pet", name),
-                        Span::styled(", your rooms, music and a clock,", text),
-                    ]),
-                    Line::from(Span::styled(
-                        "as tiles you arrange yourself. the layout is saved.",
-                        text,
-                    )),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[Ctrl+F] ", key),
-                        Span::styled("from any page opens it; the same chord", text),
-                    ]),
-                    Line::from(Span::styled("hands you back to wherever you were.", text)),
-                    Line::default(),
-                    Line::from(vec![
-                        Span::styled("[Tab] ", key),
-                        Span::styled("focus a tile · ", text),
-                        Span::styled("[space] ", key),
-                        Span::styled("pick what it shows", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("[S] ", key),
-                        Span::styled("split · ", text),
-                        Span::styled("[X] ", key),
-                        Span::styled("close · ", text),
-                        Span::styled("[z] ", key),
-                        Span::styled("zoom · ", text),
-                        Span::styled("[R] ", key),
-                        Span::styled("reset", text),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("[i] ", key),
-                        Span::styled("write in the focused chat · ", text),
-                        Span::styled("[?] ", key),
-                        Span::styled("the zen guide", text),
-                    ]),
-                ],
-                "0",
-                "home to the lounge",
-            ),
-            Tutorial::Off
-            | Tutorial::Pending
-            | Tutorial::Welcome
-            | Tutorial::Homecoming
-            | Tutorial::Done => return,
-        };
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled("Brogue", name),
+                    Span::styled(": the most beautiful dungeon ASCII ever drew.", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("Green Dragon", name),
+                    Span::styled(": the legendary BBS door, reborn.", text),
+                ]),
+                Line::default(),
+                Line::from(Span::styled(
+                    "and much more; your wins stick to your name.",
+                    text,
+                )),
+            ],
+            "a taste of the dungeon",
+        ),
+        Tutorial::VisitArtboard => (
+            Screen::Artboard,
+            " ✦ the tour · [4] the artboard ",
+            vec![
+                Line::from(Span::styled(
+                    "one shared canvas, the whole house draws at once.",
+                    text,
+                )),
+                Line::from(Span::styled(
+                    "everything stays, and every glyph remembers who drew it.",
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("the whole board hangs public at ", text),
+                    Span::styled("late.sh/gallery", name),
+                    Span::styled(".", text),
+                ]),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("[i] ", key),
+                    Span::styled("or a click starts drawing · ", text),
+                    Span::styled("[Ctrl+]] ", key),
+                    Span::styled("the glyph picker", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[Esc] ", key),
+                    Span::styled("the rail: gallery and archives · ", text),
+                    Span::styled("[?] ", key),
+                    Span::styled("the local guide, here and everywhere", text),
+                ]),
+            ],
+            "the profiles",
+        ),
+        Tutorial::VisitDirectory => (
+            Screen::Profiles,
+            " ✦ the tour · [5] the profiles ",
+            vec![
+                Line::from(Span::styled(
+                    "the people: everyone who ships a project or posts a work card.",
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("your profile gets a public page at ", text),
+                    Span::styled("late.sh/profiles", name),
+                    Span::styled(".", text),
+                ]),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("[Ctrl+O] ", key),
+                    Span::styled("fill yours in: bio, links, what you're building.", text),
+                ]),
+            ],
+            "the leaderboards",
+        ),
+        Tutorial::VisitLeaderboard => (
+            Screen::Leaderboard,
+            " ✦ the tour · [6] the leaderboards ",
+            vec![
+                Line::from(Span::styled(
+                    "every game keeps score: chips, wins, streaks, high scores,",
+                    text,
+                )),
+                Line::from(Span::styled(
+                    "monthly and all-time. each month's top three wear badges",
+                    text,
+                )),
+                Line::from(Span::styled(
+                    "beside their name in chat, for everyone to see.",
+                    text,
+                )),
+                Line::default(),
+                Line::from(Span::styled(
+                    "your name lands here sooner than you think.",
+                    text,
+                )),
+            ],
+            "zen",
+        ),
+        Tutorial::VisitZen => (
+            Screen::Zen,
+            " ✦ the tour · [Ctrl+F] zen ",
+            vec![
+                Line::from(Span::styled(
+                    "the whole house cut down to what you keep alive:",
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("your ", text),
+                    Span::styled("bonsai", name),
+                    Span::styled(", the ", text),
+                    Span::styled("reef", name),
+                    Span::styled(", a ", text),
+                    Span::styled("pet", name),
+                    Span::styled(", your rooms, music and a clock,", text),
+                ]),
+                Line::from(Span::styled(
+                    "as tiles you arrange yourself. the layout is saved.",
+                    text,
+                )),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("[Ctrl+F] ", key),
+                    Span::styled("from any page opens it; the same chord", text),
+                ]),
+                Line::from(Span::styled("hands you back to wherever you were.", text)),
+                Line::default(),
+                Line::from(vec![
+                    Span::styled("[Tab] ", key),
+                    Span::styled("focus a tile · ", text),
+                    Span::styled("[space] ", key),
+                    Span::styled("pick what it shows", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[S] ", key),
+                    Span::styled("split · ", text),
+                    Span::styled("[X] ", key),
+                    Span::styled("close · ", text),
+                    Span::styled("[z] ", key),
+                    Span::styled("zoom · ", text),
+                    Span::styled("[R] ", key),
+                    Span::styled("reset", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[i] ", key),
+                    Span::styled("write in the focused chat · ", text),
+                    Span::styled("[?] ", key),
+                    Span::styled("the zen guide", text),
+                ]),
+            ],
+            "home to the lounge",
+        ),
+        // The music, lobby, practice-table and dungeon stops write their
+        // pitch into the real surface they hold open: see `tour_header`.
+        Tutorial::Off
+        | Tutorial::Pending
+        | Tutorial::Welcome
+        | Tutorial::VisitMusic
+        | Tutorial::VisitLobby
+        | Tutorial::VisitTable
+        | Tutorial::VisitDungeon
+        | Tutorial::Homecoming
+        | Tutorial::Done => return,
+    };
 
     if screen != home {
         return;
     }
-    let dim = Style::default().fg(theme::TEXT_DIM());
-    let mut lines = pitch;
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "take it in; everything above unlocks when the tour ends.",
-        dim,
-    )));
-    lines.push(Line::from(vec![
-        Span::styled(format!("[{next_key}] "), key),
-        Span::styled(format!("next: {next_label}"), text),
-    ]));
+    TourHeader {
+        title: title.trim(),
+        lines: pitch,
+        keys: vec![
+            Span::styled("[Enter] ", key),
+            Span::styled(format!("next: {next_label}"), text),
+        ],
+    }
+    .draw_box(frame, area);
+}
 
-    let width = (lines
-        .iter()
-        .map(Line::width)
-        .max()
-        .unwrap_or(0)
-        .max(title.chars().count())
-        + 4)
-    .min(usize::from(area.width).saturating_sub(2)) as u16;
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
-    let rect = Rect {
-        x: area.x + (area.width.saturating_sub(width)) / 2,
-        y: area.y + (area.height.saturating_sub(height)) / 3,
-        width,
-        height,
-    };
+/// One tour stop, drawn the same way wherever it lands: a title, the pitch,
+/// then a breaker carrying the only keys the stop takes, flush right. The
+/// surface stops write it into the top of the real surface they hold open
+/// (the Stations modal, the Lobby modal) or across the top of the page
+/// they take over (the practice table, the dungeon fight: `draw_above`);
+/// every other stop gets it in a box of its own (`draw_box`).
+pub(crate) struct TourHeader {
+    title: &'static str,
+    lines: Vec<Line<'static>>,
+    keys: Vec<Span<'static>>,
+}
 
-    frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(border)
-                .title(Span::styled(title, border.add_modifier(Modifier::BOLD))),
+/// Blank columns between a frame and a tour stop's text, the same in a box
+/// as in the modals that host one.
+pub(crate) const TOUR_SIDE_PADDING: u16 = 2;
+
+impl TourHeader {
+    /// Rows the header takes: the title, the pitch, a breathing row, the
+    /// breaker.
+    pub(crate) fn rows(&self) -> u16 {
+        self.lines.len() as u16 + 3
+    }
+
+    /// The stop in a box of its own, centered over the page it pitches,
+    /// with a breathing row above and below like the modals give it.
+    pub(crate) fn draw_box(&self, frame: &mut Frame, area: Rect) {
+        let keys_width: usize = self.keys.iter().map(Span::width).sum();
+        let content = self
+            .lines
+            .iter()
+            .map(Line::width)
+            .max()
+            .unwrap_or(0)
+            .max(self.title.width())
+            // A breaker needs some rule left of its keys to read as one.
+            .max(keys_width + 12);
+        let width = (content + 2 + 2 * usize::from(TOUR_SIDE_PADDING))
+            .min(usize::from(area.width).saturating_sub(2)) as u16;
+        let height = (self.rows() + 4).min(area.height.saturating_sub(1));
+        let rect = Rect {
+            x: area.x + (area.width.saturating_sub(width)) / 2,
+            y: area.y + (area.height.saturating_sub(height)) / 3,
+            width,
+            height,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme::AMBER()));
+        let inner = block.inner(rect).inner(Margin::new(TOUR_SIDE_PADDING, 1));
+        frame.render_widget(Clear, rect);
+        frame.render_widget(block, rect);
+        self.draw(frame, inner);
+    }
+
+    /// The stop across the top of a page it takes over (the practice table,
+    /// the dungeon fight), with a breathing row either side like the modals
+    /// give it. Returns the room left under it for the page.
+    pub(crate) fn draw_above(&self, frame: &mut Frame, area: Rect) -> Rect {
+        let [above, below] = self.split_above(area);
+        self.draw(frame, above.inner(Margin::new(TOUR_SIDE_PADDING, 1)));
+        below
+    }
+
+    /// `[header, page]`, the way `draw_above` shares `area`.
+    fn split_above(&self, area: Rect) -> [Rect; 2] {
+        Layout::vertical([Constraint::Length(self.rows() + 2), Constraint::Fill(1)]).areas(area)
+    }
+
+    pub(crate) fn draw(&self, frame: &mut Frame, area: Rect) {
+        let amber = Style::default().fg(theme::AMBER());
+        let mut lines = vec![Line::from(Span::styled(
+            self.title,
+            amber.add_modifier(Modifier::BOLD),
+        ))];
+        lines.extend(self.lines.iter().cloned());
+        // The breaker is the last row the header owns, so on a short surface
+        // the pitch is what gets cut, never the keys.
+        let rows = Layout::vertical([
+            Constraint::Fill(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(area);
+        frame.render_widget(Paragraph::new(lines), rows[0]);
+
+        let keys_width: usize = self.keys.iter().map(Span::width).sum();
+        let lead = usize::from(area.width).saturating_sub(keys_width + 4);
+        let mut breaker = vec![Span::styled(format!("{} ", "─".repeat(lead)), amber)];
+        breaker.extend(self.keys.iter().cloned());
+        breaker.push(Span::styled(" ──", amber));
+        frame.render_widget(Paragraph::new(Line::from(breaker)), rows[2]);
+    }
+}
+
+/// Where the practice table stop stands on a page whose content area is
+/// `content_area`. A struck break stays struck whatever the terminal does
+/// afterwards; until then the table has to fit under its header to be
+/// played.
+pub(crate) fn table_stop(content_area: Rect, played: bool) -> TableStop {
+    // Every table header is the same height, so any of them measures.
+    let [_, table] = table_header(TableStop::Racked).split_above(content_area);
+    match (played, pool_ui::fits(table)) {
+        (true, true | false) => TableStop::Played,
+        (false, true) => TableStop::Racked,
+        (false, false) => TableStop::TooSmall,
+    }
+}
+
+fn table_header(table: TableStop) -> TourHeader {
+    let key = Style::default()
+        .fg(theme::AMBER_GLOW())
+        .add_modifier(Modifier::BOLD);
+    let text = Style::default().fg(theme::TEXT());
+    let next = |label: &'static str| vec![Span::styled("[Enter] ", key), Span::styled(label, text)];
+    let (line, keys) = match table {
+        TableStop::TooSmall => (
+            "this table needs a bigger window. the lobby has one waiting.",
+            next("next: the games"),
         ),
-        rect,
-    );
+        TableStop::Racked => ("your table, your break. nobody is watching.", next("break")),
+        TableStop::Played => (
+            "that was real physics. the lobby has a table waiting.",
+            next("next: the games"),
+        ),
+    };
+    TourHeader {
+        title: "✦ the tour · one shot of pool",
+        lines: vec![Line::from(Span::styled(line, text))],
+        keys,
+    }
+}
+
+/// The header for the stops that live inside a real surface, `None` for
+/// every other stage. `table` is where the practice table stop stands,
+/// `fight_won` whether the dungeon's dragon is down.
+pub(crate) fn tour_header(
+    stage: Tutorial,
+    table: TableStop,
+    fight_won: bool,
+) -> Option<TourHeader> {
+    let key = Style::default()
+        .fg(theme::AMBER_GLOW())
+        .add_modifier(Modifier::BOLD);
+    let text = Style::default().fg(theme::TEXT());
+    let name = Style::default()
+        .fg(theme::TEXT_BRIGHT())
+        .add_modifier(Modifier::BOLD);
+    let next = |label: &'static str| vec![Span::styled("[Enter] ", key), Span::styled(label, text)];
+
+    match stage {
+        Tutorial::VisitMusic => Some(TourHeader {
+            title: "✦ the tour · the radio",
+            lines: vec![
+                Line::from(vec![
+                    Span::styled(
+                        format!("{} stations", RadioStation::enabled().count()),
+                        name,
+                    ),
+                    Span::styled(", live and always on, plus a ", text),
+                    Span::styled("YouTube", name),
+                    Span::styled(" jukebox.", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("SSH carries no sound: ", text),
+                    Span::styled("late.sh/listen", name),
+                    Span::styled(" plays it in any browser.", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("[v r] ", key),
+                    Span::styled("opens this list · ", text),
+                    Span::styled(format!("[v 1-{RADIO_SLOTS}] "), key),
+                    Span::styled("your pinned ones", text),
+                ]),
+            ],
+            keys: next("next: the arcade"),
+        }),
+        Tutorial::VisitLobby => Some(TourHeader {
+            title: "✦ the tour · the lobby",
+            lines: vec![
+                Line::from(vec![
+                    Span::styled("[Ctrl+G] ", key),
+                    Span::styled("opens this from anywhere: all the multiplayer.", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("chess, pool, backgammon, cards", name),
+                    Span::styled(": challenge anyone, move whenever.", text),
+                ]),
+                Line::from(vec![
+                    Span::styled("Poker, Blackjack", name),
+                    Span::styled(" and more live tables are always open.", text),
+                ]),
+            ],
+            keys: next("next: one shot of pool"),
+        }),
+        Tutorial::VisitTable => Some(table_header(table)),
+        Tutorial::VisitDungeon => Some(TourHeader {
+            title: "✦ the tour · a taste of the dungeon",
+            lines: vec![Line::from(vec![
+                Span::styled("one fight, sketched. ", text),
+                Span::styled("Dungeon Crawl", name),
+                Span::styled(" and ", text),
+                Span::styled("NetHack", name),
+                Span::styled(" run here for real.", text),
+            ])],
+            keys: if fight_won {
+                next("next: the artboard")
+            } else {
+                next("fight")
+            },
+        }),
+        Tutorial::Off
+        | Tutorial::Pending
+        | Tutorial::Welcome
+        | Tutorial::VisitChat
+        | Tutorial::VisitArcade
+        | Tutorial::VisitGames
+        | Tutorial::VisitArtboard
+        | Tutorial::VisitDirectory
+        | Tutorial::VisitLeaderboard
+        | Tutorial::VisitZen
+        | Tutorial::Homecoming
+        | Tutorial::Done => None,
+    }
 }
 
 fn draw_popover(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) {
@@ -1827,8 +1913,11 @@ fn draw_popover(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) {
                 interactive,
                 vec![
                     Line::from(Span::styled(now, Style::default().fg(theme::AMBER_GLOW()))),
-                    Line::from(Span::styled("v v music booth · v x cycle source", text)),
-                    Line::from(Span::styled("v s skip vote · v 1-4 pick a station", text)),
+                    Line::from(Span::styled("v v music booth · v x switch source", text)),
+                    Line::from(Span::styled(
+                        "v s skip vote · v 1-5 pinned station · v r stations",
+                        text,
+                    )),
                     Line::from(Span::styled("m mute · +/- volume · Enter opens booth", dim)),
                     Line::from(Span::styled("[?] full guide, opens on the Pair tab", dim)),
                 ],

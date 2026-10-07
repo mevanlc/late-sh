@@ -8,7 +8,9 @@ use super::state::{
 use crate::app::activity::event::ActivityKind;
 use crate::app::common::primitives::Screen;
 use crate::app::common::theme;
+use crate::app::directory::state::Shelf;
 use crate::app::files::inline_image::InlineImageRenderSettings;
+use crate::metrics::Place;
 use crate::session::SessionMessage;
 
 /// The hot world-tick cadence (the classic 15fps): animations that earn
@@ -176,6 +178,10 @@ impl App {
             // ~7.5fps ambience edge as the clubhouse; the runner's steps
             // are input-driven, the other runners' arrive with presence.
             self.city.tick(self.marquee_tick as u64);
+            changed = true;
+        }
+        if anim_half && crate::app::door::hub::state::animates(self) {
+            // Night City's card in the Games hub rains on the same edge.
             changed = true;
         }
 
@@ -475,11 +481,19 @@ impl App {
         let daily_tick = self.daily.tick();
         changed |= daily_tick.changed;
         let picture_settings = self.inline_image_render_settings();
+        let own_door_games: Vec<_> = crate::app::door::spectate::chat::own_running_games(self)
+            .into_iter()
+            .filter_map(|(game, playname)| {
+                crate::app::door::spectate::state::LiveGameKey::new(game, &playname)
+            })
+            .collect();
         changed |= self.live.tick(
             &self.daily,
             &self.audio,
             self.chat.news.all_articles(),
             &self.chat.live_streams,
+            &self.live_games.live_rows(),
+            &own_door_games,
             reading,
             picture_settings,
         );
@@ -568,6 +582,50 @@ impl App {
         }
         if let Some(state) = self.brogue_state.as_mut() {
             state.tick();
+        }
+        // The live-game rosters feed the hub rail's live rows and the watcher
+        // count in a running watchable game's chrome: drain always, pay a
+        // frame only where one of them is drawn.
+        let rosters_changed = self.live_games.tick();
+        changed |= rosters_changed
+            && (self.screen == Screen::Games
+                || crate::app::door::spectate::state::SpectateGame::of_screen(self.screen)
+                    .is_some());
+        // The watch chat: the watchers' pane and the player's own pane each
+        // hang on a room that resolves and joins in the background.
+        changed |= crate::app::door::spectate::chat::tick(self);
+        // A preview lives only on the Games hub, so leaving the hub ends it.
+        // An open watch outlives a hop away until it has been off screen for
+        // `AWAY_WINDOW`; the stamp below is what that measures from. The
+        // watched game ending (or its stream dropping) ends either, with a
+        // word on why the screen went away.
+        let now = std::time::Instant::now();
+        let on_hub = self.screen == Screen::Games;
+        let watch_end = match self.spectate_state.as_mut() {
+            Some(state) => {
+                if on_hub {
+                    state.mark_seen(now);
+                }
+                state.end_reason(on_hub, now)
+            }
+            None => None,
+        };
+        match watch_end {
+            Some(
+                crate::app::door::spectate::state::WatchEnd::LeftHub
+                | crate::app::door::spectate::state::WatchEnd::WentAway,
+            ) => {
+                self.stop_spectating();
+                changed = true;
+            }
+            Some(crate::app::door::spectate::state::WatchEnd::GameEnded(playname)) => {
+                self.banner = Some(crate::app::common::primitives::Banner::info(&format!(
+                    "{playname}'s game is no longer running."
+                )));
+                self.stop_spectating();
+                changed = true;
+            }
+            None => {}
         }
         // A detached roguelike whose game has ended (death, save, idle
         // shutdown, network drop) has nothing left to resume: drop the state
@@ -772,15 +830,17 @@ impl App {
                 let phase = crate::app::common::username_effect::shimmer_phase(self.marquee_tick);
                 // The crown rides the same map, and lapses the same way: an
                 // entry from a finished UTC month resolves to nobody, which
-                // is what empties the slot at the rollover with no sweeper.
-                let crown_holder = self
-                    .crown_holder_rx
-                    .as_mut()
-                    .and_then(|rx| *rx.borrow_and_update())
-                    .and_then(|holder| holder.if_current(now));
+                // is what empties the slot at the rollover with no sweeper,
+                // and the same rollover hands the laureate's crown on.
+                let crown_wearers = match self.crown_wearers_rx.as_mut() {
+                    Some(rx) => *rx.borrow_and_update(),
+                    // Only a test harness builds an app without the crown.
+                    None => crate::app::crown::svc::CrownWearers::default(),
+                };
                 let name_flair = crate::app::common::username_effect::resolve_all(
                     &crate::app::common::username_effect::snapshot(directory),
-                    crown_holder,
+                    crown_wearers.holder(now),
+                    crown_wearers.laureate(now),
                     phase,
                     now,
                 );
@@ -1215,22 +1275,12 @@ impl App {
             != prev_marquee_tick / crate::app::common::marquee::MARQUEE_STEP_TICKS
             && sidebar_visible
         {
-            let selected_icecast_stream = self.selected_icecast_stream;
-            let icecast_now_playing = self
-                .now_playing_rx
-                .as_ref()
-                .and_then(|rx| rx.borrow().get(selected_icecast_stream.as_str()).cloned());
             let selected_radio_station = self.selected_radio_station;
-            let radio_now_playing = self.radio_meta_rx.as_ref().and_then(|rx| {
-                rx.borrow()
-                    .get(selected_radio_station.as_str())
-                    .map(|meta| format!("{} - {}", meta.artist, meta.title))
-            });
+            let radio_now_playing = self.station_now_playing(selected_radio_station);
             let queue = self.audio.queue_snapshot();
             let inputs = crate::app::common::sidebar::SidebarMarqueeInputs {
                 components: &self.profile_state.profile().right_sidebar_components,
                 active_friends: &self.active_friends,
-                icecast_now_playing: icecast_now_playing.as_ref(),
                 radio_now_playing: radio_now_playing.as_deref(),
                 selected_station: selected_radio_station,
                 source: self.paired_source,
@@ -1335,6 +1385,7 @@ impl App {
         // to the aquarium's quarter tier it drops to ~3.8fps.
         if self.screen == Screen::Clubhouse
             || self.screen == Screen::City
+            || crate::app::door::hub::state::animates(self)
             || self.right_sidebar_visible()
             || (self.live_strip_shown() && self.live.aiming())
             || (self.screen == Screen::Zen && self.zen.shows_equalizer())
@@ -1430,24 +1481,78 @@ impl App {
 }
 
 impl App {
-    /// Add the seconds since the last mark to the screen in front of the
-    /// user (and the Arcade game, while a board is open). Rides the 1Hz
-    /// edge; a screen switched mid-second lands on the new screen.
+    /// Add the seconds since the last mark to the screen and place in front
+    /// of the user, and count a visit when either moved since the last edge.
+    /// Rides the 1Hz edge; a screen switched mid-second lands on the new
+    /// screen, and a place held under a second may never count as a visit.
     fn record_attention(&mut self) {
         let now = Instant::now();
         let seconds = now.duration_since(self.attention_mark).as_secs_f64();
         self.attention_mark = now;
-        let arcade_game = match (self.screen, self.is_playing_game) {
-            (Screen::Arcade, true) => Some(crate::app::arcade::ui::game_for_selection(
-                self.game_selection,
-            )),
-            _ => None,
-        };
+        let place = self.attention_place();
+        let spot = Some((self.screen, place));
+        if self.attention_spot != spot {
+            self.attention_spot = spot;
+            crate::metrics::record_place_visit(self.screen, place);
+        }
         let presence = match self.last_input_at.elapsed() < ATTENTION_ACTIVE_WINDOW {
             true => crate::metrics::Presence::Active,
             false => crate::metrics::Presence::Idle,
         };
-        crate::metrics::record_attention(self.screen, arcade_game, presence, seconds);
+        crate::metrics::record_attention(self.screen, place, presence, seconds);
+    }
+
+    /// Where inside the current screen the user is, for the screens that
+    /// hold more than one place.
+    pub(crate) fn attention_place(&self) -> Place {
+        match self.screen {
+            Screen::Dashboard => match self.chat.home_room() {
+                Some(room) => Place::Home(room),
+                None => Place::Whole,
+            },
+            Screen::Arcade => match self.is_playing_game {
+                true => Place::Game(crate::app::arcade::ui::game_for_selection(
+                    self.game_selection,
+                )),
+                false => Place::Whole,
+            },
+            Screen::HouseTable => match self.house.client() {
+                Some(client) => Place::Game(crate::app::lobby::house::registry::activity_game_for(
+                    client.table(),
+                )),
+                None => Place::Whole,
+            },
+            Screen::Profiles => match self.directory_state.shelf() {
+                Shelf::People => Place::PeopleShelf,
+                Shelf::Jobs => Place::JobsShelf,
+            },
+            Screen::Artboard => match &self.dartboard_state {
+                None => Place::Whole,
+                Some(state) => match state.gallery().shows_gallery_pane() {
+                    true => Place::ArtboardGallery,
+                    false => Place::ArtboardCanvas,
+                },
+            },
+            Screen::Games
+            | Screen::Lateania
+            | Screen::Rebels
+            | Screen::Nethack
+            | Screen::Dcss
+            | Screen::Brogue
+            | Screen::Dopewars
+            | Screen::Bashquest
+            | Screen::Codekeep
+            | Screen::Usurper
+            | Screen::GreenDragon
+            | Screen::Darkroom
+            | Screen::Leaderboard
+            | Screen::Clubhouse
+            | Screen::Nightcap
+            | Screen::City
+            | Screen::Zen
+            | Screen::DailyMatch
+            | Screen::Scratchpad => Place::Whole,
+        }
     }
 }
 

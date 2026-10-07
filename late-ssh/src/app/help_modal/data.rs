@@ -1,7 +1,7 @@
 use crate::app::ai::ghost::GRAYBEARD_MENTION_COOLDOWN;
 use crate::app::common::primitives::thousands;
 use crate::app::common::qr::{Barcode, HalfBlock};
-use crate::app::common::username_effect::CROWN_GLYPH;
+use crate::app::common::username_effect::{CROWN_GLYPH, CROWN_LAUREATE_GLYPH};
 use late_core::models::{
     article::{NEWS_SHARE_MAX_PAID_PER_DAY, NEWS_SHARE_REWARD_CHIPS},
     asterion::ASTERION_DAILY_ESCAPE_PAYOUT,
@@ -185,7 +185,7 @@ pub(crate) fn bot_app_context() -> String {
         CRITICAL FACTS:\n\
         - Chat username badges render in this order: bracketed last-month leaderboard awards, special role badges, bonsai stage, chat badge, chat flag, burn milestone, then the LIVE tag and the away glyph (\u{1F4A4}), which shows on its own after 30 quiet minutes across every session, or at once with /brb. The crown prints immediately after the name, and a rented title after that, ahead of the whole stack, as \"name \u{1F451}, the night clerk\".\n\
         - The Clubhouse (page 0, the Late Lounge tavern) is the landing screen: a walkable ASCII room where everyone online is present. Arrows/hjkl walk, i says something (it floats over your head and lands in #lounge), w waves, x dances, Enter interacts with a landmark. This is where you (@bartender) keep the bar. Out back, through the back door past the end of the counter (or n from anywhere in the Clubhouse), is Nightcap: a quiet six-stool bar with its own chat that only the seated may speak in (1-6 sit or stand, i talks once seated), a fixed drink menu on d (house beer 100, whiskey neat 250, old fashioned 500, top shelf 1,000 chips, r buys the other stools a round; a banked round credit only covers the house beer), c to carve one line into your stool for the next sitter to find, and Esc back inside. No bot, including you, ever answers out there, and what is said at the bar stays there: it is not on Home, not in search, and not in mentions.\n\
-        - @bartender pours drinks for Late Chips: mention him (or press t at the bar) to order. There is no fixed menu; he invents each drink's name and prices it 100-1000 chips, never more than the patron can spend while keeping a 100-chip floor untouched. A brand-new patron's first-ever drink is free. He pours only for the person ordering; \"@bartender buy @user a drink\" costs 200 chips and puts one drink credit on someone else's tab to redeem when they order, even if they are offline. It expires after 24 hours; a patron can hold at most three. Only that exact instruction buys a personal drink.\n\
+        - @bartender pours drinks for Late Chips: mention him (or press t at the bar) to order. There is no fixed menu; he invents each drink's name and prices it 100-1000 chips, never more than the patron can spend while keeping a 100-chip floor untouched. A brand-new patron's first-ever drink is free. He pours only for the person ordering; \"@bartender buy @user a drink\" (or \"I'll get @user a beer\", \"pour @user one\", \"one for @user\", \"@user's next one is on me\") costs 200 chips and puts one drink credit on someone else's tab to redeem when they order, even if they are offline. It expires after 24 hours; a patron can hold at most three. The bar rings it up only as a plain order naming exactly one person: the words have to start the sentence, it is never a question, and never in the same message as a round.\n\
         - Drinking builds a buzz that levels up: 0 sober, 1 tipsy, 2 buzzed, 3 sloshed, 4 wasted. Every non-sober level prints its word beside the name. Once wasted, the bartender cuts a patron off to water or coffee instead of more drinks.\n\
         - The buzz sobers up on its own over time, no action needed, whether the patron is online or not: it decays 334 points an hour, so reaching wasted wears off in about six hours and even a maxed-out binge is fully sober again half a day later.\n\
         - A buzz also comes out in your typing, in public rooms only (never DMs or private rooms). Letters inside a word get shuffled, more of them the drunker you are, but the first and last letter of every word stay put so it always stays readable. Tipsy is the odd stumbled word; wasted is most of the sentence, plus a *hic* dropped mid-sentence in about a third of messages (and once in a while at sloshed). Handles, room slugs, links, and code in backticks are never touched. The slurring is saved with the message, so it does not clear up when you sober up later.\n\
@@ -194,11 +194,12 @@ pub(crate) fn bot_app_context() -> String {
         - Users miss their DMs the same way. A DM carrying unread messages is lifted out of the DM list at the bottom of the Home (page 1) room rail into an \"unread dms\" group directly under core, with its unread count beside it; once read it drops back into \"dms\" as soon as the user moves to another room. Favorited DMs stay in favorites instead, and a DM whose peer is ignored appears nowhere. Ctrl+/ also lists DMs unread-first, and /dm @user opens one.\n\
         - The Games hub (page 3) is the dedicated landing for the door games Lateania, NetHack, DCSS, Brogue, Usurper, Green Dragon, A Dark Room, dopewars, CodeKeep, BashQuest, and Rebels; each is launched from there, not from its own top-level page. The hub also has an info card for our Minecraft server; see the Minecraft topic. A Dark Room is the odd one out: it is an incremental, so it grows on its own while you are connected to late.sh (about three hours of village time a day, wherever you are in the app) instead of being played in one sitting. It is also the only door with an ending, and it has two of them: flying the starship out pays 15,000 chips and the [ADE] badge, and doing it while carrying the fleet beacon taken off the immortal wanderer on the ravaged battleship pays 20,000 and the [ADB] badge. They are claimed separately, so one account can earn both. The chips land for every run that gets out, because the save is wiped on the way out and a repeat is the whole arc again; the badge lands once per account. The battleship itself only appears on the map once the account has finished the game at least once, so a first run never meets it.\n\
         - The three roguelikes (NetHack, DCSS, Brogue) support stepping out mid-game: pressing ` inside a running game detaches it (the game keeps running, saved-state intact) and hops along the backtick cycle to the next live dungeon or back to Home chat (or Zen, when you went in from Zen). Resume from the hub card (a green dot marks a game in progress, Enter resumes) or by pressing ` again from Home or Zen. A detached game idle for 20 minutes is closed with a clean save, and it also saves if the session drops. Inside DCSS this costs crawl's own ` repeat-command key.\n\
+        - Anyone's running NetHack, DCSS or Brogue game can be watched, read-only: the Games hub rail lists who is playing under `live` (where they are, how long, who else watches), and sitting on a row previews their screen; Enter opens it across the page with that player's watch chat beside it, ` hops away with the watch kept open, Esc steps back. A game that just started also shows on the live strip (o opens it). The player sees their watchers' chat beside their game (t on the card hides it for them) and the watcher count in the chrome; F2 or a click on that pane opens a composer in it, Enter sends and hands the keys back to the game, Esc discards. On a terminal too narrow for the pane the chat is one read-only row under the game.\n\
         - Lateania rides the backtick cycle too, with a twist: pressing ` inside the world hops out like a single-press leave (the character autosaves out of the world, same as a confirmed Esc), and for the next 5 minutes Lateania stays a stop on the cycle, so ` from Home hops straight back into the same character, skipping the character-select gate. While that window is live the Games hub sidebar marks Lateania with the same green dot the roguelikes get. An explicit Esc-Esc leave drops it off the cycle immediately.\n\
         - A Dark Room and Green Dragon ride the backtick cycle too, as its last stops after Lateania and the roguelikes: pressing ` inside either hops onward with the door still loaded (the village keeps growing, the character stays listed as online), and ` from Home hops back in. While loaded they wear the same green in-progress dot on the Games hub sidebar. A loaded door left alone for 30 minutes (no key in it and its screen not open) ends its visit with the same save an explicit leave does and drops off the cycle; in Green Dragon that also drops the online flag, so an absent character becomes an ordinary sleeping PvP target. Two keys the hop never takes: a ` typed into a Green Dragon talk line stays a character, and there is no hopping out of a Green Dragon fight or mid-ascent in A Dark Room.\n\
         - NetHack and DCSS take a per-account config file (.nethackrc / init.txt): press c on their Games hub card (or their landing page) to open a paste box, paste the whole file to save it, x clears back to defaults. It is stored on the account and applied at every launch, including resumes after a hangup-save. Brogue keeps its config per-player upstream already, so it has no paste box.\n\
         - Profiles page 5 lists people: one row per user who shared a project or posted a work card. Artboard has detailed page-local editing keybinds.\n\
-        - Leaderboards page 6 holds every board. The Games section leads: Lateania Adventurers (living characters by level, class shown on the row) and Lateania Frontier (deepest Frontier zone walked), then a board triple for each roguelike door in DCSS, NetHack, Brogue order: Wins (all-time), Deepest Dive, and Top Score (monthly + all-time), fed spoof-proof from the games' own log files, seconds after a game ends. Then Top Chips, Arcade Wins, per-game daily win counts, and per-game high scores, each with monthly and all-time standings. A trailing Badge Guide entry explains what every award code means, how it is earned, and whether it pays chips. Daily quests render at the top of The Arcade (page 2). The Shop opens with Ctrl+S or the /shop composer command; active games, profile/job editors, and Artboard input keep their local Ctrl+S bindings.\n",
+        - Leaderboards page 6 holds every board. The Boards section leads: Top Chips, Arcade Wins, Late Time (monthly + all-time), and Top Drinkers (buzz points from every drink you take, whoever paid, monthly + yearly). Then the Games section: Lateania Adventurers (living characters by level, class shown on the row) and Lateania PvP (rivals slain in the Wildbound Waste), then a board triple for each roguelike door in DCSS, NetHack, Brogue order: Wins (all-time), Deepest Dive, and Top Score (monthly + all-time), fed spoof-proof from the games' own log files, seconds after a game ends. Then per-game daily win counts and per-game high scores, each with monthly and all-time standings. A trailing Badge Guide entry explains what every award code means, how it is earned, and whether it pays chips. Daily quests render at the top of The Arcade (page 2). The Shop opens with Ctrl+S or the /shop composer command; active games, profile/job editors, and Artboard input keep their local Ctrl+S bindings.\n",
     );
     for topic in HelpTopic::ALL {
         out.push_str(&format!("## {}\n", topic.title()));
@@ -283,16 +284,16 @@ fn pair_help_lines(listen_url: &str) -> Vec<String> {
         "                           cargo build --release --bin late".to_string(),
         "".to_string(),
         "What `late` unlocks".to_string(),
-        "  audio       Icecast playback and visualizer on your machine".to_string(),
+        "  audio       radio playback and visualizer on your machine".to_string(),
         "  youtube     embedded webview hosts the shared queue locally".to_string(),
         "  clipboard   /paste-image reads your OS clipboard image into chat".to_string(),
         "  voice       talk in voice rooms with your mic (linux + windows; plain SSH only shows status)".to_string(),
         "  desktop     now playing shows in your desktop media widget (linux)".to_string(),
-        "  controls    m mute, +/- volume, v+x source, v+v Music Booth".to_string(),
+        "  controls    m mute, +/- volume, v+x source, v+r stations, v+v Music Booth".to_string(),
         "".to_string(),
         "Listen without the CLI".to_string(),
         "  Open the link below on any device, or scan the QR.".to_string(),
-        "  It plays the house streams, Nightride, and the community YouTube".to_string(),
+        "  It plays every radio station and the community YouTube".to_string(),
         "  queue in a plain browser tab. No pairing, no session, nothing to".to_string(),
         "  install, so it works from a phone or a locked-down laptop.".to_string(),
         "  Listening only: chat, games and the rest stay in the terminal.".to_string(),
@@ -508,13 +509,17 @@ fn chips_help_lines() -> Vec<String> {
         "".to_string(),
         "9. The crown".to_string(),
         format!("  One slot, one holder, one {CROWN_GLYPH} after their name in every message they send."),
-        "  /crown shows who wears it and what taking it costs. /crown take buys it.".to_string(),
+        "  /crown shows who wears it and what taking it costs. /crown take buys it at that price.".to_string(),
         format!("  A vacant crown costs {}. After that it costs 1.5x whatever the holder paid, rounded up,", thousands(CROWN_MIN_PRICE)),
         "  so the price ratchets on its own and nobody sets it.".to_string(),
+        "  /crown take N bids N chips instead, any amount at or above the price. You pay all of it,".to_string(),
+        "  and the next price is 1.5x your bid: overpay to put the crown out of a rival's reach.".to_string(),
+        "  A bid that the price has climbed past by the time it lands is refused, and nothing is charged.".to_string(),
         "  Every chip is destroyed: the crown pays nobody, and none of it comes back into the economy.".to_string(),
         "  There is no cooldown: anyone can take it off you the moment you have it, at 1.5x. You cannot take a crown you already wear.".to_string(),
         "  It empties at the end of every UTC month: the crown goes back to vacant, and whoever wore it".to_string(),
-        "  when the month ended keeps the permanent [CRWN] badge for that month.".to_string(),
+        format!("  when the month ended wears a {CROWN_LAUREATE_GLYPH} before their name in chat all the next month,"),
+        "  and keeps the permanent [CRWN] badge for that month on their profile.".to_string(),
         "  Every takeover posts to #lounge, naming both players.".to_string(),
         "  Like Shop spending, the crown does not count against Top Chips.".to_string(),
         "".to_string(),
@@ -599,7 +604,7 @@ pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "  /icons             open emoji / nerd font picker",
         "  /picker            open the room picker (same as Ctrl+/)",
         "  /petname [name]    show or set your pet's name",
-        "  /brb               show as away now; your next key brings you back",
+        "  /brb [reason]      post brb here, away until your next key",
         "  /coffee            post a coffee cup",
         "  /tea               post a tea cup",
         "  /ultimate          open owned Ultimate Spells",
@@ -649,9 +654,11 @@ pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "                     messages), rooms you are not in, what we were reading; pops",
         "                     once a day at login (after the tour, on a first visit)",
         "                     (Ctrl+O Tweaks → Daily paper at login turns the pop off)",
-        "                     j/k, arrows or wheel scroll; drag the scrollbar or click",
+        "  /paper 2026-09-14  an older edition, if graybeard printed one that day",
+        "                     ←/→ (h/l) in the paper leaf to the previous/next edition",
+        "                     j/k, ↑/↓ or wheel scroll; drag the scrollbar or click",
         "                     its track to page. Esc/q/Enter or [x] closes the paper.",
-        "                     admins: /paper on|off, outside on|off, print, preview, reset",
+        "                     admins: /paper print, preview, reset",
         "",
         "Global chat keys",
         "  Ctrl+O             open your settings modal anywhere",
@@ -706,7 +713,7 @@ pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "Polls",
         "  /poll              create a 10/20/30-minute poll in the selected Home room",
         "  va / vb / vc       vote while a poll is visible",
-        "  v1 / v2 / v3       select music streams/stations",
+        "  v1 .. v5           tune to a pinned radio station",
         "  limit              one active poll per room",
         "  author             the strip names who started the poll, when it fits",
         "",
@@ -973,7 +980,7 @@ fn directory_help_lines() -> Vec<String> {
         "  n                 post a job of your own: company, role, link, where, regions, stack, pay, excerpt; live at once, three a person",
         "  d                 take down a posting made here: your own, or any when you moderate",
         "  for you           your own open or casual card shows its best matches on the People shelf; The Late Edition prints NEW WORK from yesterday's releases the same way",
-        "  /jobs             open the shelf from anywhere; /jobs post opens the form; admins: /jobs pull, /jobs release, /jobs on|off",
+        "  /jobs             open the shelf from anywhere; /jobs post opens the form; admins: /jobs pull, /jobs release",
         "",
         "Public web profile",
         "  /profiles         public index of work profiles; open first, then casual, then not-looking",
@@ -1032,9 +1039,11 @@ fn arcade_help_lines() -> Vec<String> {
         "  [24#]     2048",
         "  [SN]      Snake",
         "  [CRWN]    The Crown, to whoever wore it when the month ended.",
-        "            No rank digit: the crown has one holder.",
+        "            Profile only: in chat the winner wears a crown before their name.",
         "  [LATE]    Late Time, to whoever spent the most time online that month.",
         "            First place only, so no rank digit either.",
+        "  [DRNK]    Top Drinkers, to whoever took the most buzz from drinks that month.",
+        "            First place only, no rank digit, no chips.",
         "  [ART]     Artboard Gallery: your most applauded piece of the month. Top 3 by best piece,",
         "            3 applause to count, and the one ranked badge that pays: 40,000 / 15,000 / 10,000 chips.",
         "  The door badges are one-off feats, shown with no rank digit. The badge lands the first",
@@ -1327,9 +1336,10 @@ fn overview_lines() -> Vec<String> {
         "  m                 mute paired client",
         "  + / -             paired client volume",
         "  v then v          open the Music Booth (submit + queue + votes)",
-        "  v then x          cycle audio source: Icecast → YouTube → Radio",
+        "  v then x          switch audio source: Radio ⇄ YouTube",
         "  v then s          skip-vote the current YouTube track",
-        "  v then 1..5       select stream/station in the active source",
+        "  v then 1..5       tune to a pinned station (radio active)",
+        "  v then r          open Stations: every radio, live now-playing, pin to v1..v5",
         "  w, m, + / - and the v music prefix are off on the Artboard: that page",
         "  spends those letters itself (v applauds; m opens gallery moderation for staff)",
         "",
@@ -1404,8 +1414,7 @@ fn architecture_lines() -> Vec<String> {
         "  services publish watch snapshots and broadcast events into SSH sessions",
         "",
         "Audio stack",
-        "  Icecast has chill and classical house streams",
-        "  Radio has Nightride guest stations",
+        "  Radio is a station catalogue: Nightride, Nightwave Plaza, Code Radio, Radio Paradise, FIP and Radio Swiss guest stations plus the lofi and classical house streams",
         "  Liquidsoap manages the house playlists",
         "  the paired CLI plays audio locally; late.sh/listen plays the same sources in a browser",
         "",
@@ -1455,6 +1464,7 @@ fn news_help_lines() -> Vec<String> {
             "  Enter in composer submit link",
             "  Esc               cancel URL entry",
             "  j / k             browse stories",
+            "  r                 reply in #lounge quoting the selected story",
             "  d                 delete your own story",
             "  /                 toggle filter to only your stories",
             "  o on live strip   open the news item modal",
@@ -1586,12 +1596,30 @@ fn settings_help_lines() -> Vec<String> {
         "".to_string(),
         "Modal controls".to_string(),
         "  Tab / Shift+Tab switch settings tabs".to_string(),
+        "  Click a tab or row to activate it immediately; [x] closes the foreground dialog".to_string(),
+        "  Wheel scrolls only the pane under the pointer, three visual rows per notch".to_string(),
+        "  Scrolling changes neither selection nor settings; keyboard navigation reveals its row".to_string(),
+        "  Clicking away from a text field saves it, the same as Enter".to_string(),
+        "  Click a field to place the caret; Save/Cancel mirror Enter/Esc; Bio has Done (Esc saves)".to_string(),
+        "  Themes: click to apply, headings to fold, ☆/★ to favorite, search to filter".to_string(),
+        "  Statusline: labels open options; checkboxes toggle; [↑↓] arrows reorder".to_string(),
+        "  Amber ◂/▸ controls cycle backward/forward; ordinary row/value clicks cycle forward".to_string(),
+        "  Target language and Interaction mode: Enter/Space opens a chooser; Left/Right still cycles".to_string(),
+        "  Language search matches English/native names and stored codes. Profile Langs uses the tag picker".to_string(),
+        "  Interaction mode offers Keyboard, Mouse, Hybrid; Keyboard disables clicks and wheel input".to_string(),
+        "  Statusline Label and component options use ◂/▸; Brief and Auto-hide are toggles".to_string(),
+        "  Sidebar panels: click toggles; [↑↓] arrows reorder. Chat badges: click toggles".to_string(),
+        "  Right sidebar: mode arrows change this device; its label or [Panels] opens panels, even when Off".to_string(),
+        "  Country/timezone/Target language/Interaction mode: Enter or click a result applies; Esc/[x] cancels".to_string(),
+        "  RSS: click subscriptions to select; Add, Remove, Refresh manage them".to_string(),
+        "  Account: click fields, choices and buttons; typed confirmations still apply".to_string(),
+        "  Mouse controls are disabled in keyboard-only interaction mode".to_string(),
         "  j / k or arrows move rows".to_string(),
         "  Left / Right cycle option rows".to_string(),
         "  Enter / e edit text or open pickers".to_string(),
         "  Space quick-cycles simple toggles".to_string(),
         "  Pickers: type to filter, Enter pick, Esc cancel".to_string(),
-        "  Custom sidebar: Enter on Custom opens the three-page checklist".to_string(),
+        "  Sidebar panels: Enter on Right sidebar opens the ordered checklist".to_string(),
         "  Statusline: Space toggles a component; Enter opens its options"
             .to_string(),
         "  Account: Enter opens Invites, Link Accounts, IRC access token, or Delete Account"
@@ -1619,14 +1647,14 @@ fn settings_help_lines() -> Vec<String> {
         "  Linking is unavailable while either account has an active ban.".to_string(),
         "".to_string(),
         "Account deletion".to_string(),
-        "  Settings > Account > Delete Account opens delete confirmation; type DELETE to confirm".to_string(),
+        "  Settings > Account > Delete Account opens delete confirmation; type your current username to confirm".to_string(),
         "".to_string(),
         "Tweaks tab".to_string(),
         "  Power-user toggles, grouped by area:".to_string(),
         "  Appearance".to_string(),
         "    Sync terminal background  paint your terminal's background to match the theme; off (or the Terminal theme) leaves your terminal's own background alone. Selections and highlights inside the app are part of the theme itself, not this toggle"
             .to_string(),
-        "    Text Brightness         nudge overall text brightness up or down".to_string(),
+        "    Text Brightness         nudge overall text brightness up or down; click ◂ / ▸ to decrease / increase".to_string(),
         "    Right sidebar           on / off / auto for Home and Arcade; Enter opens a panel checklist"
             .to_string(),
         "    Room list               on / off / auto for the Home room-list rail".to_string(),
@@ -1997,19 +2025,18 @@ fn bonsai_help_lines() -> Vec<String> {
 const MUSIC_PAIR_TEXT: &str = "\
 Music controls
 
-late.sh has three music sources:
+late.sh has two music sources:
 
-  Icecast    24/7 house radio with chill and classical streams.
+  Radio      a station catalogue: Nightride guest stations (chillsynth, nightride, datawave, spacesynth, ambient, darksynth, horrorsynth, ebsm), Nightwave Plaza (plaza), freeCodeCamp Code Radio (code radio), Radio Paradise (main mix, mellow, rock, globe, beyond, kfat), FIP (fip jazz), Radio Swiss (swiss jazz, swiss classic) and the late.sh house streams (lofi, classical). More stations arrive as they are cleared.
   YouTube    a shared queue everyone can submit links to.
-  Radio      direct Nightride guest stations.
 
-Your paired client plays the selected source. Use v then 1..5 to select a stream or station inside the active source.
+Your paired client plays the selected source. Pin up to five stations behind v1..v5 and open Stations (v then r) to browse the whole catalogue with live now-playing.
 
 Plain stream, no pairing:
   vlc https://late.sh/stream
   mpv https://late.sh/stream
 
-Direct stream playback is Icecast only. Pair the CLI or browser for source switching, mute/volume keys, visualizer sync, or the shared YouTube queue.
+Direct stream playback is the house streams only. Pair the CLI for source switching, stations, mute/volume keys, visualizer sync, or the shared YouTube queue.
 
 No sound from the paired CLI on Linux?
   The CLI plays audio through ALSA. On a PipeWire system with no ALSA compatibility layer, it finds no output device.
@@ -2018,7 +2045,7 @@ No sound from the paired CLI on Linux?
 Now playing on your desktop (Linux)
   The paired CLI publishes the current track over MPRIS, the D-Bus standard your desktop already uses for media players.
   GNOME's top bar, KDE's tray, lock screens, and panel applets pick it up on their own. There is nothing to switch on: it appears once `late` is running and paired.
-  Every source reports title and artist. YouTube tracks add duration, the video thumbnail, and a watch link; Icecast adds track length.
+  Every source reports title and artist. YouTube tracks add duration, the video thumbnail, and a watch link; house stations add track length.
   Play/pause from the widget, or your keyboard's media keys, mutes and unmutes the paired client, the same as pressing m here. The volume slider works too.
   The controls travel through the server to every paired player, so they cover all sources, YouTube included, and this terminal always agrees with the widget.
   Machines with no session bus (headless boxes, containers, some WSL setups) simply get nothing. Audio and everything else carry on as normal.
@@ -2028,12 +2055,13 @@ Global keys (work anywhere)
   m                 mute paired client
   + / -             volume up / down
 
-Select stream or station
-  Icecast active: v then 1 / 2 selects chill / classical
-  Radio active:   v then 1..5 selects Chillsynth / Nightride / Datawave / Spacesynth / Ambient
+Tune a station
+  v then 1..5       tune to the station pinned in that slot (radio active)
+  v then r          open Stations: ↑↓ move, Enter listen, 1-5 pin to a slot, 0 unpin, Esc close
+                    every row shows what that station is playing right now, so you can check before you switch
 
 Swap which source you hear
-  v then x          cycle your paired client through Icecast → YouTube → Radio. Your choice is saved per-user, so a refresh keeps it.
+  v then x          switch your paired client between Radio and YouTube. Your choice is saved per-user, so a refresh keeps it.
 
 Music Booth (v then v)
 

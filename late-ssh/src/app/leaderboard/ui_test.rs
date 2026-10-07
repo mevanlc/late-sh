@@ -166,7 +166,13 @@ fn paired_columns_share_scroll_and_keep_headings_fixed() {
     use late_core::models::leaderboard::{BoardWindows, LeaderboardData};
     use ratatui::{Terminal, backend::TestBackend};
     let mut state = LeaderboardPageState::new();
-    state.select(2); // Late Time has paired windows.
+    // Late Time has paired windows.
+    let late_time = state
+        .boards()
+        .iter()
+        .position(|board| *board == Board::TimeOnline)
+        .unwrap();
+    state.select(late_time);
     let entries: Vec<_> = (1..=40)
         .map(|rank| {
             entry(
@@ -448,8 +454,8 @@ fn rail_groups_boards_under_headers_at_roster_boundaries() {
         text(&lines[1])
     );
     assert_eq!(selected_line, 1);
-    // The three bespoke boards, then a blank and the "Games" header.
-    let games_header = 1 + 3 + 1;
+    // The four bespoke boards, then a blank and the "Games" header.
+    let games_header = 1 + 4 + 1;
     assert_eq!(text(&lines[games_header - 1]), "");
     assert!(
         text(&lines[games_header]).contains("Games"),
