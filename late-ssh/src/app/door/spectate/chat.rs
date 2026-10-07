@@ -6,11 +6,13 @@
 //   feeds the chat pane beside the watched screen, where they read and type.
 //   Only an open watch drives it: a preview beside the rail has no chat, so
 //   browsing the live rows joins nobody's room;
-// - a player's link (`App::own_watch_chat`) lives while their own game runs
-//   and feeds the read-only pane beside it (one line under it on a narrow
-//   terminal). The player only reads: every key they press still goes to the
-//   game. The `show_watch_chat` profile setting turns their side off; the
-//   watchers keep talking either way.
+// - a player's links (`App::own_watch_chats`, one per watchable door with a
+//   game of theirs running, detached ones included) live while those games
+//   run and feed the read-only pane beside the game on screen (one line
+//   under it on a narrow terminal). The player reads, and answers from the
+//   pane: F2 or a click there opens the room's composer, the one time keys
+//   leave the game (`App::handle_input`). The `show_watch_chat` profile
+//   setting turns their side off; the watchers keep talking either way.
 //
 // `tick` drives both links from `App::tick`.
 
@@ -45,46 +47,89 @@ pub fn tick(app: &mut App) -> bool {
         );
     }
 
-    // The player's own link follows their running game: made when it starts
-    // (or the setting comes on), dropped when it ends (or the setting goes
-    // off).
-    let wanted = own_game(app);
-    let held = app
-        .own_watch_chat
-        .as_ref()
-        .map(|link| (link.game(), link.playname()));
-    if held != wanted.as_ref().map(|(game, name)| (*game, name.as_str())) {
-        app.own_watch_chat = wanted.map(|(game, name)| ChatLink::new(game, name));
-        changed = true;
+    // The player's own links follow their running games: one made when a
+    // game starts (or the setting comes on), dropped when it ends (or the
+    // setting goes off).
+    let wanted = own_games(app);
+    let (kept, dropped): (Vec<ChatLink>, Vec<ChatLink>) = std::mem::take(&mut app.own_watch_chats)
+        .into_iter()
+        .partition(|link| {
+            wanted
+                .iter()
+                .any(|(game, name)| link.game() == *game && link.playname() == name)
+        });
+    app.own_watch_chats = kept;
+    changed |= !dropped.is_empty();
+    // A composer open in a dropped link's room (the game ended, or `t`
+    // turned the pane off) has nowhere left to send: it closes with the link.
+    for link in dropped {
+        if let Some(room_id) = link.room_id()
+            && app.chat.composer_room_id() == Some(room_id)
+        {
+            app.chat.reset_composer();
+        }
     }
-    if let Some(link) = app.own_watch_chat.as_mut() {
+    for (game, name) in wanted {
+        let linked = app
+            .own_watch_chats
+            .iter()
+            .any(|link| link.game() == game && link.playname() == name);
+        if !linked {
+            app.own_watch_chats.push(ChatLink::new(game, name));
+            changed = true;
+        }
+    }
+    for link in app.own_watch_chats.iter_mut() {
         changed |= drive(link, &app.live_games, &app.chat, app.repaint_signal.clone());
     }
 
     changed
 }
 
-/// The running game this session's player should see watcher chat under.
-fn own_game(app: &App) -> Option<(SpectateGame, String)> {
+/// The running games this session's player should see watcher chat beside.
+fn own_games(app: &App) -> Vec<(SpectateGame, String)> {
     match app.profile_state.profile().show_watch_chat {
-        true => own_running_game(app),
-        false => None,
+        true => own_running_games(app),
+        false => Vec::new(),
     }
 }
 
-/// This session's own running game on a watchable door, by its door and the
+/// This session's own running games on the watchable doors, by door and the
 /// player's handle.
-pub(crate) fn own_running_game(app: &App) -> Option<(SpectateGame, String)> {
-    let state = app.dcss_state.as_ref()?;
-    if !state.is_running() {
-        return None;
-    }
-    match state.handle_status() {
-        HandleStatus::Claimed(handle) => Some((SpectateGame::Dcss, handle)),
-        HandleStatus::Loading
-        | HandleStatus::Missing { .. }
-        | HandleStatus::Claiming
-        | HandleStatus::Failed => None,
+pub(crate) fn own_running_games(app: &App) -> Vec<(SpectateGame, String)> {
+    SpectateGame::ALL
+        .into_iter()
+        .filter_map(|game| Some((game, own_running_handle(app, game)?)))
+        .collect()
+}
+
+/// The handle this session's player runs `game` under, while a game of
+/// theirs is running there.
+pub(crate) fn own_running_handle(app: &App, game: SpectateGame) -> Option<String> {
+    let (running, handle) = match game {
+        SpectateGame::Dcss => {
+            let state = app.dcss_state.as_ref()?;
+            (state.is_running(), state.handle_status())
+        }
+        SpectateGame::Nethack => {
+            let state = app.nethack_state.as_ref()?;
+            (state.is_running(), state.handle_status())
+        }
+        SpectateGame::Brogue => {
+            let state = app.brogue_state.as_ref()?;
+            (state.is_running(), state.handle_status())
+        }
+    };
+    match (running, handle) {
+        (true, HandleStatus::Claimed(handle)) => Some(handle),
+        (false, _)
+        | (
+            true,
+            HandleStatus::Loading
+            | HandleStatus::Missing { .. }
+            | HandleStatus::Claiming
+            | HandleStatus::Failed,
+        ) => None,
     }
 }
 

@@ -310,6 +310,7 @@ async fn run_bridge(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn bridge_loop(
     cmd_rx: &mut mpsc::Receiver<Command>,
     out_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
