@@ -1279,7 +1279,7 @@ Content invariants worth preserving when editing `data.rs`:
 
 ### Keyboard shortcuts
 
-Left clicks on the frame's `0`–`6` screen numbers run before page-specific input handlers, including active Arcade games and Artboard hang/rating flows. App-wide modals retain input priority. Keyboard-only interaction mode ignores mouse reports; Zen has no frame or screen-number hit targets.
+Left clicks on the frame's `0`–`7` screen numbers run before page-specific input handlers, including active Arcade games and Artboard hang/rating flows. App-wide modals retain input priority. Keyboard-only interaction mode ignores mouse reports; Zen has no frame or screen-number hit targets.
 
 | Key | Context | Action |
 |-----|---------|--------|
