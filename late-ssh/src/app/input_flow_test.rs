@@ -2113,7 +2113,7 @@ async fn chat_room_switch_ctrl_keys_wrap() {
 }
 
 #[tokio::test]
-async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
+async fn chat_reaction_leader_routes_cancel_digits_and_wave() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "f-react-viewer").await;
     let author = create_test_user(&test_db.db, "f-react-author").await;
@@ -2146,13 +2146,13 @@ async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
     app.handle_input(b"f");
     wait_for_render_contains(&mut app, "1 👍").await;
 
-    // A non-digit closes the leader and is consumed instead of triggering its
+    // An unbound key closes the leader and is consumed instead of triggering its
     // ordinary message action. Check state directly instead of polling for the
     // absence of a reply banner.
     app.handle_input(b"r");
     assert!(
         !app.chat.is_reaction_leader_active(),
-        "non-digit input should close the reaction leader"
+        "unbound input should close the reaction leader"
     );
     assert!(
         app.chat.reply_target().is_none() && !app.chat.is_composing(),
@@ -2169,7 +2169,7 @@ async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
             .await
             .expect("load reaction")
             .is_none(),
-        "non-digit input should not react",
+        "unbound input should not react",
     );
 
     app.handle_input(b"f");
@@ -2210,6 +2210,50 @@ async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
         "extended f leader reaction to persist",
     )
     .await;
+
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "w 👋").await;
+    app.handle_input(b"w");
+    assert!(!app.chat.is_reaction_leader_active());
+    assert!(
+        !app.show_bonsai_modal,
+        "reaction leader owns w before the global Bonsai shortcut"
+    );
+    wait_until(
+        || async {
+            ChatMessageReaction::get_by_user_and_message(&client, message.id, viewer.id)
+                .await
+                .expect("load wave reaction")
+                .is_some_and(|reaction| reaction.icon == "👋")
+        },
+        "f w wave reaction to persist",
+    )
+    .await;
+    let plain = render_plain(&mut app);
+    assert!(
+        plain.contains("▸reaction target"),
+        "message selection should stay after waving: {plain:?}"
+    );
+    assert!(!plain.contains("w 👋"), "picker should close: {plain:?}");
+
+    app.handle_input(b"fw");
+    assert!(!app.chat.is_reaction_leader_active());
+    wait_until(
+        || async {
+            ChatMessageReaction::get_by_user_and_message(&client, message.id, viewer.id)
+                .await
+                .expect("load toggled wave reaction")
+                .is_none()
+        },
+        "repeating f w to remove the wave reaction",
+    )
+    .await;
+
+    app.handle_input(b"w");
+    assert!(
+        app.show_bonsai_modal,
+        "w opens Bonsai when the reaction leader is inactive"
+    );
 }
 
 #[tokio::test]

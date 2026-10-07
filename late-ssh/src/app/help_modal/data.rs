@@ -680,6 +680,7 @@ pub(crate) fn chat_help_lines(keep_composer_focused: bool) -> Vec<String> {
         "  g / G              clear selection (back to live view)",
         "  p                  open selected user's profile",
         "  f then 1-9        quick-react to selected message",
+        "  f then w          wave hi (👋) on selected message",
         "  f then 0          choose any icon-picker reaction",
         "  f then f          list reaction owners",
         "  Enter              jump to loaded original for selected reply",

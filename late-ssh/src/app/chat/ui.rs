@@ -51,7 +51,18 @@ use super::ui_text::{
     wrap_chat_entry_to_lines,
 };
 
-const REACTION_PICKER_KEYS: [i16; 9] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+const REACTION_PICKER_CHOICES: [(&str, i16); 10] = [
+    ("1", 1),
+    ("2", 2),
+    ("3", 3),
+    ("4", 4),
+    ("5", 5),
+    ("6", 6),
+    ("7", 7),
+    ("8", 8),
+    ("9", 9),
+    ("w", 0),
+];
 /// The gap between messages and composer: a blank breather row on top so the
 /// ticker doesn't read as one more chat line, then the ticker row itself
 /// hugging the composer. Two rows, always present, so the chrome never moves.
@@ -397,23 +408,28 @@ fn pick_composer_title_text(view: &ComposerBlockView<'_>, block_width: u16) -> S
     .to_string()
 }
 
-fn reaction_picker_choice_width(key: i16) -> usize {
-    1 + 1 + reaction_label(key).width()
+fn reaction_picker_choice_width(key: &str, kind: i16) -> usize {
+    Span::raw(key).width() + 1 + Span::raw(reaction_label(kind)).width()
 }
 
 fn reaction_picker_custom_width() -> usize {
-    "0 icon".width()
+    Span::raw("0 icon").width()
 }
 
-fn push_reaction_picker_choice(reaction_spans: &mut Vec<Span<'static>>, dim: Style, key: i16) {
+fn push_reaction_picker_choice(
+    reaction_spans: &mut Vec<Span<'static>>,
+    dim: Style,
+    key: &'static str,
+    kind: i16,
+) {
     reaction_spans.push(Span::styled(
-        key.to_string(),
+        key,
         Style::default()
             .fg(theme::AMBER())
             .add_modifier(Modifier::BOLD),
     ));
     reaction_spans.push(Span::styled(" ", dim));
-    reaction_spans.push(Span::styled(reaction_label(key), dim));
+    reaction_spans.push(Span::styled(reaction_label(kind), dim));
 }
 
 fn reaction_picker_placeholder_lines(dim: Style, width: usize) -> Vec<Line<'static>> {
@@ -422,9 +438,9 @@ fn reaction_picker_placeholder_lines(dim: Style, width: usize) -> Vec<Line<'stat
     let mut current_spans = Vec::new();
     let mut current_width = 0usize;
 
-    for key in REACTION_PICKER_KEYS {
+    for (key, kind) in REACTION_PICKER_CHOICES {
         let separator_width = usize::from(!current_spans.is_empty()) * 2;
-        let choice_width = reaction_picker_choice_width(key);
+        let choice_width = reaction_picker_choice_width(key, kind);
         if !current_spans.is_empty()
             && current_width + separator_width + choice_width > available_width
         {
@@ -435,7 +451,7 @@ fn reaction_picker_placeholder_lines(dim: Style, width: usize) -> Vec<Line<'stat
             current_spans.push(Span::styled("  ", dim));
             current_width += 2;
         }
-        push_reaction_picker_choice(&mut current_spans, dim, key);
+        push_reaction_picker_choice(&mut current_spans, dim, key, kind);
         current_width += choice_width;
     }
 

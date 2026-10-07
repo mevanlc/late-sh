@@ -1292,6 +1292,7 @@ Left clicks on the frame's `0`–`6` screen numbers run before page-specific inp
 | `j`/`k`, `Enter`, `c`, `x` | Lobby modal | Move selection; open a match / claim a challenge (with confirm); post an open challenge; cancel your own challenge |
 | arrows / `w/a/s/d`, `Space`/`Enter`, `r`, `p`, `Esc` | Daily match board | Move cursor (arrows go to the board only while it's your move); pick/play a move; resign (press twice); toggle piece graphics (chess); back to where the board was opened from (the Lobby modal, or the page the live strip was on: Home, or Zen) |
 | `i`, `j`/`k`, message-action keys | Daily match board / house table (with embedded chat) | Compose in the embedded chat; select messages; act on the selected message (reply/edit/delete/profile/copy/react). See `late-ssh/src/app/lobby/daily/CONTEXT.md`. |
+| `f` then `w` | Selected chat message | Wave hi (👋). Chat reaction shortcuts live in `late-ssh/src/app/chat/CONTEXT.md`. |
 | `` ` `` | Home / Daily match board / House table | Hop Home chat → each daily match waiting on your move (nearest deadline first) → each house table you're seated at (roster order) → each unfinished Arcade daily → each live door game → Home. Lives in `app/workspace/cycle.rs`. |
 | `w` | Bonsai modal | Water (once per UTC day, +200 chips) or replant a dead tree |
 | `Tab` / `n` / `Shift+Tab` / wheel | Bonsai modal | Select the next / previous live tip |

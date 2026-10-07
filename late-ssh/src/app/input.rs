@@ -4052,13 +4052,12 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return true;
     }
 
-    // While the reaction leader is armed, every digit belongs to it: `1`-`9`
-    // are the quick reactions and `0` opens the custom icon picker. Let them
-    // fall through to the chat message-action handler instead of the global
-    // page switch (`0` now lands on the Clubhouse, `1`-`6` on other pages).
+    // While the reaction leader is armed, its shortcuts belong to chat:
+    // `1`-`9` quick-react, `w` waves, and `0` opens the custom icon picker.
+    // Let them reach the message-action handler before global page/Bonsai keys.
     if matches!(
         byte,
-        b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9'
+        b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9' | b'w' | b'W'
     ) && ctx.screen == Screen::Dashboard
         && app.chat.is_reaction_leader_active()
     {

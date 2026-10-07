@@ -517,7 +517,8 @@ Keys:
 - Enter jumps from a reply to its loaded target.
 - `f` enters reaction leader mode.
 - `f` again while reaction leader is active opens reaction-owner overlay.
-- Digits `1..9` while reaction leader is active toggle quick reactions, exit reaction leader mode, and keep the message selected.
+- Digits `1..9` and `w` (👋, wave hi) while reaction leader is active toggle quick reactions, exit reaction leader mode, and keep the message selected.
+- Reaction leader shortcuts take priority over global page and Bonsai keys.
 - Digit `0` while reaction leader is active opens the icon picker for a custom reaction.
 
 Selection deltas are message-based, not row-based. Positive means older, negative means newer.
@@ -931,7 +932,7 @@ reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
 Reactions:
 - One reaction per `(message_id, user_id)`.
 - Reactions are stored as icon text in `chat_message_reactions.icon`.
-- Quick reaction keys `1..9` map to the default emoji set; `0` opens the full icon picker.
+- Quick reaction keys `1..9` map to the default emoji set; `w` waves hi (👋); `0` opens the full icon picker.
 - UI appends reaction footer chips under the message body.
 - Reaction summaries live in `message_reactions: HashMap<Uuid, Vec<ChatMessageReactionSummary>>`.
 - Reaction-owner overlay (`ff`) waits for a matching `ReactionOwnersListed` event keyed by `pending_reaction_owners_message_id`. The event also carries the message's gilds (`ChatMessageGild::list_for_message`, best tier first), which `reaction_owner_lines` lists above the reactions as one block per tier held (`◆◆◆ 1 Gold gild`, buyers under it), sharing the reaction blocks' name capping.
@@ -1100,6 +1101,7 @@ Cache:
 | `f` | Favorite/unfavorite the selected real room |
 | `[` / `]` | Move the selected favorite up/down in the room rail |
 | `f` then `1..9` | Quick-react to selected message |
+| `f` then `w` | Wave hi (👋) on selected message |
 | `f` then `0` | Open icon picker for a custom reaction |
 | `f` then `f` | Open reaction-owner overlay |
 | `Ctrl+]` | Open icon picker; inserts only into main chat composer |

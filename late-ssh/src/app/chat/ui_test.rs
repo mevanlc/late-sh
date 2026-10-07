@@ -1466,7 +1466,7 @@ fn reaction_picker_placeholder_uses_one_line() {
         .collect();
     assert_eq!(
         rendered,
-        "1 👍  2 🧡  3 😂  4 👀  5 🔥  6 🙌  7 🚀  8 🤔  9 💩  0 icon  f list"
+        "1 👍  2 🧡  3 😂  4 👀  5 🔥  6 🙌  7 🚀  8 🤔  9 💩  w 👋  0 icon  f list"
     );
 }
 
@@ -1488,7 +1488,7 @@ fn reaction_picker_placeholder_wraps_at_narrow_width() {
         rendered,
         vec![
             "1 👍  2 🧡  3 😂  4 👀  5 🔥  6 🙌  7 🚀  8 🤔",
-            "9 💩  0 icon  f list",
+            "9 💩  w 👋  0 icon  f list",
         ]
     );
 }
@@ -1549,6 +1549,10 @@ fn draw_composer_block_renders_reaction_picker_in_placeholder() {
     assert!(
         row_1.contains("9 💩"),
         "ninth reaction choice missing from {row_1:?}",
+    );
+    assert!(
+        row_1.contains("w 👋"),
+        "wave reaction choice missing from {row_1:?}",
     );
     assert!(
         row_1.contains("0 icon"),

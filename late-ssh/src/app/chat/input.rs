@@ -24,6 +24,7 @@ fn leader_reaction_emoji(byte: u8) -> Option<&'static str> {
         b'7' => Some(crate::app::chat::ui_text::reaction_label(7)),
         b'8' => Some(crate::app::chat::ui_text::reaction_label(8)),
         b'9' => Some(crate::app::chat::ui_text::reaction_label(9)),
+        b'w' | b'W' => Some(crate::app::chat::ui_text::reaction_label(0)),
         _ => None,
     }
 }
