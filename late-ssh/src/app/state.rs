@@ -946,6 +946,9 @@ pub struct App {
     /// View mode stays connected to the shared board but reserves global
     /// screen hotkeys like `1-4` and `Tab`.
     pub(crate) artboard_interacting: bool,
+    /// Consent lasts until this Artboard visit ends.
+    pub(crate) artboard_content_accepted: bool,
+    pub(crate) artboard_disclaimer_choices: std::cell::Cell<[Rect; 3]>,
     /// Page-5 Profiles feed state (filter, selection, search). Work and
     /// Showcase data continue to live on `ChatState`; this stores only the
     /// page-level view state over their merged feed.
@@ -1828,6 +1831,8 @@ impl App {
             scratchpad: None,
             directory_state: crate::app::directory::state::DirectoryState::new(),
             artboard_interacting: false,
+            artboard_content_accepted: false,
+            artboard_disclaimer_choices: std::cell::Cell::default(),
             dartboard_server,
             dartboard_provenance,
             artboard_snapshot_service,
@@ -2481,6 +2486,7 @@ impl App {
         }
 
         if self.screen == Screen::Artboard {
+            self.artboard_content_accepted = false;
             self.deactivate_artboard_interaction();
             self.leave_dartboard();
         }

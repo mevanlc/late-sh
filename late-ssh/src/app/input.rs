@@ -834,7 +834,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         return;
     }
 
-    if handle_tour_gate(app, &event) {
+    if !app.artboard_disclaimer_visible() && handle_tour_gate(app, &event) {
         return;
     }
 
@@ -979,6 +979,11 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     // Picker intercepts all input when open (ESC is handled via dispatch_escape).
     if app.icon_picker_open {
         handle_icon_picker_input(app, event);
+        return;
+    }
+
+    if app.artboard_disclaimer_visible() {
+        crate::app::artboard::disclaimer::handle_input(app, &event);
         return;
     }
 
@@ -2156,7 +2161,7 @@ fn dispatch_escape(app: &mut App) {
     }
     // A lone Esc skips the tour gate the same way, and would close the modal
     // or the practice table a stop is holding open.
-    if app.clubhouse.tutorial_forced_step().is_some() {
+    if app.clubhouse.tutorial_forced_step().is_some() && !app.artboard_disclaimer_visible() {
         return;
     }
     if app.show_help {
@@ -2280,6 +2285,10 @@ fn dispatch_escape(app: &mut App) {
     }
     if app.chat.has_image_modal() {
         close_image_modal(app);
+        return;
+    }
+    if app.artboard_disclaimer_visible() {
+        crate::app::artboard::disclaimer::handle_input(app, &ParsedInput::Byte(0x1B));
         return;
     }
     let ctx = InputContext::from_app(app);

@@ -319,6 +319,8 @@ struct DrawContext<'a> {
     /// requested on Home); the Lounge composer itself opens none.
     clubhouse_overlay: Option<&'a crate::app::common::overlay::Overlay>,
     artboard_interacting: bool,
+    artboard_disclaimer_visible: bool,
+    artboard_disclaimer_choices: &'a std::cell::Cell<[Rect; 3]>,
     leaderboard: &'a Arc<LeaderboardData>,
     now_playing: Option<&'a NowPlaying>,
     paired_client: Option<&'a ClientAudioState>,
@@ -486,6 +488,7 @@ impl App {
         self.leaderboard_page.clear_hit_regions();
 
         // Init theme and layout sync — preview settings-modal draft live while open.
+        let artboard_disclaimer_visible = self.artboard_disclaimer_visible();
         let active_theme_id = if self.show_settings {
             self.settings_modal_state
                 .draft()
@@ -1627,6 +1630,8 @@ impl App {
                         city_runner_looks: &self.runner_looks,
                         clubhouse_overlay: self.chat.overlay(),
                         artboard_interacting: self.artboard_interacting,
+                        artboard_disclaimer_visible,
+                        artboard_disclaimer_choices: &self.artboard_disclaimer_choices,
                         leaderboard: &self.leaderboard,
                         now_playing: now_playing.as_ref(),
                         paired_client: paired_client.as_ref(),
@@ -2031,7 +2036,13 @@ impl App {
                 }
             }
             Screen::Artboard => {
-                if let Some(state) = ctx.dartboard_state {
+                if ctx.artboard_disclaimer_visible {
+                    artboard::disclaimer::draw(
+                        frame,
+                        content_area,
+                        ctx.artboard_disclaimer_choices,
+                    );
+                } else if let Some(state) = ctx.dartboard_state {
                     artboard::ui::draw_game(
                         frame,
                         content_area,
@@ -3150,7 +3161,9 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         let gallery_focus = ctx
             .dartboard_state
             .map(|state| (state.gallery().focus(), state.gallery().is_framing()));
-        let hints: &[(&str, &str)] = if ctx.artboard_interacting {
+        let hints: &[(&str, &str)] = if ctx.artboard_disclaimer_visible {
+            &[("V", "view"), ("A", "always view"), ("B", "back to chat")]
+        } else if ctx.artboard_interacting {
             &[
                 ("active", "draw"),
                 ("Space", "drop"),
@@ -3195,20 +3208,29 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 ],
             }
         };
-        // The page's own help is Ctrl+P in every state, and the top border
-        // always says so (`?` is the global guide, here as everywhere).
-        let help_hint: &[(&str, &str)] = if ctx.artboard_interacting {
-            &[]
-        } else {
-            &[("Ctrl+P", "help")]
-        };
+        // The page's own help is Ctrl+P once content has been accepted
+        // (`?` is the global guide, here as everywhere).
+        let help_hint: &[(&str, &str)] =
+            if ctx.artboard_interacting || ctx.artboard_disclaimer_visible {
+                &[]
+            } else {
+                &[("Ctrl+P", "help")]
+            };
         for (key, desc) in hints.iter().chain(help_hint) {
+            let key_color = if ctx.artboard_disclaimer_visible {
+                match *key {
+                    "V" => ratatui::style::Color::Yellow,
+                    "A" => ratatui::style::Color::Red,
+                    "B" => ratatui::style::Color::Green,
+                    _ => theme::AMBER_DIM(),
+                }
+            } else {
+                theme::AMBER_DIM()
+            };
             spans.push(Span::styled("· ", Style::default().fg(theme::BORDER_DIM())));
             spans.push(Span::styled(
                 *key,
-                Style::default()
-                    .fg(theme::AMBER_DIM())
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(key_color).add_modifier(Modifier::BOLD),
             ));
             spans.push(Span::styled(
                 format!(" {desc} "),

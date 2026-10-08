@@ -11,6 +11,7 @@ Naming note: `Artboard` is the user-facing name. Code and upstream crates still 
 ## High-Level Model
 
 - Top-level screen: `Screen::Artboard`, key `4`, also reachable through `Tab` / `Shift+Tab`.
+- Settings → Tweaks → Artboard content disclaimer (`artboard_disclaimer` in account settings, default true) hides the entire page behind a double-bordered NSFW warning. Its choices are View (`V`, current visit), Always View (`A`, view and persist the tweak off), and Back to Chat (`B`/Esc, Home screen 1). Leaving resets one-visit consent. One all-yellow warning symbol sits on each side with five spaces to the wording, NSFW is red, and the choices start with yellow/red/green initials; explanations use theme text with dim parentheses. Superscript aside/footer use the theme faint text color and sit under the warning and above the bottom border. Choices are clickable except in keyboard-only mode. `disclaimer.rs` owns this gate, before gallery/editor input and without drawing art underneath; app modals keep priority. The first-visit tour also requires this choice at its Artboard stop.
 - Shared canvas: `dartboard_core::Canvas`, canonical size `384 x 192`.
 - Server: one in-process `dartboard_local::ServerHandle` per `late-ssh` process.
 - Session connection: created lazily when the user enters Artboard; dropped when leaving Artboard.

@@ -2042,6 +2042,14 @@ pub fn extract_paper_at_login(settings: &Value) -> bool {
         .unwrap_or(true)
 }
 
+/// Ask before displaying Artboard content on each visit. Enabled by default.
+pub fn extract_artboard_disclaimer(settings: &Value) -> bool {
+    settings
+        .get("artboard_disclaimer")
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
 /// Whether a player sees their watchers' chat beside a running door game
 /// (toggled from the door's landing). Defaults to true; off hides it from
 /// the player only, the watchers keep talking.

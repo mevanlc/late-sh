@@ -144,10 +144,11 @@ pub(crate) enum TweakRow {
     LandingPage,
     PaperAtLogin,
     ArtSplash,
+    ArtboardDisclaimer,
 }
 
 impl TweakRow {
-    pub(crate) const ALL: [TweakRow; 12] = [
+    pub(crate) const ALL: [TweakRow; 13] = [
         TweakRow::BackgroundColor,
         TweakRow::TextBrightness,
         TweakRow::RightSidebar,
@@ -160,6 +161,7 @@ impl TweakRow {
         TweakRow::LandingPage,
         TweakRow::PaperAtLogin,
         TweakRow::ArtSplash,
+        TweakRow::ArtboardDisclaimer,
     ];
 }
 
@@ -1154,6 +1156,9 @@ impl SettingsModalState {
             }
             TweakRow::PaperAtLogin => {
                 self.draft.paper_at_login ^= true;
+            }
+            TweakRow::ArtboardDisclaimer => {
+                self.draft.artboard_disclaimer ^= true;
             }
             TweakRow::InteractionMode => {
                 // Applied on the app (it flips the mouse live and persists on its
@@ -2701,6 +2706,7 @@ impl SettingsModalState {
             paper_at_login: draft.paper_at_login,
             show_watch_chat: draft.show_watch_chat,
             art_splash_mode: draft.art_splash_mode,
+            artboard_disclaimer: draft.artboard_disclaimer,
             terminal_images: draft.terminal_images,
             hidden_award_categories: draft.hidden_award_categories.clone(),
             show_flag_fallback: draft.show_flag_fallback,

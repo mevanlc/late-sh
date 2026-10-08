@@ -1,6 +1,162 @@
 //! App input integration tests against a real ephemeral DB.
 
 #[tokio::test]
+async fn artboard_disclaimer_hides_content_and_only_allows_the_current_visit() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "art-prompt-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "art-prompt-flow-it");
+    app.resize(80, 24).unwrap();
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Artboard may contain NSFW content").await;
+    let frame = render_plain(&mut app);
+    assert!(frame.contains("Always View"));
+    assert!(frame.contains("⁽ᵘˢᵘᵃˡˡʸ ᵇᵒᵒᵇⁱᵉˢ⁾"));
+    assert!(!frame.contains("GALLERY"));
+    assert!(!frame.contains("Mode       view"));
+    assert!(!frame.contains("rail j/k"));
+    app.handle_input(b"i\r \t5?");
+    app.handle_input(b"\x1b[200~private drawing\x1b[201~");
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(app.screen, Screen::Artboard);
+    assert!(!app.artboard_interacting);
+    assert!(app.artboard_disclaimer_visible());
+
+    app.handle_input(b"V");
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    assert!(
+        !app.artboard_interacting,
+        "V must not also activate editing"
+    );
+    app.handle_input(b"i");
+    app.handle_input(b"\x1b[200~PRIVATEART\x1b[201~");
+    wait_for_render_contains(&mut app, "PRIVATEART").await;
+    app.set_screen(Screen::Dashboard);
+    // Tab and the top-bar mouse shortcut enter through the same prompt.
+    app.set_screen(Screen::Games);
+    app.handle_input(b"\t");
+    assert!(app.artboard_disclaimer_visible());
+    assert!(!render_plain(&mut app).contains("PRIVATEART"));
+    app.handle_input(b"b");
+    assert_eq!(app.screen, Screen::Dashboard);
+    assert!(app.dartboard_state.is_none());
+    assert!(app.profile_state.profile().artboard_disclaimer);
+    app.handle_input(b"\x1b[<0;21;1M");
+    assert!(app.artboard_disclaimer_visible());
+    app.handle_input(b"v");
+    wait_for_render_contains(&mut app, "PRIVATEART").await;
+    app.handle_input(b"4");
+    assert!(
+        !app.artboard_disclaimer_visible(),
+        "same-screen navigation keeps consent"
+    );
+    app.set_screen(Screen::Dashboard);
+    app.handle_input(b"4\x1b");
+    wait_for_esc_effect(
+        &mut app,
+        |app| app.screen == Screen::Dashboard,
+        "art disclaimer",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn artboard_disclaimer_dont_remind_persists_and_settings_can_reenable_it() {
+    use crate::app::{
+        common::primitives::Screen,
+        settings_modal::state::{Tab, TweakRow},
+    };
+    use late_core::models::user::extract_artboard_disclaimer;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "art-dismiss-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "art-dismiss-flow-it");
+    // No tick yet: A must wait for the profile rather than save blank account fields.
+    app.handle_input(b"4A");
+    assert!(!app.artboard_disclaimer_visible());
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        app.tick();
+        let client = test_db.db.get().await.unwrap();
+        let stored = User::get(&client, user.id).await.unwrap().unwrap();
+        assert_eq!(stored.username, user.username);
+        if !extract_artboard_disclaimer(&stored.settings) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "Always View was not persisted"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut reloaded = make_app(test_db.db.clone(), user.id, "art-dismiss-reload-it");
+    reloaded.handle_input(b"\x0f");
+    wait_for_render_contains(&mut reloaded, &user.username).await;
+    reloaded.settings_modal_state.select_tab(Tab::Tweaks);
+    reloaded.settings_modal_state.move_tweak_row(isize::MAX);
+    assert_eq!(
+        reloaded.settings_modal_state.selected_tweak_row(),
+        TweakRow::ArtboardDisclaimer
+    );
+    assert!(!reloaded.settings_modal_state.draft().artboard_disclaimer);
+    reloaded.handle_input(b"\x1b");
+    wait_for_esc_effect(&mut reloaded, |app| !app.show_settings, "settings").await;
+    reloaded.handle_input(b"4");
+    assert!(!reloaded.artboard_disclaimer_visible());
+
+    reloaded.handle_input(b"\x0f");
+    reloaded.settings_modal_state.select_tab(Tab::Tweaks);
+    reloaded.settings_modal_state.move_tweak_row(isize::MAX);
+    wait_for_render_contains(&mut reloaded, "Artboard content disclaimer").await;
+    reloaded.handle_input(b"\r");
+    assert!(reloaded.settings_modal_state.draft().artboard_disclaimer);
+    assert!(reloaded.artboard_disclaimer_visible());
+    reloaded.handle_input(b"\x1b");
+    wait_for_esc_effect(&mut reloaded, |app| !app.show_settings, "settings").await;
+    assert!(!render_plain(&mut reloaded).contains("GALLERY"));
+    reloaded.handle_input(b"B");
+    assert_eq!(reloaded.screen, Screen::Dashboard);
+}
+
+#[tokio::test]
+async fn artboard_disclaimer_mouse_choices_respect_keyboard_only_mode() {
+    use crate::app::common::primitives::Screen;
+    use late_core::models::user::InteractionMode;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "art-mouse-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "art-mouse-flow-it");
+    for index in [0, 2, 1] {
+        app.set_screen(Screen::Artboard);
+        render_plain(&mut app);
+        let rect = app.artboard_disclaimer_choices.get()[index];
+        let click = format!("\x1b[<0;{};{}M", rect.x + rect.width / 2 + 1, rect.y + 1);
+        app.interaction_mode = InteractionMode::Keyboard;
+        app.handle_input(click.as_bytes());
+        assert!(app.artboard_disclaimer_visible());
+        app.interaction_mode = InteractionMode::Hybrid;
+        app.handle_input(click.replace('M', "m").as_bytes());
+        assert!(app.artboard_disclaimer_visible(), "release cannot choose");
+        app.handle_input(click.as_bytes());
+        assert!(!app.artboard_disclaimer_visible());
+        assert_eq!(
+            app.screen,
+            if index == 2 {
+                Screen::Dashboard
+            } else {
+                Screen::Artboard
+            }
+        );
+        if index == 1 {
+            assert!(!app.profile_state.profile().artboard_disclaimer);
+        }
+        app.set_screen(Screen::Dashboard);
+    }
+}
+
+#[tokio::test]
 async fn esc_in_the_settings_langs_picker_closes_the_picker_and_keeps_settings_open() {
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "langs-esc-it").await;
@@ -96,7 +252,7 @@ async fn art_content_dialog_routes_owner_votes_mouse_and_close_keys() {
         own_share_percent: 100, content_hash: "content-dialog-test".to_string(),
     }).await.unwrap() else { panic!("hang"); };
     let mut painter = make_app(test_db.db.clone(), owner.id, "content-owner-flow-it");
-    painter.handle_input(b"4");
+    painter.handle_input(b"4v");
     wait_for_render_contains(&mut painter, "GALLERY").await;
     painter.handle_input(b"j\r");
     wait_for_render_contains(&mut painter, "content dialog piece").await;
@@ -112,7 +268,7 @@ async fn art_content_dialog_routes_owner_votes_mouse_and_close_keys() {
 
     let mut voter = make_app(test_db.db.clone(), viewer.id, "content-voter-flow-it");
     voter.resize(80, 24).unwrap();
-    voter.handle_input(b"4");
+    voter.handle_input(b"4v");
     wait_for_render_contains(&mut voter, "GALLERY").await;
     voter.handle_input(b"j\r");
     wait_for_render_contains(&mut voter, "content dialog piece").await;
@@ -172,7 +328,7 @@ async fn art_content_dialog_routes_owner_votes_mouse_and_close_keys() {
     assert_eq!(voter.screen, Screen::Dashboard);
     assert!(voter.dartboard_state.is_none());
     wait_for_render_contains(&mut voter, " Home ").await;
-    voter.handle_input(b"4");
+    voter.handle_input(b"4v");
     wait_for_render_contains(&mut voter, "GALLERY").await;
     assert!(
         voter
@@ -195,7 +351,7 @@ async fn artboard_topbar_clicks_leave_framing_and_title_entry() {
     let mut app = make_app(test_db.db.clone(), user.id, "artboard-topbar-flow-it");
 
     for naming in [false, true] {
-        app.handle_input(b"4");
+        app.handle_input(b"4v");
         wait_for_render_contains(&mut app, "Mode       view").await;
         if naming {
             app.handle_input(b"i");
@@ -227,7 +383,7 @@ async fn artboard_topbar_clicks_leave_framing_and_title_entry() {
         assert_eq!(app.screen, Screen::Dashboard, "naming={naming}");
         assert!(app.dartboard_state.is_none());
         wait_for_render_contains(&mut app, " Home ").await;
-        app.handle_input(b"4");
+        app.handle_input(b"4v");
         wait_for_render_contains(&mut app, "Mode       view").await;
         assert_eq!(
             app.dartboard_state.as_ref().unwrap().gallery().hang(),
@@ -288,7 +444,7 @@ async fn gallery_moderation_opens_selected_safety_record_only_for_staff() {
     ] {
         let viewer = create_test_user(&test_db.db, &format!("gallery-mod-{role}")).await;
         let mut app = make_app_with_permissions(test_db.db.clone(), viewer.id, role, permissions);
-        app.handle_input(b"4");
+        app.handle_input(b"4v");
         wait_for_render_contains(&mut app, "GALLERY").await;
         app.handle_input(b"m");
         assert!(!app.show_mod_modal, "rail has no moderation shortcut");
@@ -1040,7 +1196,7 @@ async fn screen_number_keys_switch_between_pages_including_profiles() {
     app.handle_input(b"3");
     wait_for_render_contains(&mut app, " Games ").await;
 
-    app.handle_input(b"4");
+    app.handle_input(b"4v");
     wait_for_render_contains(&mut app, "Mode       view").await;
 
     app.handle_input(b"5");
@@ -1858,7 +2014,7 @@ async fn artboard_view_help_and_active_input_share_one_lifecycle() {
     let user = create_test_user(&test_db.db, "artboard-view-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "artboard-view-flow-it");
 
-    app.handle_input(b"4");
+    app.handle_input(b"4v");
     wait_for_render_contains(&mut app, "Mode       view").await;
     wait_for_render_contains(&mut app, "Cursor     0,0").await;
 
@@ -1962,7 +2118,7 @@ async fn artboard_ban_locks_user_in_view_mode() {
     let user = create_test_user(&test_db.db, "artboard-banned-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "artboard-banned-flow-it");
 
-    app.handle_input(b"4");
+    app.handle_input(b"4v");
     wait_for_render_contains(&mut app, "Mode       view").await;
     app.set_artboard_banned_for_tests(true);
 
@@ -3532,7 +3688,7 @@ async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
         assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
     }
 
-    // The rest of the route is Enter alone.
+    // Enter continues the route after consenting to the Artboard visit.
     for screen in [
         Screen::Artboard,
         Screen::Profiles,
@@ -3542,6 +3698,9 @@ async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
     ] {
         app.handle_input(b"\r");
         assert_eq!(app.screen, screen);
+        if screen == Screen::Artboard {
+            app.handle_input(b"v");
+        }
     }
     assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
 
@@ -4229,7 +4388,7 @@ async fn artboard_archives_time_travel_from_the_rail() {
     .expect("insert daily snapshot");
     let mut app = make_app(test_db.db.clone(), user.id, "artboard-archive-flow-it");
 
-    app.handle_input(b"4");
+    app.handle_input(b"4v");
     wait_for_render_contains(&mut app, "ARCHIVES").await;
     wait_for_render_contains(&mut app, "Daily").await;
 
@@ -4265,7 +4424,7 @@ async fn artboard_gallery_hangs_a_framed_piece_from_the_rail() {
     let user = create_test_user(&test_db.db, "artboard-gallery-it").await;
     let mut app = make_app(test_db.db.clone(), user.id, "artboard-gallery-flow-it");
 
-    app.handle_input(b"4");
+    app.handle_input(b"4v");
     wait_for_render_contains(&mut app, "Mode       view").await;
     wait_for_render_contains(&mut app, "GALLERY").await;
     wait_for_render_contains(&mut app, "Hang a piece").await;
