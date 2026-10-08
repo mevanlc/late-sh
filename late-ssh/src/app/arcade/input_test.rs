@@ -138,7 +138,7 @@ async fn le_word_s_types_a_letter_until_the_round_ends_then_copies_the_card() {
 
     assert!(handle_key(&mut app, b's'));
     let card = app.pending_clipboard.take().expect("card copied");
-    assert!(card.starts_with("late.sh Le Word #"), "{card}");
+    assert!(card.starts_with("late.sh Le Word (English) #"), "{card}");
     assert!(
         card.contains("· 2/6\n🟨🟨⬛🟨⬛\n🟩🟩🟩🟩🟩\nssh late.sh"),
         "{card}"

@@ -2,6 +2,7 @@
 //! brags about the solve without giving the word away.
 
 use chrono::NaiveDate;
+use late_core::models::le_word::LeWordLanguage;
 
 use crate::app::arcade::share::{self, Glyph, Row, ShareCard};
 
@@ -22,10 +23,15 @@ pub fn from_state(state: &State) -> Option<ShareCard> {
         .iter()
         .map(|guess| state.scores_for_guess(guess))
         .collect();
-    Some(card(state.puzzle_date, &scores, state.won))
+    Some(card(state.puzzle_date, state.language, &scores, state.won))
 }
 
-pub fn card(puzzle_date: NaiveDate, scores: &[[LetterScore; WORD_LEN]], won: bool) -> ShareCard {
+pub fn card(
+    puzzle_date: NaiveDate,
+    language: LeWordLanguage,
+    scores: &[[LetterScore; WORD_LEN]],
+    won: bool,
+) -> ShareCard {
     let number = share::puzzle_number(puzzle_date);
     let result = if won {
         format!("{}/{MAX_GUESSES}", scores.len())
@@ -37,7 +43,11 @@ pub fn card(puzzle_date: NaiveDate, scores: &[[LetterScore; WORD_LEN]], won: boo
         .map(|row| Row::Glyphs(row.iter().map(|score| glyph(*score)).collect()))
         .collect();
     ShareCard {
-        title: share::title("Le Word", number, Some(&result)),
+        title: share::title(
+            &format!("Le Word ({})", language.label()),
+            number,
+            Some(&result),
+        ),
         rows,
     }
 }

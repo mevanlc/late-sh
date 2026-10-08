@@ -71,8 +71,7 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
         initial_snake_high_score,
         initial_traffic_track_scores,
         initial_traffic_high_score,
-        initial_le_word_daily_word,
-        initial_le_word_game,
+        (initial_le_word_daily_word, initial_le_word_game),
         initial_rubiks_cube_game,
         initial_sliding_puzzle_games,
         initial_sudoku_games,
@@ -153,21 +152,11 @@ pub async fn load_arcade_session_preloads(state: &State, user_id: Uuid) -> Arcad
             }
         },
         async {
-            match le_word_service.ensure_daily_word().await {
-                Ok(word) => Some(word),
-                Err(e) => {
-                    tracing::warn!(error = ?e, "failed to load Le Word daily word");
-                    None
-                }
-            }
-        },
-        async {
-            let today = le_word_service.today();
-            match le_word_service.load_game(user_id, today).await {
-                Ok(game) => game,
-                Err(e) => {
-                    tracing::warn!(error = ?e, "failed to load Le Word game state");
-                    None
+            match le_word_service.load_initial_round(user_id).await {
+                Ok((word, game)) => (Some(word), game),
+                Err(error) => {
+                    tracing::warn!(?error, "failed to load Le Word daily board");
+                    (None, None)
                 }
             }
         },
@@ -458,6 +447,9 @@ pub async fn build_session_config(state: &State, inputs: SessionBootstrapInputs)
         le_word_service: state.le_word_service.clone(),
         initial_le_word_daily_word,
         initial_le_word_game,
+        le_word_preferred_language: late_core::models::le_word::LeWordLanguage::from_settings(
+            &user.settings,
+        ),
         sudoku_service: state.sudoku_service.clone(),
         initial_sudoku_games,
         nonogram_service: state.nonogram_service.clone(),

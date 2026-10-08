@@ -154,11 +154,11 @@ async fn daily_boards_and_arcade_points_follow_the_roster() {
     // Solver: five Le Word wins this month plus one from last month, and one
     // hard Sudoku win. Monthly points: 5 * 1 + 5 = 10.
     for offset in [0, 1, 2, 5, 6] {
-        le_word::DailyWin::record_win(&client, solver.id, day(offset), 4)
+        le_word::DailyWin::record_win(&**client, solver.id, day(offset), 4)
             .await
             .expect("record solver win");
     }
-    le_word::DailyWin::record_win(&client, solver.id, month_start - Duration::days(10), 3)
+    le_word::DailyWin::record_win(&**client, solver.id, month_start - Duration::days(10), 3)
         .await
         .expect("record solver history");
     sudoku::DailyWin::record_win(&client, solver.id, "hard".to_string(), day(0), 100)
@@ -168,7 +168,7 @@ async fn daily_boards_and_arcade_points_follow_the_roster() {
     // Rival: two Le Word wins and today's Rubik's Cube. Monthly points:
     // 2 * 1 + 3 = 5.
     for offset in [1, 2] {
-        le_word::DailyWin::record_win(&client, rival.id, day(offset), 5)
+        le_word::DailyWin::record_win(&**client, rival.id, day(offset), 5)
             .await
             .expect("record rival win");
     }

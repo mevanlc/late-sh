@@ -1,5 +1,41 @@
 use super::*;
 
+#[tokio::test]
+async fn le_word_routes_split_unicode_paste_and_modal_escape_before_global_keys() {
+    let db = crate::test_helpers::new_test_db().await;
+    let mut app =
+        crate::test_helpers::make_app(db.db.clone(), uuid::Uuid::now_v7(), "polish-input");
+    app.show_splash = false;
+    app.set_screen(Screen::Arcade);
+    app.game_selection = crate::app::state::GAME_SELECTION_LE_WORD;
+    app.is_playing_game = true;
+    app.le_word_state = crate::app::arcade::le_word::input::input_test::polish_state();
+    for byte in "ŻÓŁTY".as_bytes() {
+        app.handle_input(&[*byte]);
+    }
+    assert_eq!(app.le_word_state.current_guess, "żółty");
+    app.le_word_state.current_guess.clear();
+    app.handle_input(b"\x1b[200~");
+    app.handle_input("Szkło".as_bytes());
+    app.handle_input(b"\x1b[201~");
+    assert_eq!(app.le_word_state.current_guess, "szkło");
+    assert!(app.le_word_state.guesses.is_empty());
+    app.handle_input(b"\t");
+    assert!(app.le_word_state.show_language_picker);
+    assert_eq!(app.screen, Screen::Arcade);
+    dispatch_escape(&mut app);
+    assert!(!app.le_word_state.show_language_picker);
+    assert_eq!(app.le_word_state.current_guess, "szkło");
+    app.handle_input(b";");
+    assert!(app.le_word_state.accent_pending);
+    dispatch_escape(&mut app);
+    assert!(!app.le_word_state.accent_pending);
+    assert!(app.is_playing_game);
+    assert_eq!(app.le_word_state.current_guess, "szkło");
+    dispatch_escape(&mut app);
+    assert!(!app.is_playing_game);
+}
+
 #[test]
 fn rect_contains_treats_edges_correctly() {
     let r = Rect {

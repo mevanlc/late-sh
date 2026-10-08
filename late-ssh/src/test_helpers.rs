@@ -544,6 +544,7 @@ fn make_app_with_chat_service_and_permissions(
         initial_sliding_puzzle_games: Vec::new(),
         initial_le_word_daily_word: None,
         initial_le_word_game: None,
+        le_word_preferred_language: Default::default(),
         sudoku_service: SudokuService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_sudoku_games: test_sudoku_games(user_id),
         nonogram_service: NonogramService::new(
@@ -803,6 +804,7 @@ pub fn make_app_with_paired_client(
         initial_sliding_puzzle_games: Vec::new(),
         initial_le_word_daily_word: None,
         initial_le_word_game: None,
+        le_word_preferred_language: Default::default(),
         sudoku_service: SudokuService::new(db.clone(), broadcast::channel::<ActivityEvent>(64).0),
         initial_sudoku_games: test_sudoku_games(user_id),
         nonogram_service: NonogramService::new(

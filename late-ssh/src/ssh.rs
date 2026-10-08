@@ -971,6 +971,9 @@ impl russh::server::Handler for ClientHandler {
             le_word_service,
             initial_le_word_daily_word,
             initial_le_word_game,
+            le_word_preferred_language: late_core::models::le_word::LeWordLanguage::from_settings(
+                &user.settings,
+            ),
             sudoku_service,
             initial_sudoku_games,
             nonogram_service,

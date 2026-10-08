@@ -3915,6 +3915,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "unicode-normalization",
  "unicode-width 0.2.2",
  "unicode_names2",
  "uuid",

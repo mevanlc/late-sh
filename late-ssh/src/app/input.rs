@@ -1975,6 +1975,11 @@ fn handle_dedicated_screen_input(app: &mut App, ctx: InputContext, event: &Parse
     }
 
     if ctx.screen == Screen::Arcade && app.is_playing_game {
+        if app.game_selection == crate::app::state::GAME_SELECTION_LE_WORD
+            && crate::app::arcade::le_word::input::handle_event(&mut app.le_word_state, event)
+        {
+            return true;
+        }
         match event {
             ParsedInput::Byte(byte) => {
                 crate::app::arcade::input::handle_key(app, *byte);

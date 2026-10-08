@@ -1,3 +1,4 @@
+use late_core::models::le_word::LeWordLanguage;
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
@@ -13,10 +14,9 @@ use crate::app::arcade::ui::{
 use crate::app::common::theme;
 
 const BOARD_WIDTH: u16 = 24;
-const BOARD_HEIGHT: u16 = 13;
+const BOARD_HEIGHT: u16 = 11;
 const BOARD_KEYBOARD_GAP: u16 = 2;
 const KEYBOARD_WIDTH: u16 = 39;
-const KEYBOARD_HEIGHT: u16 = 5;
 const LETTER_KEY_WIDTH: u16 = 3;
 const ACTION_KEY_WIDTH: u16 = 5;
 const KEY_GAP: u16 = 1;
@@ -36,6 +36,7 @@ struct KeyRect {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct LeWordLayout {
+    header: Rect,
     board: Rect,
     keyboard: Option<Rect>,
 }
@@ -51,29 +52,37 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, show_bottom_bar: 
             ),
             ("reward", "250".to_string(), theme::TEXT_BRIGHT()),
         ]),
-        keys: keys_line(
-            vec![
-                ("a-z", "type"),
-                ("Backspace", "delete"),
-                ("Enter", "guess"),
-                ("?", "help"),
-                ("!", "rules"),
-                ("`", "dashboard"),
-                ("Esc", "exit"),
-            ]
-            .into_iter()
-            .chain(crate::app::arcade::ui::share_hints(super::share::is_ready(
-                state,
-            )))
-            .collect(),
-        ),
+        keys: key_hints(state, area.width as usize),
         tip: Some(tip_line(state.message.clone())),
     };
 
     let board_area = draw_game_frame(frame, area, "Le Word", bottom, show_bottom_bar);
-    let layout = le_word_layout(board_area);
+    let layout = le_word_layout(board_area, state.language);
     frame.render_widget(
-        Paragraph::new(board_lines(state))
+        Paragraph::new(vec![
+            Line::from(format!(
+                "Le Word · {}  [{}]",
+                state.language.label(),
+                if state.language_locked() {
+                    "locked"
+                } else {
+                    "Tab: language"
+                }
+            )),
+            Line::from("One daily attempt across all languages."),
+            Line::from(if state.language_locked() {
+                "Language locked for today's attempt."
+            } else {
+                "First guess locks your choice—choose wisely."
+            }),
+        ])
+        .alignment(Alignment::Center)
+        .wrap(Wrap { trim: true })
+        .style(Style::default().fg(theme::TEXT_DIM())),
+        layout.header,
+    );
+    frame.render_widget(
+        Paragraph::new(board_lines(state, layout.board.height >= BOARD_HEIGHT))
             .alignment(Alignment::Center)
             .style(
                 Style::default()
@@ -109,22 +118,67 @@ pub fn draw_game(frame: &mut Frame, area: Rect, state: &State, show_bottom_bar: 
     }
 
     if state.show_rules {
-        draw_rules_modal(frame, board_area);
+        draw_rules_modal(frame, board_area, state);
+    }
+    if state.show_language_picker {
+        draw_language_picker(frame, board_area, state);
     }
 }
 
-fn draw_rules_modal(frame: &mut Frame, area: Rect) {
-    let modal = centered_rect(area, 58.min(area.width), 16.min(area.height));
+fn key_hints(state: &State, width: usize) -> Line<'static> {
+    let mut hints = Vec::new();
+    if !state.is_game_over {
+        hints.push(("a-z", "type"));
+        if state.language == LeWordLanguage::Polish {
+            hints.push((";", "accent"));
+        }
+        hints.extend([("Bksp", "delete"), ("Enter", "guess")]);
+    }
+    hints.extend([("?", "help"), ("!", "rules"), ("Esc", "exit")]);
+    hints.extend(crate::app::arcade::ui::share_hints(super::share::is_ready(
+        state,
+    )));
+    let full = keys_line(hints);
+    if full.width() <= width {
+        return full;
+    }
+    let mut compact = Vec::new();
+    if !state.is_game_over {
+        compact.push(("a-z", ""));
+        if state.language == LeWordLanguage::Polish {
+            compact.push((";", "accent"));
+        }
+        compact.extend([("Bksp", ""), ("Enter", "guess")]);
+    }
+    compact.extend([("!", "rules"), ("Esc", "")]);
+    compact.extend(crate::app::arcade::ui::share_hints(super::share::is_ready(
+        state,
+    )));
+    let compact = keys_line(compact);
+    if compact.width() <= width {
+        return compact;
+    }
+    let mut essentials = vec![("Enter", "guess"), ("Esc", "")];
+    if state.language == LeWordLanguage::Polish && !state.is_game_over {
+        essentials.insert(1, (";", "accent"));
+    }
+    keys_line(essentials)
+}
+
+fn draw_rules_modal(frame: &mut Frame, area: Rect, state: &State) {
+    let modal = centered_rect(area, 64.min(area.width), 18.min(area.height));
     let rules = Paragraph::new(vec![
-        Line::from(Span::styled(
-            "Le Word Rules",
-            Style::default()
-                .fg(theme::TEXT_BRIGHT())
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from("Guess the hidden five-letter word in six tries."),
-        Line::from("Each guess must be a valid word."),
+        Line::from("Guess the five-letter word in six tries."),
+        Line::from("Each guess must be in the selected word list."),
+        Line::from(super::state::LANGUAGE_RULE),
+        Line::from(if state.language == LeWordLanguage::Polish {
+            "Common Polish inflections can be answers."
+        } else {
+            "Tab or the header chooses English or Polski."
+        }),
+        Line::from("Polish letters are distinct: a ≠ ą, z ≠ ź ≠ ż."),
+        Line::from("Type Polish letters, click keys, or use ; + letter:"),
+        Line::from(";a ą  ;c ć  ;e ę  ;l ł  ;n ń  ;o ó  ;s ś  ;x ź  ;z ż"),
         Line::from(""),
         Line::from(vec![
             Span::styled("GREEN", score_style(LetterScore::Correct)),
@@ -138,12 +192,9 @@ fn draw_rules_modal(frame: &mut Frame, area: Rect) {
             Span::styled("GRAY", score_style(LetterScore::Absent)),
             Span::raw("   letter not in the word"),
         ]),
-        Line::from(""),
-        Line::from("A new daily answer appears once per day."),
         Line::from(format!(
-            "Solving the daily earns {DAILY_WIN_REWARD_CHIPS} chips."
+            "New words daily (UTC). Solve: {DAILY_WIN_REWARD_CHIPS} chips."
         )),
-        Line::from(""),
         Line::from(Span::styled(
             "! / q / Esc closes",
             Style::default()
@@ -161,6 +212,7 @@ fn draw_rules_modal(frame: &mut Frame, area: Rect) {
     .block(
         Block::default()
             .borders(Borders::ALL)
+            .title(" Le Word Rules ")
             .border_style(Style::default().fg(theme::AMBER_GLOW())),
     );
     frame.render_widget(Clear, modal);
@@ -230,54 +282,132 @@ fn result_panel_area(board_area: Rect, board_rect: Rect, keyboard_rect: Option<R
     centered_rect(board_area, width, height)
 }
 
-fn le_word_layout(area: Rect) -> LeWordLayout {
-    let board_width = BOARD_WIDTH.min(area.width);
-    let board_height = BOARD_HEIGHT.min(area.height);
-    let can_show_keyboard = area.height
-        >= board_height
-            .saturating_add(BOARD_KEYBOARD_GAP)
-            .saturating_add(KEYBOARD_HEIGHT)
-        && area.width >= LETTER_KEY_WIDTH;
-    let keyboard_height = if can_show_keyboard {
-        KEYBOARD_HEIGHT
+fn le_word_layout(area: Rect, language: LeWordLanguage) -> LeWordLayout {
+    let header_height = 3.min(area.height);
+    let header = Rect::new(area.x, area.y, area.width, header_height);
+    let available = area.height.saturating_sub(header_height);
+    let row_count = keyboard_rows(language).len() as u16;
+    let roomy = available >= BOARD_HEIGHT + BOARD_KEYBOARD_GAP + row_count * 2 - 1;
+    let spaced_board = roomy || available >= BOARD_HEIGHT + 1 + row_count;
+    let board_height = if spaced_board {
+        BOARD_HEIGHT
     } else {
-        0
-    };
-    let content_height = board_height
-        .saturating_add(if keyboard_height > 0 {
-            BOARD_KEYBOARD_GAP
+        MAX_GUESSES as u16
+    }
+    .min(available);
+    let gap = if roomy { BOARD_KEYBOARD_GAP } else { 1 };
+    let keyboard_height = if roomy { row_count * 2 - 1 } else { row_count };
+    let can_show_keyboard =
+        area.width >= KEYBOARD_WIDTH && available >= board_height + gap + keyboard_height;
+    let height = board_height
+        + if can_show_keyboard {
+            gap + keyboard_height
         } else {
             0
-        })
-        .saturating_add(keyboard_height)
-        .min(area.height);
-    let content_width = if can_show_keyboard {
-        KEYBOARD_WIDTH.max(board_width).min(area.width)
-    } else {
-        board_width
-    };
-    let content = centered_rect(area, content_width, content_height);
-    let board = Rect {
-        x: content.x + content.width.saturating_sub(board_width) / 2,
-        y: content.y,
-        width: board_width,
-        height: board_height,
-    };
-    let keyboard = (keyboard_height > 0).then_some(Rect {
-        x: content.x
-            + content
-                .width
-                .saturating_sub(KEYBOARD_WIDTH.min(content.width))
-                / 2,
-        y: board
-            .y
-            .saturating_add(board.height)
-            .saturating_add(BOARD_KEYBOARD_GAP),
-        width: KEYBOARD_WIDTH.min(content.width),
-        height: keyboard_height,
+        };
+    let content = centered_rect(
+        Rect::new(area.x, area.y + header_height, area.width, available),
+        KEYBOARD_WIDTH.min(area.width),
+        height,
+    );
+    let board = Rect::new(
+        content.x + content.width.saturating_sub(BOARD_WIDTH) / 2,
+        content.y,
+        BOARD_WIDTH.min(content.width),
+        board_height,
+    );
+    let keyboard = can_show_keyboard.then(|| {
+        Rect::new(
+            content.x,
+            board.y + board.height + gap,
+            KEYBOARD_WIDTH,
+            keyboard_height,
+        )
     });
+    LeWordLayout {
+        header,
+        board,
+        keyboard,
+    }
+}
 
-    LeWordLayout { board, keyboard }
+pub fn language_selector_hit_test(area: Rect, x: u16, y: u16) -> bool {
+    contains(
+        Rect::new(area.x, area.y, area.width, 1.min(area.height)),
+        x,
+        y,
+    )
+}
+
+fn language_picker_area(area: Rect) -> Rect {
+    centered_rect(area, 60.min(area.width), 9.min(area.height))
+}
+
+pub fn language_picker_hit_test(area: Rect, x: u16, y: u16) -> Option<LeWordLanguage> {
+    let modal = language_picker_area(area);
+    LeWordLanguage::ALL
+        .into_iter()
+        .enumerate()
+        .find_map(|(i, language)| {
+            contains(
+                Rect::new(
+                    modal.x + 1,
+                    modal.y + 2 + i as u16,
+                    modal.width.saturating_sub(2),
+                    1,
+                ),
+                x,
+                y,
+            )
+            .then_some(language)
+        })
+}
+
+fn draw_language_picker(frame: &mut Frame, area: Rect, state: &State) {
+    let modal = language_picker_area(area);
+    let mut lines = vec![Line::from("")];
+    for language in LeWordLanguage::ALL {
+        lines.push(Line::styled(
+            format!(
+                "{} {}",
+                if state.picker_language == language {
+                    "›"
+                } else {
+                    " "
+                },
+                language.label()
+            ),
+            Style::default().fg(if state.picker_language == language {
+                theme::AMBER_GLOW()
+            } else {
+                theme::TEXT_DIM()
+            }),
+        ));
+    }
+    lines.extend([
+        Line::from(""),
+        Line::from("One daily attempt across all languages."),
+        Line::from("First guess locks your choice—choose wisely."),
+        Line::from("↑/↓ select · Enter confirm · Esc cancel"),
+    ]);
+    frame.render_widget(Clear, modal);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true })
+            .style(
+                Style::default()
+                    .fg(theme::TEXT_BRIGHT())
+                    .bg(theme::BG_CANVAS()),
+            )
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Le Word language ")
+                    .border_style(Style::default().fg(theme::AMBER_GLOW())),
+            ),
+        modal,
+    );
 }
 
 fn draw_keyboard(frame: &mut Frame, area: Rect, state: &State) {
@@ -285,7 +415,7 @@ fn draw_keyboard(frame: &mut Frame, area: Rect, state: &State) {
         Block::default().style(Style::default().bg(theme::BG_CANVAS())),
         area,
     );
-    for key_rect in keyboard_key_rects(area) {
+    for key_rect in keyboard_key_rects(area, state.language) {
         let label = key_label(key_rect.key);
         let key = Paragraph::new(label)
             .alignment(Alignment::Center)
@@ -294,17 +424,26 @@ fn draw_keyboard(frame: &mut Frame, area: Rect, state: &State) {
     }
 }
 
-pub fn keyboard_hit_test(area: Rect, x: u16, y: u16) -> Option<KeyboardKey> {
-    let keyboard = le_word_layout(area).keyboard?;
-    keyboard_key_rects(keyboard)
+pub fn keyboard_hit_test(
+    area: Rect,
+    language: LeWordLanguage,
+    x: u16,
+    y: u16,
+) -> Option<KeyboardKey> {
+    let keyboard = le_word_layout(area, language).keyboard?;
+    keyboard_key_rects(keyboard, language)
         .into_iter()
         .find(|key| contains(key.rect, x, y))
         .map(|key| key.key)
 }
 
-fn keyboard_key_rects(area: Rect) -> Vec<KeyRect> {
-    let rows = keyboard_rows();
-    let row_step = if area.height >= KEYBOARD_HEIGHT { 2 } else { 1 };
+fn keyboard_key_rects(area: Rect, language: LeWordLanguage) -> Vec<KeyRect> {
+    let rows = keyboard_rows(language);
+    let row_step = if area.height >= rows.len() as u16 * 2 - 1 {
+        2
+    } else {
+        1
+    };
     let mut rects = Vec::new();
     for (row_idx, row) in rows.iter().enumerate() {
         let y = area.y.saturating_add(row_idx as u16 * row_step);
@@ -336,7 +475,7 @@ fn keyboard_key_rects(area: Rect) -> Vec<KeyRect> {
     rects
 }
 
-fn keyboard_rows() -> [&'static [KeyboardKey]; 3] {
+fn keyboard_rows(language: LeWordLanguage) -> Vec<&'static [KeyboardKey]> {
     static ROW_1: [KeyboardKey; 10] = [
         KeyboardKey::Letter('q'),
         KeyboardKey::Letter('w'),
@@ -371,7 +510,22 @@ fn keyboard_rows() -> [&'static [KeyboardKey]; 3] {
         KeyboardKey::Letter('m'),
         KeyboardKey::Backspace,
     ];
-    [&ROW_1, &ROW_2, &ROW_3]
+    static ACCENTS: [KeyboardKey; 9] = [
+        KeyboardKey::Letter('ą'),
+        KeyboardKey::Letter('ć'),
+        KeyboardKey::Letter('ę'),
+        KeyboardKey::Letter('ł'),
+        KeyboardKey::Letter('ń'),
+        KeyboardKey::Letter('ó'),
+        KeyboardKey::Letter('ś'),
+        KeyboardKey::Letter('ź'),
+        KeyboardKey::Letter('ż'),
+    ];
+    let mut rows: Vec<&[KeyboardKey]> = vec![&ROW_1, &ROW_2, &ROW_3];
+    if language == LeWordLanguage::Polish {
+        rows.push(&ACCENTS);
+    }
+    rows
 }
 
 fn keyboard_row_width(row: &[KeyboardKey]) -> u16 {
@@ -391,7 +545,7 @@ fn key_width(key: KeyboardKey) -> u16 {
 
 fn key_label(key: KeyboardKey) -> String {
     match key {
-        KeyboardKey::Letter(ch) => ch.to_ascii_uppercase().to_string(),
+        KeyboardKey::Letter(ch) => ch.to_uppercase().to_string(),
         KeyboardKey::Backspace => "BKSP".to_string(),
         KeyboardKey::Enter => "ENTER".to_string(),
     }
@@ -421,10 +575,10 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
-fn board_lines(state: &State) -> Vec<Line<'static>> {
+fn board_lines(state: &State, spaced: bool) -> Vec<Line<'static>> {
     let mut lines = Vec::with_capacity(MAX_GUESSES * 2 - 1);
     for row in 0..MAX_GUESSES {
-        if row > 0 {
+        if row > 0 && spaced {
             lines.push(Line::from(""));
         }
 
@@ -451,22 +605,22 @@ fn cell_span(
 ) -> Span<'static> {
     let (ch, style) = if let Some(guess) = guess {
         let ch = guess
-            .as_bytes()
-            .get(col)
-            .copied()
-            .map(char::from)
+            .chars()
+            .nth(col)
             .unwrap_or(' ')
-            .to_ascii_uppercase();
+            .to_uppercase()
+            .next()
+            .unwrap_or(' ');
         let scores = state.scores_for_guess(guess);
         (ch, score_style(scores[col]))
     } else if let Some(current) = current {
         let ch = current
-            .as_bytes()
-            .get(col)
-            .copied()
-            .map(char::from)
+            .chars()
+            .nth(col)
             .unwrap_or(' ')
-            .to_ascii_uppercase();
+            .to_uppercase()
+            .next()
+            .unwrap_or(' ');
         (
             ch,
             Style::default()

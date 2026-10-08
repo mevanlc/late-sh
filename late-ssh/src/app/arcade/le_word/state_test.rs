@@ -109,9 +109,11 @@ fn yesterdays_state() -> (State, chrono::NaiveDate, chrono::NaiveDate) {
             created: now,
             updated: now,
             puzzle_date: yesterday,
+            language: "en".to_string(),
             answer_word: "crane".to_string(),
         }),
         None,
+        LeWordLanguage::English,
     );
     (state, today, yesterday)
 }
@@ -123,6 +125,7 @@ fn todays_word(today: chrono::NaiveDate) -> late_core::models::le_word::DailyWor
         created: now,
         updated: now,
         puzzle_date: today,
+        language: "en".to_string(),
         answer_word: "slate".to_string(),
     }
 }
@@ -148,7 +151,8 @@ fn rolling_over_the_day_clears_yesterdays_word() {
     // The word lands; only now does the round own today's date.
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.word_reload_rx = Some(rx);
-    tx.send(Some(todays_word(today))).expect("deliver word");
+    tx.send(Ok((todays_word(today), None)))
+        .expect("deliver word");
     assert!(state.poll_word_reload());
     assert_eq!(state.puzzle_date, today);
     assert!(state.daily_word_loaded);
@@ -184,9 +188,92 @@ fn failed_word_fetch_retries_after_backoff() {
     // ...and a successful retry brings the board back for good.
     let (tx, rx) = tokio::sync::oneshot::channel();
     state.word_reload_rx = Some(rx);
-    tx.send(Some(todays_word(today))).expect("deliver word");
+    tx.send(Ok((todays_word(today), None)))
+        .expect("deliver word");
     assert!(state.poll_word_reload());
     assert_eq!(state.puzzle_date, today);
     assert!(state.daily_word_loaded, "the retried word should install");
     assert!(!state.ensure_current_daily());
+}
+
+#[test]
+fn polish_scoring_counts_letters_and_treats_accents_as_distinct() {
+    use LetterScore::{Absent, Correct, Present};
+    assert_eq!(score_guess("żółty", "żółty"), [Correct; 5]);
+    assert_eq!(
+        score_guess("zolty", "żółty"),
+        [Absent, Absent, Absent, Correct, Correct]
+    );
+    assert_eq!(
+        score_guess("żżżżż", "żółty"),
+        [Correct, Absent, Absent, Absent, Absent]
+    );
+    assert_eq!(
+        score_guess("żżółt", "żółty"),
+        [Correct, Absent, Present, Present, Present]
+    );
+    let guesses = vec!["źółty".to_string(), "żółty".to_string()];
+    assert_eq!(
+        score_letter_from_guesses(&guesses, "żółty", 'ż'),
+        Some(Correct)
+    );
+    assert_eq!(
+        score_letter_from_guesses(&guesses, "żółty", 'ź'),
+        Some(Absent)
+    );
+    assert_eq!(score_letter_from_guesses(&guesses, "żółty", 'z'), None);
+}
+
+#[test]
+fn failed_submission_keeps_draft_and_blocks_edits_while_pending() {
+    let (mut state, today, _) = yesterdays_state();
+    state.install_round(todays_word(today), None);
+    state.current_guess = "glass".to_string();
+    assert!(state.submit_guess());
+    assert!(state.submission_pending());
+    assert!(!state.push_letter('a'));
+    assert!(!state.pop_letter());
+    assert!(!state.choose_language(LeWordLanguage::Polish));
+    assert!(state.poll_submission());
+    assert!(!state.submission_pending());
+    assert_eq!(state.current_guess, "glass");
+    assert!(!state.language_locked());
+}
+
+#[test]
+fn rapid_language_switch_drops_obsolete_loads() {
+    let (mut state, today, _) = yesterdays_state();
+    state.install_round(todays_word(today), None);
+    state.current_guess = "gl".to_string();
+    assert!(state.choose_language(LeWordLanguage::Polish));
+    assert!(state.current_guess.is_empty());
+    let (obsolete_tx, obsolete_rx) = oneshot::channel();
+    state.word_reload_rx = Some(obsolete_rx);
+    assert!(state.choose_language(LeWordLanguage::English));
+    assert!(obsolete_tx.send(Ok((todays_word(today), None))).is_err());
+    let (tx, rx) = oneshot::channel();
+    state.word_reload_rx = Some(rx);
+    tx.send(Ok((todays_word(today), None))).unwrap();
+    assert!(state.poll_word_reload());
+    assert_eq!(state.language, LeWordLanguage::English);
+}
+
+#[test]
+fn saved_attempt_language_does_not_replace_next_days_preference() {
+    let (previous, today, yesterday) = yesterdays_state();
+    let mut word = todays_word(today);
+    word.puzzle_date = yesterday;
+    let mut state = State::new(
+        previous.user_id,
+        previous.svc,
+        Some(word),
+        None,
+        LeWordLanguage::Polish,
+    );
+    state.guesses.push("glass".to_string());
+    assert_eq!(state.language, LeWordLanguage::English);
+    assert!(state.language_locked());
+    assert!(state.ensure_current_daily());
+    assert_eq!(state.language, LeWordLanguage::Polish);
+    assert!(!state.language_locked());
 }

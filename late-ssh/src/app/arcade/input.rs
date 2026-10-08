@@ -116,7 +116,11 @@ pub fn handle_key(app: &mut App, byte: u8) -> bool {
             // Le Word is a text-entry game where `q`/`Q` are valid letters, so
             // only `Esc` exits to the lobby; `q`/`Q` fall through to the
             // letter handler below.
-            if byte == 0x1B && !app.le_word_state.show_rules {
+            if byte == 0x1B
+                && !app.le_word_state.show_rules
+                && !app.le_word_state.show_language_picker
+                && !app.le_word_state.accent_pending
+            {
                 app.is_playing_game = false;
                 return true;
             }
@@ -310,7 +314,12 @@ pub(crate) fn handle_event(app: &mut App, event: &crate::app::input::ParsedInput
     }
 
     if app.game_selection == GAME_SELECTION_LE_WORD {
-        return super::le_word::input::handle_mouse(&mut app.le_word_state, area, *mouse);
+        return super::le_word::input::handle_mouse(
+            &mut app.le_word_state,
+            area,
+            *mouse,
+            super::ui::SHOW_GAME_BOTTOM_BAR,
+        );
     }
 
     if app.game_selection == GAME_SELECTION_SOLITAIRE {
