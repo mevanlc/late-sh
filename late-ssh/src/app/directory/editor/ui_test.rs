@@ -9,7 +9,11 @@ use super::state::{EditorState, Field, Page};
 use super::ui::{EditorView, draw};
 
 fn render(state: &EditorState) -> Vec<String> {
-    let backend = TestBackend::new(100, 30);
+    render_at(state, 100, 30)
+}
+
+fn render_at(state: &EditorState, width: u16, height: u16) -> Vec<String> {
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).expect("terminal");
     terminal
         .draw(|frame| {
@@ -62,4 +66,36 @@ fn an_empty_row_being_typed_puts_the_cursor_on_the_hints_first_letter() {
         "the hint must not shift right when typing starts:\n{}",
         typing.join("\n")
     );
+}
+
+#[test]
+fn short_editor_scrolls_full_fields_and_discard_prompt_owns_every_hit() {
+    use super::state::MouseTarget;
+    let mut editor = EditorState::default();
+    editor.open_own(Uuid::now_v7(), None, &Profile::default(), Page::Card);
+    render_at(&editor, 50, 16);
+    editor.mouse.scroll(10, 8, 100, (50, 16));
+    let lines = render_at(&editor, 50, 16);
+    let (rect, _) = editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Field(Field::Summary))
+        .expect("summary revealed by wheel");
+    assert!(lines[usize::from(rect.y)].contains("summary"));
+    assert!(rect.bottom() <= 16);
+    assert_eq!(editor.row(), 0, "wheel did not move keyboard selection");
+    editor.field_mut(Field::Headline).insert_str("a draft");
+    editor.request_leave(true);
+    render_at(&editor, 50, 16);
+    assert!(
+        editor
+            .mouse
+            .hits()
+            .iter()
+            .all(|(_, target)| matches!(target, MouseTarget::Discard | MouseTarget::Keep))
+    );
+    editor.confirm_discard_no();
+    assert_eq!(editor.field_text(Field::Headline), "a draft");
+    assert!(editor.is_open());
 }

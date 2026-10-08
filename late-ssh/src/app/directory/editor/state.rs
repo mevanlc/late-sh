@@ -1,12 +1,9 @@
-use std::cell::Cell;
-
 use late_core::models::{
     profile::Profile,
     showcase::ShowcaseParams,
     work_profile::{WorkProfile, WorkProfileParams, WorkStatus, WorkType},
 };
 use late_core::vocab;
-use ratatui::layout::Rect;
 use ratatui_textarea::{CursorMove, TextArea, WrapMode};
 use uuid::Uuid;
 
@@ -30,7 +27,6 @@ pub(crate) const DESCRIPTION_MAX: usize = 800;
 pub(crate) const SKILLS_LIMIT: usize = vocab::TAG_LIMIT;
 
 /// The most rows any page draws; the click map is sized to it.
-pub(crate) const MAX_ROWS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
@@ -349,6 +345,23 @@ pub(crate) enum EscapeOutcome {
     Closed,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MouseTarget {
+    Page(Page),
+    Field(Field),
+    Caret(Field, usize, usize),
+    Choice(Field, bool),
+    Project(Uuid),
+    Add,
+    EditProject,
+    DeleteProject,
+    Save,
+    Back,
+    Close,
+    Discard,
+    Keep,
+}
+
 pub(crate) struct EditorState {
     open: bool,
     scope: Scope,
@@ -379,9 +392,8 @@ pub(crate) struct EditorState {
     about_baseline: AboutValues,
     // projects
     projects_view: ProjectsView,
-    /// Screen rects of the rows on screen this frame, each with the index it
-    /// stands for, so a click lands on the right row of a scrolled list.
-    row_rects: Cell<[Option<(usize, Rect)>; MAX_ROWS]>,
+    pub(crate) mouse: crate::app::common::mouse::MouseState<MouseTarget, Page>,
+    discard_closes: bool,
 }
 
 fn text_input(field: Field) -> TextArea<'static> {
@@ -519,7 +531,8 @@ impl Default for EditorState {
             langs: Vec::new(),
             about_baseline: AboutValues::default(),
             projects_view: ProjectsView::List { selected: 0 },
-            row_rects: Cell::new([None; MAX_ROWS]),
+            mouse: Default::default(),
+            discard_closes: false,
         }
     }
 }
@@ -1021,6 +1034,31 @@ impl EditorState {
 
     // Pages
 
+    pub(crate) fn select_page(&mut self, page: Page) {
+        if !self.scope.pages().contains(&page) || page == self.page {
+            return;
+        }
+        self.page = page;
+        self.row = 0;
+        self.editing = false;
+        self.error = None;
+        self.mouse.reveal_selection();
+        self.sync_cursors();
+    }
+    pub(crate) fn request_leave(&mut self, close: bool) {
+        self.stop_editing();
+        self.discard_closes = close;
+        if close {
+            if self.dirty() {
+                self.confirm_discard = true;
+            } else {
+                self.close();
+            }
+        } else {
+            let _ = self.escape();
+        }
+        self.mouse.invalidate();
+    }
     pub(crate) fn switch_page(&mut self, forward: bool) {
         let pages = self.scope.pages();
         if pages.len() < 2 {
@@ -1035,6 +1073,7 @@ impl EditorState {
         } else {
             (idx + pages.len() - 1) % pages.len()
         };
+        self.mouse.reset_pane(pages[next]);
         self.page = pages[next];
         self.row = 0;
         self.editing = false;
@@ -1104,12 +1143,15 @@ impl EditorState {
     /// project form goes back to its list; the modal asks before losing
     /// unsaved work, and closes when there is none.
     pub(crate) fn escape(&mut self) -> EscapeOutcome {
+        if !self.confirm_discard {
+            self.discard_closes = false;
+        }
         if self.editing {
             self.stop_editing();
             return EscapeOutcome::Stayed;
         }
         if self.confirm_discard {
-            self.confirm_discard = false;
+            self.confirm_discard_no();
             return EscapeOutcome::Stayed;
         }
         if self.scope == Scope::Own && matches!(self.projects_view, ProjectsView::Form(_)) {
@@ -1132,6 +1174,10 @@ impl EditorState {
     /// drop everything and close.
     pub(crate) fn confirm_discard_yes(&mut self) -> EscapeOutcome {
         self.confirm_discard = false;
+        if self.discard_closes {
+            self.close();
+            return EscapeOutcome::Closed;
+        }
         if self.scope == Scope::Own
             && matches!(self.projects_view, ProjectsView::Form(_))
             && self.project_form_dirty()
@@ -1145,6 +1191,7 @@ impl EditorState {
 
     pub(crate) fn confirm_discard_no(&mut self) {
         self.confirm_discard = false;
+        self.discard_closes = false;
     }
 
     /// Ctrl+S. On a project form: that project alone, and the form returns
@@ -1219,33 +1266,9 @@ impl EditorState {
             .iter()
             .position(|candidate| *candidate == field)
             .unwrap_or(0);
+        self.mouse.reveal_selection();
         self.error = Some((field, message.to_string()));
         self.sync_cursors();
-    }
-
-    // Click map
-
-    /// Record that `row` is drawn at `rect`. The map holds one entry per
-    /// row on screen; a ninth is a draw bug and is dropped.
-    pub(crate) fn record_row_rect(&self, row: usize, rect: Rect) {
-        let mut rects = self.row_rects.get();
-        if let Some(slot) = rects.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some((row, rect));
-        }
-        self.row_rects.set(rects);
-    }
-
-    pub(crate) fn clear_row_rects(&self) {
-        self.row_rects.set([None; MAX_ROWS]);
-    }
-
-    pub(crate) fn row_at(&self, x: u16, y: u16) -> Option<usize> {
-        self.row_rects.get().iter().find_map(|slot| match slot {
-            Some((row, r)) if x >= r.x && x < r.x + r.width && y >= r.y && y < r.y + r.height => {
-                Some(*row)
-            }
-            Some(_) | None => None,
-        })
     }
 }
 

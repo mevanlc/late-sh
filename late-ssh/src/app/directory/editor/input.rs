@@ -88,22 +88,10 @@ pub(crate) fn open_card(app: &mut App, card_id: Uuid) -> bool {
 /// being typed, then the page's own keys.
 pub(crate) fn handle_input(app: &mut App, event: &ParsedInput) {
     if let ParsedInput::Mouse(mouse) = event {
-        if mouse.kind == MouseEventKind::Down && mouse.button == Some(MouseButton::Left) {
-            let editor = &app.directory_editor;
-            if let Some(row) = editor.row_at(mouse.x, mouse.y) {
-                if editor.page() == Page::Projects
-                    && matches!(editor.projects_view(), ProjectsView::List { .. })
-                {
-                    let len = projects_of(app.chat.showcase.all_items(), app.user_id).len();
-                    app.directory_editor.set_project_selection(row, len);
-                } else {
-                    app.directory_editor.stop_editing();
-                    app.directory_editor.set_row(row);
-                }
-            }
-        }
+        handle_mouse(app, *mouse);
         return;
     }
+    app.directory_editor.mouse.reveal_selection();
 
     // The parser hands printable keys over as `Char`; the row and list keys
     // below read bytes, so fold ASCII back before matching. A row being
@@ -289,5 +277,122 @@ pub(crate) fn subject_label(scope: &Scope, viewer_name: &str) -> String {
         Scope::CardOf { username, .. } | Scope::ProjectOf { username, .. } => {
             format!("@{username}")
         }
+    }
+}
+
+fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
+    use super::state::MouseTarget;
+    if !app.interaction_mode.mouse_enabled() {
+        return;
+    }
+    let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
+        return;
+    };
+    let target = app.directory_editor.mouse.target(x, y, app.size);
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            if app.directory_editor.confirm_discard() {
+                return;
+            }
+            let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                -3
+            } else {
+                3
+            };
+            if let Some(MouseTarget::Caret(field, _, _)) = target.filter(|target| matches!(target, MouseTarget::Caret(field, _, _) if field.kind() == FieldKind::Multi)) {
+                app.directory_editor.field_mut(field).scroll(ratatui_textarea::Scrolling::Delta { rows: delta as i16, cols: 0 });
+                app.directory_editor.mouse.invalidate();
+            } else { app.directory_editor.mouse.scroll(x, y, delta, app.size); }
+        }
+        MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
+            if app.directory_editor.confirm_discard() {
+                match target {
+                    Some(MouseTarget::Discard) => {
+                        app.directory_editor.confirm_discard_yes();
+                    }
+                    Some(MouseTarget::Keep) => app.directory_editor.confirm_discard_no(),
+                    _ => {}
+                }
+            } else if !app.directory_editor.mouse.click_track(x, y, app.size) {
+                match target {
+                    Some(MouseTarget::Page(page)) => app.directory_editor.select_page(page),
+                    Some(MouseTarget::Field(field) | MouseTarget::Caret(field, _, _)) => {
+                        let caret = match target {
+                            Some(MouseTarget::Caret(_, row, col)) => Some((row, col)),
+                            _ => None,
+                        };
+                        app.directory_editor.stop_editing();
+                        if let Some(index) = app
+                            .directory_editor
+                            .fields()
+                            .iter()
+                            .position(|candidate| *candidate == field)
+                        {
+                            app.directory_editor.set_row(index);
+                            match field {
+                                Field::Skills => {
+                                    tag_picker::input::open(app, TagPickerTarget::EditorSkills)
+                                }
+                                Field::Langs => {
+                                    tag_picker::input::open(app, TagPickerTarget::EditorLangs)
+                                }
+                                _ => {
+                                    app.directory_editor.start_editing();
+                                    if let Some((row, col)) = caret {
+                                        app.directory_editor.field_mut(field).cancel_selection();
+                                        app.directory_editor.field_mut(field).move_cursor(
+                                            ratatui_textarea::CursorMove::Jump(
+                                                row as u16, col as u16,
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(MouseTarget::Choice(field, forward)) => {
+                        app.directory_editor.stop_editing();
+                        if let Some(index) = app
+                            .directory_editor
+                            .fields()
+                            .iter()
+                            .position(|candidate| *candidate == field)
+                        {
+                            app.directory_editor.set_row(index);
+                            app.directory_editor.cycle_choice(forward);
+                        }
+                    }
+                    Some(MouseTarget::Project(id)) => {
+                        let projects = projects_of(app.chat.showcase.all_items(), app.user_id);
+                        if let Some((index, project)) = projects
+                            .iter()
+                            .enumerate()
+                            .find(|(_, project)| project.id == id)
+                        {
+                            app.directory_editor
+                                .set_project_selection(index, projects.len());
+                            app.directory_editor.start_editing_project(project);
+                            app.directory_editor.mouse.reset_pane(Page::Projects);
+                        }
+                    }
+                    Some(MouseTarget::Add) => {
+                        app.directory_editor.start_new_project();
+                        app.directory_editor.mouse.reset_pane(Page::Projects);
+                    }
+                    Some(MouseTarget::EditProject) => {
+                        handle_project_list_key(app, &ParsedInput::Byte(b'e'))
+                    }
+                    Some(MouseTarget::DeleteProject) => {
+                        handle_project_list_key(app, &ParsedInput::Byte(b'd'))
+                    }
+                    Some(MouseTarget::Save) => save(app),
+                    Some(MouseTarget::Close) => app.directory_editor.request_leave(true),
+                    Some(MouseTarget::Back) => app.directory_editor.request_leave(false),
+                    Some(MouseTarget::Discard | MouseTarget::Keep) | None => {}
+                }
+            }
+            app.directory_editor.mouse.invalidate();
+        }
+        _ => {}
     }
 }

@@ -25,6 +25,8 @@ The modal is as wide as the terminal allows up to 110 columns and as tall as the
 
 The measured heights go back to the state as a `ScrollExtent` (interior-mutable, like `popup_area`), which is what clamps `scroll_by` and honours a pending `/chips` jump: `jump_to_chips` is a flag the next measured draw consumes by setting the offset to the chips section's row.
 
+Mouse geometry is published by the renderer and clipped to the current viewport. Wheel input scrolls only over the body; showcase titles and URLs copy the full URL, scrollbar clicks seek, and `[x]` / `[Close]` dismiss. Outside clicks still dismiss, but stale geometry after resize and all mouse input in keyboard-only mode are ignored.
+
 ## 3. Data
 
 `ProfileSnapshot` carries everything the modal shows; `ProfileService::do_find_profile` loads it in one pass, including `runner` (`ProfileRunner`: the parsed look and sheet of a standing `deadchannel_runners` row; a row that fails to parse is logged and shown as no runner, the directory's rule), `chip_ledger` as resolved `LedgerRow`s (one batched primary-key lookup per source table, at most `PROFILE_LEDGER_ROWS` ids each) and `chips_month` (earned and net in one scan). The modal never queries.

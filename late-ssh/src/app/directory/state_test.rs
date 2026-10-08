@@ -297,3 +297,19 @@ fn row_model_for_card_only_projects_only_and_both() {
         "five tags at most"
     );
 }
+
+#[test]
+fn search_caret_inserts_and_backspaces_at_character_boundaries() {
+    let mut state = DirectoryState::new();
+    state.enter_search();
+    for ch in "ab界cd".chars() {
+        state.search_push(ch);
+    }
+    state.position_search_cursor(3);
+    state.search_push('X');
+    assert_eq!(state.search_query(), "ab界Xcd");
+    state.search_backspace();
+    state.search_backspace();
+    assert_eq!(state.search_query(), "abcd");
+    assert_eq!(state.search_cursor(), 2);
+}

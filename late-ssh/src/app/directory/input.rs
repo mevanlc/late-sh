@@ -2,7 +2,128 @@ use crate::app::common::primitives::Banner;
 use crate::app::directory::editor;
 use crate::app::{input::ParsedInput, state::App};
 
+use super::mouse::Target;
 use super::state::{PersonFocus, Shelf, person_entries};
+use crate::app::input::{MouseButton, MouseEvent, MouseEventKind};
+
+pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
+    if !app.interaction_mode.mouse_enabled() {
+        return true;
+    }
+    let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
+        return true;
+    };
+    let size = app.size;
+    match mouse.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+            let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                -3
+            } else {
+                3
+            };
+            if app.directory_state.shelf() == Shelf::Jobs {
+                app.jobs.mouse.scroll(x, y, delta, size);
+            } else {
+                app.directory_state.mouse.scroll(x, y, delta, size);
+            }
+        }
+        MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
+            let on_jobs = app.directory_state.shelf() == Shelf::Jobs;
+            if app.directory_state.mouse.click_track(x, y, size)
+                || (on_jobs && app.jobs.mouse.click_track(x, y, size))
+            {
+                return true;
+            }
+            let target = app
+                .directory_state
+                .mouse
+                .target(x, y, size)
+                .or_else(|| on_jobs.then(|| app.jobs.mouse.target(x, y, size)).flatten());
+            match target {
+                Some(Target::Shelf(shelf)) => {
+                    app.directory_state.set_shelf(shelf);
+                    app.jobs.mouse.invalidate();
+                }
+                Some(Target::Person(id)) => {
+                    let entries = person_entries(
+                        app.chat.showcase.all_items(),
+                        app.chat.work.all_items(),
+                        app.directory_state.mine_only,
+                        app.user_id,
+                        app.directory_state.active_query(),
+                    );
+                    if let Some(index) = entries.iter().position(|entry| entry.user_id == id) {
+                        app.directory_state.select_and_open(index);
+                        if app.directory_state.search_mode() {
+                            submit_search(app);
+                        }
+                    }
+                }
+                Some(Target::Job(id)) => {
+                    let tags = crate::app::jobs::input::own_tags(app);
+                    if let Some(index) = app.jobs.visible(&tags).iter().position(|job| job.id == id)
+                    {
+                        app.directory_state.set_shelf(Shelf::Jobs);
+                        app.jobs.select_and_open(index);
+                    }
+                }
+                Some(Target::Key(key)) => {
+                    handle_idle_byte(app, key);
+                }
+                Some(Target::Item(item, key)) => {
+                    if focus_item(app, item) && key != 0 {
+                        handle_people_byte(app, key);
+                    }
+                }
+                Some(Target::Copy(url)) => {
+                    app.pending_clipboard = Some(url);
+                    app.banner = Some(Banner::success("Link copied!"));
+                }
+                Some(Target::Profile(id, name)) => app.open_profile_modal(id, name),
+                Some(Target::SearchCaret(col)) => app.directory_state.position_search_cursor(col),
+                Some(Target::Back) => {
+                    if on_jobs {
+                        app.jobs.close_detail();
+                    } else {
+                        app.directory_state.close_detail();
+                    }
+                }
+                None => {}
+            }
+            app.directory_state.mouse.invalidate();
+            app.jobs.mouse.invalidate();
+        }
+        _ => {}
+    }
+    true
+}
+
+fn focus_item(app: &mut App, wanted: FocusedItem) -> bool {
+    let entries = person_entries(
+        app.chat.showcase.all_items(),
+        app.chat.work.all_items(),
+        app.directory_state.mine_only,
+        app.user_id,
+        app.directory_state.active_query(),
+    );
+    let found = entries
+        .get(app.directory_state.selected())
+        .and_then(|entry| {
+            (0..entry.focus_len()).find(|index| match entry.focus_target(*index) {
+                Some(PersonFocus::Card(item)) => wanted == FocusedItem::Card(item.profile.id),
+                Some(PersonFocus::Project(item)) => {
+                    wanted == FocusedItem::Project(item.showcase.id)
+                }
+                None => false,
+            })
+        });
+    if let Some(index) = found {
+        app.directory_state.focus_item(index);
+        true
+    } else {
+        false
+    }
+}
 
 /// The focused item of the selected person: their card or one of their
 /// projects, by id. Owned values, so the caller can mutate `app` afterwards.
@@ -101,6 +222,8 @@ pub(crate) fn handle_search_input(app: &mut App, event: &ParsedInput) -> bool {
         ParsedInput::Arrow(b'A') | ParsedInput::Byte(0x0B) => {
             app.directory_state.move_selection(-1, len);
         }
+        ParsedInput::Arrow(b'C') => app.directory_state.move_search_cursor(1),
+        ParsedInput::Arrow(b'D') => app.directory_state.move_search_cursor(-1),
         ParsedInput::PageDown => app.directory_state.move_selection(8, len),
         ParsedInput::PageUp => app.directory_state.move_selection(-8, len),
         ParsedInput::Char(ch) => app.directory_state.search_push(*ch),

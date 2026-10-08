@@ -154,7 +154,17 @@ pub(crate) struct PostValues {
     pub(crate) excerpt: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PostTarget {
+    Field(PostField),
+    Caret(PostField, usize, usize),
+    Scope(bool),
+    Post,
+    Close,
+}
+
 pub(crate) struct PostForm {
+    pub(crate) mouse: crate::app::common::mouse::MouseState<PostTarget, ()>,
     open: bool,
     row: usize,
     editing: bool,
@@ -186,6 +196,7 @@ fn joined(ta: &TextArea<'static>, sep: &str) -> String {
 impl Default for PostForm {
     fn default() -> Self {
         Self {
+            mouse: Default::default(),
             open: false,
             row: 0,
             editing: false,
@@ -277,14 +288,13 @@ impl PostForm {
         }
     }
 
-    /// The text of a row as it shows when not being typed into.
-    pub(crate) fn field_text(&self, field: PostField) -> String {
-        match field.kind() {
-            PostKind::Choice => scope_choice_label(self.scope).to_string(),
-            PostKind::Tags => self.tags.join(" · "),
-            PostKind::Text => joined(self.field(field), " "),
-            PostKind::Multi => joined(self.field(field), "\n"),
-        }
+    pub(crate) fn select_field(&mut self, field: PostField) {
+        self.stop_editing();
+        self.row = POST_FIELDS
+            .iter()
+            .position(|candidate| *candidate == field)
+            .unwrap_or(0);
+        self.sync_cursors();
     }
 
     pub(crate) fn move_row(&mut self, delta: isize) {
@@ -379,6 +389,7 @@ impl PostForm {
                 Some(posting)
             }
             Err((field, message)) => {
+                self.mouse.reveal_selection();
                 self.row = POST_FIELDS
                     .iter()
                     .position(|known| *known == field)

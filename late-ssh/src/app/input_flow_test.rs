@@ -6355,3 +6355,370 @@ async fn the_road_and_the_hand_fit_an_80_by_24_terminal() {
         );
     }
 }
+
+fn screen5_click(app: &mut crate::app::state::App, rect: ratatui::layout::Rect) {
+    app.handle_input(format!("\x1b[<0;{};{}M", rect.x + 1, rect.y + 1).as_bytes());
+}
+
+#[tokio::test]
+async fn profiles_mouse_scroll_and_click_preserve_routing_and_narrow_back() {
+    use crate::app::{
+        common::primitives::Screen,
+        directory::{
+            mouse::{Pane, Target},
+            state::Shelf,
+        },
+    };
+    use late_core::models::user::InteractionMode;
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-jobs").await;
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-jobs");
+    app.resize(120, 24).unwrap();
+    app.set_screen(Screen::Profiles);
+    app.directory_state.set_shelf(Shelf::Jobs);
+    app.jobs.loaded = true;
+    app.jobs.items = (0..20)
+        .map(|index| crate::app::jobs::state_test::posting(&format!("Company{index}"), &["rust"]))
+        .collect();
+    app.render().unwrap();
+    let row = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Job(_)))
+        .unwrap()
+        .0;
+    let wheel = format!("\x1b[<65;{};{}M", row.x + 1, row.y + 1);
+    app.interaction_mode = InteractionMode::Keyboard;
+    app.handle_input(wheel.as_bytes());
+    assert_eq!(app.jobs.mouse.offset(Pane::JobsList), 0);
+    app.interaction_mode = InteractionMode::Hybrid;
+    app.handle_input(wheel.as_bytes());
+    assert_eq!(app.jobs.mouse.offset(Pane::JobsList), 3);
+    assert_eq!(app.jobs.selected(), 0);
+    app.render().unwrap();
+    let (rect, target) = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Job(_)))
+        .unwrap();
+    let Target::Job(id) = target else {
+        unreachable!()
+    };
+    let expected = app.jobs.items.iter().position(|job| job.id == id).unwrap();
+    app.handle_input(
+        format!(
+            "\x1b[<2;{};{}M\x1b[<0;{};{}m",
+            rect.x + 1,
+            rect.y + 1,
+            rect.x + 1,
+            rect.y + 1
+        )
+        .as_bytes(),
+    );
+    assert_eq!(app.jobs.selected(), 0, "right press and release ignored");
+    screen5_click(&mut app, rect);
+    assert_eq!(app.jobs.selected(), expected);
+    app.render().unwrap();
+    let copy = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Copy(_)))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, copy);
+    assert_eq!(
+        app.pending_clipboard,
+        Some(app.jobs.items[expected].url.clone())
+    );
+    app.resize(60, 20).unwrap();
+    app.render().unwrap();
+    let back = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Back)
+        .unwrap()
+        .0;
+    screen5_click(&mut app, back);
+    assert!(!app.jobs.detail_open());
+    app.render().unwrap();
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(
+        app.screen,
+        Screen::Dashboard,
+        "global frame remains clickable"
+    );
+}
+
+#[tokio::test]
+async fn profiles_mouse_editor_retains_draft_and_saves_about_with_explicit_button() {
+    use crate::app::{
+        common::primitives::Screen,
+        directory::editor::state::{Field, MouseTarget, Page},
+    };
+    use late_core::models::{profile::Profile, user::InteractionMode};
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-editor").await;
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-editor");
+    app.resize(100, 30).unwrap();
+    app.set_screen(Screen::Profiles);
+    app.handle_input(b"w");
+    app.render().unwrap();
+    let about = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Page(Page::About))
+        .unwrap()
+        .0;
+    app.interaction_mode = InteractionMode::Keyboard;
+    screen5_click(&mut app, about);
+    assert_eq!(app.directory_editor.page(), Page::Card);
+    app.interaction_mode = InteractionMode::Hybrid;
+    screen5_click(&mut app, about);
+    app.render().unwrap();
+    let bio = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Caret(Field::Bio, 0, 0))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, bio);
+    app.handle_input(b"draft bio");
+    app.render().unwrap();
+    screen5_click(&mut app, ratatui::layout::Rect::new(0, 0, 1, 1));
+    assert!(app.directory_editor.is_open());
+    assert_eq!(app.directory_editor.field_text(Field::Bio), "draft bio");
+    app.render().unwrap();
+    let close = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Close)
+        .unwrap()
+        .0;
+    screen5_click(&mut app, close);
+    app.render().unwrap();
+    assert!(app.directory_editor.confirm_discard());
+    screen5_click(&mut app, about);
+    assert_eq!(
+        app.directory_editor.page(),
+        Page::About,
+        "discard question owns input"
+    );
+    app.render().unwrap();
+    let keep = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Keep)
+        .unwrap()
+        .0;
+    screen5_click(&mut app, keep);
+    app.render().unwrap();
+    let save = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Save)
+        .unwrap()
+        .0;
+    screen5_click(&mut app, save);
+    assert!(!app.directory_editor.is_open());
+    wait_until(
+        || {
+            let db = db.db.clone();
+            async move {
+                let client = db.get().await.unwrap();
+                Profile::load(&client, user.id).await.unwrap().bio == "draft bio"
+            }
+        },
+        "mouse save to persist",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn profiles_mouse_post_form_activates_fields_and_waits_for_pending_save() {
+    use crate::app::{
+        common::primitives::Screen,
+        jobs::post::{PostField, PostTarget},
+    };
+    use late_core::models::user::InteractionMode;
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-post").await;
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-post");
+    app.resize(100, 30).unwrap();
+    app.set_screen(Screen::Profiles);
+    app.jobs.post.open();
+    for (field, text) in [
+        (PostField::Company, "Garden"),
+        (PostField::Title, "Engineer"),
+        (PostField::Link, "https://example.com/job"),
+        (PostField::Excerpt, "Build things"),
+    ] {
+        app.render().unwrap();
+        let rect = app
+            .jobs
+            .post
+            .mouse
+            .hits()
+            .into_iter()
+            .find(|(_, target)| *target == PostTarget::Caret(field, 0, 0))
+            .unwrap()
+            .0;
+        app.interaction_mode = InteractionMode::Keyboard;
+        screen5_click(&mut app, rect);
+        app.interaction_mode = InteractionMode::Hybrid;
+        screen5_click(&mut app, rect);
+        assert_eq!(app.jobs.post.active_field(), field);
+        assert!(app.jobs.post.editing());
+        app.handle_input(text.as_bytes());
+    }
+    app.render().unwrap();
+    screen5_click(&mut app, ratatui::layout::Rect::new(0, 0, 1, 1));
+    assert!(app.jobs.post.is_open());
+    app.render().unwrap();
+    let close = app
+        .jobs
+        .post
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == PostTarget::Close)
+        .unwrap()
+        .0;
+    let post = app
+        .jobs
+        .post
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == PostTarget::Post)
+        .unwrap()
+        .0;
+    screen5_click(&mut app, post);
+    assert!(app.jobs.post.pending());
+    screen5_click(&mut app, close);
+    assert!(app.jobs.post.is_open(), "pending post cannot be dismissed");
+    crate::test_helpers::wait_for_app(&mut app, "post save to settle", |app| {
+        !app.jobs.post.is_open()
+    })
+    .await;
+    assert!(!app.jobs.post.is_open());
+}
+
+#[tokio::test]
+async fn profiles_mouse_search_selects_person_and_profile_popup_owns_input() {
+    use crate::app::{
+        common::primitives::Screen, directory::mouse::Target, profile_modal::state::MouseTarget,
+    };
+    use late_core::models::{
+        showcase::{Showcase, ShowcaseParams},
+        user::InteractionMode,
+    };
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-search").await;
+    let author = create_test_user(&db.db, "profiles-mouse-author").await;
+    let url = "https://example.com/mouse/project?full=value";
+    let client = db.db.get().await.unwrap();
+    Showcase::create_by_user_id(
+        &client,
+        author.id,
+        ShowcaseParams {
+            user_id: author.id,
+            title: "Mouse project".to_string(),
+            url: url.to_string(),
+            description: "A shared project".to_string(),
+            tags: vec!["rust".to_string()],
+        },
+    )
+    .await
+    .unwrap();
+    drop(client);
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-search");
+    app.resize(80, 24).unwrap();
+    app.set_screen(Screen::Profiles);
+    wait_for_render_contains(&mut app, "@profiles-mouse-author").await;
+    app.interaction_mode = InteractionMode::Hybrid;
+    app.render().unwrap();
+    let search = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Key(b's'))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, search);
+    app.handle_input(b"profiles-mouse-author");
+    app.render().unwrap();
+    let person = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Person(author.id))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, person);
+    assert!(!app.directory_state.search_mode());
+    assert!(app.directory_state.detail_open());
+    app.render().unwrap();
+    let copy = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Copy(url.to_string()))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, copy);
+    assert_eq!(app.pending_clipboard, Some(url.to_string()));
+    app.render().unwrap();
+    let profile = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Profile(id, _) if *id == author.id))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, profile);
+    assert!(app.show_profile_modal);
+    wait_for_render_contains(&mut app, "profile · profiles-mouse-author").await;
+    app.render().unwrap();
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(app.screen, Screen::Profiles, "popup blocks page switches");
+    assert!(!app.show_profile_modal, "outside click dismisses the popup");
+    app.open_profile_modal(author.id, "profiles-mouse-author");
+    wait_for_render_contains(&mut app, "profile · profiles-mouse-author").await;
+    app.render().unwrap();
+    let close = app
+        .profile_modal_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Close)
+        .unwrap()
+        .0;
+    app.interaction_mode = InteractionMode::Keyboard;
+    screen5_click(&mut app, close);
+    assert!(app.show_profile_modal);
+    app.interaction_mode = InteractionMode::Hybrid;
+    screen5_click(&mut app, close);
+    assert!(!app.show_profile_modal);
+}

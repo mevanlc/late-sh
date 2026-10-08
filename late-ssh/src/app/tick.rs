@@ -200,6 +200,11 @@ impl App {
         // Services
         let chat_tick = self.chat.tick();
         changed |= chat_tick.changed;
+        if chat_tick.changed {
+            self.directory_state.mouse.invalidate();
+            self.directory_editor.mouse.invalidate();
+            self.jobs.mouse.invalidate();
+        }
         if let Some(b) = chat_tick.banner {
             self.banner = Some(b);
             changed = true;

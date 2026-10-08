@@ -34,7 +34,12 @@ use ratatui::{
 
 use crate::app::{
     bonsai::render::{apply_sway, canvas_lines_in},
-    common::{markdown::render_body_to_lines, theme, time::timezone_current_time},
+    common::{
+        markdown::render_body_to_lines,
+        mouse_ui::{self, Surface},
+        theme,
+        time::timezone_current_time,
+    },
     deadchannel::{
         fight::data as fight_data, fight::ui as fight_ui, runner::state::PORTRAIT_WIDTH,
         runner::ui as runner_ui,
@@ -47,7 +52,7 @@ use crate::app::{
 
 use super::{
     badges, ledger,
-    state::{ProfileModalState, ScrollExtent},
+    state::{MouseTarget, ProfileModalState, ScrollExtent},
 };
 
 /// The widest the modal gets; past this a text column reads badly.
@@ -78,6 +83,11 @@ const RUNNER_BAR_CELLS: usize = 12;
 /// measured before it is painted.
 enum Segment {
     Text(Vec<Line<'static>>),
+    Link {
+        lines: Vec<Line<'static>>,
+        url: String,
+        link_height: u16,
+    },
     /// Two columns side by side: `right` is drawn `right_width` wide
     /// against the right edge, `left` takes what is left of the gap.
     Beside {
@@ -97,7 +107,7 @@ enum Segment {
 impl Segment {
     fn height(&self) -> u16 {
         match self {
-            Segment::Text(lines) => lines.len() as u16,
+            Segment::Text(lines) | Segment::Link { lines, .. } => lines.len() as u16,
             Segment::Beside { left, right, .. } => left.len().max(right.len()) as u16,
             Segment::Aquarium | Segment::AquariumBeside { .. } => AQUARIUM_HEIGHT,
         }
@@ -114,7 +124,13 @@ pub(crate) fn draw(
     wall_tick: usize,
     viewer_is_runner: bool,
 ) {
-    let width = area.width.saturating_sub(4).clamp(MIN_WIDTH, MAX_WIDTH);
+    let size = frame.area();
+    state.mouse.begin((size.width, size.height));
+    let width = area
+        .width
+        .saturating_sub(4)
+        .clamp(MIN_WIDTH, MAX_WIDTH)
+        .min(area.width);
     let body_width = width.saturating_sub(2 + SIDE_MARGIN * 2);
 
     let (segments, chips_top) = build_segments(state, body_width, wall_tick, viewer_is_runner);
@@ -139,7 +155,20 @@ pub(crate) fn draw(
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
-    if inner.height < 3 || inner.width < MIN_WIDTH - 2 {
+    mouse_ui::buttons(
+        &mut Surface {
+            buffer: frame.buffer_mut(),
+        },
+        Rect::new(
+            popup.right().saturating_sub(4).max(popup.x),
+            popup.y,
+            popup.width.min(3),
+            popup.height.min(1),
+        ),
+        &state.mouse,
+        &[("[x]", MouseTarget::Close)],
+    );
+    if inner.height < 3 || body_width == 0 {
         return;
     }
 
@@ -162,7 +191,27 @@ pub(crate) fn draw(
     });
     let offset = state.scroll_offset();
 
+    // set_scroll_extent clamps the offset; publish geometry afterwards.
+    state.mouse.begin((size.width, size.height));
+    mouse_ui::buttons(
+        &mut Surface {
+            buffer: frame.buffer_mut(),
+        },
+        Rect::new(
+            popup.right().saturating_sub(4).max(popup.x),
+            popup.y,
+            popup.width.min(3),
+            popup.height.min(1),
+        ),
+        &state.mouse,
+        &[("[x]", MouseTarget::Close)],
+    );
+    state
+        .mouse
+        .pane(rows[1], (), usize::from(rows[1].height), 0);
+    let mark = state.mouse.mark();
     let body = compose(&segments, body_width, content_height, state);
+    state.mouse.translate(mark, viewport, usize::from(offset));
     blit(frame.buffer_mut(), &body, viewport, offset);
 
     if content_height > viewport.height {
@@ -173,6 +222,17 @@ pub(crate) fn draw(
             x: inner.x + inner.width - 1,
             ..rows[1]
         };
+        let max = content_height.saturating_sub(viewport.height);
+        for row in 0..track.height {
+            state.mouse.hit(
+                Rect::new(track.x, track.y + row, 1, 1),
+                MouseTarget::ScrollTo(
+                    (u32::from(row) * u32::from(max)
+                        / u32::from(track.height.saturating_sub(1).max(1)))
+                        as u16,
+                ),
+            );
+        }
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -185,6 +245,20 @@ pub(crate) fn draw(
     }
 
     draw_footer(frame, rows[2], content_height > viewport.height);
+    mouse_ui::buttons(
+        &mut Surface {
+            buffer: frame.buffer_mut(),
+        },
+        Rect::new(
+            rows[2].right().saturating_sub(7).max(rows[2].x),
+            rows[2].y,
+            rows[2].width.min(7),
+            rows[2].height,
+        ),
+        &state.mouse,
+        &[("[Close]", MouseTarget::Close)],
+    );
+    state.mouse.finish();
 }
 
 /// Every section in order, plus the body row the chips section starts on.
@@ -261,19 +335,25 @@ fn build_segments(
     // ── showcases ──
     let showcases = state.showcases();
     if !showcases.is_empty() {
-        let mut lines = section_lines(&format!("showcases ({})", showcases.len()), width_usize);
+        segments.push(Segment::Text(section_lines(
+            &format!("showcases ({})", showcases.len()),
+            width_usize,
+        )));
         for (index, item) in showcases.iter().enumerate() {
             if index > 0 {
-                lines.push(Line::from(""));
+                segments.push(Segment::Text(vec![Line::from("")]));
             }
-            lines.extend(render_body_to_lines(
-                &showcase_markdown(item),
-                width_usize,
-                Span::raw(""),
-                text,
-            ));
+            let heading = format!("### {}\n\n> {}", item.title.trim(), item.url.trim());
+            let link_height =
+                render_body_to_lines(&heading, width_usize, Span::raw(""), text).len() as u16;
+            let lines =
+                render_body_to_lines(&showcase_markdown(item), width_usize, Span::raw(""), text);
+            segments.push(Segment::Link {
+                lines,
+                url: item.url.clone(),
+                link_height,
+            });
         }
-        segments.push(Segment::Text(lines));
     }
 
     // ── bonsai ──
@@ -362,6 +442,17 @@ fn compose(segments: &[Segment], width: u16, height: u16, state: &ProfileModalSt
         let segment_height = segment.height();
         let area = Rect::new(0, y, width, segment_height);
         match segment {
+            Segment::Link {
+                lines,
+                url,
+                link_height,
+            } => {
+                Paragraph::new(lines.clone()).render(area, &mut buf);
+                state.mouse.hit(
+                    Rect::new(0, y, width, *link_height),
+                    MouseTarget::Copy(url.clone()),
+                );
+            }
             Segment::Text(lines) => {
                 Paragraph::new(lines.clone()).render(area, &mut buf);
             }

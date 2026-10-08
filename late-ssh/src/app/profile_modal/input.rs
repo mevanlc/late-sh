@@ -1,3 +1,4 @@
+use super::state::MouseTarget;
 use crate::app::{
     input::{MouseButton, MouseEvent, MouseEventKind, ParsedInput},
     state::App,
@@ -26,14 +27,49 @@ pub(crate) fn handle_input(app: &mut App, event: ParsedInput) {
         | ParsedInput::Arrow(b'A') => {
             app.profile_modal_state.scroll_by(-1);
         }
-        ParsedInput::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollUp => app.profile_modal_state.scroll_by(-3),
-            MouseEventKind::ScrollDown => app.profile_modal_state.scroll_by(3),
-            // A left click outside the modal dismisses it, like clicking off a
-            // popup elsewhere; clicks on the modal itself are left alone.
-            MouseEventKind::Down if clicked_outside(app, &mouse) => close(app),
-            _ => {}
-        },
+        ParsedInput::Mouse(mouse) => {
+            if !app.interaction_mode.mouse_enabled() {
+                return;
+            }
+            let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
+                return;
+            };
+            match mouse.kind {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    if app
+                        .profile_modal_state
+                        .mouse
+                        .over_pane(x, y, app.size)
+                        .is_some()
+                    {
+                        app.profile_modal_state.scroll_by(
+                            if mouse.kind == MouseEventKind::ScrollUp {
+                                -3
+                            } else {
+                                3
+                            },
+                        );
+                    }
+                }
+                MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
+                    match app.profile_modal_state.mouse.target(x, y, app.size) {
+                        Some(MouseTarget::Close) => close(app),
+                        Some(MouseTarget::Copy(url)) => {
+                            app.pending_clipboard = Some(url);
+                            app.banner = Some(crate::app::common::primitives::Banner::success(
+                                "Link copied!",
+                            ));
+                        }
+                        Some(MouseTarget::ScrollTo(offset)) => {
+                            app.profile_modal_state.scroll_to(offset)
+                        }
+                        None if clicked_outside(app, &mouse) => close(app),
+                        None => {}
+                    }
+                }
+                _ => {}
+            }
+        }
         ParsedInput::PageDown => {
             let step = (app.size.1 / 2).max(1) as i16;
             app.profile_modal_state.scroll_by(step);
@@ -54,7 +90,9 @@ pub(crate) fn handle_escape(app: &mut App) {
 /// (from the last render). SGR mouse cells are 1-indexed; the popup rect is
 /// in 0-indexed frame cells, so shift the click by one before testing.
 fn clicked_outside(app: &App, mouse: &MouseEvent) -> bool {
-    if mouse.button != Some(MouseButton::Left) {
+    if mouse.button != Some(MouseButton::Left)
+        || !app.profile_modal_state.mouse.is_current(app.size)
+    {
         return false;
     }
     let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
