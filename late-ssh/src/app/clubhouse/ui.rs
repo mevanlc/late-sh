@@ -1371,8 +1371,8 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
 
 /// The page stops of the first-visit tour, drawn centered over the page
 /// they pitch (`render.rs` calls this on every non-clubhouse screen). The
-/// forced gate guarantees the current screen is the stop's own page, so a
-/// mismatch, like off-tour stages, draws nothing.
+/// Artboard can return to chat without showing content, where Enter continues
+/// the tour. Other screen mismatches, like off-tour stages, draw nothing.
 pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen: Screen) {
     let key = Style::default()
         .fg(theme::AMBER_GLOW())
@@ -1491,6 +1491,21 @@ pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen:
                 )),
             ],
             "a taste of the dungeon",
+        ),
+        Tutorial::VisitArtboard if screen == Screen::Dashboard => (
+            Screen::Dashboard,
+            " ✦ the tour · artboard skipped ",
+            vec![
+                Line::from(Span::styled(
+                    "you can leave the canvas for another visit.",
+                    text,
+                )),
+                Line::from(Span::styled(
+                    "you'll be asked again if you visit later.",
+                    text,
+                )),
+            ],
+            "the profiles",
         ),
         Tutorial::VisitArtboard => (
             Screen::Artboard,

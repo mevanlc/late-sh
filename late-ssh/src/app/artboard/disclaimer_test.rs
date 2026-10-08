@@ -20,7 +20,7 @@ fn artboard_disclaimer_matches_requested_layout_and_colors() {
         let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         let choices = Cell::default();
         terminal
-            .draw(|frame| draw(frame, frame.area(), &choices))
+            .draw(|frame| draw(frame, frame.area(), &choices, false))
             .unwrap();
         let buffer = terminal.backend().buffer();
         let warning = "/!\\     Artboard may contain NSFW content     /!\\";
@@ -79,7 +79,7 @@ fn artboard_disclaimer_keeps_choices_and_reset_hint_on_small_terminals() {
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
     let choices = Cell::default();
     terminal
-        .draw(|frame| draw(frame, frame.area(), &choices))
+        .draw(|frame| draw(frame, frame.area(), &choices, false))
         .unwrap();
     let buffer = terminal.backend().buffer();
     text_position(buffer, "Artboard may contain NSFW content");

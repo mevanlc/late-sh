@@ -1316,6 +1316,8 @@ fn overview_lines() -> Vec<String> {
         "Artboard may contain NSFW content: V views this visit, A always views,",
         "and B returns to chat (1). Settings > Tweaks > Artboard",
         "content disclaimer turns this default-on prompt off or back on.",
+        "During the tour, B/Esc skips the art; Enter continues to Profiles.",
+        "Tour choices are temporary and do not change disclaimer preferences.",
         "There is also a dedicated Architecture slide if you need system-level context.",
         "",
         "Global keys",

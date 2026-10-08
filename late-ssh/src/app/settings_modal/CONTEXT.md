@@ -43,7 +43,8 @@ button open its panel editor, including when Off.
 The Artboard group contains the default-on Artboard content disclaimer toggle.
 It persists `artboard_disclaimer` in account settings; re-enabling it closes
 editing and hides the current Artboard visit until consent. `A` (Always View) in the Artboard
-prompt turns the same tweak off and allows that visit.
+prompt turns the same tweak off and allows that visit outside the tour. Tour
+dialog choices do not change the tweak or save account settings.
 
 Target language and Interaction mode open the shared picker on click or
 Enter/Space; Left/Right keyboard cycling stays available. Opening selects the

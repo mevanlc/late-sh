@@ -2041,6 +2041,7 @@ impl App {
                         frame,
                         content_area,
                         ctx.artboard_disclaimer_choices,
+                        ctx.clubhouse_state.tutorial_forced_step().is_some(),
                     );
                 } else if let Some(state) = ctx.dartboard_state {
                     artboard::ui::draw_game(
@@ -2521,7 +2522,7 @@ impl App {
         // The first-visit tour's page-stop box (top-right). The clubhouse
         // draws its own tutorial overlays; toasts draw after, so they win
         // the corner while they last.
-        if screen != Screen::Clubhouse {
+        if screen != Screen::Clubhouse && !ctx.artboard_disclaimer_visible {
             crate::app::clubhouse::ui::draw_tour_overlay(
                 frame,
                 inner,
@@ -3162,7 +3163,11 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             .dartboard_state
             .map(|state| (state.gallery().focus(), state.gallery().is_framing()));
         let hints: &[(&str, &str)] = if ctx.artboard_disclaimer_visible {
-            &[("V", "view"), ("A", "always view"), ("B", "back to chat")]
+            if ctx.clubhouse_state.tutorial_forced_step().is_some() {
+                &[("V", "view"), ("B", "back to chat")]
+            } else {
+                &[("V", "view"), ("A", "always view"), ("B", "back to chat")]
+            }
         } else if ctx.artboard_interacting {
             &[
                 ("active", "draw"),
