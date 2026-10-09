@@ -6,9 +6,13 @@ Z-machine stories with a vendored, locally modified Frotz executable in a
 standalone door host, projecting its terminal through late.sh's existing door
 transport and renderer.
 
-**Status:** implementation plan. The work that produced this document is
-documentation only; it does not vendor assets, patch Frotz, implement the door,
-or deploy anything. Repository observations below were checked against
+**Status:** implementation in progress. Story assets and the modified interpreter
+are vendored. The curses regression suite covers all three editions, both slot
+kinds, visible-screen and RNG continuation, decoded stack operands, confirmation
+prompts, resize, RESTORE cancellation, Unicode descriptions, corruption, and
+failed writes on macOS and Linux. The host, late.sh menus, packaging, and full
+repository/deployment validation remain implementation work. Repository
+observations used for the design below were checked against
 `6ff4199852e22ea7bfb2422316a7dce5deb3172d` on 2026-10-08.
 
 ## 1. Agreed behavior
@@ -432,6 +436,13 @@ and story provenance.
 
 Each milestone has a concrete exit condition. These describe future feature
 implementation; none is completed merely by adding this plan.
+
+Milestone 1 uses the `LZORK001` container and explicit `LATE_FROTZ_DOOR` launch
+modes, documented in `vendor/frotz/LATE-ZORK.md`. Both checkpoint kinds wrap a
+Quetzal VM image with pending operands, RNG state, window records, visible
+Unicode terminal cells, and metadata. The standalone interpreter owns all VM
+serialization. The adjacent `ux_door_test.py` suite is the executable regression
+evidence; dumb-Frotz transcripts are not used as a substitute.
 
 1. **Vendor and prove the interpreter path.** Import the pinned stories/source
    with notices, build curses Frotz, and demonstrate ordinary play for all three.
