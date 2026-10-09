@@ -115,7 +115,7 @@ impl HubGame {
             HubGame::Dopewars => "dopewars",
             HubGame::Bashquest => "BashQuest",
             HubGame::Codekeep => "CodeKeep",
-            HubGame::Zork => "Zork I, II, III",
+            HubGame::Zork => "Zork Trilogy",
             HubGame::Darkroom => crate::app::door::darkroom::data::TITLE,
         }
     }

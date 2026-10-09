@@ -1,6 +1,6 @@
-# Plan: Zork I, II, III doors
+# Plan: Zork Trilogy door
 
-Add one **Zork I, II, III** entry to the Games hub. It opens a menu for
+Add one **Zork Trilogy** entry to the Games hub. It opens a menu for
 choosing an edition, then that edition's save actions. Play the original
 Z-machine stories with a vendored, locally modified Frotz executable in a
 standalone door host, projecting its terminal through late.sh's existing door
@@ -37,7 +37,7 @@ next successful `SAVE`.
 ### Menu and navigation
 
 The Games hub has one card, under the existing doors group, labeled
-**Zork I, II, III**. It has no new top-level number shortcut. Enter opens a
+**Zork Trilogy**. It has no new top-level number shortcut. Enter opens a
 native late.sh edition selector, followed by these edition actions:
 
 | Action | Behavior |

@@ -2955,7 +2955,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Dopewars => "dopewars",
         Screen::Bashquest => "BashQuest",
         Screen::Codekeep => "CodeKeep",
-        Screen::Zork => "Zork I, II, III",
+        Screen::Zork => "Zork Trilogy",
         Screen::Darkroom => crate::app::door::darkroom::data::TITLE,
         Screen::GreenDragon => "Green Dragon",
         Screen::Arcade => "The Arcade",

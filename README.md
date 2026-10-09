@@ -24,7 +24,7 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire
-- Zork I, II, III door with an autosave and a manual save per edition
+- Zork Trilogy door with an autosave and a manual save per edition
 - Web frontend for landing, profiles, and the token-less `/listen` page
 - Companion CLI for local audio playback and synced visualizer data
 
@@ -136,7 +136,7 @@ docker build --platform linux/amd64 -f docker/doors/zork.Dockerfile \
 make start
 ```
 
-Open Games (`3`) → **Zork I, II, III** → choose an edition. Each has automatic
+Open Games (`3`) → **Zork Trilogy** → choose an edition. Each has automatic
 progress and one deliberate `SAVE`; the six slots belong to your account.
 `SAVE` accepts an optional description, `RESTORE` asks before returning to the
 edition menu, and backtick steps out while the current game stays open.

@@ -209,7 +209,7 @@ pub fn draw_tabs(frame: &mut Frame, area: Rect, current: Screen) {
         Screen::Dopewars => "dopewars",
         Screen::Bashquest => "BashQuest",
         Screen::Codekeep => "CodeKeep",
-        Screen::Zork => "Zork I, II, III",
+        Screen::Zork => "Zork Trilogy",
         Screen::Usurper => "Usurper",
         Screen::GreenDragon => "Green Dragon",
         Screen::Darkroom => crate::app::door::darkroom::data::TITLE,

@@ -63,7 +63,7 @@ fn all_games_are_listed_in_order() {
             "BashQuest",
             "Rebels",
             "CodeKeep",
-            "Zork I, II, III"
+            "Zork Trilogy"
         ],
     );
 }

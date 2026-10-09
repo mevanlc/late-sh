@@ -1,4 +1,4 @@
-# Zork trilogy door context
+# Zork Trilogy door context
 
 Scope: `app/door/zork`, the standalone `late-zork` host, `vendor/frotz`, and
 `assets/zork`. Parent: root `CONTEXT.md`. Design/acceptance history:
@@ -7,7 +7,7 @@ disabled pending the rollout below.
 
 ## Player contract
 
-One **Zork I, II, III** Games card opens edition selection, then Continue,
+One **Zork Trilogy** Games card opens edition selection, then Continue,
 Load manual save, Start new game, and Back. Each account has two slots per
 edition: automatic progress and a deliberate manual fallback. These are six
 slots, not six independent campaigns. Missing, invalid, and unavailable slots

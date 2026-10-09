@@ -57,7 +57,7 @@ fn slot_line(label: &str, slot: Option<&Slot>) -> Line<'static> {
 pub fn draw_landing(frame: &mut Frame, area: Rect, enabled: bool, scroll: u16) -> u16 {
     let lines = vec![
         Line::raw(""),
-        title("Zork I, II, III"),
+        title("Zork Trilogy"),
         Line::raw(""),
         Line::raw("Explore the Great Underground Empire, one command at a time."),
         Line::raw(""),
@@ -104,7 +104,7 @@ pub fn draw_page(frame: &mut Frame, area: Rect, state: &State) {
         }
         return;
     }
-    let mut lines = vec![title("Zork I, II, III"), Line::raw("")];
+    let mut lines = vec![title("Zork Trilogy"), Line::raw("")];
     if !state.enabled() {
         lines.push(Line::styled(
             "Currently unavailable",
