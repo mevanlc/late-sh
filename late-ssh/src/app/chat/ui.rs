@@ -47,10 +47,12 @@ use super::state::{
     visual_order_for_rooms,
 };
 use super::ui_text::{
-    AuthorTint, Gutter, is_nerd_font_glyph, reaction_label, without_nerd_font_glyphs,
-    wrap_chat_entry_to_lines,
+    AuthorTint, Gutter, WAVE_REACTION_KIND, is_nerd_font_glyph, reaction_label,
+    without_nerd_font_glyphs, wrap_chat_entry_to_lines,
 };
 
+/// The picker's choices in paint order: the key to press and the reaction
+/// kind it toggles.
 const REACTION_PICKER_CHOICES: [(&str, i16); 10] = [
     ("1", 1),
     ("2", 2),
@@ -61,7 +63,7 @@ const REACTION_PICKER_CHOICES: [(&str, i16); 10] = [
     ("7", 7),
     ("8", 8),
     ("9", 9),
-    ("w", 0),
+    ("w", WAVE_REACTION_KIND),
 ];
 /// The gap between messages and composer: a blank breather row on top so the
 /// ticker doesn't read as one more chat line, then the ticker row itself
