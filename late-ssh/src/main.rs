@@ -111,6 +111,11 @@ async fn main() -> anyhow::Result<()> {
     let _telemetry = late_core::telemetry::init_telemetry("late-ssh")
         .context("failed to initialize telemetry")?;
 
+    // The ascii scenes build their land once per process (alpine dawn
+    // raymarches for about half a second): do it here, off the runtime's
+    // workers, rather than under the first away session's app lock.
+    tokio::task::spawn_blocking(late_ssh::app::ascii::piece::warm);
+
     // Load configuration from environment
     let config = Config::load().context("failed to load configuration")?;
     config.log_startup();
@@ -395,8 +400,7 @@ async fn main() -> anyhow::Result<()> {
     let shop_service = late_ssh::app::ShopService::new(db.clone())
         .with_flair_directory(flair_directory.clone())
         .with_activity(activity_publisher.clone())
-        .with_ai_service(ai_service.clone())
-        .with_drunk_map(drunk_map.clone());
+        .with_ai_service(ai_service.clone());
     let _shop_notify_task = shop_service
         .start_notify_worker(pg_listener.subscribe(late_ssh::app::ShopService::CHANNELS));
     // Every notify-driven domain is subscribed by now.

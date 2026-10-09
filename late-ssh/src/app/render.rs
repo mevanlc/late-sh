@@ -221,9 +221,17 @@ struct DrawContext<'a> {
     /// Every live game on a watchable door: the hub rail's live rows and
     /// the watch view's header.
     live_rows: Vec<crate::app::door::spectate::state::LiveRow>,
-    /// Watchers on this player's own running game on the watchable door
-    /// whose screen is up, for its chrome.
-    own_watchers: Option<usize>,
+    /// The same games as the sidebar's Live panel lists them, with who is
+    /// watching each, and the panel's click slot.
+    live_panel_rows: Vec<crate::app::live::panel::LivePanelRow>,
+    live_panel_now: chrono::DateTime<chrono::Utc>,
+    live_panel_hit: &'a crate::app::live::panel::LivePanelHit,
+    /// People with a watch open on this player's own running game on the
+    /// watchable door whose screen is up, for its watcher chat.
+    own_watchers: usize,
+    /// People with the held watch open, this session included, for its
+    /// watch chat's header.
+    held_watchers: usize,
     /// The watch chat on show: the watched player's room on the Games hub,
     /// this player's own room beside their running game on a watchable
     /// door's screen. `None` until this session is in the room.
@@ -364,6 +372,12 @@ struct DrawContext<'a> {
     show_ultimate_modal: bool,
     ultimate_state: &'a crate::app::ultimates::UltimateState,
     show_splash: bool,
+    /// The away screensaver: the piece that covers the whole frame while the
+    /// session is away (`App::screensaver`).
+    screensaver: Option<late_core::models::user::AsciiPiece>,
+    /// The shared clock every ascii piece is drawn at this frame
+    /// (`ascii::piece::clock_now`).
+    ascii_clock: u64,
     splash_ticks: usize,
     splash_hint: &'a str,
     /// The day's wall piece, hung over the splash when it fits; the
@@ -383,6 +397,7 @@ struct DrawContext<'a> {
     room_info_modal_state: &'a room_info_modal::state::RoomInfoModalState,
     directory_editor: &'a crate::app::directory::editor::state::EditorState,
     tag_picker: &'a crate::app::tag_picker::state::TagPickerState,
+    piece_picker: &'a crate::app::ascii::picker::state::PiecePickerState,
     /// The showcase feed, for the editor's projects page.
     showcase_items: &'a [chat::showcase::svc::ShowcaseFeedItem],
     booth_modal_open: bool,
@@ -431,8 +446,6 @@ struct DrawContext<'a> {
     zen_pet_strip: Option<crate::app::pet::ui::PetView<'a>>,
     zen_active_friends: &'a [crate::app::chat::state::ActiveFriend],
     zen_care: crate::app::zen::ui::Care,
-    zen_live_strip: Option<crate::app::live::state::LiveStripView<'a>>,
-    live_hit: &'a std::cell::Cell<Option<(Rect, crate::app::live::pick::LiveSource)>>,
     /// The pane beside this player's own running game, published for the
     /// click that opens its composer; cleared every frame like the hits.
     own_chat_hit: &'a std::cell::Cell<Option<Rect>>,
@@ -455,16 +468,29 @@ impl App {
         // game shows its watchers and their chat.
         let own_screen_game =
             crate::app::door::spectate::state::SpectateGame::of_screen(self.screen);
-        let own_watchers = own_screen_game.and_then(|game| {
+        let own_game_key = own_screen_game.and_then(|game| {
             let handle = crate::app::door::spectate::chat::own_running_handle(self, game)?;
-            self.live_games.watchers_of(game, &handle)
+            crate::app::door::spectate::state::LiveGameKey::new(game, &handle)
         });
+        // No game of theirs on the roster: nobody can be watching it.
+        let own_watchers = match own_game_key {
+            Some(key) => self.live_games.watchers_of(key),
+            None => 0,
+        };
+        let held_watchers = match self.spectate_state.as_ref() {
+            Some(state) => self.live_games.watchers_of(state.key()),
+            None => 0,
+        };
         let games_hub_roster = HubGame::roster(self.is_runner());
+        // Away with the Tweak on: the piece covers everything this frame.
+        let screensaver = self.screensaver();
+        let ascii_clock = crate::app::ascii::piece::clock_now();
         // Clear last-frame mouse hit-test rects so screens that don't draw
         // them this frame can't leave a stale target behind.
         self.last_pet_rect.set(None);
         self.last_pet_frame.set(None);
         self.live.hit.set(None);
+        self.live.panel_hit.set(None);
         self.own_chat_hit.set(None);
         self.chat.last_composer_rect.set(None);
         // `last_composer_viewport_top` is intentionally NOT reset here: it
@@ -714,6 +740,15 @@ impl App {
         // The live games on the watchable doors: the hub rail's live rows,
         // and a live strip source.
         let live_rows = self.live_games.live_rows();
+        let live_panel_now = chrono::Utc::now();
+        let live_panel_rows = crate::app::live::panel::rows(
+            &self.chat.live_streams,
+            &live_rows,
+            self.chat.news.all_articles(),
+            self.chat.news.reads(),
+            self.live_games.open_watches(),
+            live_panel_now,
+        );
         // The strip is the #lounge card's alone; another room's card, or
         // the chat center, never carries it.
         let dashboard_live_strip = if home_selected {
@@ -724,22 +759,7 @@ impl App {
                 self.chat.news.all_articles(),
                 &self.chat.live_streams,
                 &live_rows,
-            )
-        } else {
-            None
-        };
-        // Zen's Live tile shows the same strip, built only while the page
-        // draws one (not while zoomed on another tile).
-        let zen_live_strip = if self.screen == Screen::Zen
-            && self.zen.draws(crate::app::zen::state::TileKind::Live)
-        {
-            self.live.view(
-                &self.daily,
-                &self.audio,
-                self.paired_source,
-                self.chat.news.all_articles(),
-                &self.chat.live_streams,
-                &live_rows,
+                &self.live_games,
             )
         } else {
             None
@@ -794,6 +814,7 @@ impl App {
                     self.chat.news.all_articles(),
                     &self.chat.live_streams,
                     &live_rows,
+                    &self.live_games,
                 )
                 .map(|strip| crate::app::live::ui::status_text(&strip))
         } else {
@@ -881,7 +902,7 @@ impl App {
         let news_view = chat::news::ui::ArticleListView {
             articles: self.chat.news.displayed_articles(),
             selected_index: self.chat.news.selected_index(),
-            marker_read_at: self.chat.news.marker_read_at(),
+            marker: self.chat.news.marker(),
             mine_only: self.chat.news.mine_only(),
         };
         let feeds_view = chat::feeds::ui::FeedListView {
@@ -1455,6 +1476,7 @@ impl App {
             || self.show_help
             || self.show_ultimate_modal
             || self.show_splash
+            || screensaver.is_some()
             || news_modal.is_some()
             || self.icon_picker_open
             || self.room_search_modal_state.is_open()
@@ -1476,6 +1498,7 @@ impl App {
             || self.show_help
             || self.show_ultimate_modal
             || self.show_splash
+            || screensaver.is_some()
             || news_modal.is_some()
             || self.icon_picker_open
             || self.room_search_modal_state.is_open()
@@ -1556,7 +1579,11 @@ impl App {
                         greendragon_live,
                         spectate_state: self.spectate_state.as_ref(),
                         live_rows,
+                        live_panel_rows,
+                        live_panel_now,
+                        live_panel_hit: &self.live.panel_hit,
                         own_watchers,
+                        held_watchers,
                         watch_chat_view,
                         show_watch_chat: self.profile_state.profile().show_watch_chat,
                         own_watch_line,
@@ -1670,6 +1697,8 @@ impl App {
                         show_ultimate_modal: self.show_ultimate_modal,
                         ultimate_state: &self.ultimate_state,
                         show_splash: self.show_splash,
+                        screensaver,
+                        ascii_clock,
                         splash_ticks: self.splash_ticks,
                         splash_hint: &self.splash_hint,
                         splash_piece: self.splash_piece.as_ref(),
@@ -1689,6 +1718,7 @@ impl App {
                         room_info_modal_state: &self.room_info_modal_state,
                         directory_editor: &self.directory_editor,
                         tag_picker: &self.tag_picker,
+                        piece_picker: &self.piece_picker,
                         showcase_items: self.chat.showcase.all_items(),
                         booth_modal_open: self.booth_modal_state.is_open(),
                         booth_modal_state: &self.booth_modal_state,
@@ -1748,8 +1778,6 @@ impl App {
                         zen_pet_strip,
                         zen_active_friends: &self.active_friends,
                         zen_care,
-                        zen_live_strip,
-                        live_hit: &self.live.hit,
                         own_chat_hit: &self.own_chat_hit,
                     },
                     &mut terminal_image_frame,
@@ -1933,6 +1961,16 @@ impl App {
             return;
         }
 
+        // Away: the screensaver covers the page, its frame, and every modal.
+        // Nothing under it is clickable, and the input that dismisses it is
+        // swallowed (`App::handle_input`).
+        if let Some(piece) = ctx.screensaver {
+            ctx.status_hits.borrow_mut().clear();
+            frame.render_widget(Clear, area);
+            crate::app::ascii::ui::draw_piece(frame, area, piece, ctx.ascii_clock);
+            return;
+        }
+
         // The Zen pages are full-bleed: no frame, no HUD, no tab bar. Every
         // other page keeps the app frame. Zen paints its own status row and
         // fills the click slots below.
@@ -2072,6 +2110,7 @@ impl App {
                             entry: state
                                 .row_in(&ctx.live_rows)
                                 .map(|index| &ctx.live_rows[index].entry),
+                            watchers: ctx.held_watchers,
                         },
                         crate::app::door::spectate::ui::WatchPane::Open(
                             ctx.watch_chat_view.take().map(Box::new),
@@ -2137,6 +2176,7 @@ impl App {
                         &crate::app::door::spectate::ui::SpectateView {
                             state,
                             entry: live_selected.map(|index| &ctx.live_rows[index].entry),
+                            watchers: ctx.held_watchers,
                         },
                         crate::app::door::spectate::ui::WatchPane::Preview,
                         terminal_images,
@@ -2378,11 +2418,11 @@ impl App {
             ),
             Screen::Zen => {
                 // A page too small to draw has no row, so it keeps no
-                // click target either.
+                // click target either; nor does a zoomed one, the tile
+                // takes the whole page.
                 let (_, row) = crate::app::zen::layout::rice_areas(
                     content_area,
-                    crate::app::zen::layout::rice_fits(content_area)
-                        && crate::app::statusline::bar::zen_row_shown(&ctx.statusline_components),
+                    crate::app::zen::layout::rice_row(content_area, ctx.zen.zoomed),
                 );
                 let status_row = row.map(|row| {
                     crate::app::statusline::bar::build_zen_status_row(
@@ -2440,9 +2480,13 @@ impl App {
                     } else {
                         Vec::new()
                     },
-                    live: ctx.zen_live_strip.take(),
-                    live_hit: ctx.live_hit,
+                    live_panel: crate::app::live::panel::LivePanelProps {
+                        rows: &ctx.live_panel_rows,
+                        hit: ctx.live_panel_hit,
+                        now: ctx.live_panel_now,
+                    },
                     wall_tick: ctx.marquee_tick,
+                    ascii_clock: ctx.ascii_clock,
                 };
                 crate::app::zen::ui::draw_rice(frame, content_area, view, terminal_images);
             }
@@ -2498,6 +2542,11 @@ impl App {
                     radio_slots: ctx.radio_slots,
                     radio_now_playing: ctx.radio_now_playing,
                     daily: ctx.daily,
+                    live: crate::app::live::panel::LivePanelProps {
+                        rows: &ctx.live_panel_rows,
+                        hit: ctx.live_panel_hit,
+                        now: ctx.live_panel_now,
+                    },
                     lobby_glow: ctx.lobby.glow(),
                     online_count: ctx.online_count,
                     active_friends: ctx.zen_active_friends,
@@ -2759,6 +2808,11 @@ impl App {
             crate::app::tag_picker::ui::draw(frame, inner, ctx.tag_picker);
         }
 
+        // Over the Zen page, from its ascii tile.
+        if ctx.piece_picker.is_open() {
+            crate::app::ascii::picker::ui::draw(frame, inner, ctx.piece_picker);
+        }
+
         if ctx.booth_modal_open {
             crate::app::audio::booth::ui::draw(
                 frame,
@@ -2853,16 +2907,6 @@ fn foreground_terminal_overlay_open(ctx: &DrawContext<'_>) -> bool {
         || ctx.chat_state.history_modal.is_open()
         || ctx.booth_modal_open
         || ctx.icon_picker_open
-}
-
-/// `· 2 watching` in a running watchable game's chrome. Being watched is
-/// never hidden from the player, whatever their watch-chat setting.
-fn own_watchers_span(watchers: Option<usize>) -> Option<Span<'static>> {
-    let watchers = watchers.filter(|n| *n > 0)?;
-    Some(Span::styled(
-        format!("\u{b7} {watchers} watching "),
-        Style::default().fg(theme::AMBER_GLOW()),
-    ))
 }
 
 /// A watchable door's content area split between its game and the player's
@@ -3012,7 +3056,6 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 "· ? help · S save · ` step out · Ctrl-C quit ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
-            spans.extend(own_watchers_span(ctx.own_watchers));
         }
     }
 
@@ -3033,7 +3076,6 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 "· ? help · S save · ` step out · Ctrl-Q abandon ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
-            spans.extend(own_watchers_span(ctx.own_watchers));
         }
     }
 
@@ -3054,7 +3096,6 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                 "\u{b7} ? help \u{b7} S save \u{b7} ` step out \u{b7} Q abandon ",
                 Style::default().fg(theme::TEXT_DIM()),
             ));
-            spans.extend(own_watchers_span(ctx.own_watchers));
         }
     }
 
@@ -3349,7 +3390,7 @@ fn sponsor_line(include_thanks: bool) -> Line<'static> {
     // over the bottom border, so without them the `─` glyphs on either side
     // get swallowed into the URL by terminals that linkify what they see.
     spans.push(Span::styled(
-        " https://ko-fi.com/mateuszpiorowski ",
+        " https://late.sh/thanks ",
         Style::default().fg(theme::AMBER_DIM()),
     ));
     Line::from(spans).right_aligned()

@@ -15,9 +15,9 @@ mod artboard_piece_test;
 #[cfg(test)]
 mod artboard_test;
 pub mod article;
-pub mod article_feed_read;
+pub mod article_read;
 #[cfg(test)]
-mod article_feed_read_test;
+mod article_read_test;
 #[cfg(test)]
 mod article_test;
 pub mod asterion;

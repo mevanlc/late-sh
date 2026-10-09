@@ -760,6 +760,102 @@ fn landing_page_reads_the_choice_and_falls_back_to_the_clubhouse() {
     );
 }
 
+#[test]
+fn screensaver_reads_the_choice_and_falls_back_to_earthrise() {
+    use crate::models::user::{AsciiPiece, Scene, SceneStyle, Screensaver, extract_screensaver};
+    let earthrise = Screensaver::Piece(AsciiPiece {
+        scene: Scene::Earthrise,
+        style: SceneStyle::Dots,
+    });
+    assert_eq!(extract_screensaver(&json!({})), earthrise);
+    assert_eq!(
+        extract_screensaver(&json!({ "screensaver": "off" })),
+        Screensaver::Off
+    );
+    assert_eq!(
+        extract_screensaver(&json!({ "screensaver": "aurora_fjord" })),
+        Screensaver::Piece(AsciiPiece {
+            scene: Scene::AuroraFjord,
+            style: SceneStyle::Dots
+        })
+    );
+    assert_eq!(
+        extract_screensaver(&json!({ "screensaver": "alpine_dawn_pixels" })),
+        Screensaver::Piece(AsciiPiece {
+            scene: Scene::AlpineDawn,
+            style: SceneStyle::Pixels
+        })
+    );
+    // A piece this binary does not know (a rolled-back deploy, or one of the
+    // text pieces that were dropped) plays the default rather than
+    // switching the screensaver off.
+    for gone in ["night_coast", "plasma", "lava_lamp", "donut"] {
+        assert_eq!(
+            extract_screensaver(&json!({ "screensaver": gone })),
+            earthrise,
+            "{gone}"
+        );
+    }
+    // Every stored key reads back as itself.
+    for saver in
+        std::iter::once(Screensaver::Off).chain(AsciiPiece::ALL.into_iter().map(Screensaver::Piece))
+    {
+        assert_eq!(Screensaver::from_key(saver.as_str()), Some(saver));
+    }
+}
+
+#[test]
+fn screensaver_cycle_walks_off_then_every_piece() {
+    use crate::models::user::{AsciiPiece, Scene, SceneStyle, Screensaver};
+    let mut seen = vec![Screensaver::Off];
+    let mut at = Screensaver::Off.cycle(true);
+    while at != Screensaver::Off {
+        seen.push(at);
+        at = at.cycle(true);
+    }
+    assert_eq!(
+        seen,
+        vec![
+            Screensaver::Off,
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::Earthrise,
+                style: SceneStyle::Dots
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::Earthrise,
+                style: SceneStyle::Pixels
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::MistyForest,
+                style: SceneStyle::Dots
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::MistyForest,
+                style: SceneStyle::Pixels
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::AuroraFjord,
+                style: SceneStyle::Dots
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::AuroraFjord,
+                style: SceneStyle::Pixels
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::AlpineDawn,
+                style: SceneStyle::Dots
+            }),
+            Screensaver::Piece(AsciiPiece {
+                scene: Scene::AlpineDawn,
+                style: SceneStyle::Pixels
+            }),
+        ]
+    );
+    for saver in seen {
+        assert_eq!(saver.cycle(true).cycle(false), saver);
+    }
+}
+
 #[tokio::test]
 async fn paper_shown_claim_wins_once_per_edition_and_only_moves_forward() {
     let (client, _test_db) = setup_db().await;
@@ -1008,4 +1104,25 @@ fn radio_settings_read_the_station_and_pinned_slots() {
         extract_radio_slots(&settings),
         crate::models::user::RadioSlots::default()
     );
+}
+
+#[test]
+fn an_ascii_piece_serialises_as_its_key() {
+    use crate::models::user::{AsciiPiece, Scene, SceneStyle};
+    let piece = AsciiPiece {
+        scene: Scene::AlpineDawn,
+        style: SceneStyle::Pixels,
+    };
+    assert_eq!(
+        serde_json::to_string(&piece).unwrap(),
+        "\"alpine_dawn_pixels\""
+    );
+    assert_eq!(
+        serde_json::from_str::<AsciiPiece>("\"alpine_dawn_pixels\"").unwrap(),
+        piece
+    );
+    assert!(serde_json::from_str::<AsciiPiece>("\"night_coast\"").is_err());
+    for piece in AsciiPiece::ALL {
+        assert_eq!(AsciiPiece::from_key(piece.as_str()), Some(piece));
+    }
 }

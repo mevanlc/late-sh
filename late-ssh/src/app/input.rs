@@ -796,18 +796,6 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         app.apply_primary_device_attributes(attrs);
         return;
     }
-    // `/brb` holds "until your next key". A bare mouse move is not one: with
-    // any-event tracking on, the pointer merely crossing the terminal reports
-    // here, and must not bring the session back. Keys, clicks, drags and
-    // scrolls do; the 1Hz edge publishes it.
-    match &event {
-        ParsedInput::Mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            ..
-        }) => {}
-        _ => app.sent_away = false,
-    }
-
     // The Late Edition sits above everything else: it is the first thing
     // a session sees after the splash and the tour.
     if app.paper.modal_visible() {
@@ -851,6 +839,12 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     // input ahead of both.
     if app.tag_picker.is_open() {
         crate::app::tag_picker::input::handle_input(app, event);
+        return;
+    }
+
+    // Over the Zen page, from its ascii tile.
+    if app.piece_picker.is_open() {
+        crate::app::ascii::picker::input::handle_input(app, event);
         return;
     }
 
@@ -1311,7 +1305,7 @@ fn select_rail_entry(
             // Re-selecting the row already being watched keeps its stream.
             if watched_live_row(app, live) != Some(index) {
                 let row = &live[index];
-                app.start_spectating(row.game, row.entry.playname.clone());
+                app.start_spectating(row.key);
             }
         }
     }
@@ -2063,6 +2057,16 @@ fn handle_byte_event(app: &mut App, ctx: InputContext, byte: u8) {
         return;
     }
 
+    // `s` then a digit opens that row of the Live panel. Any other key
+    // after `s` is swallowed, like `z`'s: a mistyped suffix must not jump
+    // rooms, switch pages or open the slash composer, so the prefix is
+    // spent here, ahead of every dispatcher below.
+    if app.live_prefix_armed {
+        app.live_prefix_armed = false;
+        crate::app::live::input::open_from_prefix(app, byte);
+        return;
+    }
+
     if byte == b'/' && start_slash_command_composer(app, ctx.screen) {
         return;
     }
@@ -2177,6 +2181,10 @@ fn dispatch_escape(app: &mut App) {
     // ahead of both, the same order `handle_parsed_input` gives its keys.
     if app.tag_picker.is_open() {
         crate::app::tag_picker::input::close(app);
+        return;
+    }
+    if app.piece_picker.is_open() {
+        crate::app::ascii::picker::input::close(app);
         return;
     }
     if app.show_settings {
@@ -2900,6 +2908,11 @@ fn handle_mouse_click(app: &mut App, screen: Screen, mouse: MouseEvent) -> bool 
     if !chat_scroll_clicks_blocked(app) && crate::app::live::input::open_from_click(app, x, y) {
         return true;
     }
+    // The sidebar's Live panel is drawn under the same modals as the pet.
+    if !chat_scroll_clicks_blocked(app) && crate::app::live::input::open_from_panel_click(app, x, y)
+    {
+        return true;
+    }
     // A click on a Zen tile focuses it, then falls through so the composer
     // and the messages of that tile still take the click. A modal over the
     // page takes the click itself, the same guard the pet click uses.
@@ -3509,6 +3522,7 @@ fn is_room_search_shortcut(event: &ParsedInput) -> bool {
 fn clear_prefix_arms(app: &mut App) {
     app.music_prefix_armed = false;
     app.room_section_prefix_armed = false;
+    app.live_prefix_armed = false;
 }
 
 /// Everything a full-screen modal has to close before it opens, so it never
@@ -3553,6 +3567,8 @@ pub(crate) fn open_message_search_modal_globally(app: &mut App, query: &str) {
 
 fn open_settings_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
+    // A piece picker left open over Zen would take the modal's keys.
+    app.piece_picker.close();
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
@@ -3658,6 +3674,8 @@ fn open_bonsai_modal_globally(app: &mut App) {
 
 pub(crate) fn open_daily_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
+    // A piece picker left open over Zen would take the modal's keys.
+    app.piece_picker.close();
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
@@ -3901,7 +3919,8 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
 fn focus_zen_tile_at(app: &mut App, x: u16, y: u16) {
     use crate::app::zen::layout as zen_layout;
     let (cols, rows) = app.size;
-    let (tiles_area, _) = zen_layout::rice_areas(Rect::new(0, 0, cols, rows), app.zen_status_row());
+    let page = Rect::new(0, 0, cols, rows);
+    let (tiles_area, _) = zen_layout::rice_areas(page, zen_layout::rice_row(page, app.zen.zoomed));
     let zoomed = app.zen.zoomed.then_some(app.zen.focus);
     let rects = zen_layout::tile_rects(
         &app.zen.rice.root,
@@ -4079,13 +4098,12 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return true;
     }
 
-    // While the reaction leader is armed, every digit belongs to it: `1`-`9`
-    // are the quick reactions and `0` opens the custom icon picker. Let them
-    // fall through to the chat message-action handler instead of the global
-    // page switch (`0` now lands on the Clubhouse, `1`-`7` on other pages).
+    // While the reaction leader is armed, its shortcuts belong to chat:
+    // `1`-`9` quick-react, `w` waves, and `0` opens the custom icon picker.
+    // Let them reach the message-action handler before global page/Bonsai keys.
     if matches!(
         byte,
-        b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9'
+        b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9' | b'w' | b'W'
     ) && ctx.screen == Screen::Dashboard
         && app.chat.is_reaction_leader_active()
     {
@@ -4211,6 +4229,23 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
                 && !app.chat.room_jump_active =>
         {
             app.room_section_prefix_armed = true;
+            true
+        }
+        // The Live panel's prefix: Home only, where the panel draws its
+        // row numbers, and not while a pane that spends `s` is selected
+        // (RSS shares its entry, Discover cycles its sort); on every other
+        // page `s` is the page's (the Directory's search, the Clubhouse's
+        // seat).
+        b's' | b'S'
+            if ctx.screen == Screen::Dashboard
+                && !ctx.chat_composing
+                && !ctx.feeds_processing
+                && !ctx.news_composing
+                && !app.chat.room_jump_active
+                && !app.chat.feeds_selected
+                && !app.chat.discover_selected =>
+        {
+            app.live_prefix_armed = true;
             true
         }
         b'\\'
