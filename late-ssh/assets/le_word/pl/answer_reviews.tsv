@@ -1,0 +1,346 @@
+word	english_gloss	category	selection_basis
+afera	scandal	noun	frequency-reviewed
+akcja	action	noun	frequency-reviewed
+aleja	avenue	noun	frequency-reviewed
+arbuz	watermelon	noun	familiarity-reviewed
+atlas	atlas	noun	frequency-reviewed
+awans	promotion	noun	frequency-reviewed
+badać	to examine	verb	frequency-reviewed
+bagaż	luggage	noun	frequency-reviewed
+balon	balloon	noun	frequency-reviewed
+banan	banana	noun	familiarity-reviewed
+banda	gang	noun	frequency-reviewed
+baner	banner	noun	frequency-reviewed
+baron	baron	noun	frequency-reviewed
+barwa	colour	noun	familiarity-reviewed
+basen	swimming pool	noun	frequency-reviewed
+bawić	to amuse	verb	frequency-reviewed
+bańka	bubble	noun	familiarity-reviewed
+belka	beam	noun	familiarity-reviewed
+bieda	poverty	noun	frequency-reviewed
+biega	runs	verb-form	frequency-reviewed
+biuro	office	noun	frequency-reviewed
+blady	pale	adjective	familiarity-reviewed
+bluza	sweatshirt	noun	frequency-reviewed
+boleć	to hurt	verb	frequency-reviewed
+broda	beard or chin	noun	frequency-reviewed
+budzi	wakes	verb-form	frequency-reviewed
+burak	beetroot	noun	familiarity-reviewed
+bułka	bread roll	noun	familiarity-reviewed
+bydło	cattle	noun	frequency-reviewed
+bęben	drum	noun	familiarity-reviewed
+cegła	brick	noun	familiarity-reviewed
+chaos	chaos	noun	frequency-reviewed
+chowa	hides	verb-form	frequency-reviewed
+chudy	thin	adjective	frequency-reviewed
+chwyt	grip	noun	frequency-reviewed
+chłop	peasant or colloquial man	noun	frequency-reviewed
+cicho	quietly	adverb	frequency-reviewed
+cichy	quiet	adjective	frequency-reviewed
+ciąża	pregnancy	noun	frequency-reviewed
+coraz	increasingly	function-word	frequency-reviewed
+cytat	quotation	noun	frequency-reviewed
+czołg	tank	noun	frequency-reviewed
+czoło	forehead	noun	frequency-reviewed
+czyli	that is	function-word	frequency-reviewed
+danie	dish or meal	noun	frequency-reviewed
+darmo	for free	adverb	frequency-reviewed
+dawać	to give	verb	frequency-reviewed
+dawka	dose	noun	frequency-reviewed
+dawno	long ago	adverb	frequency-reviewed
+deser	dessert	noun	frequency-reviewed
+dobro	goodness	noun	frequency-reviewed
+dodać	to add	verb	frequency-reviewed
+dolar	dollar	noun	frequency-reviewed
+dolny	lower	adjective	frequency-reviewed
+dosyć	enough	function-word	frequency-reviewed
+drogo	expensively	adverb	frequency-reviewed
+dwoje	two collectively	numeral	frequency-reviewed
+dynia	pumpkin	noun	familiarity-reviewed
+dziać	to happen with się	verb	frequency-reviewed
+dzień	day	noun	frequency-reviewed
+dzwon	bell	noun	frequency-reviewed
+dążyć	to strive	verb	frequency-reviewed
+długi	long	adjective	frequency-reviewed
+długo	for a long time	adverb	frequency-reviewed
+efekt	effect	noun	frequency-reviewed
+ekipa	crew or team	noun	frequency-reviewed
+filtr	filter	noun	frequency-reviewed
+futro	fur	noun	familiarity-reviewed
+gadać	to chat	verb	frequency-reviewed
+gdyby	if in a hypothetical clause	function-word	frequency-reviewed
+gmina	municipality	noun	frequency-reviewed
+gniew	anger	noun	frequency-reviewed
+godny	worthy	adjective	frequency-reviewed
+gracz	player	noun	frequency-reviewed
+grosz	Polish currency subunit	noun	frequency-reviewed
+grubo	thickly	adverb	frequency-reviewed
+grunt	ground	noun	frequency-reviewed
+gęsto	densely	adverb	frequency-reviewed
+gęsty	thick or dense	adjective	familiarity-reviewed
+głupi	stupid	adjective	frequency-reviewed
+hańba	disgrace	noun	frequency-reviewed
+hokej	hockey	noun	frequency-reviewed
+idzie	goes	verb-form	frequency-reviewed
+ilość	quantity	noun	frequency-reviewed
+jajko	egg	noun	frequency-reviewed
+jasno	brightly or clearly	adverb	frequency-reviewed
+jawny	open or public	adjective	familiarity-reviewed
+jeleń	deer	noun	familiarity-reviewed
+jeśli	if	function-word	frequency-reviewed
+jodła	fir	noun	familiarity-reviewed
+kajak	kayak	noun	familiarity-reviewed
+karmi	feeds	verb-form	frequency-reviewed
+kasza	groats	noun	familiarity-reviewed
+katar	runny nose	noun	frequency-reviewed
+kefir	kefir	noun	familiarity-reviewed
+kocha	loves	verb-form	frequency-reviewed
+kocur	tomcat	noun	familiarity-reviewed
+kogut	rooster	noun	familiarity-reviewed
+komar	mosquito	noun	familiarity-reviewed
+konto	account	noun	frequency-reviewed
+koper	dill	noun	familiarity-reviewed
+kowal	blacksmith	noun	frequency-reviewed
+kołek	peg	noun	familiarity-reviewed
+kpina	mockery	noun	frequency-reviewed
+kraść	to steal	verb	frequency-reviewed
+kreda	chalk	noun	familiarity-reviewed
+kulka	small ball	noun	familiarity-reviewed
+kupno	purchase	noun	frequency-reviewed
+kuzyn	cousin	noun	frequency-reviewed
+kółko	small circle or wheel	noun	frequency-reviewed
+lalka	doll	noun	frequency-reviewed
+larwa	larva	noun	familiarity-reviewed
+lasek	small wood	noun	frequency-reviewed
+laser	laser	noun	frequency-reviewed
+latać	to fly	verb	frequency-reviewed
+ledwo	barely	adverb	frequency-reviewed
+lekko	lightly	adverb	frequency-reviewed
+letni	summer or lukewarm	adjective	frequency-reviewed
+leśny	forest-related	adjective	familiarity-reviewed
+leżeć	to lie or be lying	verb	frequency-reviewed
+lider	leader	noun	frequency-reviewed
+linia	line	noun	frequency-reviewed
+linka	cord	noun	frequency-reviewed
+lizak	lollipop	noun	familiarity-reviewed
+luźny	loose	adjective	familiarity-reviewed
+mafia	mafia	noun	frequency-reviewed
+manga	manga	noun	frequency-reviewed
+mango	mango	noun	frequency-reviewed
+marsz	march	noun	frequency-reviewed
+marzy	dreams	verb-form	frequency-reviewed
+masaż	massage	noun	frequency-reviewed
+maska	mask	noun	frequency-reviewed
+meble	furniture	noun	frequency-reviewed
+melon	melon	noun	familiarity-reviewed
+miedź	copper	noun	frequency-reviewed
+misja	mission	noun	frequency-reviewed
+mniej	less	function-word	frequency-reviewed
+mocno	strongly	adverb	frequency-reviewed
+modny	fashionable	adjective	familiarity-reviewed
+moduł	module	noun	frequency-reviewed
+motto	motto	noun	frequency-reviewed
+motyl	butterfly	noun	familiarity-reviewed
+można	it is possible	function-word	frequency-reviewed
+mucha	fly	noun	frequency-reviewed
+muszę	I must	verb-form	frequency-reviewed
+muzea	museums	noun	frequency-reviewed
+mylić	to confuse	verb	frequency-reviewed
+mądry	wise	adjective	frequency-reviewed
+męski	masculine	adjective	frequency-reviewed
+nadal	still	function-word	frequency-reviewed
+nadać	to send or confer	verb	frequency-reviewed
+nagły	sudden	adjective	frequency-reviewed
+nakaz	order or injunction	noun	frequency-reviewed
+nalot	raid or coating	noun	frequency-reviewed
+napad	attack or robbery	noun	frequency-reviewed
+napój	drink	noun	frequency-reviewed
+napęd	drive or propulsion	noun	frequency-reviewed
+naraz	all at once	function-word	frequency-reviewed
+naród	nation	noun	frequency-reviewed
+nazwa	name	noun	frequency-reviewed
+nerka	kidney	noun	familiarity-reviewed
+nerwy	nerves	noun	frequency-reviewed
+nieco	somewhat	function-word	frequency-reviewed
+nieść	to carry	verb	frequency-reviewed
+niski	low or short	adjective	frequency-reviewed
+nisko	low	adverb	frequency-reviewed
+obieg	circulation	noun	frequency-reviewed
+objaw	symptom	noun	frequency-reviewed
+objąć	to embrace or take over	verb	frequency-reviewed
+oboje	both people	numeral	frequency-reviewed
+obrót	rotation or turnover	noun	frequency-reviewed
+oczko	small eye or mesh opening	noun	frequency-reviewed
+odbyć	to undergo or make a journey	verb	frequency-reviewed
+odtąd	from now on	function-word	frequency-reviewed
+ogrom	immensity	noun	frequency-reviewed
+około	around or approximately	function-word	frequency-reviewed
+okręg	district	noun	frequency-reviewed
+okręt	ship	noun	frequency-reviewed
+oliwa	olive oil	noun	familiarity-reviewed
+opcja	option	noun	frequency-reviewed
+opony	tyres	noun	frequency-reviewed
+order	decoration or medal	noun	frequency-reviewed
+orzeł	eagle	noun	frequency-reviewed
+osioł	donkey	noun	familiarity-reviewed
+ostro	sharply	adverb	frequency-reviewed
+otwór	opening or hole	noun	frequency-reviewed
+padać	to fall or rain	verb	frequency-reviewed
+pająk	spider	noun	frequency-reviewed
+pasja	passion	noun	frequency-reviewed
+pazur	claw	noun	familiarity-reviewed
+pałac	palace	noun	frequency-reviewed
+pełen	full	adjective	frequency-reviewed
+picie	drinking	noun	frequency-reviewed
+pierś	breast	noun	frequency-reviewed
+pilny	urgent or diligent	adjective	familiarity-reviewed
+pismo	writing or a document	noun	frequency-reviewed
+pióro	feather or pen	noun	frequency-reviewed
+pięta	heel	noun	familiarity-reviewed
+pięść	fist	noun	frequency-reviewed
+plaga	plague	noun	frequency-reviewed
+plama	stain	noun	familiarity-reviewed
+plecy	back of the body	noun	frequency-reviewed
+pobić	to beat	verb	frequency-reviewed
+pobyt	stay	noun	frequency-reviewed
+podać	to pass or serve	verb	frequency-reviewed
+pogoń	pursuit	noun	frequency-reviewed
+pojąć	to grasp or understand	verb	frequency-reviewed
+ponoć	supposedly	function-word	frequency-reviewed
+pozew	lawsuit	noun	frequency-reviewed
+prosi	asks	verb-form	frequency-reviewed
+przed	before or in front of	function-word	frequency-reviewed
+przez	through	function-word	frequency-reviewed
+przód	front	noun	frequency-reviewed
+prócz	besides	function-word	frequency-reviewed
+psuje	spoils or breaks	verb-form	frequency-reviewed
+pupil	pet or favourite	noun	familiarity-reviewed
+pusto	empty	adverb	frequency-reviewed
+pójść	to go	verb	frequency-reviewed
+półka	shelf	noun	familiarity-reviewed
+późno	late	adverb	frequency-reviewed
+pętla	loop	noun	familiarity-reviewed
+płaca	pay or wage	noun	frequency-reviewed
+płuca	lungs	noun	frequency-reviewed
+rabat	discount	noun	frequency-reviewed
+racja	being right or a ration	noun	frequency-reviewed
+ramię	arm or shoulder	noun	frequency-reviewed
+rdzeń	core	noun	frequency-reviewed
+rejon	area	noun	frequency-reviewed
+remis	draw or tie	noun	frequency-reviewed
+robak	worm	noun	familiarity-reviewed
+robić	to do or make	verb	frequency-reviewed
+rosną	grow	verb-form	frequency-reviewed
+ruiny	ruins	noun	frequency-reviewed
+runda	round	noun	frequency-reviewed
+rurka	small tube	noun	familiarity-reviewed
+rybak	fisherman	noun	familiarity-reviewed
+rzęsy	eyelashes	noun	frequency-reviewed
+równo	evenly	adverb	frequency-reviewed
+rękaw	sleeve	noun	familiarity-reviewed
+sarna	roe deer	noun	familiarity-reviewed
+sedno	crux or essence	noun	frequency-reviewed
+senat	senate	noun	frequency-reviewed
+senny	sleepy	adjective	familiarity-reviewed
+sesja	session	noun	frequency-reviewed
+siano	hay	noun	familiarity-reviewed
+skoro	since or as	function-word	frequency-reviewed
+smuci	saddens	verb-form	frequency-reviewed
+sonda	probe	noun	frequency-reviewed
+sosna	pine	noun	familiarity-reviewed
+spada	falls	verb-form	frequency-reviewed
+spaść	to fall	verb	frequency-reviewed
+spoza	from outside	function-word	frequency-reviewed
+stres	stress	noun	frequency-reviewed
+sucho	dryly	adverb	frequency-reviewed
+suchy	dry	adjective	frequency-reviewed
+sufit	ceiling	noun	frequency-reviewed
+susza	drought	noun	familiarity-reviewed
+synek	little son	noun	frequency-reviewed
+sześć	six	numeral	frequency-reviewed
+sznur	rope	noun	familiarity-reviewed
+szopa	shed or raccoon	noun	familiarity-reviewed
+szyna	rail	noun	familiarity-reviewed
+słaby	weak	adjective	frequency-reviewed
+sława	fame	noun	frequency-reviewed
+słony	salty	adjective	familiarity-reviewed
+tajny	secret	adjective	frequency-reviewed
+także	also	function-word	frequency-reviewed
+talia	waist or deck of cards	noun	familiarity-reviewed
+tanio	cheaply	adverb	frequency-reviewed
+tenis	tennis	noun	frequency-reviewed
+towar	goods	noun	frequency-reviewed
+traci	loses	verb-form	frequency-reviewed
+trasa	route	noun	frequency-reviewed
+trend	trend	noun	frequency-reviewed
+troje	three collectively	numeral	frequency-reviewed
+trzej	three masculine-personal	numeral	frequency-reviewed
+tutaj	here	function-word	frequency-reviewed
+tylko	only	function-word	frequency-reviewed
+tytuł	title	noun	frequency-reviewed
+ubrać	to dress	verb	frequency-reviewed
+uciec	to escape	verb	frequency-reviewed
+uciąć	to cut off	verb	frequency-reviewed
+uczeń	pupil	noun	frequency-reviewed
+ukryć	to hide	verb	frequency-reviewed
+umysł	mind	noun	frequency-reviewed
+upaść	to fall down	verb	frequency-reviewed
+urząd	office or public authority	noun	frequency-reviewed
+uznać	to recognise	verb	frequency-reviewed
+wafel	wafer	noun	familiarity-reviewed
+wagon	railway carriage	noun	familiarity-reviewed
+warga	lip	noun	familiarity-reviewed
+warty	worth	adjective	frequency-reviewed
+wazon	vase	noun	familiarity-reviewed
+wbrew	contrary to	function-word	frequency-reviewed
+wcale	at all	function-word	frequency-reviewed
+wciąż	still or continuously	function-word	frequency-reviewed
+wdowa	widow	noun	frequency-reviewed
+widmo	spectre	noun	frequency-reviewed
+widzę	I see	verb-form	frequency-reviewed
+wieje	blows	verb-form	frequency-reviewed
+wiesz	you know	verb-form	frequency-reviewed
+willa	villa	noun	frequency-reviewed
+winić	to blame	verb	frequency-reviewed
+wobec	towards or in view of	function-word	frequency-reviewed
+wokół	around	function-word	frequency-reviewed
+wpaść	to fall in or drop by	verb	frequency-reviewed
+wrota	large gate	noun	frequency-reviewed
+wręcz	quite or downright	function-word	frequency-reviewed
+wstyd	shame	noun	frequency-reviewed
+wtedy	then	function-word	frequency-reviewed
+wybić	to knock out	verb	frequency-reviewed
+wyjąć	to take out	verb	frequency-reviewed
+wypad	outing	noun	frequency-reviewed
+wyrok	verdict	noun	frequency-reviewed
+wziąć	to take	verb	frequency-reviewed
+wąski	narrow	adjective	frequency-reviewed
+węzeł	knot	noun	frequency-reviewed
+wśród	among	function-word	frequency-reviewed
+zając	hare	noun	frequency-reviewed
+zająć	to occupy	verb	frequency-reviewed
+zajść	to occur or set	verb	frequency-reviewed
+zanim	before	function-word	frequency-reviewed
+zarys	outline	noun	frequency-reviewed
+zawał	heart attack	noun	frequency-reviewed
+zbiór	collection	noun	frequency-reviewed
+zdjąć	to take off	verb	frequency-reviewed
+zebra	zebra	noun	familiarity-reviewed
+zjeść	to eat	verb	frequency-reviewed
+znika	disappears	verb-form	frequency-reviewed
+złoto	gold	noun	frequency-reviewed
+złość	anger	noun	frequency-reviewed
+łamać	to break	verb	frequency-reviewed
+łatwo	easily	adverb	frequency-reviewed
+łatwy	easy	adjective	frequency-reviewed
+ławka	bench	noun	familiarity-reviewed
+łydka	calf of the leg	noun	familiarity-reviewed
+łyżka	spoon	noun	familiarity-reviewed
+ślina	saliva	noun	familiarity-reviewed
+śliwa	plum tree	noun	familiarity-reviewed
+śmiać	to laugh with się	verb	frequency-reviewed
+śruba	screw	noun	familiarity-reviewed
+żabka	small frog	noun	familiarity-reviewed
+żmija	viper	noun	familiarity-reviewed
+żuraw	crane	noun	familiarity-reviewed
+życie	life	noun	frequency-reviewed
