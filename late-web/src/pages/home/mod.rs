@@ -19,6 +19,7 @@ pub(crate) fn router() -> Router<AppState> {
 }
 
 async fn thanks_handler() -> Redirect {
+    metrics::record_page_view("thanks", false);
     Redirect::temporary("https://ko-fi.com/mateuszpiorowski")
 }
 
