@@ -142,13 +142,66 @@ Use the established host/client shape without introducing a general door
 framework refactor. Keep sync UI state/rendering separate from async transport
 and filesystem work, following [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-## 3. Assets, provenance, and licensing
+## 3. Licensing, assets, and provenance
+
+### Unified licensing and redistribution
+
+On November 20, 2025, Microsoft's Open Source Programs Office, Team Xbox, and
+Activision [announced the release of Zork I, II, and III under the MIT license](https://opensource.microsoft.com/blog/2025/11/20/preserving-code-that-shaped-generations-zork-i-ii-and-iii-go-open-source/),
+adding the grant to the existing `historicalsource` repositories. The pinned
+repositories below carry byte-identical MIT licenses with
+`Copyright (c) 2025 Microsoft`. The release covers the game code; commercial
+packaging, marketing materials, and trademark rights are outside that grant.
+
+The door contains separately licensed components:
+
+| Component | License and retained material |
+|---|---|
+| Zork I, II, and III story files in `assets/zork/` | MIT; preserve the complete [copyright and permission notice](../assets/zork/LICENSE), existing story attribution, and [provenance](../assets/zork/PROVENANCE.md). |
+| Frotz and our interpreter modifications in `vendor/frotz/` | GPL-2.0-or-later; preserve [COPYING](../vendor/frotz/COPYING), copyright headers, component notices, and dated modification notices. |
+| late.sh's own Rust host and application code | [FSL-1.1-MIT](../LICENSE), as explained in [LICENSING.md](../LICENSING.md). This license does not replace or restrict the separate MIT/GPL grants above. |
+
+**Execute, do not link.** The late.sh host runs Frotz as an independent child
+program, exchanging terminal input/output, launch options, and ordinary process
+status. It neither statically nor dynamically links Frotz, embeds its VM, nor
+copies GPL interpreter code into Rust/FSL modules. VM checkpoint manipulation
+stays inside the GPL interpreter. This is the separate-program/aggregation
+design described in the [GNU FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#MereAggregation);
+process separation alone is not a blanket compatibility guarantee, so preserve
+the independent-program boundary as integration features are added.
+
+**Public source and forks.** Redistribute our Frotz modifications with the
+complete vendored interpreter source as part of late.sh. The public source
+distribution path is [github.com/mpiorowski/late-sh](https://github.com/mpiorowski/late-sh)
+and third-party forks that comply with the applicable component licenses. The
+`vendor/frotz/` tree and [local change/build notes](../vendor/frotz/LATE-ZORK.md)
+make the modified interpreter available to inspect, rebuild, and redistribute
+under GPL-2.0-or-later. A fork distributing late.sh must retain its applicable
+license terms and notices; Frotz and any further interpreter modifications
+remain GPL-licensed, and the Zork stories retain their MIT notice.
+
+**Source accompanying binaries.** Our distribution strategy accompanies each
+Frotz binary with its exact complete corresponding modified source, notices,
+and compilation/installation scripts, following
+[GPLv2 sections 1–3](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
+The [asset recipe](../docker/doors/zork.Dockerfile) copies the source from the
+same inputs used to build the executable into `/usr/share/doc/frotz/source/`,
+with `COPYING` and `zork.Dockerfile` beside it. Both the door asset image and the
+runtime image carry this material. Public repository source must identify the
+matching release commit; a link to a changing branch or to unmodified upstream
+Frotz alone does not provide the source corresponding to our binary. Forks
+redistributing modified binaries must likewise provide their corresponding
+source under the GPL's distribution terms.
+
+Keep [NOTICE](../NOTICE) and [LICENSING.md](../LICENSING.md) consistent with this
+component boundary. Preserve the `.dockerignore` exceptions that allow the
+required source, documentation, and license files into the build contexts.
 
 ### Story files
 
 Copy the tracked `COMPILED/zorkN.z3` files from `~/p/my/zorks/zorkN/` into
-`assets/zork/`, with provenance and the MIT copyright/permission notice. These
-are Z-machine version 3 stories. Each inspected file is byte-identical to the
+`assets/zork/`, retaining the material described above. These are Z-machine
+version 3 stories. Each inspected file is byte-identical to the
 same repository's `zorkN.zip`; the `.zip` is a story file, not an archive to
 unpack. No ZIL compilation is needed for the initial integration.
 
@@ -166,10 +219,8 @@ SHA-256 of the selected assets:
 b637a242865d059890184164ce8dec28554cc80901dcbf26c740b2d1ed0d4eb8  zork3.z3
 ```
 
-All three inspected LICENSE files contain the MIT license with
-`Copyright (c) 2025 Microsoft` and are byte-identical. Preserve that notice and
-the stories' existing attribution. Record the source path, commit, story
-identity, and hash in the asset provenance file; validate hashes during builds.
+Record the source path, commit, story identity, and hash in the asset provenance
+file; validate hashes during builds.
 
 ### Frotz
 
@@ -179,45 +230,16 @@ Vendor the tracked source from `~/p/my/zorks/frotz` into `vendor/frotz/`:
 - Commit: `042d7bcadc1e2a8090cf737c841d8b7fc14b6eff`.
 - Build version: **2.56pre**, development release. The inspected README still
   says 2.55; it is not the version pin.
-- License: **GPL-2.0-or-later**; retain COPYING, copyright headers, and other
-  component notices.
 
 Copy tracked source, including the upstream build machinery, rather than the
 working directory wholesale. Exclude `.git`, compiled executables, objects,
 and archives. Keep local modifications in the vendored tree, with their
-purpose and upstream base documented. Mark modified GPL files with the change
-notice/date required by the license.
+purpose and upstream base documented.
 
 Build the curses frontend with sound disabled (`make curses SOUND_TYPE=none`)
 for the door. Use the dumb frontend for suitable interpreter tests, but do not
 treat those tests as proof of the curses/PTY integration. Preserve standalone
 interpreter use; enable the door save/menu policy explicitly.
-
-### License boundary and distribution
-
-The late.sh host executes Frotz and exchanges terminal input/output, launch
-options, and ordinary process status. It does not link Frotz, embed its VM,
-or copy GPL interpreter code into Rust/FSL modules. VM checkpoint manipulation
-belongs inside the GPL interpreter. Zork assets retain their MIT notice.
-
-This follows the separate-program/aggregation approach described in the
-[GNU FAQ](https://www.gnu.org/licenses/gpl-faq.en.html#MereAggregation).
-Process separation alone is not a blanket compatibility guarantee; preserve
-the independent-program boundary as integration features are added.
-
-For distributed Frotz binaries, include the exact modified corresponding
-source, notices, and compilation/installation scripts. Build a source archive
-from the same inputs as the binary and carry it in both the door asset image
-and runtime image under `/usr/share/doc/frotz/`, alongside the license and
-provenance. The repository will also contain that source. A generic link to an
-upstream branch is not the distribution strategy. This addresses the source
-and modification requirements in
-[GPLv2 sections 1–3](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html).
-
-Update NOTICE and LICENSING.md to describe the separate components accurately.
-Ensure `.dockerignore` allows the required source, documentation, and license
-files into their build contexts; its current documentation/license exclusions
-must not accidentally strip distribution material.
 
 ## 4. Runtime and interface design
 
