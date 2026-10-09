@@ -55,9 +55,16 @@ fn slot_line(label: &str, slot: Option<&Slot>) -> Line<'static> {
     )
 }
 pub fn draw_landing(frame: &mut Frame, area: Rect, enabled: bool, scroll: u16) -> u16 {
-    let lines = vec![
+    let mut lines = vec![Line::raw("")];
+    lines.extend(zork_logo());
+    lines.extend([
         Line::raw(""),
-        title("Zork Trilogy"),
+        Line::styled(
+            "Zork I, Zork II, and Zork III on late.sh!",
+            Style::default()
+                .fg(theme::TEXT_BRIGHT())
+                .add_modifier(Modifier::BOLD),
+        ),
         Line::raw(""),
         Line::raw("Explore the Great Underground Empire, one command at a time."),
         Line::raw(""),
@@ -79,16 +86,43 @@ pub fn draw_landing(frame: &mut Frame, area: Rect, enabled: bool, scroll: u16) -
         Line::raw("SAVE replaces that edition's manual save; its description is optional."),
         Line::raw("RESTORE returns to the edition menu after confirmation."),
         Line::raw("` steps out while the game stays open. Autosave resumes at the last prompt."),
-    ];
+    ]);
     crate::app::door::landing::render_scrolled(
         frame,
-        area,
+        Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(1),
+            area.height,
+        ),
         Paragraph::new(lines)
             .style(Style::default().fg(theme::TEXT()))
             .wrap(Wrap { trim: false }),
         scroll,
     )
 }
+
+fn zork_logo() -> Vec<Line<'static>> {
+    [
+        "███████╗ ██████╗ ██████╗ ██╗  ██╗",
+        "╚══███╔╝██╔═══██╗██╔══██╗██║ ██╔╝",
+        "  ███╔╝ ██║   ██║██████╔╝█████╔╝ ",
+        " ███╔╝  ██║   ██║██╔══██╗██╔═██╗ ",
+        "███████╗╚██████╔╝██║  ██║██║  ██╗",
+        "╚══════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝",
+    ]
+    .into_iter()
+    .map(|line| {
+        Line::styled(
+            line,
+            Style::default()
+                .fg(theme::AMBER_GLOW())
+                .add_modifier(Modifier::BOLD),
+        )
+    })
+    .collect()
+}
+
 pub fn draw_page(frame: &mut Frame, area: Rect, state: &State) {
     if state.game_visible() {
         if let Some(proxy) = state.proxy() {
