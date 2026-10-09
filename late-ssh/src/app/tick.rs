@@ -679,6 +679,9 @@ impl App {
         if let Some(state) = self.bashquest_state.as_mut() {
             state.tick();
         }
+        if let Some(state) = self.zork_state.as_mut() {
+            changed |= state.tick();
+        }
         if let Some(state) = self.codekeep_state.as_mut() {
             state.tick();
         }
@@ -1549,6 +1552,7 @@ impl App {
             | Screen::Dopewars
             | Screen::Bashquest
             | Screen::Codekeep
+            | Screen::Zork
             | Screen::Usurper
             | Screen::GreenDragon
             | Screen::Darkroom

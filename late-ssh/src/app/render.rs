@@ -199,6 +199,7 @@ struct DrawContext<'a> {
     dopewars_enabled: bool,
     bashquest_enabled: bool,
     codekeep_enabled: bool,
+    zork_enabled: bool,
     lateania_state: Option<&'a crate::app::door::lateania::state::State>,
     /// Players currently in the Lateania world (for the landing/hub card).
     lateania_online: usize,
@@ -212,6 +213,7 @@ struct DrawContext<'a> {
     nethack_live: bool,
     dcss_live: bool,
     brogue_live: bool,
+    zork_live: bool,
     darkroom_live: bool,
     greendragon_live: bool,
     /// The live game this session is watching; the hub draws it instead of
@@ -250,6 +252,7 @@ struct DrawContext<'a> {
     dopewars_state: Option<&'a mut crate::app::door::dopewars::state::State>,
     bashquest_state: Option<&'a mut crate::app::door::bashquest::state::State>,
     codekeep_state: Option<&'a mut crate::app::door::codekeep::state::State>,
+    zork_state: Option<&'a mut crate::app::door::zork::state::State>,
     /// Detected terminal-image protocol for the current session.
     /// `None` -> no native images supported; capable terminals get
     /// pixel polish on top of the existing text rendering.
@@ -1504,6 +1507,10 @@ impl App {
             let _ = self.shared.write_all(&pre_wipe);
         }
 
+        let zork_live = self
+            .zork_state
+            .as_ref()
+            .is_some_and(|state| state.is_running());
         let terminal = &mut self.terminal;
         // Taken out so the draw dispatch can hold &mut and call set_viewport
         // with the exact content_area before blitting.
@@ -1515,6 +1522,7 @@ impl App {
         let mut dopewars_state_taken = self.dopewars_state.take();
         let mut bashquest_state_taken = self.bashquest_state.take();
         let mut codekeep_state_taken = self.codekeep_state.take();
+        let mut zork_state_taken = self.zork_state.take();
 
         let draw_result = terminal
             .draw(|frame| {
@@ -1547,6 +1555,7 @@ impl App {
                         dopewars_enabled: self.dopewars_enabled,
                         bashquest_enabled: self.bashquest_enabled,
                         codekeep_enabled: self.codekeep_enabled,
+                        zork_enabled: self.zork_enabled,
                         lateania_state: self.lateania_state.as_ref(),
                         lateania_online: self.lateania_service.player_count(),
                         lateania_slots: self.lateania_service.character_slots(self.user_id),
@@ -1555,6 +1564,7 @@ impl App {
                         nethack_live,
                         dcss_live,
                         brogue_live,
+                        zork_live,
                         darkroom_live,
                         greendragon_live,
                         spectate_state: self.spectate_state.as_ref(),
@@ -1577,6 +1587,7 @@ impl App {
                         dopewars_state: dopewars_state_taken.as_mut(),
                         bashquest_state: bashquest_state_taken.as_mut(),
                         codekeep_state: codekeep_state_taken.as_mut(),
+                        zork_state: zork_state_taken.as_mut(),
                         terminal_image_protocol,
                         twenty_forty_eight_state: &self.twenty_forty_eight_state,
                         tetris_state: &self.tetris_state,
@@ -1773,6 +1784,7 @@ impl App {
         self.dopewars_state = dopewars_state_taken;
         self.bashquest_state = bashquest_state_taken;
         self.codekeep_state = codekeep_state_taken;
+        self.zork_state = zork_state_taken;
         draw_result?;
 
         // Feed the modal's image capacity (recorded during draw) back into
@@ -2091,6 +2103,7 @@ impl App {
                         dopewars_enabled: ctx.dopewars_enabled,
                         bashquest_enabled: ctx.bashquest_enabled,
                         codekeep_enabled: ctx.codekeep_enabled,
+                        zork_enabled: ctx.zork_enabled,
                         lateania_online: ctx.lateania_online,
                         lateania_slots: ctx.lateania_slots.clone(),
                         lateania_slot_cursor: ctx.lateania_slot_cursor,
@@ -2098,6 +2111,7 @@ impl App {
                         nethack_live: ctx.nethack_live,
                         dcss_live: ctx.dcss_live,
                         brogue_live: ctx.brogue_live,
+                        zork_live: ctx.zork_live,
                         darkroom_live: ctx.darkroom_live,
                         greendragon_live: ctx.greendragon_live,
                         live: &ctx.live_rows,
@@ -2263,6 +2277,12 @@ impl App {
                     // Size the child PTY to the exact widget area before blitting.
                     state.set_viewport(content_area);
                     crate::app::door::bashquest::render::draw_page(frame, content_area, state);
+                }
+            }
+            Screen::Zork => {
+                if let Some(state) = ctx.zork_state {
+                    state.set_viewport(content_area);
+                    crate::app::door::zork::render::draw_page(frame, content_area, state);
                 }
             }
             Screen::Codekeep => {
@@ -2905,6 +2925,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
                         | Screen::Dopewars
                         | Screen::Bashquest
                         | Screen::Codekeep
+                        | Screen::Zork
                         | Screen::GreenDragon
                 ))
             || (*tab_screen == Screen::Dashboard
@@ -2934,6 +2955,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Dopewars => "dopewars",
         Screen::Bashquest => "BashQuest",
         Screen::Codekeep => "CodeKeep",
+        Screen::Zork => "Zork I, II, III",
         Screen::Darkroom => crate::app::door::darkroom::data::TITLE,
         Screen::GreenDragon => "Green Dragon",
         Screen::Arcade => "The Arcade",
@@ -3105,6 +3127,12 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         }
     }
 
+    if screen == Screen::Zork {
+        spans.push(Span::styled(
+            "· SAVE manual save · RESTORE menu · ` step out ",
+            Style::default().fg(theme::TEXT_DIM()),
+        ));
+    }
     if screen == Screen::Codekeep {
         spans.push(Span::styled(
             "by github.com/tooyipjee/codekeep ",

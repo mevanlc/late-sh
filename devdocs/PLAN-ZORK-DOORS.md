@@ -6,13 +6,14 @@ Z-machine stories with a vendored, locally modified Frotz executable in a
 standalone door host, projecting its terminal through late.sh's existing door
 transport and renderer.
 
-**Status:** implementation in progress. Story assets and the modified interpreter
-are vendored. The curses regression suite covers all three editions, both slot
-kinds, visible-screen and RNG continuation, decoded stack operands, confirmation
-prompts, resize, RESTORE cancellation, Unicode descriptions, corruption, and
-failed writes on macOS and Linux. The host, late.sh menus, packaging, and full
-repository/deployment validation remain implementation work. Repository
-observations used for the design below were checked against
+**Status:** implemented, with local validation on 2026-10-09. The pinned stories,
+modified standalone Frotz, private host, native menus, six slots, workspace
+detach/resume, and delivery wiring are present. Development entry is enabled;
+production entry stays disabled until image publication and cluster verification.
+Validation evidence and the existing macOS repository-test limitation are recorded
+below. Current component contracts and commands are in
+`late-ssh/src/app/door/zork/CONTEXT.md`. Repository observations used for the
+original design below were checked against
 `6ff4199852e22ea7bfb2422316a7dce5deb3172d` on 2026-10-08.
 
 ## 1. Agreed behavior
@@ -434,8 +435,9 @@ and story provenance.
 
 ## 7. Implementation milestones
 
-Each milestone has a concrete exit condition. These describe future feature
-implementation; none is completed merely by adding this plan.
+The following milestones are implemented. Interpreter, host, client, container,
+and live SSH checks are recorded below. Production publication/deployment is a
+separate rollout step; it has not been performed by this implementation session.
 
 Milestone 1 uses the `LZORK001` container and explicit `LATE_FROTZ_DOOR` launch
 modes, documented in `vendor/frotz/LATE-ZORK.md`. Both checkpoint kinds wrap a
@@ -500,7 +502,7 @@ and telemetry build. Use `cargo test` only for harness/doctest needs that
 nextest does not cover or when nextest is unavailable. A dumb-Frotz transcript
 test cannot substitute for a curses PTY test or an end-to-end late.sh session.
 
-### Evidence already collected
+### Planning baseline
 
 During planning, the local trees and source licenses were inspected, source
 commits and story hashes were recorded, and each `.z3` was compared with its
@@ -508,16 +510,48 @@ tracked historical `.zip` story. The local `dfrotz -v` identifies the pinned
 2.56pre commit. All three stories were launched with that dumb-interface binary
 and accepted LOOK followed by QUIT and affirmative confirmation.
 
-Those checks establish asset identity and a basic interpreter/story baseline.
-They do not validate a clean Linux build, curses projection, modified saves,
-screen restoration, signal cleanup, or late.sh integration. These remain
-implementation milestones, not completed tests.
+Those initial checks established asset identity and a basic interpreter/story
+baseline. The implementation checks below exercise the curses interpreter and
+the actual host/client boundary.
 
-### Acceptance of this planning document
+### Implementation evidence
+
+- The ten real curses PTY tests in `vendor/frotz/src/curses/ux_door_test.py`
+  pass on macOS and in the built Linux amd64 asset image as a non-root user.
+  They cover all three stories and both slot kinds, exact styled-screen and RNG
+  continuation, decoded stack operands, story questions, death in every edition,
+  a terminal Zork III death, resize, RESTORE cancellation, Unicode descriptions,
+  abrupt termination, corruption, and failed writes preserving previous saves.
+- Host/client tests cover authentication, account and edition isolation,
+  account-wide leases, busy errors, natural and checkpoint exits, disconnect
+  cleanup, spawn failure, read-only metadata, menu defaults, switch ordering,
+  input fragmentation/filtering, idle deadlines, workspace detach/resume, and
+  light/dark theme text. The final focused selection passes all 40 tests.
+- `scripts/test_zork_host.sh` passes against the release runtime image. Its two
+  opt-in tests exercise I → II → III → I with all six slots, then restart the
+  host with a live interpreter and verify the six slots and visible continuation
+  through a new SSH connection. The script owns and removes its container/volume.
+- The asset and release runtime build from repository inputs without the
+  reference checkout. The asset smoke suite uses the installed binary/stories
+  and bundled source. Story hashes, non-root runtime permissions, and complete
+  modified GPL source/notices/build recipe were checked in the images.
+- Compose startup, workflow `actionlint`, shell `shellcheck`, Terraform formatting
+  and validation, affected Rust checks, formatting, and clippy pass. The full
+  `make check` runs formatting and workspace clippy successfully; 5,026 of 5,027
+  tests pass (14 skipped). Its sole test failure on this Mac is the existing
+  `ssh_test::rate_limited_peer_does_not_consume_a_global_permit`, whose bind to
+  `127.0.0.2` fails with `AddrNotAvailable`. This platform failure is outside the
+  Zork implementation; the gate must still pass in CI before merging.
+
+The live late.sh SSH TTY review covers Games/edition/save menus, confirmation
+defaults, gameplay, SAVE descriptions, RESTORE cancellation/return, game-owned
+Ctrl+S, workspace detach/resume, terminal resizing, and native theme rendering.
+See the component context for reproducible test commands and rollout order.
+
+### Original planning-document acceptance
 
 The document must preserve the final six-slot / one-engine decision, record
 the agreed SAVE/RESTORE and menu behavior, identify the source/license boundary,
-and provide an implementation sequence with measurable tests. Validate local
-references and Markdown, run a whitespace/diff check that includes the newly
-added file, and confirm the document is the only repository change in this
-documentation task.
+and provide an implementation sequence with measurable tests. The initial
+documentation-only change was committed separately; implementation now includes
+the code, assets, packaging, tests, and current-state documentation described here.

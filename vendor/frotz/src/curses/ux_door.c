@@ -376,14 +376,16 @@ void door_input(void)
 	size_t size = 0;
 	int ok;
 	if (!mode) return;
-	flush_buffer(); refresh();
+	flush_buffer();
 	ok = make_payload("", &data, &size);
 	if (ok && checkpoint_ok && size == last_size && !memcmp(data, last_payload, size)) {
-		free(data); reading_story = 1; return;
+		free(data); reading_story = 1; refresh(); return;
 	}
 	checkpoint_ok = ok && commit_slot(AUTO_FILE, 1, "", data, size);
 	if (ok) { free(last_payload); last_payload = data; last_size = size; }
 	else free(data);
+	/* Publish the pending prompt after its checkpoint has committed. */
+	refresh();
 	if (!checkpoint_ok) {
 		print_string("\nWarning: automatic save failed; the previous checkpoint is retained.\n");
 		flush_buffer(); refresh();

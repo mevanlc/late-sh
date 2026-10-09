@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import struct
 import subprocess
 import sys
@@ -15,8 +16,8 @@ import time
 import unittest
 
 ROOT = Path(__file__).resolve().parents[4]
-BIN = ROOT / "vendor/frotz/frotz"
-STORIES = ROOT / "assets/zork"
+BIN = Path(os.environ.get("LATE_ZORK_TEST_BIN", ROOT / "vendor/frotz/frotz"))
+STORIES = Path(os.environ.get("LATE_ZORK_TEST_STORIES", ROOT / "assets/zork"))
 
 
 class DoorTests(unittest.TestCase):
@@ -49,7 +50,15 @@ class DoorTests(unittest.TestCase):
                   "-e", "TMUX_TMPDIR=" , "sleep", "30")
         self.tmux("set-option", "-t", "game", "remain-on-exit", "on")
         self.tmux("set-option", "-t", "game", "window-size", "manual")
-        self.tmux("respawn-pane", "-k", "-t", "game", str(BIN), "-d", "-s", "1234", str(self.story))
+        # Capture the actual child status. Under x86 emulation tmux 3.3a can
+        # report a dead direct-exec pane without a pane_dead_status value.
+        self.exit_file = self.data / "child-exit"
+        self.pid_file = self.data / "child-pid"
+        self.exit_file.unlink(missing_ok=True)
+        command = shlex.join([str(BIN), "-d", "-s", "1234", str(self.story)])
+        wrapper = (f"{command} < /dev/tty & child=$!; printf '%s' \"$child\" > {shlex.quote(str(self.pid_file))}; "
+                   f"wait \"$child\"; result=$?; printf '%s' \"$result\" > {shlex.quote(str(self.exit_file))}; exit \"$result\"")
+        self.tmux("respawn-pane", "-k", "-t", "game", "/bin/sh", "-c", wrapper)
         self.live = True
         self.wait(lambda: self.screen().rstrip().endswith(prompt) or self.exited() is not None)
 
@@ -57,8 +66,10 @@ class DoorTests(unittest.TestCase):
         return self.tmux("capture-pane", "-t", "game", "-p", *( ["-e"] if styles else []))
 
     def exited(self):
-        s = self.tmux("display-message", "-t", "game", "-p", "#{pane_dead}:#{pane_dead_status}").strip()
-        return int(s.split(":")[1] or "-1") if s.startswith("1:") else None
+        if self.exit_file.is_file():
+            value = self.exit_file.read_text()
+            return int(value) if value else None
+        return None
 
     def wait(self, condition, timeout=4):
         end = time.monotonic() + timeout
@@ -73,7 +84,8 @@ class DoorTests(unittest.TestCase):
 
     def command(self, command, expect=None):
         before = self.screen()
-        self.keys(command, "Enter")
+        self.tmux("send-keys", "-t", "game", "-l", command)
+        self.keys("Enter")
         self.wait(lambda: self.screen() != before and (
             expect in self.screen() if expect else self.screen().rstrip().endswith(">")))
 
@@ -85,14 +97,16 @@ class DoorTests(unittest.TestCase):
 
     def save(self, description="checkpoint"):
         self.command("save", "One manual slot")
-        self.keys(description, "Enter")
+        self.tmux("send-keys", "-t", "game", "-l", description)
+        self.keys("Enter")
         self.wait(lambda: self.screen().rstrip().endswith(">"))
         self.assertEqual(self.inspect(True)["description"], description)
 
     def return_menu(self):
         self.command("RESTORE ignored", "Return to this Zork's menu?")
         self.keys("y")
-        self.wait(lambda: self.exited() is not None)
+        # tmux can mark a pane dead before publishing its exit status.
+        self.wait(lambda: self.exited() == 20)
         self.assertEqual(self.exited(), 20)
 
     def test_trilogy_switch_and_screen_fidelity(self):
@@ -164,6 +178,46 @@ class DoorTests(unittest.TestCase):
         self.tmux("resize-window", "-t", "game", "-x", 110, "-y", 35)
         self.command("inventory")
 
+    def test_death_states_and_terminal_ending(self):
+        # These are real story routes, not a replay or a synthetic LOOK after
+        # restore. A death can legitimately be the newest automatic progress.
+        for edition in (1, 2, 3):
+            self.launch(edition, rows=60)
+            if edition == 1:
+                route = ("north", "east", "open window", "west", "west", "take sword", "kill me with sword")
+            elif edition == 2:
+                route = ("take sword", "kill me with sword")
+            else:
+                route = ("south", "west") # The fixed RNG seed gives a grue here.
+            for command in route:
+                self.command(command)
+            self.assertIn("You have died", self.screen())
+            expected = self.screen(styles=True)
+            self.return_menu()
+            self.launch(edition, "auto", rows=60)
+            self.assertEqual(self.screen(styles=True), expected)
+            self.command("inventory")
+            self.return_menu()
+        # Zork III's fourth death ends the interpreter without another READ.
+        # The last committed slot remains coherent and may be a losing state.
+        self.launch(3, rows=60)
+        # Repeatedly move between two dark rooms; death returns to the stair.
+        for index in range(40):
+            ending_command = ("south", "south", "north")[index % 3]
+            before = self.screen()
+            self.keys(ending_command, "Enter")
+            self.wait(lambda: self.exited() is not None or (
+                self.screen() != before and self.screen().rstrip().endswith(">")))
+            if self.exited() is not None:
+                break
+        self.assertEqual(self.exited(), 0, self.screen())
+        self.assertEqual(self.inspect()["status"], "ready")
+        self.launch(3, "auto", rows=60)
+        self.assertIn("pitch black", self.screen())
+        self.keys(ending_command, "Enter")
+        self.wait(lambda: self.exited() is not None)
+        self.assertEqual(self.exited(), 0)
+
     def test_invalid_slots_and_failed_write_preserve_previous(self):
         self.launch()
         self.save()
@@ -217,7 +271,7 @@ class DoorTests(unittest.TestCase):
         for command in commands:
             self.command(command)
         expected = (self.directory / "autosave.lz").read_bytes()[52:]
-        pid = int(self.tmux("display-message", "-t", "game", "-p", "#{pane_pid}").strip())
+        pid = int(self.pid_file.read_text())
         os.kill(pid, 9)
         self.wait(lambda: self.exited() is not None)
         (self.directory / "autosave.lz").write_bytes(checkpoint)
