@@ -12,7 +12,7 @@ Implement a way for `@bartender` to pour non-intoxicating drinks (like water, co
 
 ## Service Layer (ChipService)
 - **`buy_drink` & `cash_round_drink` (`late-ssh/src/app/games/chips/svc.rs`)**: Both core methods now accept an `intoxicating: bool` argument.
-- When an order passes through the `Pour` or `PourComped` decisions, the extracted `intoxicating` boolean is carried down the stack to the database layer. 
+- When an order passes through the `Pour` or `PourComped` decisions, the extracted `intoxicating` boolean is carried down the stack to the database layer.
 - Hardcoded calls like the buyer's portion of a round (`buy_round`) pass `intoxicating: true` by default since rounds are exclusively alcoholic.
 
 ## Database Layer (UserDrinks)
