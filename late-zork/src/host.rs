@@ -54,7 +54,6 @@ pub(crate) struct HostConfig {
     pub(crate) account: String,
     pub(crate) cols: u16,
     pub(crate) rows: u16,
-    pub(crate) term: String,
 }
 
 enum Command {
@@ -174,7 +173,9 @@ async fn run_bridge(
     let mut cmd = TokioCommand::new(&cfg.bin);
     cmd.env_clear()
         .current_dir(&home)
-        .env("TERM", &cfg.term)
+        // Frotz renders into late.sh's vt100 parser, not the player's terminal.
+        // Use the terminfo shipped in the image even for Kitty/Ghostty clients.
+        .env("TERM", "xterm-256color")
         .env("HOME", &home)
         .env("LANG", "C.UTF-8")
         .env("LC_ALL", "C.UTF-8")

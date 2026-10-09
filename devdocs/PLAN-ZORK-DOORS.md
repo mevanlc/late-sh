@@ -548,6 +548,48 @@ defaults, gameplay, SAVE descriptions, RESTORE cancellation/return, game-owned
 Ctrl+S, workspace detach/resume, terminal resizing, and native theme rendering.
 See the component context for reproducible test commands and rollout order.
 
+### Trilogy session review, 2026-10-09
+
+A fresh test account completed the following through the real late.sh client
+on SSH port 2222, in one uninterrupted 140×40 tmux session. Each edition was
+played beyond its manual save before switching to the next edition via the
+Games card. Returning with Continue checked the later automatic state; RESTORE
+returned to the native menu to load the earlier manual state.
+
+| Edition | Manual save restored | Later autosave restored |
+|---|---|---|
+| I | Living Room, score 10, move 10; sword, unlit lantern, and leaflet carried; rug still covering the trap door. | Cellar, score 35, move 16; lantern lit; leaflet dropped in the cellar. |
+| II | Foot Bridge, score 0, move 6; sword and lit lamp carried. | Great Cavern, score 0, move 9; sword dropped in the cavern; lit lamp carried. |
+| III | Junction, score 0, move 4; lit lamp carried; sword still embedded in the rock. | Barren Area, score 0, move 8; lamp off, darkness and inventory preserved. |
+
+All six restored game-area text frames matched their saved frames exactly,
+including the status line and prompt, before any verification command was sent.
+Subsequent inventory and LOOK commands confirmed the room, carried/dropped
+objects, lamp state, and rug state. Another I → II → III cycle confirmed Continue
+now used the post-manual-restore autosaves (moves 12, 8, and 6 respectively).
+All six fixed slot files remained present, with independent manual descriptions.
+Screenshots of each edition were captured and reviewed.
+
+This review also reproduced an immediate launch failure for Kitty clients:
+`xterm-kitty` passed the original name validation but had no terminfo entry in
+the container. Frotz reported `Error opening terminal: xterm-kitty.` The host
+now always uses the shipped `xterm-256color` definition for the embedded vt100
+screen; the outer terminal name only describes the player's SSH connection.
+A fresh SSH connection explicitly reporting `xterm-kitty` successfully resumed
+and switched among all three editions. The host regression exercises Kitty,
+Ghostty, empty, and path-like PTY terminal names through an actual child process.
+The 23 focused host/client/config tests, formatting, and host clippy pass.
+
+Development environment observations: the earlier branch switch had stopped
+the Zork watcher on a missing package; restarting only `service-zork` recovered
+the save catalogue. A source-triggered watcher restart during this review also
+left the old test interpreter detached from its host. That test-account child
+was identified and stopped with SIGHUP; normal menu switches reaped their old
+children. Hard watcher restarts with live games need separate lifecycle work.
+The database already contains migration `229_le_word_languages`, while this
+branch predates its language-aware queries. The two daily-word rows explain the
+Le Word startup warning; no database reset or rollback was performed.
+
 ### Original planning-document acceptance
 
 The document must preserve the final six-slot / one-engine decision, record

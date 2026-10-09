@@ -1,16 +1,5 @@
 use super::*;
 
-#[test]
-fn hostile_term_falls_back() {
-    assert_eq!(effective_term("../../etc/passwd"), "xterm-256color");
-    assert_eq!(effective_term(""), "xterm-256color");
-}
-
-#[test]
-fn safe_term_passes_through() {
-    assert_eq!(effective_term("xterm-ghostty"), "xterm-ghostty");
-}
-
 use russh::client;
 use russh::{ChannelMsg, Disconnect};
 use std::os::unix::fs::PermissionsExt;
@@ -52,6 +41,7 @@ esac
 trap 'printf stopped > stopped; exit 20' USR1
 trap 'printf saved > stopped; exit 0' HUP TERM
 printf 'READY %s %s secret=%s\n' "$HOME" "$LATE_FROTZ_DOOR" "$LATE_ZORK_SECRET"
+printf 'TERM %s\n' "$TERM"
 while IFS= read -r line; do
   case "$line" in
   quit) exit 0;;
@@ -129,9 +119,16 @@ done
 const ACCOUNT: &str = "late_000000000000000000000001";
 const OTHER: &str = "late_000000000000000000000002";
 async fn request(client: &client::Handle<Client>, command: &str) -> Channel<client::Msg> {
+    request_with_term(client, command, "xterm-256color").await
+}
+async fn request_with_term(
+    client: &client::Handle<Client>,
+    command: &str,
+    term: &str,
+) -> Channel<client::Msg> {
     let channel = client.channel_open_session().await.unwrap();
     channel
-        .request_pty(true, "xterm-256color", 80, 24, 0, 0, &[])
+        .request_pty(true, term, 80, 24, 0, 0, &[])
         .await
         .unwrap();
     channel.exec(true, command).await.unwrap();
@@ -169,6 +166,20 @@ async fn exit(channel: &mut Channel<client::Msg>) -> (u32, String) {
     })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn client_terminal_names_do_not_reach_the_embedded_interpreter() {
+    let fixture = Fixture::new().await;
+    let (client, accepted) = fixture.client(ACCOUNT, "test-secret").await;
+    assert!(accepted);
+    for term in ["xterm-kitty", "xterm-ghostty", "../../etc/passwd", ""] {
+        let mut game = request_with_term(&client, "play zork1 new", term).await;
+        let output = until(&mut game, "TERM xterm-256color\r\n").await;
+        assert!(output.contains("TERM xterm-256color\r\n"), "{output}");
+        game.data(&b"quit\n"[..]).await.unwrap();
+        assert_eq!(exit(&mut game).await.0, 0);
+    }
 }
 
 #[tokio::test]

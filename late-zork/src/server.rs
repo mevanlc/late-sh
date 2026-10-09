@@ -56,14 +56,12 @@ impl russh::server::Server for Server {
 
 #[derive(Clone)]
 struct Terminal {
-    term: String,
     cols: u16,
     rows: u16,
 }
 impl Default for Terminal {
     fn default() -> Self {
         Self {
-            term: "xterm-256color".into(),
             cols: 108,
             rows: 24,
         }
@@ -82,19 +80,6 @@ fn reject() -> Auth {
     Auth::Reject {
         proceed_with_methods: Some(MethodSet::from(&[MethodKind::PublicKey][..])),
         partial_success: false,
-    }
-}
-
-fn effective_term(requested: &str) -> String {
-    if !requested.is_empty()
-        && requested.len() <= 64
-        && requested
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'+'))
-    {
-        requested.to_string()
-    } else {
-        "xterm-256color".to_string()
     }
 }
 
@@ -153,7 +138,7 @@ impl Handler for ClientHandler {
     async fn pty_request(
         &mut self,
         channel: ChannelId,
-        term: &str,
+        _term: &str,
         cols: u32,
         rows: u32,
         _pix_width: u32,
@@ -164,7 +149,6 @@ impl Handler for ClientHandler {
         self.terminals.insert(
             channel,
             Terminal {
-                term: effective_term(term),
                 cols: cols.clamp(20, 255) as u16,
                 rows: rows.clamp(4, 255) as u16,
             },
@@ -260,7 +244,6 @@ impl Handler for ClientHandler {
                             action,
                             cols: terminal.cols,
                             rows: terminal.rows,
-                            term: terminal.term,
                         },
                         session.handle(),
                         channel,
