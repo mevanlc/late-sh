@@ -62,7 +62,7 @@ Tests live beside the file they exercise as `<file>_test.rs`, wired with
 Core models used by chat live in `late-core/src/models/`:
 `chat_room.rs`, `chat_room_member.rs`, `chat_message.rs`, `chat_message_reaction.rs`,
 `chat_message_gild.rs`, `crown.rs`,
-`notification.rs`, `rss_feed.rs`, `rss_entry.rs`, `article.rs`, `article_feed_read.rs`, `cyberspace_account.rs`, `showcase.rs`,
+`notification.rs`, `rss_feed.rs`, `rss_entry.rs`, `article.rs`, `article_read.rs`, `cyberspace_account.rs`, `showcase.rs`,
 `showcase_feed_read.rs`, `work_profile.rs`, `work_feed_read.rs`, and `chat_poll.rs`.
 Chat-owned moderation commands also use `room_ban.rs`,
 `chat_slow_mode.rs`, `server_ban.rs`, `artboard_ban.rs`, and `moderation_audit_log.rs`.
@@ -517,7 +517,8 @@ Keys:
 - Enter jumps from a reply to its loaded target.
 - `f` enters reaction leader mode.
 - `f` again while reaction leader is active opens reaction-owner overlay.
-- Digits `1..9` while reaction leader is active toggle quick reactions, exit reaction leader mode, and keep the message selected.
+- Digits `1..9` and `w` (👋, wave hi) while reaction leader is active toggle quick reactions, exit reaction leader mode, and keep the message selected.
+- Reaction leader shortcuts take priority over global page and Bonsai keys.
 - Digit `0` while reaction leader is active opens the icon picker for a custom reaction.
 
 Selection deltas are message-based, not row-based. Positive means older, negative means newer.
@@ -931,7 +932,7 @@ reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
 Reactions:
 - One reaction per `(message_id, user_id)`.
 - Reactions are stored as icon text in `chat_message_reactions.icon`.
-- Quick reaction keys `1..9` map to the default emoji set; `0` opens the full icon picker.
+- Quick reaction keys `1..9` map to the default emoji set; `w` waves hi (👋); `0` opens the full icon picker.
 - UI appends reaction footer chips under the message body.
 - Reaction summaries live in `message_reactions: HashMap<Uuid, Vec<ChatMessageReactionSummary>>`.
 - Reaction-owner overlay (`ff`) waits for a matching `ReactionOwnersListed` event keyed by `pending_reaction_owners_message_id`. The event also carries the message's gilds (`ChatMessageGild::list_for_message`, best tier first), which `reaction_owner_lines` lists above the reactions as one block per tier held (`◆◆◆ 1 Gold gild`, buyers under it), sharing the reaction blocks' name capping.
@@ -963,12 +964,12 @@ Synthetic entries are selected from the room list but are not normal `ChatRoom`s
 - The reward is capped at one per URL per user and at `NEWS_SHARE_MAX_PAID_PER_DAY` (3) paid shares per UTC day, and the `chip_ledger` row is what enforces both, keyed on `(user_id, url)` and counted by `created_at` date like pot tickets (hence `source_ref` holds the URL, not an article id; migration 163 indexes the lookup). The `articles` row cannot be the record of payment: deleting a story frees its URL, so paying on insert alone would let one player share, delete, and re-share the same link forever. `articles.url` is unique, so while a story is live only its first sharer was paid.
 - A repeat or capped share still succeeds and still goes up on the live strip; it just mints nothing. `Article::create_shared` returns a closed `NewsShareReward` (`Paid` / `RepeatUrl` / `DailyCapReached`) that rides `ArticleEvent::Created` and `FeedEvent::EntryShared`, so `news::state::news_share_banner` says what the ledger did ("+500 chips" / "Already paid for this link" / "Today's 3 paid shares are used up") and `metrics::record_news_shared` labels `late_ssh_news_shares_total` by the same outcome. An RSS entry marked shared because its link was already in News carries `reward: None` and raises no second banner over "Already shared.".
 - Insert, ledger lookup, and credit are one transaction under a `pg_advisory_xact_lock` keyed on `('news_share', user_id)`, the shape `GamePayout` and the pot use: a failed credit leaves no orphan article squatting on a globally unique URL, and two shares by one person landing together serialize, so the day cap is exact rather than read-then-write.
-- Every snapshot article is a live strip candidate, stamped with its `created` (`news/live.rs`, `../live/CONTEXT.md`): a share joins the strip's News lane, which goes ahead of everything else at the next handover, and stays up exactly five minutes. `o` there opens the article modal (`ChatState::open_news_modal_for_article`); `r` opens the #lounge composer replying to it (`ChatState::begin_reply_to_article`, `ReplyTo::Article`), and the sent message carries `> @sharer: 📰 Title` with no `reply_to_message_id`, since there is no message to point at. `r` on the selected article in the News room starts the same reply and switches to #lounge (`news/input.rs`).
+- Every snapshot article is a live strip candidate, stamped with its `created` (`news/live.rs`, `../live/CONTEXT.md`): a share joins the strip's News lane, which goes ahead of everything else at the next handover, and stays up exactly five minutes. `o` there opens the article modal (`ChatState::open_news_modal_for_article`, the one way the modal opens, which marks that article read: `news::State::mark_article_read`); `r` opens the #lounge composer replying to it (`ChatState::begin_reply_to_article`, `ReplyTo::Article`), and the sent message carries `> @sharer: 📰 Title` with no `reply_to_message_id`, since there is no message to point at. `r` on the selected article in the News room starts the same reply and switches to #lounge (`news/input.rs`).
 - A share has no chat message. Old #lounge rows whose body starts with `---NEWS---` (the cards shares used to post) are still in `chat_messages`; nothing writes, parses, or deletes them, so they render as plain text.
 - Delete removes the article (its author, or an admin with an audit row); there is no chat-side cleanup.
 - URL processing has a 5-minute timeout. Image ASCII fetch has byte, pixel, and time limits.
 - News snapshot is global: the newest `NEWS_FEED_LIMIT` (20) articles, one `watch` per replica. It is refreshed only by `ArticleService::start_notify_worker` (subscribed in `main.rs`), fed `articles_changed` (migration 198, a statement trigger on any `articles` write, empty payload) by the process listener (`pg_listener.rs`); it re-reads on the resync after LISTEN is live and on every notify, a burst collapsing into one read. Share and delete never refresh it directly; the notify brings the change back to the writing replica like any other.
-- The News badge is counted in the session, not in SQL: `news::state::unread_in_snapshot` counts snapshot articles newer than the reader's `article_feed_reads` cursor (no row = all unread, own shares included), and `news_unread_label` renders a full snapshot as `20+`. The cursor arrives as `ArticleEvent::ReadCursorLoaded` (at session start and after `mark_read`); until then `ReadCursor::Loading` keeps the badge empty. The "N new articles in news" banner fires when a refreshed snapshot holds an unread article by someone else that the previous snapshot did not (`has_fresh_unread_from_others`); a session's first snapshot never announces. No per-user event is ever published for other users, so a write costs one list query per replica whatever the users table holds.
+- The News badge is counted in the session, not in SQL: `news::state::unread_in_snapshot` counts snapshot articles the reader has no `article_reads` row for (own shares included; `news::state::Reads` is the session's set of read ids). Read is a row and nothing else: a visit to the News room (`mark_read`, `ArticleRead::mark_feed_read`) inserts a row for every snapshot article, opening the modal (`mark_article_read`) inserts that one article's and nothing else, and a brand-new user is seeded the way a visit reads (`ssh.rs`), so a first login never shows the back catalog as unread. `news_unread_label` renders a full snapshot as `20+`. The stored reads arrive as `ArticleEvent::ReadsLoaded` at session start and after either write, bounded to the snapshot's articles so a long reading history never rides a load; rows only grow, so the session merges each load into what it holds and two writes' loads landing in either order never take a read back. Until the first load `Reads::Loading` keeps the badge empty. The News list's dots read the reads held from when the room was entered (`news::State::marker`). The "N new articles in news" banner fires when a refreshed snapshot holds an unread article by someone else that the previous snapshot did not (`has_fresh_unread_from_others`); a session's first snapshot never announces. No per-user event is ever published for other users, so a write costs one list query per replica whatever the users table holds.
 
 ### Showcase
 
@@ -1100,6 +1101,7 @@ Cache:
 | `f` | Favorite/unfavorite the selected real room |
 | `[` / `]` | Move the selected favorite up/down in the room rail |
 | `f` then `1..9` | Quick-react to selected message |
+| `f` then `w` | Wave hi (👋) on selected message |
 | `f` then `0` | Open icon picker for a custom reaction |
 | `f` then `f` | Open reaction-owner overlay |
 | `Ctrl+]` | Open icon picker; inserts only into main chat composer |

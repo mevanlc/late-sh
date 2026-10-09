@@ -33,7 +33,7 @@ a row position.
 
 Settings/Tweaks clicks reuse keyboard actions, including per-device rail and
 interaction-mode updates. Cooldown, notification format, both sidebar modes,
-Terminal images, Land on, Gallery Art on Splash, and Text Brightness share bold
+Terminal images, Land on, Gallery Art on Splash, Screensaver, and Text Brightness share bold
 amber arrows. Only the arrows choose direction; other row/value clicks cycle
 forward. Every cycle reserves its longest option width. Ratatui measures both
 rendered spans and clipped hitboxes, and labels shorten at grapheme boundaries
@@ -46,8 +46,8 @@ editing and hides the current Artboard visit until consent. `A` (Always View) in
 prompt turns the same tweak off and allows that visit outside the tour. Tour
 dialog choices do not change the tweak or save account settings.
 
-Target language and Interaction mode open the shared picker on click or
-Enter/Space; Left/Right keyboard cycling stays available. Opening selects the
+Target language, Interaction mode and Screensaver open the shared picker on
+click or Enter/Space; Left/Right keyboard cycling stays available. Opening selects the
 current value without applying it. Enter or a result click applies once and
 closes; Esc/[x] cancels. Language filtering matches English/native names and
 stored codes in the existing 17-language order. Interaction mode offers

@@ -477,6 +477,19 @@ pub struct App {
     /// a short window after input so request -> response interactions
     /// (menu loads, chat send echo) land at typing latency.
     pub(crate) last_input_at: Instant,
+    /// Set on input from a person (`common::away::presence_input`): not
+    /// on a bare mouse move or a focus report. The away clock, the AFK line,
+    /// attention, and the device's left-at mark all read this one, so a
+    /// pointer resting on the terminal never keeps a session here.
+    pub(crate) last_active_at: Instant,
+    /// The tail of the last input chunk that cut an escape sequence in two
+    /// (`common::away::PresenceInput::Partial`), read again in front of the
+    /// next chunk, so who sent it is decided from the whole report and the
+    /// second half of a mouse move never reads as a person's keys.
+    pub(crate) presence_held: Vec<u8>,
+    /// A bracketed paste woke the session from under the screensaver and
+    /// its close has not arrived: the chunks up to it are swallowed too.
+    pub(crate) waking_paste_open: bool,
     /// Second-boundary edge state for the shared 1Hz block in tick():
     /// None = never fired (fire immediately so first frames have presence,
     /// directory, and clock state).
@@ -527,11 +540,6 @@ pub struct App {
     /// one-hertz edge and on leaving the page, so a held resize key costs
     /// one row update rather than one per key repeat.
     pub(crate) zen_layout_dirty: bool,
-    /// Whether Zen had its status row when the reef was last bound. The row
-    /// follows the status line setting, which changes outside any screen
-    /// switch (a Settings preview, a profile arriving), so tick re-binds the
-    /// reef when the two disagree.
-    pub(crate) zen_row_bound: bool,
     pub(crate) mod_modal_state: mod_modal::state::ModModalState,
     pub(crate) pending_escape: bool,
     pub(crate) pending_escape_started_at: Option<Instant>,
@@ -708,6 +716,8 @@ pub struct App {
     pub(crate) directory_editor: crate::app::directory::editor::state::EditorState,
     /// The tag picker the settings modal and the profile editor open.
     pub(crate) tag_picker: super::tag_picker::state::TagPickerState,
+    /// The piece picker a Zen ascii tile opens (`app/ascii/picker`).
+    pub(crate) piece_picker: super::ascii::picker::state::PiecePickerState,
     pub(crate) booth_modal_state: crate::app::audio::booth::state::BoothModalState,
     /// Server-authoritative audio source for the paired playback surface.
     /// Mirrors `users.settings.audio_source`. v+x flips this, persists it to
@@ -1043,8 +1053,10 @@ impl App {
     /// so peers see a session go away or come back within a second of it.
     /// Returns whether the flag moved.
     pub(crate) fn sync_away(&mut self) -> bool {
-        let away =
-            crate::app::common::away::session_is_away(self.last_input_at.elapsed(), self.sent_away);
+        let away = crate::app::common::away::session_is_away(
+            self.last_active_at.elapsed(),
+            self.sent_away,
+        );
         if away == self.away {
             return false;
         }
@@ -1057,7 +1069,25 @@ impl App {
                 away,
             );
         }
+        if let Some(piece) = self.screensaver() {
+            let trigger = match self.sent_away {
+                true => crate::metrics::ScreensaverTrigger::Brb,
+                false => crate::metrics::ScreensaverTrigger::Idle,
+            };
+            crate::metrics::record_screensaver(trigger, piece);
+        }
         true
+    }
+
+    /// The piece covering the screen while this session is away, `None`
+    /// while it is here or with the Tweak off (Settings, Tweaks,
+    /// `Screensaver`).
+    pub(crate) fn screensaver(&self) -> Option<late_core::models::user::AsciiPiece> {
+        use late_core::models::user::Screensaver;
+        match (self.away, self.profile_state.profile().screensaver) {
+            (true, Screensaver::Piece(piece)) => Some(piece),
+            (true, Screensaver::Off) | (false, _) => None,
+        }
     }
 
     /// The rail modes this session renders from: this device's stored layout if
@@ -1503,6 +1533,9 @@ impl App {
             marquee_tick: 0,
             started_at: Instant::now(),
             last_input_at: Instant::now(),
+            last_active_at: Instant::now(),
+            presence_held: Vec::new(),
+            waking_paste_open: false,
             last_one_hz_index: None,
             attention_mark: Instant::now(),
             attention_spot: None,
@@ -1542,7 +1575,6 @@ impl App {
                 }
             },
             zen_layout_dirty: false,
-            zen_row_bound: false,
             mod_modal_state: mod_modal::state::ModModalState::new(),
             pending_escape: false,
             pending_escape_started_at: None,
@@ -1690,6 +1722,7 @@ impl App {
             ),
             directory_editor: crate::app::directory::editor::state::EditorState::default(),
             tag_picker: super::tag_picker::state::TagPickerState::default(),
+            piece_picker: super::ascii::picker::state::PiecePickerState::default(),
             booth_modal_state: crate::app::audio::booth::state::BoothModalState::default(),
             paired_source: config.initial_audio_source,
             selected_radio_station: config.initial_radio_station,
@@ -2478,6 +2511,11 @@ impl App {
             return;
         }
 
+        // The piece picker belongs to the Zen page it was opened over; a
+        // chord off the page (Ctrl+F, a door) must not carry it along to
+        // own the next page's keys.
+        self.piece_picker.close();
+
         // Leaving Home is leaving the open cyberspace chat room: its stream
         // and presence heartbeat exist only while the user is on the surface,
         // and Esc is not the only way off it (digits, Tab, door chords).
@@ -2800,10 +2838,72 @@ impl App {
     }
 
     pub fn handle_input(&mut self, data: &[u8]) {
+        use crate::app::common::away::{PresenceInput, paste_end, presence_input};
         if !data.is_empty() {
             self.last_input_at = Instant::now();
-            self.newcomer_clock.note_input(chrono::Utc::now());
         }
+        // A paste that woke the session is swallowed to its close, however
+        // many chunks it runs on for; what follows the close is the page's.
+        let data: &[u8] = match self.waking_paste_open {
+            false => data,
+            true => match paste_end(data) {
+                Some(end) => {
+                    self.waking_paste_open = false;
+                    &data[end..]
+                }
+                None => return,
+            },
+        };
+        // Read before the input can bring the session back: the one thing
+        // that drops the screensaver is swallowed, not acted on.
+        let screensaver_up = self.screensaver().is_some();
+        // Presence is read over the held tail of the last chunk and this
+        // one, so a report cut at a chunk boundary is classified whole.
+        let held = std::mem::take(&mut self.presence_held);
+        let read: std::borrow::Cow<'_, [u8]> = match held.is_empty() {
+            true => std::borrow::Cow::Borrowed(data),
+            false => std::borrow::Cow::Owned([held.as_slice(), data].concat()),
+        };
+        // A person, not the pointer crossing the terminal: the away clock
+        // restarts and `/brb` ("until your next key") ends here, for every
+        // screen including the doors that never parse their input. Coming
+        // back is synced now rather than on the next 1Hz edge, so the
+        // screensaver drops on this very key.
+        let person = match presence_input(&read) {
+            PresenceInput::Nobody => None,
+            PresenceInput::Partial { held_from } => {
+                self.presence_held = read[held_from..].to_vec();
+                None
+            }
+            PresenceInput::Person {
+                event_end,
+                paste_open,
+            } => {
+                self.last_active_at = Instant::now();
+                self.newcomer_clock.note_input(chrono::Utc::now());
+                self.sent_away = false;
+                if self.away {
+                    self.sync_away();
+                }
+                // The held tail came from a chunk already swallowed, so the
+                // event ends this far into this one.
+                Some((event_end - held.len(), paste_open))
+            }
+        };
+        let data: &[u8] = match (screensaver_up, person) {
+            (false, _) => data,
+            // The pointer, a focus change, or half a report: nothing to
+            // wake for, nothing to act on.
+            (true, None) => return,
+            (true, Some((event_end, paste_open))) => {
+                self.waking_paste_open = paste_open;
+                let rest = &data[event_end..];
+                if rest.is_empty() {
+                    return;
+                }
+                rest
+            }
+        };
         // First contact's breakthrough (`app/deadchannel/haunt`): while it
         // plays, every key is swallowed here, before a running door game or
         // the parser sees it.
@@ -3208,22 +3308,17 @@ impl App {
         }
     }
 
-    /// Whether Zen gives its bottom row to the status line; every caller of
-    /// `zen::layout::rice_areas` reads it from here, so the tiles, the
-    /// clicks, and the reef agree on where the row is.
-    pub(crate) fn zen_status_row(&self) -> bool {
-        crate::app::statusline::bar::zen_row_shown(self.statusline_components())
-    }
-
     /// The rect the aquarium simulation should fill on the current screen:
-    /// the tank tile's inner rect on Zen, the launch band elsewhere.
+    /// the tank tile's inner rect on Zen (the whole page, zoomed), the
+    /// launch band elsewhere.
     fn aquarium_area_for_screen(&self) -> Rect {
         use crate::app::zen::{layout as zen_layout, state::TileKind};
         let (cols, rows) = self.size;
         let full = Rect::new(0, 0, cols, rows);
         match self.screen {
             Screen::Zen => {
-                let (tiles, _) = zen_layout::rice_areas(full, self.zen_status_row());
+                let (tiles, _) =
+                    zen_layout::rice_areas(full, zen_layout::rice_row(full, self.zen.zoomed));
                 let zoomed = self.zen.zoomed.then_some(self.zen.focus);
                 zen_layout::tile_rects(
                     &self.zen.rice.root,
@@ -3233,7 +3328,10 @@ impl App {
                 )
                 .into_iter()
                 .find(|(kind, _)| *kind == TileKind::Aquarium)
-                .map(|(_, rect)| zen_layout::tile_inner(rect, &self.zen.rice.look))
+                .map(|(_, rect)| match zoomed {
+                    Some(_) => rect,
+                    None => zen_layout::tile_inner(rect, &self.zen.rice.look),
+                })
                 .unwrap_or_else(|| aquarium_area_for_terminal(cols, rows))
             }
             _ => aquarium_area_for_terminal(cols, rows),
@@ -3254,7 +3352,6 @@ impl App {
     pub(crate) fn sync_aquarium_bounds(&mut self) {
         let area = self.aquarium_area_for_screen();
         self.aquarium_state.handle_resize(area.width, area.height);
-        self.zen_row_bound = self.zen_status_row();
     }
 
     /// Note a Zen layout edit. The write itself is debounced: see
@@ -4178,7 +4275,7 @@ impl Drop for App {
         // the morning left last night. Keyless sessions (ghost bots, tests)
         // have no device to remember it on.
         if let Some(fingerprint) = self.key_fingerprint.clone()
-            && let Ok(idle) = chrono::Duration::from_std(self.last_input_at.elapsed())
+            && let Ok(idle) = chrono::Duration::from_std(self.last_active_at.elapsed())
         {
             self.profile_state
                 .set_device_left_at(fingerprint, chrono::Utc::now() - idle);

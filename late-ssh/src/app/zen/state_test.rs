@@ -314,3 +314,124 @@ fn a_placed_tile_shows_whatever_the_zoom_but_only_draws_while_on_show() {
     assert!(zen.draws(TileKind::Lobby), "zoomed on it, it draws");
     assert!(!zen.draws(TileKind::Bonsai), "and the bonsai does not");
 }
+
+/// An ascii tile plays the screensaver's piece, the slow earthrise,
+/// until `[` `]` pick another; the piece is stored with the layout, rides
+/// along when the tile is split, and is forgotten when the tile becomes
+/// something else, as a chat tile's room is.
+#[test]
+fn an_ascii_tile_keeps_its_piece_until_it_changes_kind() {
+    use late_core::models::user::{AsciiPiece, Scene, SceneStyle, Screensaver};
+    let earthrise = AsciiPiece {
+        scene: Scene::Earthrise,
+        style: SceneStyle::Dots,
+    };
+    let dawn = AsciiPiece {
+        scene: Scene::AlpineDawn,
+        style: SceneStyle::Pixels,
+    };
+    let mut zen = ZenState::new(RiceLayout {
+        root: Node::leaf(TileKind::Ascii),
+        look: Look::default(),
+    });
+    assert_eq!(zen.focused_piece(), Some(earthrise));
+    assert_eq!(
+        Screensaver::DEFAULT,
+        Screensaver::Piece(earthrise),
+        "the tile and the screensaver default to one piece"
+    );
+    assert!(zen.cycle_focused_piece(true));
+    assert_eq!(
+        zen.focused_piece(),
+        Some(AsciiPiece {
+            scene: Scene::Earthrise,
+            style: SceneStyle::Pixels
+        })
+    );
+    // Back past earthrise's two styles, off the front of the list
+    // onto its end.
+    for _ in 0..2 {
+        assert!(zen.cycle_focused_piece(false));
+    }
+    assert_eq!(zen.focused_piece(), Some(dawn), "it wraps");
+
+    let stored = serde_json::to_string(&zen.rice).expect("serialize");
+    assert!(
+        stored.contains("\"piece\":\"alpine_dawn_pixels\""),
+        "stored by key: {stored}"
+    );
+    let restored: RiceLayout = serde_json::from_str(&stored).expect("deserialize");
+    assert_eq!(restored.root.piece_at(0), Some(dawn));
+
+    let aurora = AsciiPiece {
+        scene: Scene::AuroraFjord,
+        style: SceneStyle::Dots,
+    };
+    assert!(zen.set_focused_piece(aurora));
+    assert_eq!(zen.focused_piece(), Some(aurora));
+    assert!(zen.set_focused_piece(dawn));
+
+    assert!(zen.split_focused(true));
+    assert_eq!(zen.rice.root.piece_at(0), Some(dawn));
+    assert_eq!(zen.rice.root.piece_at(1), None, "the new tile is blank");
+    assert!(
+        !zen.cycle_focused_piece(true),
+        "`[ ]` on a blank tile is nothing"
+    );
+
+    assert!(zen.rice.root.set_kind(0, TileKind::Clock));
+    assert!(zen.rice.root.set_kind(0, TileKind::Ascii));
+    assert_eq!(
+        zen.rice.root.piece_at(0),
+        Some(earthrise),
+        "coming back plays the default"
+    );
+}
+
+/// Layouts stored before the ascii tile existed carry no `piece` key, and
+/// read back unchanged.
+#[test]
+fn a_layout_without_pieces_reads_back_unchanged() {
+    let stored = serde_json::to_string(&RiceLayout::default()).expect("serialize");
+    assert!(!stored.contains("piece"));
+    let restored: RiceLayout = serde_json::from_str(&stored).expect("deserialize");
+    assert_eq!(restored, RiceLayout::default());
+}
+
+/// A piece key this build does not know (one dropped, like the donut, or a
+/// deploy rolled back past it) costs that tile its pick, not the user the
+/// whole layout: the tile plays the default and every other leaf reads as
+/// stored.
+#[test]
+fn a_layout_with_an_unknown_piece_keeps_everything_but_the_pick() {
+    use late_core::models::user::{AsciiPiece, Scene, SceneStyle};
+    let room = Uuid::from_u128(7);
+    let stored = serde_json::json!({
+        "root": {
+            "node": "split",
+            "dir": "row",
+            "share": 500,
+            "first": { "node": "leaf", "kind": "ascii", "piece": "donut" },
+            "second": {
+                "node": "split",
+                "dir": "column",
+                "share": 400,
+                "first": { "node": "leaf", "kind": "chat", "room": room },
+                "second": { "node": "leaf", "kind": "ascii", "piece": "alpine_dawn_pixels" }
+            }
+        },
+        "look": Look::default()
+    });
+    let restored = RiceLayout::from_json(Some(&stored));
+    assert_ne!(restored, RiceLayout::default(), "the layout survives");
+    assert_eq!(restored.root.piece_at(0), Some(AsciiPiece::DEFAULT));
+    assert_eq!(restored.root.kind_at(1), Some(TileKind::Chat));
+    assert_eq!(restored.root.leaf_rooms()[1], Some(room));
+    assert_eq!(
+        restored.root.piece_at(2),
+        Some(AsciiPiece {
+            scene: Scene::AlpineDawn,
+            style: SceneStyle::Pixels
+        })
+    );
+}
