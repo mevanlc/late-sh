@@ -191,6 +191,234 @@ impl LandingPage {
     }
 }
 
+/// A colour scene from ascii.rest: shaded per cell, drawn in a
+/// `SceneStyle`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Scene {
+    /// A slow one, the default: the Earth turning over the lunar horizon,
+    /// played at a crawl.
+    Earthrise,
+    /// A slow one: fog and sunbeams through pines, played at a crawl.
+    MistyForest,
+    AuroraFjord,
+    AlpineDawn,
+}
+
+impl Scene {
+    pub const ALL: [Scene; 4] = [
+        Scene::Earthrise,
+        Scene::MistyForest,
+        Scene::AuroraFjord,
+        Scene::AlpineDawn,
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Earthrise => "earthrise",
+            Self::MistyForest => "misty_forest",
+            Self::AuroraFjord => "aurora_fjord",
+            Self::AlpineDawn => "alpine_dawn",
+        }
+    }
+
+    /// Lowercase display name, the way ascii.rest names its pieces.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Earthrise => "earthrise",
+            Self::MistyForest => "misty forest",
+            Self::AuroraFjord => "aurora fjord",
+            Self::AlpineDawn => "alpine dawn",
+        }
+    }
+}
+
+/// How a scene is drawn on the terminal's cells.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SceneStyle {
+    /// The original's halftone: a grid of dots sized and lit by
+    /// brightness.
+    Dots,
+    /// Solid half-block pixels, two to a cell, in true colour.
+    Pixels,
+}
+
+impl SceneStyle {
+    pub const ALL: [SceneStyle; 2] = [SceneStyle::Dots, SceneStyle::Pixels];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dots => "dots",
+            Self::Pixels => "pixels",
+        }
+    }
+}
+
+/// An animated ascii piece (`late-ssh/src/app/ascii`): what a Zen ascii tile
+/// shows and what the away screensaver plays, a scene in one of its styles.
+/// Ported from ascii.rest by @bas3line (MIT). Stored by key (`as_str`) in
+/// `users.settings` and in the Zen layout: a scene's key is its name for
+/// dots, `<name>_pixels` for pixels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AsciiPiece {
+    pub scene: Scene,
+    pub style: SceneStyle,
+}
+
+impl AsciiPiece {
+    /// What plays when nothing was picked, on a Zen ascii tile and as the
+    /// screensaver alike: earthrise in dots, a slow piece, a frame a second
+    /// that moves a few cells, so a tile left up or an away session costs
+    /// about what idling does.
+    pub const DEFAULT: AsciiPiece = AsciiPiece {
+        scene: Scene::Earthrise,
+        style: SceneStyle::Dots,
+    };
+
+    /// Picker and cycle order: each scene in both styles, the screensaver's
+    /// default first.
+    pub const ALL: [AsciiPiece; 8] = [
+        AsciiPiece {
+            scene: Scene::Earthrise,
+            style: SceneStyle::Dots,
+        },
+        AsciiPiece {
+            scene: Scene::Earthrise,
+            style: SceneStyle::Pixels,
+        },
+        AsciiPiece {
+            scene: Scene::MistyForest,
+            style: SceneStyle::Dots,
+        },
+        AsciiPiece {
+            scene: Scene::MistyForest,
+            style: SceneStyle::Pixels,
+        },
+        AsciiPiece {
+            scene: Scene::AuroraFjord,
+            style: SceneStyle::Dots,
+        },
+        AsciiPiece {
+            scene: Scene::AuroraFjord,
+            style: SceneStyle::Pixels,
+        },
+        AsciiPiece {
+            scene: Scene::AlpineDawn,
+            style: SceneStyle::Dots,
+        },
+        AsciiPiece {
+            scene: Scene::AlpineDawn,
+            style: SceneStyle::Pixels,
+        },
+    ];
+
+    pub fn as_str(self) -> &'static str {
+        match (self.scene, self.style) {
+            (Scene::Earthrise, SceneStyle::Dots) => "earthrise",
+            (Scene::Earthrise, SceneStyle::Pixels) => "earthrise_pixels",
+            (Scene::MistyForest, SceneStyle::Dots) => "misty_forest",
+            (Scene::MistyForest, SceneStyle::Pixels) => "misty_forest_pixels",
+            (Scene::AuroraFjord, SceneStyle::Dots) => "aurora_fjord",
+            (Scene::AuroraFjord, SceneStyle::Pixels) => "aurora_fjord_pixels",
+            (Scene::AlpineDawn, SceneStyle::Dots) => "alpine_dawn",
+            (Scene::AlpineDawn, SceneStyle::Pixels) => "alpine_dawn_pixels",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        let key = key.trim();
+        Self::ALL.into_iter().find(|piece| piece.as_str() == key)
+    }
+
+    /// Lowercase display name, the way ascii.rest names its pieces, with the
+    /// style: `aurora fjord · dots`.
+    pub fn label(self) -> String {
+        format!("{} · {}", self.scene.label(), self.style.label())
+    }
+
+    pub fn cycle(self, forward: bool) -> Self {
+        let at = Self::ALL
+            .iter()
+            .position(|piece| *piece == self)
+            .expect("every piece is in ALL");
+        let len = Self::ALL.len();
+        match forward {
+            true => Self::ALL[(at + 1) % len],
+            false => Self::ALL[(at + len - 1) % len],
+        }
+    }
+}
+
+impl Serialize for AsciiPiece {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for AsciiPiece {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        let key = String::deserialize(deserializer)?;
+        match Self::from_key(&key) {
+            Some(piece) => Ok(piece),
+            None => Err(serde::de::Error::custom(format!(
+                "unknown ascii piece {key:?}"
+            ))),
+        }
+    }
+}
+
+/// Tweak: what covers the screen while the session is away (`/brb`, or 30
+/// quiet minutes). On by default, playing earthrise in dots: a slow piece,
+/// a frame a second that moves a few cells, so an away session costs about
+/// what an idle one did. The lively scenes are a choice.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Screensaver {
+    Off,
+    Piece(AsciiPiece),
+}
+
+impl Screensaver {
+    pub const DEFAULT: Screensaver = Screensaver::Piece(AsciiPiece::DEFAULT);
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Piece(piece) => piece.as_str(),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key.trim() {
+            "off" => Some(Self::Off),
+            other => AsciiPiece::from_key(other).map(Self::Piece),
+        }
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Off => "off".to_string(),
+            Self::Piece(piece) => piece.label(),
+        }
+    }
+
+    /// Off, then every piece in order, then Off again.
+    pub fn cycle(self, forward: bool) -> Self {
+        let first = AsciiPiece::ALL[0];
+        let last = AsciiPiece::ALL[AsciiPiece::ALL.len() - 1];
+        match (self, forward) {
+            (Self::Off, true) => Self::Piece(first),
+            (Self::Off, false) => Self::Piece(last),
+            (Self::Piece(piece), true) if piece == last => Self::Off,
+            (Self::Piece(piece), false) if piece == first => Self::Off,
+            (Self::Piece(piece), forward) => Self::Piece(piece.cycle(forward)),
+        }
+    }
+}
+
 /// Which hung pieces may appear over the login splash. Unmarked art is SFW.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ArtSplashMode {
@@ -505,6 +733,7 @@ const ROOM_LIST_MODE_KEY: &str = "room_list_mode";
 const KEEP_COMPOSER_FOCUSED_KEY: &str = "keep_composer_focused";
 const START_WITH_MUSIC_MUTED_KEY: &str = "start_with_music_muted";
 const LANDING_PAGE_KEY: &str = "landing_page";
+const SCREENSAVER_KEY: &str = "screensaver";
 const PAPER_AT_LOGIN_KEY: &str = "paper_at_login";
 const SHOW_WATCH_CHAT_KEY: &str = "show_watch_chat";
 const TERMINAL_IMAGES_KEY: &str = "terminal_images";
@@ -2004,6 +2233,15 @@ pub fn extract_landing_page(settings: &Value) -> LandingPage {
     match settings.get(LANDING_PAGE_KEY).and_then(Value::as_str) {
         Some(key) => LandingPage::from_key(key).unwrap_or(LandingPage::Clubhouse),
         None => LandingPage::Clubhouse,
+    }
+}
+
+/// Tweak: what plays over the screen while the session is away. Absent or
+/// unreadable values play the default, earthrise.
+pub fn extract_screensaver(settings: &Value) -> Screensaver {
+    match settings.get(SCREENSAVER_KEY).and_then(Value::as_str) {
+        Some(key) => Screensaver::from_key(key).unwrap_or(Screensaver::DEFAULT),
+        None => Screensaver::DEFAULT,
     }
 }
 

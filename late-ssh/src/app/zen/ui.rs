@@ -76,8 +76,8 @@ pub(crate) fn chat_tile_title(label: &str, stream_badge: Option<&str>, width: u1
 /// Everything the Zen page reads, assembled once per frame in `render.rs`.
 pub(crate) struct ZenView<'a> {
     pub zen: &'a ZenState,
-    /// The bottom row, `None` when every status line component is off and
-    /// the tiles take the whole page.
+    /// The bottom row: the user's status line and the page's keys. `None`
+    /// only on a page too small to draw.
     pub status_row: Option<ZenStatusRow>,
     pub bonsai: &'a BonsaiState,
     /// The reef is drawn for everyone; `aquarium_owned` says whether the
@@ -116,6 +116,9 @@ pub(crate) struct ZenView<'a> {
     /// them the same way and records the same click and key targets.
     pub live_panel: LivePanelProps<'a>,
     pub wall_tick: usize,
+    /// The shared clock the ascii tiles are drawn at
+    /// (`ascii::piece::clock_now`).
+    pub ascii_clock: u64,
 }
 
 pub(crate) fn draw_rice(
@@ -158,6 +161,8 @@ pub(crate) fn draw_rice(
         } else {
             idx == zen.focus
         };
+        // Zoomed, the one rect drawn is the focused tile's.
+        let ordinal = zoomed.unwrap_or(idx);
         // Each chat tile takes the next frame in layout order and names
         // its room in the title, so `[` `]` walking the rooms shows where
         // you landed without reading the messages.
@@ -172,6 +177,7 @@ pub(crate) fn draw_rice(
             }
             TileKind::Bonsai
             | TileKind::Aquarium
+            | TileKind::Ascii
             | TileKind::Pet
             | TileKind::Music
             | TileKind::Clock
@@ -190,6 +196,12 @@ pub(crate) fn draw_rice(
                 chat_tile_title(&tile.label, tile.stream_badge.as_deref(), rect.width)
             }
             (TileKind::Chat, None) => kind.label().to_string(),
+            // The tile names the piece it plays, so `[` `]` shows where
+            // you landed.
+            (TileKind::Ascii, _) => match zen.rice.root.piece_at(ordinal) {
+                Some(piece) => format!("{} · {}", kind.label(), piece.label()),
+                None => kind.label().to_string(),
+            },
             (
                 TileKind::Bonsai
                 | TileKind::Aquarium
@@ -215,6 +227,7 @@ pub(crate) fn draw_rice(
                 Some(care_bar_spans(view.aquarium_care.bar()))
             }
             TileKind::Aquarium
+            | TileKind::Ascii
             | TileKind::Chat
             | TileKind::Bonsai
             | TileKind::Pet
@@ -231,15 +244,20 @@ pub(crate) fn draw_rice(
             | TileKind::Blank => None,
         };
         let keys = tile_keys(*kind, &view);
-        let inner = draw_tile_chrome(
-            frame,
-            *rect,
-            &title,
-            title_tail,
-            keys,
-            focused,
-            &zen.rice.look,
-        );
+        // Zoomed, the tile is the page: no border, no title, no keys, the
+        // way the screensaver draws a piece.
+        let inner = match zoomed {
+            Some(_) => *rect,
+            None => draw_tile_chrome(
+                frame,
+                *rect,
+                &title,
+                title_tail,
+                keys,
+                focused,
+                &zen.rice.look,
+            ),
+        };
         if inner.width == 0 || inner.height == 0 {
             continue;
         }
@@ -249,6 +267,11 @@ pub(crate) fn draw_rice(
             TileKind::Bonsai => draw_bonsai_tile(frame, inner, view.bonsai, view.wall_tick),
             TileKind::Aquarium => {
                 draw_aquarium_tile(frame, inner, view.aquarium, view.aquarium_owned)
+            }
+            TileKind::Ascii => {
+                if let Some(piece) = zen.rice.root.piece_at(ordinal) {
+                    crate::app::ascii::ui::draw_piece(frame, inner, piece, view.ascii_clock);
+                }
             }
             TileKind::Pet => draw_pet_tile(frame, inner, view.pet_strip.as_ref(), neighbours),
             TileKind::Chat => draw_chat_tile(frame, inner, chat_tile, terminal_images),
@@ -397,6 +420,7 @@ fn draw_kind_picker(frame: &mut Frame, area: Rect, zen: &ZenState) {
 fn tile_keys(kind: TileKind, view: &ZenView<'_>) -> &'static [(&'static str, &'static str)] {
     match kind {
         TileKind::Bonsai => &[("w", "tend")],
+        TileKind::Ascii => &[("[ ]", "piece"), ("Enter", "pick"), ("z", "full")],
         TileKind::Aquarium if view.aquarium_owned => &[("a", "feed")],
         TileKind::Aquarium => &[],
         TileKind::Pet if view.pet_strip.is_some() => &[("click", "pet")],
@@ -530,11 +554,14 @@ pub(crate) fn care_bar_spans(bar: CareBar) -> Vec<Span<'static>> {
     ]
 }
 
-/// The user's status line. The layout keys live in the guide (`?`); each
-/// tile names its own in its title.
+/// The user's status line on the left, the layout keys on the right (the
+/// rest are in the guide, `?`); each tile names its own in its title.
 fn draw_status_row(frame: &mut Frame, area: Rect, row: ZenStatusRow) {
     if let Some(bar) = row.bar {
         frame.render_widget(Paragraph::new(bar), area);
+    }
+    if let Some(keys) = row.keys {
+        frame.render_widget(Paragraph::new(keys).right_aligned(), area);
     }
 }
 

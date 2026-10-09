@@ -2113,7 +2113,7 @@ async fn chat_room_switch_ctrl_keys_wrap() {
 }
 
 #[tokio::test]
-async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
+async fn chat_reaction_leader_routes_cancel_digits_and_wave() {
     let test_db = new_test_db().await;
     let viewer = create_test_user(&test_db.db, "f-react-viewer").await;
     let author = create_test_user(&test_db.db, "f-react-author").await;
@@ -2146,13 +2146,13 @@ async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
     app.handle_input(b"f");
     wait_for_render_contains(&mut app, "1 👍").await;
 
-    // A non-digit closes the leader and is consumed instead of triggering its
+    // An unbound key closes the leader and is consumed instead of triggering its
     // ordinary message action. Check state directly instead of polling for the
     // absence of a reply banner.
     app.handle_input(b"r");
     assert!(
         !app.chat.is_reaction_leader_active(),
-        "non-digit input should close the reaction leader"
+        "unbound input should close the reaction leader"
     );
     assert!(
         app.chat.reply_target().is_none() && !app.chat.is_composing(),
@@ -2169,7 +2169,7 @@ async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
             .await
             .expect("load reaction")
             .is_none(),
-        "non-digit input should not react",
+        "unbound input should not react",
     );
 
     app.handle_input(b"f");
@@ -2210,6 +2210,50 @@ async fn chat_reaction_leader_routes_cancel_and_reaction_digits() {
         "extended f leader reaction to persist",
     )
     .await;
+
+    app.handle_input(b"f");
+    wait_for_render_contains(&mut app, "w 👋").await;
+    app.handle_input(b"w");
+    assert!(!app.chat.is_reaction_leader_active());
+    assert!(
+        !app.show_bonsai_modal,
+        "reaction leader owns w before the global Bonsai shortcut"
+    );
+    wait_until(
+        || async {
+            ChatMessageReaction::get_by_user_and_message(&client, message.id, viewer.id)
+                .await
+                .expect("load wave reaction")
+                .is_some_and(|reaction| reaction.icon == "👋")
+        },
+        "f w wave reaction to persist",
+    )
+    .await;
+    let plain = render_plain(&mut app);
+    assert!(
+        plain.contains("▸reaction target"),
+        "message selection should stay after waving: {plain:?}"
+    );
+    assert!(!plain.contains("w 👋"), "picker should close: {plain:?}");
+
+    app.handle_input(b"fw");
+    assert!(!app.chat.is_reaction_leader_active());
+    wait_until(
+        || async {
+            ChatMessageReaction::get_by_user_and_message(&client, message.id, viewer.id)
+                .await
+                .expect("load toggled wave reaction")
+                .is_none()
+        },
+        "repeating f w to remove the wave reaction",
+    )
+    .await;
+
+    app.handle_input(b"w");
+    assert!(
+        app.show_bonsai_modal,
+        "w opens Bonsai when the reaction leader is inactive"
+    );
 }
 
 #[tokio::test]
@@ -3309,10 +3353,11 @@ async fn zen_too_small_to_draw_keeps_no_status_click_targets() {
 }
 
 /// `?` on Zen opens the guide on the Zen topic, which lists the layout keys;
-/// with every status line component off Zen's bottom row is gone and the
-/// tiles run down to the last row.
+/// with every status line component off Zen's bottom row stays, holding
+/// the layout keys alone with nothing to click, and the tiles end one row
+/// above it.
 #[tokio::test]
-async fn zen_guide_opens_on_zen_keys_and_the_row_goes_with_every_component_off() {
+async fn zen_guide_opens_on_zen_keys_and_the_row_keeps_its_keys_with_every_component_off() {
     use crate::app::common::primitives::Screen;
     use crate::app::help_modal::data::HelpTopic;
     use crate::app::profile::state::profile_params_from_profile;
@@ -3354,10 +3399,65 @@ async fn zen_guide_opens_on_zen_keys_and_the_row_goes_with_every_component_off()
     app.reset_render();
     terminal.process(&app.render().expect("render"));
     let screen = terminal.screen().contents();
-    let last_row = screen.lines().last().expect("last row");
+    let mut rows = screen.lines().rev();
+    let last_row = rows.next().expect("last row");
     assert!(
-        last_row.starts_with('╰'),
-        "a tile's bottom border is the page's last row: {last_row:?}"
+        last_row
+            .trim_end()
+            .ends_with("? help  S split  F flip  X close  z zoom"),
+        "the layout keys hold the last row's right end: {last_row:?}"
+    );
+    assert!(
+        !last_row.contains('╰'),
+        "no tile border on the keys' row: {last_row:?}"
+    );
+    let above = rows.next().expect("row above");
+    assert!(
+        above.starts_with('╰'),
+        "the tiles end one row above the keys: {above:?}"
+    );
+}
+
+/// The piece picker is the Zen page's. A chord off the page (Ctrl+F) or
+/// into a modal (Ctrl+O) closes it, so it never owns the next surface's
+/// keys or writes a pick to a tile that is no longer on screen.
+#[tokio::test]
+async fn the_piece_picker_closes_when_the_page_or_a_modal_takes_over() {
+    use crate::app::common::primitives::Screen;
+    use crate::app::zen::state::{Node, TileKind};
+
+    let test_db = new_test_db().await;
+    let viewer = create_test_user(&test_db.db, "piece-picker-viewer").await;
+    let mut app = make_app(test_db.db.clone(), viewer.id, "piece-picker-flow-it");
+    app.resize(120, 40).expect("resize test terminal");
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+    app.zen.rice.root = Node::leaf(TileKind::Ascii);
+    app.zen.focus = 0;
+
+    app.handle_input(b"\r");
+    assert!(
+        app.piece_picker.is_open(),
+        "Enter on the ascii tile opens it"
+    );
+    app.handle_input(b"\x06");
+    assert_ne!(app.screen, Screen::Zen, "Ctrl+F leaves the page");
+    assert!(!app.piece_picker.is_open(), "and the picker goes with it");
+
+    app.handle_input(b"\x06");
+    assert_eq!(app.screen, Screen::Zen);
+    app.handle_input(b"\r");
+    assert!(app.piece_picker.is_open());
+    app.handle_input(b"\x0f");
+    assert!(app.show_settings, "Ctrl+O opens Settings over the page");
+    assert!(
+        !app.piece_picker.is_open(),
+        "the picker does not sit over it"
+    );
+    app.handle_input(b"\x1b[B");
+    assert!(
+        !app.piece_picker.is_open(),
+        "the arrow went to Settings, not a picker"
     );
 }
 
@@ -5144,10 +5244,9 @@ async fn zen_a_draft_stays_in_its_room_when_the_focus_moves_and_zoom_shows_the_f
     assert!(app.chat.composing);
     assert_eq!(app.chat.composer_room_id(), Some(quiet.id));
     let (cols, rows) = app.size;
-    let (tiles_area, _) = crate::app::zen::layout::rice_areas(
-        ratatui::layout::Rect::new(0, 0, cols, rows),
-        app.zen_status_row(),
-    );
+    let page = ratatui::layout::Rect::new(0, 0, cols, rows);
+    let (tiles_area, _) =
+        crate::app::zen::layout::rice_areas(page, crate::app::zen::layout::rice_fits(page));
     let rects = crate::app::zen::layout::tile_rects(
         &app.zen.rice.root,
         tiles_area,
@@ -5178,16 +5277,31 @@ async fn zen_a_draft_stays_in_its_room_when_the_focus_moves_and_zoom_shows_the_f
     );
     app.chat.reset_composer();
 
-    // Zoom the second tile: the one pane on show is its room.
+    // Zoom the second tile: the one pane on show is its room, and it is
+    // the whole screen, no tile chrome and no status row, as the
+    // screensaver draws.
     app.handle_input(b"\x1b[C");
     assert_eq!(app.zen.focus, second);
     app.handle_input(b"z");
     assert!(app.zen.zoomed);
+    assert_eq!(
+        app.zen.active_chat_index(),
+        Some(1),
+        "the zoomed pane is the focused tile's chat, the second, not the first"
+    );
     let rendered = strip_ansi(&render_plain(&mut app));
     assert!(
-        rendered.contains("#zen-quiet"),
-        "the zoomed pane is the focused tile's room, not the first chat's:\n{rendered}"
+        !rendered.contains("z zoom")
+            && !rendered.contains("#lounge")
+            && !rendered.contains("#zen-quiet"),
+        "zoomed, the status row and every tile's chrome are gone:\n{rendered}"
     );
+    assert!(
+        app.last_status_hits.borrow().is_empty(),
+        "no status row, no click targets"
+    );
+    app.handle_input(b"z");
+    assert!(!app.zen.zoomed, "z again unzooms");
 }
 
 #[tokio::test]
