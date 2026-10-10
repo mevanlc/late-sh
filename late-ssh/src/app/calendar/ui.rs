@@ -461,7 +461,12 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                         muted().add_modifier(Modifier::BOLD),
                     ));
                 }
-                styled_row(frame, rect, selected_line(line, date == s.selected));
+                let line = if date == s.selected && spare == 0 {
+                    patch_line(line, selection_style())
+                } else {
+                    selected_line(line, date == s.selected)
+                };
+                styled_row(frame, rect, line);
                 shade_today(frame, rect, date, s);
                 hit(s, rect, Action::Date(date));
                 x += w;

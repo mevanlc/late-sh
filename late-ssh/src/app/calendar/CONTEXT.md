@@ -32,6 +32,8 @@ grid rules. Selection adds a marker and patches every span last, using at least
 4.5:1 text contrast against fixed fills or terminal-owned inversion. High Contrast
 derives a calendar-local selection fill at least 3:1 against its canvas. Hourly cards
 reserve selection for the selected event; source buttons do not suggest focus.
+Compact month cells omit markers when needed to keep the date and event count intact;
+selected cells retain their selection style.
 Account-local today has a subtle background tint in month cells, hourly columns
 and date headings, with event cards and selection fills taking precedence.
 Modal headings use the

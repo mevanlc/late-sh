@@ -318,6 +318,9 @@ impl App {
             self.banner = Some(b);
             changed = true;
         }
+        // The saved Artboard disclaimer tweak may land after the page was
+        // opened; the board seat follows it.
+        self.sync_dartboard_connection();
         self.chat
             .set_favorite_room_ids(self.profile_state.profile().favorite_room_ids.clone());
         self.chat

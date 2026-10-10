@@ -559,33 +559,35 @@ async fn calendar_compact_month_keeps_crowded_day_count_intact() {
         CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
         Uuid::nil(),
     );
-    s.selected = s.today();
-    s.events = (0..21)
-        .map(|_| {
-            let mut event = event(9, 12);
-            event.timing = EventTiming::AllDay {
-                start: s.selected,
-                end_exclusive: s.selected + Duration::days(1),
-            };
-            event
-        })
-        .collect();
     let mut terminal = Terminal::new(TestBackend::new(48, 16)).unwrap();
-    terminal
-        .draw(|frame| draw(frame, frame.area(), &s))
-        .unwrap();
-    let cell = s
-        .hits
-        .borrow()
-        .iter()
-        .find(|h| h.action == Action::Date(s.selected))
-        .unwrap()
-        .area;
-    let buffer = terminal.backend().buffer();
-    let text: String = (cell.x..cell.right())
-        .map(|x| buffer[(x, cell.y)].symbol())
-        .collect();
-    assert!(text.contains(&format!("{}+21", s.selected.day())), "{text}");
+    for date in ["2026-10-02", "2026-10-10", "2026-10-31"] {
+        s.selected = date.parse().unwrap();
+        s.events = (0..21)
+            .map(|_| {
+                let mut event = event(9, 12);
+                event.timing = EventTiming::AllDay {
+                    start: s.selected,
+                    end_exclusive: s.selected + Duration::days(1),
+                };
+                event
+            })
+            .collect();
+        terminal
+            .draw(|frame| draw(frame, frame.area(), &s))
+            .unwrap();
+        let cell = s
+            .hits
+            .borrow()
+            .iter()
+            .find(|h| h.action == Action::Date(s.selected))
+            .unwrap()
+            .area;
+        let buffer = terminal.backend().buffer();
+        let text: String = (cell.x..cell.right())
+            .map(|x| buffer[(x, cell.y)].symbol())
+            .collect();
+        assert!(text.contains(&format!("{}+21", s.selected.day())), "{text}");
+    }
 }
 
 #[tokio::test]
