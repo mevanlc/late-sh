@@ -1892,9 +1892,7 @@ impl App {
             pending_chat_profile_open: None,
             last_terminal_bg: None,
         };
-        if app.screen == Screen::Artboard {
-            app.enter_dartboard();
-        }
+        app.sync_dartboard_connection();
         // The landing screen skips `set_screen`, so run its entry hook by
         // hand. Clubhouse: immediate crowd refresh plus the first-visit
         // tutorial. Home: refresh the room list (sync_selection runs just
@@ -2504,9 +2502,7 @@ impl App {
             if screen == Screen::Codekeep {
                 self.enter_codekeep();
             }
-            if screen == Screen::Artboard {
-                self.enter_dartboard();
-            }
+            self.sync_dartboard_connection();
             self.sync_visible_chat_room();
             return;
         }
@@ -2660,9 +2656,7 @@ impl App {
             self.chat.sync_selection();
         }
 
-        if self.screen == Screen::Artboard {
-            self.enter_dartboard();
-        }
+        self.sync_dartboard_connection();
         // The Games hub draws this account's character list on the Lateania
         // card and the landing draws it in full: read it from the database the
         // first time either is opened (and retry there if that read failed).

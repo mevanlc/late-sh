@@ -547,7 +547,7 @@ Detailed Artboard/dartboard behavior lives in `late-ssh/src/app/artboard/CONTEXT
 Root-level facts:
 - The server owns one in-process `dartboard_local::ServerHandle` for the whole `late-ssh` process.
 - The canonical canvas size is `384 x 192`.
-- Users connect to the shared board only after opening Artboard; leaving drops that session's `LocalClient` and frees the slot.
+- Users connect to the shared board only once the Artboard page may show (on entry with the content disclaimer off, else on consent, including the saved tweak landing after entry); a visitor on the prompt holds no seat. Leaving drops that session's `LocalClient` and frees the slot.
 - Artboard opens in `view` mode; `i` / `Enter` switches into active edit mode.
 - Settings → Tweaks → Artboard content disclaimer defaults on: the entire Artboard page stays hidden until `V` (View, current visit) or `A` (Always View, persist reminders off); `B`/Esc (Back to Chat) returns to Home (1). Consent resets on leaving the page. The dialog never draws during the tour: the Artboard stop's own tour box keeps the page bare and offers `S` (show, this visit only) or Enter (skip to Profiles); the tour gate keeps every other key and nothing is saved.
 - Canvas and provenance are saved together in `artboard_snapshots`; special/daily/monthly archives are exposed by the read-only web gallery at `/gallery`.

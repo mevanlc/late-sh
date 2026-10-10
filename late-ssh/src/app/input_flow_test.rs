@@ -10,6 +10,10 @@ async fn artboard_disclaimer_hides_content_and_only_allows_the_current_visit() {
     app.resize(80, 24).unwrap();
     app.handle_input(b"4");
     wait_for_render_contains(&mut app, "Artboard may contain NSFW content").await;
+    assert!(
+        app.dartboard_state.is_none(),
+        "no board seat is taken before consent"
+    );
     let frame = render_plain(&mut app);
     assert!(frame.contains("Always View"));
     assert!(frame.contains("⁽ᵘˢᵘᵃˡˡʸ ᵇᵒᵒᵇⁱᵉˢ⁾"));
@@ -22,8 +26,19 @@ async fn artboard_disclaimer_hides_content_and_only_allows_the_current_visit() {
     assert_eq!(app.screen, Screen::Artboard);
     assert!(!app.artboard_interacting);
     assert!(app.artboard_disclaimer_visible());
+    assert!(app.dartboard_state.is_none());
+
+    // Quit stays global on the prompt; cancelling it grants nothing.
+    app.handle_input(b"q");
+    assert!(app.show_quit_confirm);
+    assert!(!app.artboard_content_accepted);
+    app.handle_input(b"\x1b");
+    wait_for_esc_effect(&mut app, |app| !app.show_quit_confirm, "quit confirm").await;
+    assert!(app.artboard_disclaimer_visible());
+    assert!(app.dartboard_state.is_none());
 
     app.handle_input(b"V");
+    assert!(app.dartboard_state.is_some(), "consent takes the seat");
     wait_for_render_contains(&mut app, "Mode       view").await;
     assert!(
         !app.artboard_interacting,
@@ -94,6 +109,17 @@ async fn artboard_disclaimer_dont_remind_persists_and_settings_can_reenable_it()
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+
+    // A visit before the profile lands reads as prompted and takes no seat;
+    // once the saved tweak arrives, the seat follows on its own.
+    let mut landing = make_app(test_db.db.clone(), user.id, "art-dismiss-landing-it");
+    landing.handle_input(b"4");
+    assert!(landing.artboard_disclaimer_visible());
+    assert!(landing.dartboard_state.is_none());
+    wait_for_render_contains(&mut landing, "Mode       view").await;
+    assert!(!landing.artboard_disclaimer_visible());
+    assert!(landing.dartboard_state.is_some());
+
     let mut reloaded = make_app(test_db.db.clone(), user.id, "art-dismiss-reload-it");
     reloaded.handle_input(b"\x0f");
     wait_for_render_contains(&mut reloaded, &user.username).await;
@@ -151,10 +177,12 @@ async fn artboard_disclaimer_tour_choice_keeps_account_settings() {
     app.handle_input(b"vab");
     assert_eq!(app.screen, Screen::Artboard);
     assert!(!app.artboard_content_accepted);
+    assert!(app.dartboard_state.is_none(), "no seat before show");
 
     // Show grants this visit only; the account tweak is untouched.
     app.handle_input(b"s");
     assert!(app.artboard_content_accepted);
+    assert!(app.dartboard_state.is_some());
     assert!(app.profile_state.profile().artboard_disclaimer);
     wait_for_render_contains(&mut app, "Mode       view").await;
     let frame = render_plain(&mut app);
@@ -3906,6 +3934,10 @@ async fn forced_tour_can_skip_artboard_without_viewing_it() {
     assert_eq!(app.clubhouse.tutorial, Tutorial::VisitArtboard);
     assert!(!app.show_settings);
     assert!(!app.artboard_content_accepted);
+    assert!(
+        app.dartboard_state.is_none(),
+        "a skipped stop takes no seat"
+    );
 
     for screen in [
         Screen::Profiles,

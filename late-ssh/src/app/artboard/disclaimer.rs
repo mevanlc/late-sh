@@ -38,6 +38,16 @@ impl App {
         };
         self.screen == Screen::Artboard && enabled && !self.artboard_content_accepted
     }
+
+    /// The board seat follows consent: connect only once the page may show,
+    /// so a visitor idling on the prompt holds none of the board's seats.
+    /// Idempotent; runs on page entry, on consent, and every tick (the saved
+    /// tweak can land after the page was opened).
+    pub(crate) fn sync_dartboard_connection(&mut self) {
+        if self.screen == Screen::Artboard && !self.artboard_disclaimer_visible() {
+            self.enter_dartboard();
+        }
+    }
 }
 
 pub(crate) fn handle_input(app: &mut App, event: &ParsedInput) {
@@ -64,11 +74,15 @@ pub(crate) fn handle_input(app: &mut App, event: &ParsedInput) {
         _ => None,
     };
     match choice {
-        Some(b'V') => app.artboard_content_accepted = true,
+        Some(b'V') => {
+            app.artboard_content_accepted = true;
+            app.sync_dartboard_connection();
+        }
         Some(b'B' | 0x1B) => app.set_screen(Screen::Dashboard),
         Some(b'A') => {
             app.artboard_content_accepted = true;
             app.profile_state.dismiss_artboard_disclaimer();
+            app.sync_dartboard_connection();
         }
         _ => {}
     }

@@ -977,6 +977,14 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     }
 
     if app.artboard_disclaimer_visible() {
+        // Quit stays global on the prompt, as it is on the page behind it.
+        if matches!(
+            event,
+            ParsedInput::Byte(b'q' | b'Q') | ParsedInput::Char('q' | 'Q')
+        ) {
+            trigger_global_quit(app);
+            return;
+        }
         crate::app::artboard::disclaimer::handle_input(app, &event);
         return;
     }
@@ -3732,6 +3740,7 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
         // touches the account tweak; the standalone dialog never runs here.
         (TourStep::Enter, b's' | b'S') if app.artboard_disclaimer_visible() => {
             app.artboard_content_accepted = true;
+            app.sync_dartboard_connection();
         }
         (TourStep::Enter, b'\r' | b'\n') => tour_advance(app),
         // The table's one shot has to be played: Enter or Space strikes the
