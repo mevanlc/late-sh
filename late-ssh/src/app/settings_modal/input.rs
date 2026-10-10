@@ -313,8 +313,12 @@ fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
     };
     let state = &mut app.settings_modal_state;
     match mouse.kind {
-        MouseEventKind::ScrollUp => state.mouse.scroll(x, y, -3, app.size),
-        MouseEventKind::ScrollDown => state.mouse.scroll(x, y, 3, app.size),
+        MouseEventKind::ScrollUp => {
+            state.mouse.scroll(x, y, -3, app.size);
+        }
+        MouseEventKind::ScrollDown => {
+            state.mouse.scroll(x, y, 3, app.size);
+        }
         MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
             let Some(target) = state.mouse.target(x, y, app.size) else {
                 return;
