@@ -1,9 +1,7 @@
 //! Calendar-local selection and modal history. Browser state survives drill-downs.
 use super::state::{CalendarState, Modal, month_start};
-use chrono::{NaiveDate, Timelike};
-use late_core::models::calendar::{
-    CalendarEvent, CalendarSource, CalendarView, CreationTier, EventTiming, event_access,
-};
+use chrono::NaiveDate;
+use late_core::models::calendar::{CalendarEvent, CalendarView, event_access};
 use ratatui::layout::Rect;
 use std::{cell::Cell, time::Instant};
 use uuid::Uuid;
@@ -14,14 +12,12 @@ const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_milli
 pub enum Selection {
     #[default]
     Date,
-    Slot(u16),
     Event(Uuid),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickTarget {
     Date(NaiveDate),
-    Slot { date: NaiveDate, minute: u16 },
     Event(Uuid),
     EventAt(Uuid, NaiveDate),
 }
@@ -30,7 +26,6 @@ pub enum ClickTarget {
 enum ClickSurface {
     Page,
     Agenda,
-    Upcoming,
     Details(Uuid),
     Other,
 }
@@ -50,7 +45,8 @@ pub enum MenuAction {
     New,
     Edit,
     Delete,
-    Copy,
+    /// Say you are in (`true`) or take it back.
+    Rsvp(bool),
 }
 
 impl MenuAction {
@@ -61,7 +57,8 @@ impl MenuAction {
             Self::New => "New event",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
-            Self::Copy => "Copy as iCal",
+            Self::Rsvp(true) => "I'm in",
+            Self::Rsvp(false) => "I'm out",
         }
     }
 }
@@ -96,23 +93,12 @@ pub struct NavigationFrame {
     pub event_index: usize,
     pub scroll: usize,
     pub agenda_scroll: usize,
-    pub hour_scroll: usize,
-    pub day_scroll: usize,
-    pub slot_minute: u16,
-    pub picker_scroll: usize,
     reveal_selected: bool,
     reveal_event: bool,
     neighbor: Option<Uuid>,
 }
 
 impl CalendarState {
-    pub fn is_timed_view(&self) -> bool {
-        matches!(
-            self.view,
-            CalendarView::Week | CalendarView::ThreeDay | CalendarView::Day
-        )
-    }
-
     pub fn clear_click(&self) {
         self.last_click.borrow_mut().take();
     }
@@ -123,7 +109,6 @@ impl CalendarState {
         let surface = match &self.modal {
             None => ClickSurface::Page,
             Some(Modal::Agenda) => ClickSurface::Agenda,
-            Some(Modal::Upcoming) => ClickSurface::Upcoming,
             Some(Modal::Details(e)) => ClickSurface::Details(e.id),
             _ => ClickSurface::Other,
         };
@@ -144,11 +129,6 @@ impl CalendarState {
         double
     }
 
-    pub fn can_create_event(&self) -> bool {
-        self.source == CalendarSource::Personal(self.viewer)
-            || (self.source == CalendarSource::Server && self.role != CreationTier::User)
-    }
-
     pub fn select_date(&mut self, date: NaiveDate) {
         self.cancel_open();
         self.selected = date;
@@ -160,16 +140,8 @@ impl CalendarState {
         self.context_menu = None;
     }
 
-    pub fn select_slot(&mut self, date: NaiveDate, minute: u16) {
-        self.select_date(date);
-        let minute = minute.min(1439) / 30 * 30;
-        self.selection = Selection::Slot(minute);
-        self.slot_minute = minute;
-        self.reveal_time(minute);
-    }
-
-    /// The active target is exact. A selected date or blank slot must never
-    /// silently resolve to the first event, especially for Edit and Delete.
+    /// The active target is exact. A selected date must never silently
+    /// resolve to the first event, especially for Edit and Delete.
     pub fn selected_target_event(&self) -> Option<CalendarEvent> {
         let Selection::Event(id) = self.selection else {
             return None;
@@ -179,21 +151,11 @@ impl CalendarState {
         {
             return Some(e.clone());
         }
-        self.events
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
-            .or_else(|| self.upcoming().into_iter().find(|e| e.id == id))
+        self.events.iter().find(|e| e.id == id).cloned()
     }
 
-    pub fn select_event(&mut self, id: Uuid, date: Option<NaiveDate>, upcoming: bool) -> bool {
-        let event = self
-            .events
-            .iter()
-            .find(|e| e.id == id)
-            .cloned()
-            .or_else(|| self.upcoming().into_iter().find(|e| e.id == id));
-        let Some(event) = event else {
+    pub fn select_event(&mut self, id: Uuid, date: Option<NaiveDate>) -> bool {
+        let Some(event) = self.events.iter().find(|e| e.id == id).cloned() else {
             return false;
         };
         self.cancel_open();
@@ -205,7 +167,7 @@ impl CalendarState {
             .unwrap_or_else(|| {
                 // A month list can include an event that began last month.
                 // Selecting it should stay on its visible part of this month.
-                if !upcoming && self.view == CalendarView::List {
+                if self.view == CalendarView::List {
                     start.max(month_start(self.selected))
                 } else {
                     start
@@ -217,49 +179,16 @@ impl CalendarState {
         self.reveal_selected.set(true);
         self.reveal_event.set(true);
         self.event_index = self
-            .selection_events(upcoming)
+            .selection_events()
             .iter()
             .position(|e| e.id == id)
             .unwrap_or(0);
-        if let EventTiming::Timed { start, .. } = event.timing {
-            let start = start.with_timezone(&self.tz);
-            let minute = if start.date_naive() == selected {
-                (start.hour() * 60 + start.minute()) as u16 / 30 * 30
-            } else {
-                0
-            };
-            self.slot_minute = minute;
-            self.reveal_time(minute);
-        } else if self.modal.is_none()
-            && self.is_timed_view()
-            && self
-                .day_events(selected)
-                .into_iter()
-                .filter(|e| matches!(e.timing, EventTiming::AllDay { .. }))
-                .position(|e| e.id == id)
-                .is_some_and(|index| index >= 2)
-        {
-            self.push_modal(Modal::Agenda);
-        }
-        self.reveal_event_row(upcoming);
+        self.reveal_event_row();
         true
     }
 
-    fn reveal_time(&mut self, minute: u16) {
-        let row = usize::from(minute / 30);
-        let rows = self.hour_rows.get().max(1);
-        if row < self.hour_scroll {
-            self.hour_scroll = row;
-        } else if row >= self.hour_scroll.saturating_add(rows) {
-            self.hour_scroll = row.saturating_add(1).saturating_sub(rows);
-        }
-        self.hour_scroll = self.hour_scroll.min(48usize.saturating_sub(rows).min(47));
-    }
-
-    fn selection_events(&self, upcoming: bool) -> Vec<CalendarEvent> {
-        if upcoming {
-            self.upcoming()
-        } else if self.view == CalendarView::List && !matches!(self.modal, Some(Modal::Agenda)) {
+    fn selection_events(&self) -> Vec<CalendarEvent> {
+        if self.view == CalendarView::List && !matches!(self.modal, Some(Modal::Agenda)) {
             self.ordered_events().into_iter().cloned().collect()
         } else {
             self.day_events(self.selected)
@@ -283,13 +212,12 @@ impl CalendarState {
         if !matches!(self.selection, Selection::Event(_)) {
             return;
         }
-        let upcoming = matches!(self.modal, Some(Modal::Upcoming));
-        let events = self.selection_events(upcoming);
+        let events = self.selection_events();
         if let Selection::Event(id) = self.selection
             && let Some(index) = events.iter().position(|e| e.id == id)
         {
             self.event_index = index;
-            self.sync_event_cursor(&events[index], upcoming);
+            self.sync_event_cursor(&events[index]);
             return;
         }
         let index = self.event_index.min(events.len().saturating_sub(1));
@@ -298,33 +226,25 @@ impl CalendarState {
             .get(index)
             .map_or(Selection::Date, |e| Selection::Event(e.id));
         if let Some(event) = events.get(index) {
-            self.sync_event_cursor(event, upcoming);
+            self.sync_event_cursor(event);
         }
     }
 
-    fn sync_event_cursor(&mut self, event: &CalendarEvent, upcoming: bool) {
+    fn sync_event_cursor(&mut self, event: &CalendarEvent) {
         let (start, end) = event.timing.dates(self.tz);
         if self.selected < start || self.selected >= end {
-            self.selected = if !upcoming && self.view == CalendarView::List {
+            self.selected = if self.view == CalendarView::List {
                 start.max(month_start(self.selected))
             } else {
                 start
             };
             self.reveal_selected.set(true);
         }
-        if let EventTiming::Timed { start, .. } = event.timing {
-            let start = start.with_timezone(&self.tz);
-            self.slot_minute = if start.date_naive() == self.selected {
-                (start.hour() * 60 + start.minute()) as u16 / 30 * 30
-            } else {
-                0
-            };
-        }
     }
 
-    pub fn move_selected_event(&mut self, delta: isize, upcoming: bool) {
+    pub fn move_selected_event(&mut self, delta: isize) {
         self.clear_click();
-        let events = self.selection_events(upcoming);
+        let events = self.selection_events();
         if events.is_empty() {
             self.selection = Selection::Date;
             self.event_index = 0;
@@ -338,12 +258,11 @@ impl CalendarState {
             || if delta < 0 { events.len() - 1 } else { 0 },
             |index| index.saturating_add_signed(delta).min(events.len() - 1),
         );
-        self.select_event(events[index].id, None, upcoming);
+        self.select_event(events[index].id, None);
     }
 
-    fn reveal_event_row(&mut self, upcoming: bool) {
-        let list = upcoming
-            || (self.view == CalendarView::List && !matches!(self.modal, Some(Modal::Agenda)));
+    fn reveal_event_row(&mut self) {
+        let list = self.view == CalendarView::List && !matches!(self.modal, Some(Modal::Agenda));
         let rows = if list {
             self.list_rows.get()
         } else {
@@ -353,15 +272,11 @@ impl CalendarState {
             return;
         }
         let (start, end) = if list {
-            let events = self.selection_events(upcoming);
+            let events = self.selection_events();
             let mut row: usize = 0;
             let mut last_date = None;
             for e in events.iter().take(self.event_index + 1) {
-                let date = e.timing.dates(self.tz).0.max(if upcoming {
-                    NaiveDate::MIN
-                } else {
-                    month_start(self.selected)
-                });
+                let date = e.timing.dates(self.tz).0.max(month_start(self.selected));
                 if last_date != Some(date) {
                     row += 1;
                     last_date = Some(date);
@@ -388,7 +303,7 @@ impl CalendarState {
     pub fn push_modal(&mut self, modal: Modal) {
         self.context_menu = None;
         self.clear_click();
-        let events = self.selection_events(matches!(self.modal, Some(Modal::Upcoming)));
+        let events = self.selection_events();
         let neighbor = if let Selection::Event(id) = self.selection {
             events.iter().position(|e| e.id == id).and_then(|index| {
                 events
@@ -406,10 +321,6 @@ impl CalendarState {
             event_index: self.event_index,
             scroll: self.scroll,
             agenda_scroll: self.agenda_scroll,
-            hour_scroll: self.hour_scroll,
-            day_scroll: self.day_scroll.get(),
-            slot_minute: self.slot_minute,
-            picker_scroll: self.picker_scroll.get(),
             reveal_selected: self.reveal_selected.get(),
             reveal_event: self.reveal_event.get(),
             neighbor,
@@ -417,15 +328,6 @@ impl CalendarState {
         self.modal = Some(modal);
         self.scroll = 0;
         self.agenda_scroll = 0;
-        self.picker_scroll.set(0);
-        self.picker_reveal.set(true);
-        if matches!(self.modal, Some(Modal::Upcoming)) {
-            self.event_index = 0;
-            self.selection = self
-                .upcoming()
-                .first()
-                .map_or(Selection::Date, |e| Selection::Event(e.id));
-        }
         self.error = None;
         self.invalidate_geometry();
     }
@@ -442,10 +344,6 @@ impl CalendarState {
             self.event_index = frame.event_index;
             self.scroll = frame.scroll;
             self.agenda_scroll = frame.agenda_scroll;
-            self.hour_scroll = frame.hour_scroll;
-            self.day_scroll.set(frame.day_scroll);
-            self.slot_minute = frame.slot_minute;
-            self.picker_scroll.set(frame.picker_scroll);
             self.reveal_selected.set(frame.reveal_selected);
             self.reveal_event.set(frame.reveal_event);
         } else {
@@ -455,9 +353,8 @@ impl CalendarState {
         self.error = None;
         self.invalidate_geometry();
         if self.range() != previous_range {
-            // An Upcoming event may have moved the temporary date into another
-            // range. A save/periodic refresh there must not replace page data
-            // permanently when its original date is restored.
+            // Details opened from the strip may have moved the temporary date
+            // into another month. Restoring the original date reloads it.
             self.refresh();
         }
         self.reconcile_selection();
@@ -505,21 +402,22 @@ impl CalendarState {
             .iter()
             .rev()
             .find(|frame| {
-                matches!(frame.modal, None | Some(Modal::Agenda | Modal::Upcoming))
+                matches!(frame.modal, None | Some(Modal::Agenda))
                     && frame.selection == Selection::Event(id)
             })
             .and_then(|frame| frame.neighbor);
         self.events.retain(|e| e.id != id);
-        self.notices.retain(|e| e.id != id);
+        self.personal_upcoming.retain(|e| e.id != id);
+        self.rsvps.retain(|going| *going != id);
         self.pop_modal();
         while matches!(&self.modal, Some(Modal::Details(e) | Modal::Delete(e)) if e.id == id) {
             self.pop_modal();
         }
         if self.selection == Selection::Event(id) {
-            // The shared notice watch can lag the successful write. Never keep
+            // The shared snapshot can lag the successful write. Never keep
             // a just-deleted target actionable while its invalidation arrives.
             let events: Vec<_> = self
-                .selection_events(matches!(self.modal, Some(Modal::Upcoming)))
+                .selection_events()
                 .into_iter()
                 .filter(|e| e.id != id)
                 .collect();
@@ -538,29 +436,7 @@ impl CalendarState {
         self.reconcile_selection();
         if let Selection::Event(selected) = self.selection {
             self.reveal_event.set(true);
-            let upcoming = matches!(self.modal, Some(Modal::Upcoming));
-            self.select_event(selected, None, upcoming);
-        }
-    }
-
-    /// An invalidation may revoke access while Details is hidden beneath another
-    /// modal. Unwind through every retained shared snapshot before reloading.
-    pub fn clear_shared_navigation(&mut self) {
-        self.context_menu = None;
-        self.clear_click();
-        let shared = |modal: &Option<Modal>| matches!(modal, Some(Modal::Details(e) | Modal::Delete(e)) if e.owner_id.is_some_and(|id| id != self.viewer));
-        if let Some(index) = self
-            .modal_parents
-            .iter()
-            .position(|frame| shared(&frame.modal))
-        {
-            while self.modal_parents.len() > index {
-                self.pop_modal();
-            }
-        }
-        if matches!(&self.modal, Some(Modal::Details(e) | Modal::Delete(e)) if e.owner_id.is_some_and(|id| id != self.viewer))
-        {
-            self.pop_modal();
+            self.select_event(selected, None);
         }
     }
 
@@ -573,41 +449,29 @@ impl CalendarState {
                     .iter()
                     .find(|e| e.id == id)
                     .cloned()
-                    .or_else(|| self.upcoming().into_iter().find(|e| e.id == id))
                     .or_else(|| self.selected_target_event().filter(|e| e.id == id));
                 let Some(event) = event else { return };
-                let upcoming = matches!(self.modal, Some(Modal::Upcoming));
                 let date = match target {
                     ClickTarget::EventAt(_, date) => Some(date),
                     _ => None,
                 };
-                self.select_event(id, date, upcoming);
-                if event_access(&event, self.viewer, self.role).edit {
-                    vec![
-                        MenuAction::Open,
-                        MenuAction::Edit,
-                        MenuAction::Delete,
-                        MenuAction::Copy,
-                    ]
-                } else {
-                    vec![MenuAction::Open, MenuAction::Copy]
+                self.select_event(id, date);
+                let access = event_access(&event, self.viewer, self.staff);
+                let mut items = vec![MenuAction::Open];
+                if access.rsvp {
+                    items.push(MenuAction::Rsvp(!self.going(id)));
                 }
+                if access.edit {
+                    items.push(MenuAction::Edit);
+                }
+                if access.delete {
+                    items.push(MenuAction::Delete);
+                }
+                items
             }
             ClickTarget::Date(date) => {
                 self.select_date(date);
-                if self.can_create_event() {
-                    vec![MenuAction::Agenda, MenuAction::New]
-                } else {
-                    vec![MenuAction::Agenda]
-                }
-            }
-            ClickTarget::Slot { date, minute } => {
-                self.select_slot(date, minute);
-                if self.can_create_event() {
-                    vec![MenuAction::New, MenuAction::Agenda]
-                } else {
-                    vec![MenuAction::Agenda]
-                }
+                vec![MenuAction::Agenda, MenuAction::New]
             }
         };
         self.context_menu = Some(ContextMenu {

@@ -1,63 +1,48 @@
+//! The session's side of the board: a render mirror of what the service
+//! handed it, the cursor, and the modal stack. Nothing here writes; every
+//! action goes to `svc.rs` and comes back as a `Reply` on the tick.
 pub use super::editor::Editor;
 use super::{
-    import::Import,
     navigation::{ClickRecord, ContextMenu, NavigationFrame, Selection},
     svc::{CalendarService, Query, Reply},
 };
-use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
-use late_core::models::calendar::{
-    CalendarEvent, CalendarPreferences, CalendarSource, CalendarView, CreationTier, EventTiming,
-    PublicCalendar,
-};
+use late_core::models::calendar::{CalendarEvent, CalendarView, EventTiming};
 use ratatui::layout::Rect;
-use ratatui_textarea::TextArea;
 use std::{
     cell::{Cell, RefCell},
     time::{Duration as StdDuration, Instant},
 };
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pane {
-    Grid,
     Agenda,
     List,
-    Upcoming,
-    Picker,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    Source,
-    CycleSource(i8),
     View,
-    CycleView(i8),
+    Board,
     Previous,
     Next,
     Today,
-    Go,
     New,
-    Import,
-    Copy,
     Edit,
     Delete,
-    Upcoming,
-    Settings,
+    Rsvp,
     Date(NaiveDate),
     Agenda(NaiveDate),
-    Slot(NaiveDate, u16),
     MenuChoice(usize),
     Event(Uuid),
     EventAt(Uuid, NaiveDate),
-    Field(usize),
     Save,
     Cancel,
-    Toggle,
-    ToggleField(usize),
-    Choice(usize),
-    Reload,
     Discard,
     Keep,
+    Reload,
 }
 #[derive(Clone, Debug)]
 pub struct Hit {
@@ -70,37 +55,10 @@ pub struct ScrollPane {
     pub pane: Pane,
 }
 pub enum Modal {
-    Source(usize),
-    View(usize),
-    Go(Box<TextArea<'static>>),
-    Import(Box<Import>),
-    Settings {
-        draft: CalendarPreferences,
-        focus: usize,
-    },
     Details(CalendarEvent),
     Editor(Box<Editor>),
     Delete(CalendarEvent),
     Agenda,
-    Upcoming,
-}
-pub fn parse_duration(s: &str) -> anyhow::Result<i64> {
-    let s = s.trim();
-    let duration = match s.parse::<u64>() {
-        Ok(seconds) => StdDuration::from_secs(seconds),
-        Err(_) => humantime::parse_duration(s).map_err(|_| {
-            anyhow::anyhow!("Lead time: use a nonnegative duration, e.g. 24h or 1 day")
-        })?,
-    };
-    anyhow::ensure!(
-        duration.subsec_nanos() == 0,
-        "Lead time must be whole seconds"
-    );
-    anyhow::ensure!(
-        duration.as_secs() <= 315360000,
-        "Lead time cannot exceed 3650 days"
-    );
-    Ok(duration.as_secs() as i64)
 }
 pub fn month_start(d: NaiveDate) -> NaiveDate {
     d.with_day(1).unwrap()
@@ -121,60 +79,55 @@ pub fn shift_month(d: NaiveDate, delta: i32) -> NaiveDate {
         )
         .unwrap()
 }
-pub fn week_start(d: NaiveDate, start: u8) -> NaiveDate {
-    d - Duration::days((d.weekday().num_days_from_monday() as i64 + 7 - start as i64) % 7)
+/// Weeks start on Monday.
+pub fn week_start(d: NaiveDate) -> NaiveDate {
+    d - Duration::days(d.weekday().num_days_from_monday() as i64)
 }
 pub struct CalendarState {
     pub viewer: Uuid,
-    pub source: CalendarSource,
+    /// Moderator or admin, as the last load read it: staff delete any post.
+    pub staff: bool,
+    /// Whether the board is drawn over the viewer's own events.
+    pub show_board: bool,
     pub view: CalendarView,
     pub selected: NaiveDate,
     pub tz: Tz,
-    pub preferences: CalendarPreferences,
-    pub public: Vec<PublicCalendar>,
     pub events: Vec<CalendarEvent>,
-    pub notices: Vec<CalendarEvent>,
-    pub role: CreationTier,
+    /// The viewer's own events inside the upcoming horizon.
+    pub personal_upcoming: Vec<CalendarEvent>,
+    /// The board events the viewer said they are in.
+    pub rsvps: Vec<Uuid>,
     pub modal: Option<Modal>,
     pub error: Option<String>,
     pub pending: bool,
     pub loading: bool,
     pub selection: Selection,
-    pub slot_minute: u16,
     pub reveal_event: Cell<bool>,
     pub modal_parents: Vec<NavigationFrame>,
     pub context_menu: Option<ContextMenu>,
     pub last_click: RefCell<Option<ClickRecord>>,
-    pub picker_scroll: Cell<usize>,
-    pub picker_rows: Cell<usize>,
-    pub max_picker: Cell<usize>,
-    pub picker_reveal: Cell<bool>,
     pub reload_request: bool,
     pub event_index: usize,
     pub scroll: usize,
     pub agenda_scroll: usize,
-    pub hour_scroll: usize,
-    pub hour_rows: Cell<usize>,
     pub list_rows: Cell<usize>,
     pub agenda_rows: Cell<usize>,
-    pub day_scroll: Cell<usize>,
     pub reveal_selected: Cell<bool>,
-    pub hours_geometry: Cell<Rect>,
     pub hits: RefCell<Vec<Hit>>,
     pub panes: RefCell<Vec<ScrollPane>>,
     pub geometry: Cell<Rect>,
     pub max_scroll: Cell<usize>,
     pub max_agenda: Cell<usize>,
-    pub max_days: Cell<usize>,
     service: CalendarService,
     changed: watch::Receiver<u64>,
-    server: watch::Receiver<Vec<CalendarEvent>>,
+    board: watch::Receiver<Vec<CalendarEvent>>,
     tx: mpsc::UnboundedSender<Reply>,
     rx: mpsc::UnboundedReceiver<Reply>,
     pub generation: u64,
     pub open_generation: u64,
-    pub(super) import_generation: u64,
-    pub(super) clipboard: Option<String>,
+    /// The event a details refresh was asked for after an invalidation, so
+    /// the answer replaces the open modal instead of stacking a new one.
+    refreshing: Option<Uuid>,
     needs_refresh: bool,
     last_refresh: Instant,
     initialized: bool,
@@ -183,58 +136,46 @@ impl CalendarState {
     pub fn new(service: CalendarService, viewer: Uuid) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let changed = service.subscribe();
-        let server = service.server_notices();
+        let board = service.board_upcoming();
         let mut s = Self {
             viewer,
-            source: CalendarSource::Server,
+            staff: false,
+            show_board: true,
             view: CalendarView::Month,
             selected: Utc::now().date_naive(),
             tz: chrono_tz::UTC,
-            preferences: Default::default(),
-            public: Vec::new(),
             events: Vec::new(),
-            notices: Vec::new(),
-            role: CreationTier::User,
+            personal_upcoming: Vec::new(),
+            rsvps: Vec::new(),
             modal: None,
             error: None,
             pending: false,
             loading: false,
             selection: Selection::Date,
-            slot_minute: 540,
             reveal_event: Cell::new(false),
             modal_parents: Vec::new(),
             context_menu: None,
             last_click: RefCell::new(None),
-            picker_scroll: Cell::new(0),
-            picker_rows: Cell::new(1),
-            max_picker: Cell::new(0),
-            picker_reveal: Cell::new(true),
             reload_request: false,
             event_index: 0,
             scroll: 0,
             agenda_scroll: 0,
-            hour_scroll: 16,
-            hour_rows: Cell::new(6),
             list_rows: Cell::new(1),
             agenda_rows: Cell::new(1),
-            day_scroll: Cell::new(0),
             reveal_selected: Cell::new(true),
-            hours_geometry: Cell::new(Rect::default()),
             hits: RefCell::new(Vec::new()),
             panes: RefCell::new(Vec::new()),
             geometry: Cell::new(Rect::default()),
             max_scroll: Cell::new(0),
             max_agenda: Cell::new(0),
-            max_days: Cell::new(0),
             service,
             changed,
-            server,
+            board,
             tx,
             rx,
             generation: 0,
             open_generation: 0,
-            import_generation: 0,
-            clipboard: None,
+            refreshing: None,
             needs_refresh: false,
             last_refresh: Instant::now(),
             initialized: false,
@@ -248,19 +189,13 @@ impl CalendarState {
     pub fn range(&self) -> (NaiveDate, NaiveDate) {
         match self.view {
             CalendarView::Month => {
-                let first = week_start(month_start(self.selected), self.preferences.week_start);
+                let first = week_start(month_start(self.selected));
                 (first, first + Duration::days(42))
             }
             CalendarView::List => {
                 let first = month_start(self.selected);
                 (first, shift_month(first, 1))
             }
-            CalendarView::Week => {
-                let first = week_start(self.selected, self.preferences.week_start);
-                (first, first + Duration::days(7))
-            }
-            CalendarView::ThreeDay => (self.selected, self.selected + Duration::days(3)),
-            CalendarView::Day => (self.selected, self.selected + Duration::days(1)),
         }
     }
     pub fn refresh(&mut self) {
@@ -272,7 +207,7 @@ impl CalendarState {
         self.service.load(
             Query {
                 viewer: self.viewer,
-                source: self.source,
+                board: self.show_board,
                 from,
                 to,
                 tz: self.tz,
@@ -290,26 +225,27 @@ impl CalendarState {
         }
     }
     pub fn navigate(&mut self, delta: i32) {
-        self.selected = match self.view {
-            CalendarView::Month | CalendarView::List => shift_month(self.selected, delta),
-            CalendarView::Week => self.selected + Duration::days(7 * delta as i64),
-            CalendarView::ThreeDay => self.selected + Duration::days(3 * delta as i64),
-            CalendarView::Day => self.selected + Duration::days(delta as i64),
-        };
+        self.selected = shift_month(self.selected, delta);
+        self.reset_scroll();
+        self.refresh();
+    }
+    pub fn toggle_view(&mut self) {
+        self.view = self.view.toggled();
+        self.reset_scroll();
+        self.refresh();
+    }
+    pub fn toggle_board(&mut self) {
+        self.show_board = !self.show_board;
+        self.events.clear();
         self.reset_scroll();
         self.refresh();
     }
     pub fn reset_scroll(&mut self) {
         self.scroll = 0;
         self.agenda_scroll = 0;
-        self.day_scroll.set(0);
         self.reveal_selected.set(true);
         self.event_index = 0;
-        self.selection = if self.is_timed_view() {
-            Selection::Slot(self.slot_minute)
-        } else {
-            Selection::Date
-        };
+        self.selection = Selection::Date;
         self.context_menu = None;
         self.invalidate_geometry();
     }
@@ -333,9 +269,14 @@ impl CalendarState {
     pub fn selected_event(&self) -> Option<CalendarEvent> {
         self.selected_target_event()
     }
+    /// Whether the viewer said they are in.
+    pub fn going(&self, id: Uuid) -> bool {
+        self.rsvps.contains(&id)
+    }
     pub fn open(&mut self, id: Uuid) {
         self.open_generation += 1;
         self.reload_request = false;
+        self.refreshing = None;
         self.service
             .open(self.viewer, id, self.open_generation, self.tx.clone());
         self.error = None;
@@ -343,11 +284,13 @@ impl CalendarState {
     pub fn service_reload(&mut self, id: Uuid) {
         self.open_generation += 1;
         self.reload_request = true;
+        self.refreshing = None;
         self.service
             .open(self.viewer, id, self.open_generation, self.tx.clone());
     }
     pub fn cancel_open(&mut self) {
         self.open_generation += 1;
+        self.refreshing = None;
     }
     pub fn save_editor(&mut self) {
         if self.pending {
@@ -365,73 +308,6 @@ impl CalendarState {
             }
         }
     }
-    pub(super) fn read_import(&mut self) {
-        if let Some(Modal::Import(import)) = &mut self.modal {
-            if import.loading {
-                return;
-            }
-            if import.candidates.is_some() {
-                let selected = import.selected;
-                self.choose_import(selected);
-                return;
-            }
-            self.import_generation += 1;
-            import.loading = true;
-            import.error = None;
-            self.service.import(
-                import.input.lines().join("\n"),
-                self.tz,
-                self.import_generation,
-                self.tx.clone(),
-            );
-        }
-    }
-    pub(super) fn choose_import(&mut self, index: usize) {
-        let Some(Modal::Editor(editor)) = self
-            .modal_parents
-            .last()
-            .and_then(|frame| frame.modal.as_ref())
-        else {
-            return;
-        };
-        let can_import = editor.access.edit
-            && (editor.existing.is_some()
-                || editor.source == CalendarSource::Personal(self.viewer)
-                || (editor.source == CalendarSource::Server && self.role != CreationTier::User));
-        let Some(Modal::Import(import)) = &mut self.modal else {
-            return;
-        };
-        if !can_import {
-            import.error = Some("This calendar is read-only".into());
-            return;
-        }
-        let Some(candidate) = import.candidates.as_ref().and_then(|c| c.get(index)) else {
-            return;
-        };
-        let draft = match &candidate.draft {
-            Ok(draft) => draft.clone(),
-            Err(error) => {
-                import.error = Some(error.clone());
-                return;
-            }
-        };
-        self.import_generation += 1;
-        self.pop_modal();
-        if let Some(Modal::Editor(editor)) = &mut self.modal {
-            editor.apply_import(&draft, self.tz);
-        }
-        self.invalidate_geometry();
-    }
-    pub fn save_settings(&mut self) {
-        if self.pending {
-            return;
-        }
-        if let Some(Modal::Settings { draft, .. }) = &self.modal {
-            self.pending = true;
-            self.service
-                .preferences(self.viewer, draft.clone(), self.tx.clone());
-        }
-    }
     pub fn confirm_delete(&mut self) {
         if self.pending {
             return;
@@ -441,6 +317,42 @@ impl CalendarState {
             self.service
                 .delete(self.viewer, e.id, e.revision, self.tx.clone());
         }
+    }
+    /// Say you are in, or take it back, on the details event or the
+    /// selection. A personal event takes nothing.
+    pub fn toggle_rsvp(&mut self) {
+        if self.pending {
+            return;
+        }
+        let event = match &self.modal {
+            Some(Modal::Details(e)) => Some(e.clone()),
+            _ => self.selected_event(),
+        };
+        let Some(event) = event else {
+            self.error = Some("Select an event first".into());
+            return;
+        };
+        if !event.is_board() {
+            self.error = Some("Only board events take an I'm in".into());
+            return;
+        }
+        self.pending = true;
+        let going = !self.going(event.id);
+        self.service
+            .rsvp(self.viewer, event.id, going, self.tx.clone());
+    }
+    /// Open an event the strip or the panel showed: the day it starts, then
+    /// its details over the page. The copy is the shared snapshot's, so the
+    /// details are up before the page's own load lands.
+    pub fn show_event(&mut self, event: CalendarEvent) {
+        let start = event.timing.dates(self.tz).0;
+        if self.modal.is_some() || !self.modal_parents.is_empty() {
+            self.modal = None;
+            self.modal_parents.clear();
+        }
+        self.select_date(start);
+        self.selection = Selection::Event(event.id);
+        self.push_modal(Modal::Details(event));
     }
     pub fn tick(&mut self, visible: bool, tz: Tz) -> bool {
         let mut changed = false;
@@ -455,21 +367,28 @@ impl CalendarState {
         }
         let invalid = self.changed.has_changed().unwrap_or(false);
         if invalid {
-            self.cancel_open();
             self.changed.borrow_and_update();
             // Modal unwinding must not reconcile against the temporary empty
             // cache. Preserve browser UUIDs until the authorized load arrives.
             self.loading = true;
             self.events.clear();
-            self.notices.clear();
-            self.public.clear();
+            self.personal_upcoming.clear();
             self.clear_click();
-            self.clear_shared_navigation();
             self.invalidate_geometry();
             self.generation += 1;
             self.needs_refresh = true;
             if visible {
                 self.refresh();
+            }
+            // Details the viewer has open may have changed under them, or
+            // been deleted by staff: read it again and swap it in.
+            if let Some(Modal::Details(e)) = &self.modal {
+                let id = e.id;
+                self.open_generation += 1;
+                self.reload_request = false;
+                self.refreshing = Some(id);
+                self.service
+                    .open(self.viewer, id, self.open_generation, self.tx.clone());
             }
             changed = true;
         } else if visible
@@ -478,81 +397,53 @@ impl CalendarState {
             self.refresh();
             changed = true;
         }
-        if self.server.has_changed().unwrap_or(false) {
-            self.server.borrow_and_update();
+        if self.board.has_changed().unwrap_or(false) {
+            self.board.borrow_and_update();
             changed = true;
         }
         while let Ok(reply) = self.rx.try_recv() {
             changed |= self.apply(reply);
         }
         let now = Utc::now();
-        let before = self.notices.len();
-        self.notices.retain(|e| e.upcoming(now));
-        changed |= before != self.notices.len();
-        if matches!(self.modal, Some(Modal::Upcoming)) {
-            let before = (self.selection, self.event_index);
-            self.reconcile_selection();
-            changed |= before != (self.selection, self.event_index);
-        }
+        let before = self.personal_upcoming.len();
+        self.personal_upcoming.retain(|e| e.upcoming(now));
+        changed |= before != self.personal_upcoming.len();
         changed
     }
+    /// The board's next 24 hours plus the viewer's own, soonest first.
     pub fn upcoming(&self) -> Vec<CalendarEvent> {
+        self.upcoming_at(Utc::now())
+    }
+    pub fn upcoming_at(&self, now: DateTime<Utc>) -> Vec<CalendarEvent> {
         let mut events: Vec<_> = self
-            .server
+            .board
             .borrow()
             .iter()
-            .chain(self.notices.iter())
-            .filter(|e| e.upcoming(Utc::now()))
+            .chain(self.personal_upcoming.iter())
+            .filter(|e| e.upcoming(now))
             .cloned()
             .collect();
-        events.sort_by_key(|e| event_order(e, self.tz));
+        events.sort_by_key(|e| (e.starts_at, e.id));
+        events.dedup_by_key(|e| e.id);
         events
     }
     pub fn apply(&mut self, reply: Reply) -> bool {
         match reply {
-            Reply::Imported { generation, result }
-                if generation == self.import_generation
-                    && matches!(&self.modal, Some(Modal::Import(import)) if import.loading) =>
-            {
-                let Some(Modal::Import(import)) = &mut self.modal else {
-                    return false;
-                };
-                import.loading = false;
-                let mut single = false;
-                match result {
-                    Ok(candidates) => {
-                        single = candidates.len() == 1 && candidates[0].draft.is_ok();
-                        import.candidates = Some(candidates);
-                        import.selected = 0;
-                        self.picker_reveal.set(true);
-                    }
-                    Err(error) => import.error = Some(error),
-                }
-                if single {
-                    self.choose_import(0);
-                }
-                true
-            }
             Reply::Loaded { generation, result } if generation == self.generation => {
                 self.loading = false;
                 match result {
                     Ok(s) => {
                         let previous_range = self.range();
                         self.events = s.events;
-                        self.notices = s.personal_notices;
-                        self.public = s.public;
-                        self.role = s.role;
-                        let first = !self.initialized;
+                        self.personal_upcoming = s.personal_upcoming;
+                        self.rsvps = s.rsvps;
+                        self.staff = s.staff;
                         self.initialized = true;
-                        self.preferences = s.preferences;
-                        if first && self.view != self.preferences.default_view {
-                            self.view = self.preferences.default_view;
-                        }
                         if self.range() != previous_range {
                             self.events.clear();
                             self.refresh();
                         }
-                        self.error = s.event_error;
+                        self.error = None;
                         if !self.loading {
                             self.reconcile_selection();
                         }
@@ -565,6 +456,7 @@ impl CalendarState {
                 true
             }
             Reply::Opened { generation, result } if generation == self.open_generation => {
+                let refreshing = self.refreshing.take();
                 match result {
                     Ok(latest) => {
                         if self.reload_request {
@@ -575,11 +467,24 @@ impl CalendarState {
                                     latest.revision, latest.title
                                 ));
                             }
+                        } else if refreshing == Some(latest.id) {
+                            if let Some(Modal::Details(open)) = &mut self.modal
+                                && open.id == latest.id
+                            {
+                                *open = latest;
+                            }
                         } else {
                             self.push_modal(Modal::Details(latest));
                         }
                     }
-                    Err(e) => self.error = Some(e),
+                    Err(e) => {
+                        if let Some(id) = refreshing
+                            && matches!(&self.modal, Some(Modal::Details(open)) if open.id == id)
+                        {
+                            self.finish_delete(id);
+                        }
+                        self.error = Some(e);
+                    }
                 }
                 true
             }
@@ -614,12 +519,22 @@ impl CalendarState {
                 }
                 true
             }
-            Reply::Preferences(result) => {
+            Reply::Rsvp(result) => {
                 self.pending = false;
                 match result {
-                    Ok(p) => {
-                        self.preferences = p;
-                        self.pop_modal();
+                    Ok(e) => {
+                        let going = self.going(e.id);
+                        // The reply is the toggle's answer: it carries the
+                        // count, and the viewer's own side flips here.
+                        if going {
+                            self.rsvps.retain(|id| *id != e.id);
+                        } else {
+                            self.rsvps.push(e.id);
+                        }
+                        self.replace_event(e);
+                        // A load started before this write committed may
+                        // still land with the old answer; the generation
+                        // bump drops it and reads again.
                         self.refresh();
                     }
                     Err(e) => self.error = Some(e),
@@ -627,6 +542,31 @@ impl CalendarState {
                 true
             }
             _ => false,
+        }
+    }
+    /// Swap a fresh copy of an event into every surface holding one.
+    fn replace_event(&mut self, event: CalendarEvent) {
+        for loaded in &mut self.events {
+            if loaded.id == event.id {
+                *loaded = event.clone();
+            }
+        }
+        for loaded in &mut self.personal_upcoming {
+            if loaded.id == event.id {
+                *loaded = event.clone();
+            }
+        }
+        if let Some(Modal::Details(open)) = &mut self.modal
+            && open.id == event.id
+        {
+            *open = event.clone();
+        }
+        for frame in &mut self.modal_parents {
+            if let Some(Modal::Details(previous)) = &mut frame.modal
+                && previous.id == event.id
+            {
+                *previous = event.clone();
+            }
         }
     }
 }

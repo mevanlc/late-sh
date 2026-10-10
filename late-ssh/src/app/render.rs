@@ -747,6 +747,7 @@ impl App {
         let live_panel_rows = crate::app::live::panel::rows(
             &self.chat.live_streams,
             &live_rows,
+            &self.calendar.upcoming_at(live_panel_now),
             self.chat.news.all_articles(),
             self.chat.news.reads(),
             self.live_games.open_watches(),
@@ -763,6 +764,7 @@ impl App {
                 &self.chat.live_streams,
                 &live_rows,
                 &self.live_games,
+                &self.calendar,
             )
         } else {
             None
@@ -818,6 +820,7 @@ impl App {
                     &self.chat.live_streams,
                     &live_rows,
                     &self.live_games,
+                    &self.calendar,
                 )
                 .map(|strip| crate::app::live::ui::status_text(&strip))
         } else {
@@ -2057,23 +2060,6 @@ impl App {
                     chat::ui::draw_room_list_rail(frame, rail_area, &ctx.chat_view);
                 }
 
-                let height = if center_area.height < 20 || center_area.width < 50 {
-                    1
-                } else {
-                    5
-                };
-                crate::app::calendar::ui::draw_upcoming_panel(
-                    frame,
-                    Rect::new(center_area.x, center_area.y, center_area.width, height),
-                    ctx.calendar,
-                );
-                let center_area = Rect::new(
-                    center_area.x,
-                    center_area.y + height,
-                    center_area.width,
-                    center_area.height.saturating_sub(height),
-                );
-
                 if ctx.home_selected {
                     chat::ui::draw_dashboard_chat_card(
                         frame,
@@ -2662,10 +2648,6 @@ impl App {
                 ctx.marquee_tick,
                 ctx.viewer_is_runner,
             );
-            let available = ctx.profile_modal_state.viewed_user_id().is_some_and(|id| {
-                id == ctx.calendar.viewer || ctx.calendar.public.iter().any(|p| p.owner_id == id)
-            });
-            profile_modal::ui::draw_calendar_link(frame, ctx.profile_modal_state, available);
         }
 
         if ctx.show_sheet_modal {

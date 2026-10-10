@@ -31,6 +31,7 @@ pub mod bonsai_decay_protection;
 #[cfg(test)]
 mod bonsai_test;
 pub mod calendar;
+pub mod calendar_ban;
 #[cfg(test)]
 mod calendar_test;
 pub mod character_sheet;

@@ -176,6 +176,7 @@ fn each_kind_is_newest_first_and_stale_or_pending_things_are_not_listed() {
     let rows = rows(
         &streams,
         &games,
+        &[],
         &articles,
         &no_reads(),
         &open_watches,
@@ -205,8 +206,18 @@ fn each_kind_is_newest_first_and_stale_or_pending_things_are_not_listed() {
 fn a_share_is_dotted_while_unread() {
     let articles = [article("ann", "the freshest", ago(2))];
     let open_watches = OpenWatches::new();
-    let text_at =
-        |reads: Reads| texts(&rows(&[], &[], &articles, &reads, &open_watches, now()))[0].clone();
+    let text_at = |reads: Reads| {
+        texts(&rows(
+            &[],
+            &[],
+            &[],
+            &articles,
+            &reads,
+            &open_watches,
+            now(),
+        ))[0]
+            .clone()
+    };
 
     assert_eq!(text_at(no_reads()), "news    the fre… \u{25cf} s1");
     assert_eq!(
@@ -260,6 +271,7 @@ fn every_kind_keeps_a_row_and_the_leftover_goes_by_priority() {
         heads(&rows(
             &streams,
             &games,
+            &[],
             &articles,
             &no_reads(),
             &open_watches,
@@ -272,6 +284,7 @@ fn every_kind_keeps_a_row_and_the_leftover_goes_by_priority() {
         heads(&rows(
             &streams[..2],
             &games[..2],
+            &[],
             &articles,
             &no_reads(),
             &open_watches,
@@ -284,6 +297,7 @@ fn every_kind_keeps_a_row_and_the_leftover_goes_by_priority() {
         heads(&rows(
             &[],
             &games[..1],
+            &[],
             &articles,
             &no_reads(),
             &open_watches,
@@ -294,6 +308,7 @@ fn every_kind_keeps_a_row_and_the_leftover_goes_by_priority() {
     // Nothing live: four shares.
     assert_eq!(
         heads(&rows(
+            &[],
             &[],
             &[],
             &articles,
@@ -309,6 +324,7 @@ fn every_kind_keeps_a_row_and_the_leftover_goes_by_priority() {
         heads(&rows(
             &streams[..2],
             &games[..1],
+            &[],
             &[],
             &no_reads(),
             &open_watches,
@@ -330,4 +346,49 @@ fn nobody_playing_says_so_in_the_first_slot_alone() {
         ]
     );
     assert_eq!(hit_sources(&[]), [None; LIVE_PANEL_ROWS]);
+}
+
+/// A board event takes a row of its own kind, soonest first, saying how
+/// long until it starts and how many are in; the viewer's own is marked
+/// as theirs, and one that started reads `on now`.
+#[test]
+fn an_event_row_says_when_and_how_many_are_in() {
+    use late_core::models::calendar::{CalendarEvent, EventTiming};
+    let event = |id: u128, minutes: i64, board: bool, going: i64| {
+        let starts_at = now() + Duration::minutes(minutes);
+        CalendarEvent {
+            id: Uuid::from_u128(id),
+            owner_id: (!board).then_some(Uuid::nil()),
+            creator_id: Uuid::nil(),
+            creator_name: "mat".into(),
+            title: "Movie night".into(),
+            description: String::new(),
+            timing: EventTiming::Timed {
+                start: starts_at,
+                end: None,
+            },
+            creator_timezone: "UTC".into(),
+            starts_at,
+            ends_at: starts_at + Duration::hours(1),
+            going,
+            revision: 1,
+        }
+    };
+    let events = [
+        event(1, 120, true, 6),
+        event(2, 30, false, 0),
+        event(3, -10, true, 0),
+    ];
+    let open_watches = OpenWatches::new();
+    let rows = rows(&[], &[], &events, &[], &no_reads(), &open_watches, now());
+    assert_eq!(
+        texts(&rows),
+        vec![
+            "event   in 2h … ·6 s1".to_string(),
+            "yours   in 30m Mo… s2".to_string(),
+            "event   on now Mo… s3".to_string(),
+            String::new(),
+        ]
+    );
+    assert_eq!(rows[0].source(), LiveSource::BoardEvent(Uuid::from_u128(1)));
 }

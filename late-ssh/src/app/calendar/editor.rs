@@ -1,7 +1,7 @@
 //! Event form state, input, and the geometry shared by rendering and mouse input.
 use super::{
     date_entry, parser,
-    state::{Action, CalendarState, parse_duration},
+    state::{Action, CalendarState},
     ui,
 };
 use crate::app::{
@@ -14,8 +14,8 @@ use crate::app::{
 use chrono::{Duration, LocalResult, NaiveDate, NaiveTime, TimeZone, Timelike, Utc};
 use chrono_tz::Tz;
 use late_core::models::calendar::{
-    CalendarEvent, CalendarSource, CreationTier, EventAccess, EventDraft, EventTiming, Occurrence,
-    event_access, local_instant,
+    CalendarEvent, CalendarSource, EventAccess, EventDraft, EventTiming, Occurrence, event_access,
+    local_instant,
 };
 use ratatui::{
     Frame,
@@ -25,16 +25,16 @@ use ratatui::{
     widgets::Paragraph,
 };
 use ratatui_textarea::{CursorMove, TextArea};
-use std::{
-    cell::{Cell, RefCell},
-    time::Duration as StdDuration,
-};
+use std::cell::{Cell, RefCell};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditorControl {
     Title,
     Description,
+    /// Where a new event goes: the board, or the viewer's own calendar.
+    /// Fixed once saved.
+    Target,
     AllDay,
     StartDate,
     StartTime,
@@ -42,13 +42,12 @@ pub enum EditorControl {
     EndDate,
     EndTime,
     EndOccurrence,
-    Notifications,
-    LeadTime,
-    Delegation,
     Save,
     Cancel,
-    Import,
 }
+
+/// How many text fields the form has: title, description, two dates, two times.
+const FIELDS: usize = 6;
 
 impl EditorControl {
     fn field(self) -> Option<usize> {
@@ -59,7 +58,6 @@ impl EditorControl {
             Self::StartTime => Some(3),
             Self::EndDate => Some(4),
             Self::EndTime => Some(5),
-            Self::LeadTime => Some(6),
             _ => None,
         }
     }
@@ -68,6 +66,7 @@ impl EditorControl {
         match self {
             Self::Title => "Title",
             Self::Description => "Description",
+            Self::Target => "Post to",
             Self::AllDay => "All day",
             Self::StartDate => "Start date",
             Self::StartTime => "Start time (24-hour)",
@@ -76,12 +75,8 @@ impl EditorControl {
             Self::EndDate => "End date (optional)",
             Self::EndTime => "End time (optional)",
             Self::EndOccurrence => "End time occurs twice (DST)",
-            Self::Notifications => "Notifications",
-            Self::LeadTime => "Lead time (e.g. 1 day, 1h 30m)",
-            Self::Delegation => "Moderator delegation",
             Self::Save => "Save",
             Self::Cancel => "Cancel",
-            Self::Import => "Import iCal",
         }
     }
 
@@ -99,14 +94,13 @@ pub enum EditorCommand {
     None,
     Save,
     Cancel,
-    Import,
     Discard,
     Keep,
     Reload,
 }
 
 #[derive(Clone, Copy, Debug)]
-enum TargetAction {
+pub(super) enum TargetAction {
     Focus(EditorControl),
     Value(EditorControl, usize, usize),
     Toggle(EditorControl),
@@ -115,14 +109,14 @@ enum TargetAction {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Target {
-    area: Rect,
-    action: TargetAction,
+pub(super) struct Target {
+    pub(super) area: Rect,
+    pub(super) action: TargetAction,
 }
 
 #[derive(Clone, Default)]
-struct Geometry {
-    targets: Vec<Target>,
+pub(super) struct Geometry {
+    pub(super) targets: Vec<Target>,
     viewport: Rect,
     max_scroll: usize,
 }
@@ -134,8 +128,6 @@ pub struct Editor {
     pub fields: Vec<TextArea<'static>>,
     pub focus: EditorControl,
     pub all_day: bool,
-    pub notifications: bool,
-    pub delegated: bool,
     pub occurrence: Option<Occurrence>,
     pub end_occurrence: Option<Occurrence>,
     pub ever_assigned: bool,
@@ -147,12 +139,12 @@ pub struct Editor {
     scroll: Cell<usize>,
     reveal_focus: Cell<bool>,
     last_area: Cell<Rect>,
-    field_viewports: RefCell<[(usize, usize); 7]>,
-    geometry: RefCell<Geometry>,
+    field_viewports: RefCell<[(usize, usize); FIELDS]>,
+    pub(super) geometry: RefCell<Geometry>,
     discard_selected: bool,
 }
 
-fn field(s: impl Into<String>) -> TextArea<'static> {
+pub(super) fn field(s: impl Into<String>) -> TextArea<'static> {
     let s = s.into();
     let mut field = TextArea::from(s.split('\n').map(str::to_owned).collect::<Vec<_>>());
     field.move_cursor(CursorMove::Bottom);
@@ -190,7 +182,9 @@ fn parse_clock(text: &str) -> Result<NaiveTime, chrono::ParseError> {
 }
 
 impl Editor {
-    pub fn new(source: CalendarSource, date: NaiveDate, access: EventAccess) -> Self {
+    /// A new event on `date`. A new draft goes to the board unless the
+    /// viewer flips it: the board is what the page is for.
+    pub fn new(source: CalendarSource, date: NaiveDate) -> Self {
         let mut e = Self {
             existing: None,
             source,
@@ -201,12 +195,9 @@ impl Editor {
                 field("09:00"),
                 field(""),
                 field(""),
-                field("24h"),
             ],
             focus: EditorControl::Title,
             all_day: true,
-            notifications: false,
-            delegated: false,
             occurrence: None,
             end_occurrence: None,
             ever_assigned: false,
@@ -214,11 +205,15 @@ impl Editor {
             initial: String::new(),
             error: None,
             discard_prompt: false,
-            access,
+            access: EventAccess {
+                edit: true,
+                delete: true,
+                rsvp: false,
+            },
             scroll: Cell::new(0),
             reveal_focus: Cell::new(true),
             last_area: Cell::new(Rect::default()),
-            field_viewports: RefCell::new([(0, 0); 7]),
+            field_viewports: RefCell::new([(0, 0); FIELDS]),
             geometry: RefCell::new(Geometry::default()),
             discard_selected: false,
         };
@@ -226,57 +221,17 @@ impl Editor {
         e
     }
 
-    pub fn from_event(event: &CalendarEvent, viewer: Uuid, role: CreationTier, tz: Tz) -> Self {
-        let access = event_access(event, viewer, role);
-        let mut e = Self::new(
-            event
-                .owner_id
-                .map(CalendarSource::Personal)
-                .unwrap_or(CalendarSource::Server),
-            event.timing.dates(tz).0,
-            access,
-        );
+    pub fn from_event(event: &CalendarEvent, viewer: Uuid, staff: bool, tz: Tz) -> Self {
+        let access = event_access(event, viewer, staff);
+        let mut e = Self::new(event.source(), event.timing.dates(tz).0);
+        e.access = access;
         e.existing = Some((event.id, event.revision));
         e.fields[0] = field(&event.title);
         e.fields[1] = field(&event.description);
         e.set_timing(&event.timing, tz);
-        e.notifications = event.notice_lead_seconds.is_some();
-        e.fields[6] = field(
-            humantime::format_duration(StdDuration::from_secs(
-                event.notice_lead_seconds.unwrap_or(86400) as u64,
-            ))
-            .to_string(),
-        );
-        e.delegated = event.mod_editable;
         e.ever_assigned = true;
         e.initial = e.fingerprint();
         e
-    }
-
-    pub(super) fn apply_import(&mut self, draft: &EventDraft, tz: Tz) {
-        let e = self;
-        e.fields[0] = field(&draft.title);
-        e.fields[1] = field(&draft.description);
-        // Review starts at the beginning, including on horizontally clipped fields.
-        for input in &mut e.fields[..2] {
-            input.move_cursor(CursorMove::Top);
-            input.move_cursor(CursorMove::Head);
-        }
-        e.set_timing(&draft.timing, tz);
-        e.ever_assigned = true;
-        if e.access.notifications {
-            e.notifications = draft.notice_lead_seconds.is_some();
-            e.fields[6] = field(
-                humantime::format_duration(StdDuration::from_secs(
-                    draft.notice_lead_seconds.unwrap_or(86400) as u64,
-                ))
-                .to_string(),
-            );
-        }
-        e.error = None;
-        e.focus = EditorControl::Title;
-        e.scroll.set(0);
-        e.reveal_focus.set(true);
     }
 
     pub fn text(&self, n: usize) -> String {
@@ -285,11 +240,10 @@ impl Editor {
 
     pub fn fingerprint(&self) -> String {
         format!(
-            "{:?}|{}|{}|{}|{:?}|{:?}",
+            "{:?}|{}|{:?}|{:?}|{:?}",
             self.fields.iter().map(|f| f.lines()).collect::<Vec<_>>(),
             self.all_day,
-            self.notifications,
-            self.delegated,
+            self.source,
             self.occurrence,
             self.end_occurrence
         )
@@ -374,10 +328,14 @@ impl Editor {
 
     pub fn visible_controls(&self, today: NaiveDate, tz: Tz) -> Vec<EditorControl> {
         use EditorControl::{
-            AllDay, Cancel, Delegation, Description, EndDate, EndOccurrence, EndTime, LeadTime,
-            Notifications, Save, StartDate, StartOccurrence, StartTime, Title,
+            AllDay, Cancel, Description, EndDate, EndOccurrence, EndTime, Save, StartDate,
+            StartOccurrence, StartTime, Target, Title,
         };
-        let mut controls = vec![Title, Description, AllDay, StartDate];
+        let mut controls = vec![Title, Description];
+        if self.existing.is_none() {
+            controls.push(Target);
+        }
+        controls.extend([AllDay, StartDate]);
         if !self.all_day {
             controls.push(StartTime);
             if self.time_repeats(false, today, tz) {
@@ -391,19 +349,7 @@ impl Editor {
                 controls.push(EndOccurrence);
             }
         }
-        if self.access.notifications {
-            controls.push(Notifications);
-            if self.notifications {
-                controls.push(LeadTime);
-            }
-        }
-        if self.access.delegate {
-            controls.push(Delegation);
-        }
         controls.extend([Save, Cancel]);
-        if self.access.edit {
-            controls.push(EditorControl::Import);
-        }
         controls
     }
 
@@ -448,10 +394,9 @@ impl Editor {
                     self.fields[3] = field("09:00");
                 }
             }
-            EditorControl::Notifications if self.access.notifications => {
-                self.notifications = !self.notifications
+            EditorControl::Target if self.existing.is_none() => {
+                self.source = self.source.toggled();
             }
-            EditorControl::Delegation if self.access.delegate => self.delegated = !self.delegated,
             EditorControl::StartOccurrence => self.occurrence = next_occurrence(self.occurrence),
             EditorControl::EndOccurrence => {
                 self.end_occurrence = next_occurrence(self.end_occurrence)
@@ -504,12 +449,6 @@ impl Editor {
             title: self.text(0),
             description: self.text(1),
             timing,
-            notice_lead_seconds: if self.notifications {
-                Some(parse_duration(&self.text(6))?)
-            } else {
-                None
-            },
-            mod_editable: self.delegated,
         };
         draft.validate()?;
         Ok(draft)
@@ -585,7 +524,6 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
             return match e.focus {
                 EditorControl::Save => Save,
                 EditorControl::Cancel => Cancel,
-                EditorControl::Import => EditorCommand::Import,
                 control if control.field().is_none() => {
                     e.toggle(control);
                     None
@@ -600,7 +538,6 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
             return match e.focus {
                 EditorControl::Save => Save,
                 EditorControl::Cancel => Cancel,
-                EditorControl::Import => EditorCommand::Import,
                 control => {
                     e.toggle(control);
                     None
@@ -724,26 +661,27 @@ fn record(e: &Editor, area: Rect, action: TargetAction) {
 }
 
 fn value_text(e: &Editor, control: EditorControl) -> String {
-    let flag = match control {
-        EditorControl::AllDay => Some(e.all_day),
-        EditorControl::Notifications => Some(e.notifications),
-        EditorControl::Delegation => Some(e.delegated),
-        _ => None,
-    };
-    if let Some(flag) = flag {
-        return if flag { "[x]" } else { "[ ]" }.into();
+    match control {
+        EditorControl::AllDay => if e.all_day { "[x]" } else { "[ ]" }.into(),
+        EditorControl::Target => match e.source {
+            CalendarSource::Board => "the board · everyone sees it, anyone can say I'm in".into(),
+            CalendarSource::Personal => "just me · private, nobody else ever sees it".into(),
+        },
+        EditorControl::StartOccurrence | EditorControl::EndOccurrence => {
+            let occurrence = if control == EditorControl::StartOccurrence {
+                e.occurrence
+            } else {
+                e.end_occurrence
+            };
+            match occurrence {
+                None => "Choose earlier or later",
+                Some(Occurrence::Earlier) => "Earlier occurrence",
+                Some(Occurrence::Later) => "Later occurrence",
+            }
+            .into()
+        }
+        _ => String::new(),
     }
-    let occurrence = if control == EditorControl::StartOccurrence {
-        e.occurrence
-    } else {
-        e.end_occurrence
-    };
-    match occurrence {
-        None => "Choose earlier or later",
-        Some(Occurrence::Earlier) => "Earlier occurrence",
-        Some(Occurrence::Later) => "Later occurrence",
-    }
-    .into()
 }
 
 fn draw_field(
@@ -812,7 +750,6 @@ fn draw_command(
     let action = match command {
         EditorCommand::Save => Action::Save,
         EditorCommand::Cancel => Action::Cancel,
-        EditorCommand::Import => Action::Import,
         EditorCommand::Discard => Action::Discard,
         EditorCommand::Keep => Action::Keep,
         EditorCommand::Reload => Action::Reload,
@@ -870,12 +807,7 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
     let mut row_offset = 0;
     let rows: Vec<_> = controls
         .into_iter()
-        .filter(|c| {
-            !matches!(
-                c,
-                EditorControl::Save | EditorControl::Cancel | EditorControl::Import
-            )
-        })
+        .filter(|c| !matches!(c, EditorControl::Save | EditorControl::Cancel))
         .map(|control| {
             let height = control.value_rows(viewport.height as usize) + 1;
             let row = (control, row_offset, height);
@@ -990,10 +922,7 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
             record(e, area, TargetAction::ScrollTo(target));
         }
     }
-    let stacked_buttons = e.access.edit
-        && inner.width < Line::from(" Save  Cancel  Import iCal ").width() as u16
-        && footer_height >= 2;
-    if footer_height >= 3 && !stacked_buttons {
+    if footer_height >= 3 {
         ui::row(
             frame,
             Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
@@ -1001,13 +930,8 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
             ui::dim(),
         );
     }
-    if footer_height >= 2 && (!stacked_buttons || footer_height >= 3) {
-        let area = Rect::new(
-            inner.x,
-            inner.bottom() - if stacked_buttons { 3 } else { 2 },
-            inner.width,
-            1,
-        );
+    if footer_height >= 2 {
+        let area = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
         if let Some(error) = &e.error {
             ui::row(frame, area, error, ui::base().fg(theme::ERROR()));
             if e.existing.is_some() {
@@ -1016,10 +940,11 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
             }
         } else {
             let hint = match e.focus {
+                EditorControl::Title => "Try: movie night saturday 9pm · the date and time fill in",
+                EditorControl::Target => "Space switches the board and just me",
                 EditorControl::StartDate | EditorControl::EndDate => {
                     "Dates: Oct 2 or +2w · offsets from today"
                 }
-                EditorControl::LeadTime => "Lead: 1 day, 24h or 1h 30m",
                 EditorControl::StartOccurrence | EditorControl::EndOccurrence => {
                     "DST clock change: Space chooses occurrence"
                 }
@@ -1029,7 +954,7 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
         }
     }
     let mut x = inner.x;
-    let save_y = inner.bottom() - if stacked_buttons { 2 } else { 1 };
+    let save_y = inner.bottom() - 1;
     draw_command(
         frame,
         s,
@@ -1052,24 +977,4 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
         EditorCommand::Cancel,
         e.focus == EditorControl::Cancel,
     );
-    if e.access.edit {
-        if stacked_buttons {
-            x = inner.x;
-        }
-        draw_command(
-            frame,
-            s,
-            e,
-            &mut x,
-            inner.bottom() - 1,
-            inner.right(),
-            "Import iCal",
-            EditorCommand::Import,
-            e.focus == EditorControl::Import,
-        );
-    }
 }
-
-#[cfg(test)]
-#[path = "editor_test.rs"]
-mod tests;

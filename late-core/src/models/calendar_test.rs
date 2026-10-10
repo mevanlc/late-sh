@@ -1,6 +1,8 @@
 use super::calendar::*;
+use super::calendar_ban::CalendarBan;
 use crate::test_utils::{create_test_user, test_db};
-use chrono::{Duration, NaiveDate, TimeZone, Utc};
+use chrono::{Duration, NaiveDate, Utc};
+
 fn draft() -> EventDraft {
     EventDraft {
         title: "Calendar test".into(),
@@ -9,10 +11,27 @@ fn draft() -> EventDraft {
             start: "2028-02-29".parse().unwrap(),
             end_exclusive: "2028-03-02".parse().unwrap(),
         },
-        notice_lead_seconds: None,
-        mod_editable: false,
     }
 }
+
+fn timed(from_now: Duration) -> EventDraft {
+    EventDraft {
+        title: "Movie night".into(),
+        description: String::new(),
+        timing: EventTiming::Timed {
+            start: Utc::now() + from_now,
+            end: Some(Utc::now() + from_now + Duration::hours(2)),
+        },
+    }
+}
+
+fn refusal(error: CalendarError) -> CalendarRefusal {
+    match error {
+        CalendarError::Refused(refusal) => refusal,
+        CalendarError::Failed(error) => panic!("expected a refusal, got {error:?}"),
+    }
+}
+
 #[test]
 fn calendar_dst_and_inclusive_dates() {
     let tz = chrono_tz::America::New_York;
@@ -36,380 +55,340 @@ fn calendar_dst_and_inclusive_dates() {
     };
     assert!(d.validate().is_err());
 }
+
+/// The three rules of the board: the poster edits and deletes their own
+/// post, staff delete any post, a ban stops new posts and nothing else.
 #[tokio::test]
-async fn calendar_permissions_sharing_revisions_and_role_changes() {
+async fn board_posts_follow_the_three_rules() {
     let db = test_db().await;
     let c = db.db.get().await.unwrap();
     let user = create_test_user(&db.db, "cal_user").await;
+    let other = create_test_user(&db.db, "cal_other").await;
     let moderator = create_test_user(&db.db, "cal_mod").await;
-    let admin = create_test_user(&db.db, "cal_admin").await;
     c.execute(
         "UPDATE users SET is_moderator=true WHERE id=$1",
         &[&moderator.id],
     )
     .await
     .unwrap();
+    let store = CalendarStore::new(db.db.clone());
+
+    let saved = store
+        .save(user.id, CalendarSource::Board, None, &draft())
+        .await
+        .unwrap();
+    assert!(saved.created);
+    let post = saved.event;
+    assert_eq!(post.creator_name, "cal_user");
+    assert!(post.is_board());
+
+    // Another user reads it, may not edit it, may not delete it.
+    let seen = store.event(other.id, post.id).await.unwrap();
+    assert_eq!(seen.id, post.id);
+    let access = event_access(&seen, other.id, false);
+    assert_eq!(
+        access,
+        EventAccess {
+            edit: false,
+            delete: false,
+            rsvp: true
+        }
+    );
+    let mut edit = draft();
+    edit.title = "Hijacked".into();
+    assert_eq!(
+        refusal(
+            store
+                .save(
+                    other.id,
+                    CalendarSource::Board,
+                    Some((post.id, post.revision)),
+                    &edit
+                )
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::ReadOnly
+    );
+    assert_eq!(
+        refusal(
+            store
+                .delete(other.id, post.id, post.revision)
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::ReadOnly
+    );
+
+    // The poster edits it; a stale revision is refused afterwards.
+    let edited = store
+        .save(
+            user.id,
+            CalendarSource::Board,
+            Some((post.id, post.revision)),
+            &edit,
+        )
+        .await
+        .unwrap();
+    assert!(!edited.created);
+    assert_eq!(edited.event.revision, post.revision + 1);
+    assert_eq!(
+        refusal(
+            store
+                .save(
+                    user.id,
+                    CalendarSource::Board,
+                    Some((post.id, post.revision)),
+                    &edit
+                )
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::Revision
+    );
+
+    // A moderator may not edit it, but deletes it, and the delete says so.
+    assert!(
+        !event_access(&edited.event, moderator.id, true).edit,
+        "staff edit nobody's words"
+    );
+    let deleted = store
+        .delete(moderator.id, post.id, edited.event.revision)
+        .await
+        .unwrap();
+    assert!(deleted.by_staff);
+    assert_eq!(
+        refusal(store.event(user.id, post.id).await.unwrap_err()),
+        CalendarRefusal::Gone
+    );
+
+    // A ban stops board posts and leaves personal events alone.
+    CalendarBan::activate(&c, user.id, moderator.id, "spam", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        refusal(
+            store
+                .save(user.id, CalendarSource::Board, None, &draft())
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::Banned
+    );
+    let own = store
+        .save(user.id, CalendarSource::Personal, None, &draft())
+        .await
+        .unwrap();
+    assert_eq!(own.event.owner_id, Some(user.id));
+    CalendarBan::delete_for_user(&c, user.id).await.unwrap();
+    assert!(
+        store
+            .save(user.id, CalendarSource::Board, None, &draft())
+            .await
+            .is_ok()
+    );
+}
+
+#[tokio::test]
+async fn personal_events_are_private_even_from_staff() {
+    let db = test_db().await;
+    let c = db.db.get().await.unwrap();
+    let owner = create_test_user(&db.db, "cal_owner").await;
+    let admin = create_test_user(&db.db, "cal_admin").await;
     c.execute("UPDATE users SET is_admin=true WHERE id=$1", &[&admin.id])
         .await
         .unwrap();
     let store = CalendarStore::new(db.db.clone());
-    assert!(
-        store
-            .save(user.id, CalendarSource::Server, None, &draft())
-            .await
-            .is_err()
-    );
-    let protected = store
-        .save(admin.id, CalendarSource::Server, None, &draft())
-        .await
-        .unwrap();
-    assert!(
-        store
-            .save(
-                moderator.id,
-                CalendarSource::Server,
-                Some((protected.id, 1)),
-                &draft()
-            )
-            .await
-            .is_err()
-    );
-    let mut delegated = draft();
-    delegated.mod_editable = true;
-    let e = store
-        .save(
-            admin.id,
-            CalendarSource::Server,
-            Some((protected.id, 1)),
-            &delegated,
-        )
-        .await
-        .unwrap();
-    delegated.notice_lead_seconds = Some(86400);
-    let e = store
-        .save(
-            moderator.id,
-            CalendarSource::Server,
-            Some((e.id, e.revision)),
-            &delegated,
-        )
-        .await
-        .unwrap();
-    assert!(
-        store
-            .save(admin.id, CalendarSource::Server, Some((e.id, 1)), &draft())
-            .await
-            .is_err()
-    );
-    store.delete(moderator.id, e.id, e.revision).await.unwrap();
-    let e = store
-        .save(moderator.id, CalendarSource::Server, None, &draft())
-        .await
-        .unwrap();
-    let mut notifications = draft();
-    notifications.notice_lead_seconds = Some(0);
-    assert!(
-        store
-            .save(
-                moderator.id,
-                CalendarSource::Server,
-                Some((e.id, 1)),
-                &notifications
-            )
-            .await
-            .is_err()
-    );
-    c.execute(
-        "UPDATE users SET is_admin=true WHERE id=$1",
-        &[&moderator.id],
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        store.event(user.id, e.id).await.unwrap().creation_tier,
-        CreationTier::Moderator
-    );
-    c.execute(
-        "UPDATE users SET is_admin=false,is_moderator=false WHERE id=$1",
-        &[&moderator.id],
-    )
-    .await
-    .unwrap();
-    assert!(store.delete(moderator.id, e.id, 1).await.is_err());
-    let personal = store
-        .save(
-            user.id,
-            CalendarSource::Personal(user.id),
-            None,
-            &notifications,
-        )
-        .await
-        .unwrap();
-    assert!(store.event(admin.id, personal.id).await.is_err());
-    let p = store
-        .save_preferences(
-            user.id,
-            &CalendarPreferences {
-                public: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let shared = store.event(admin.id, personal.id).await.unwrap();
-    assert!(shared.notice_lead_seconds.is_none());
-    assert!(
-        store
-            .save(
-                admin.id,
-                CalendarSource::Personal(user.id),
-                Some((shared.id, 1)),
-                &draft()
-            )
-            .await
-            .is_err()
-    );
-    assert!(store.delete(admin.id, personal.id, 1).await.is_err());
-    store
-        .save_preferences(
-            user.id,
-            &CalendarPreferences {
-                public: false,
-                ..p.clone()
-            },
-        )
-        .await
-        .unwrap();
-    assert!(store.event(admin.id, personal.id).await.is_err());
-    assert!(store.save_preferences(user.id, &p).await.is_err());
-    let retained_server = store
-        .save(admin.id, CalendarSource::Server, None, &draft())
-        .await
-        .unwrap();
-    c.execute("DELETE FROM users WHERE id=$1", &[&admin.id])
-        .await
-        .unwrap();
-    let retained = store.event(user.id, retained_server.id).await.unwrap();
-    assert_eq!(retained.creator_id, admin.id);
-    assert_eq!(retained.creation_tier, CreationTier::Admin);
-}
-#[tokio::test]
-async fn calendar_notification_windows_and_ranges() {
-    let db = test_db().await;
-    let c = db.db.get().await.unwrap();
-    let user = create_test_user(&db.db, "cal_windows").await;
-    c.execute("UPDATE users SET settings=settings || '{\"timezone\":\"America/New_York\"}'::jsonb WHERE id=$1",&[&user.id]).await.unwrap();
-    let store = CalendarStore::new(db.db.clone());
-    let mut d = draft();
-    d.notice_lead_seconds = Some(86400);
-    let e = store
-        .save(user.id, CalendarSource::Personal(user.id), None, &d)
-        .await
-        .unwrap();
-    assert_eq!(e.creator_timezone, "America/New_York");
-    assert!(!e.upcoming(e.notice_start - Duration::seconds(1)));
-    assert!(e.upcoming(e.notice_start));
-    assert!(!e.upcoming(e.notice_end));
-    let a = store
-        .visible(
-            user.id,
-            CalendarSource::Personal(user.id),
-            false,
-            "2028-03-01".parse().unwrap(),
-            "2028-04-01".parse().unwrap(),
-            chrono_tz::Asia::Tokyo,
-        )
-        .await
-        .unwrap();
-    assert_eq!(a.len(), 1);
-    assert!(
-        store
-            .upcoming_personal(user.id, e.notice_start)
-            .await
-            .unwrap()
-            .iter()
-            .any(|x| x.id == e.id)
-    );
-    let start = Utc.with_ymd_and_hms(2026, 10, 2, 23, 30, 0).unwrap();
-    d.timing = EventTiming::Timed { start, end: None };
-    let e = store
-        .save(user.id, CalendarSource::Personal(user.id), None, &d)
-        .await
-        .unwrap();
-    assert_eq!(e.notice_end, start + Duration::hours(1));
-    d.title = "Moved".into();
-    d.timing = EventTiming::Timed {
-        start: start + Duration::days(3),
-        end: None,
-    };
-    let e = store
-        .save(
-            user.id,
-            CalendarSource::Personal(user.id),
-            Some((e.id, e.revision)),
-            &d,
-        )
-        .await
-        .unwrap();
-    assert!(!e.upcoming(start));
-    store.delete(user.id, e.id, e.revision).await.unwrap();
-    assert!(store.event(user.id, e.id).await.is_err());
-}
-
-#[tokio::test]
-async fn calendar_concurrent_writers_preserve_one_revision_and_stale_delete() {
-    let db = test_db().await;
-    let user = create_test_user(&db.db, "calendar_race").await;
-    let store = CalendarStore::new(db.db.clone());
-    let source = CalendarSource::Personal(user.id);
-    let original = store.save(user.id, source, None, &draft()).await.unwrap();
-    let mut a = draft();
-    a.title = "First writer".into();
-    let mut b = draft();
-    b.title = "Second writer".into();
-    let revision = Some((original.id, original.revision));
-    let (a, b) = tokio::join!(
-        store.save(user.id, source, revision, &a),
-        store.save(user.id, source, revision, &b)
-    );
-    assert_ne!(a.is_ok(), b.is_ok());
-    let latest = store.event(user.id, original.id).await.unwrap();
-    assert_eq!(latest.revision, 2);
-    assert!(
-        store
-            .delete(user.id, latest.id, original.revision)
-            .await
-            .is_err()
-    );
-    assert_eq!(store.event(user.id, latest.id).await.unwrap(), latest);
-    let initial = CalendarPreferences::default();
-    let (a, b) = tokio::join!(
-        store.save_preferences(user.id, &initial),
-        store.save_preferences(user.id, &initial)
-    );
-    assert_ne!(a.is_ok(), b.is_ok());
-    assert_eq!(store.preferences(user.id).await.unwrap().revision, 1);
-}
-
-#[tokio::test]
-async fn calendar_overlay_scope_and_notice_expiry_are_independent_of_sharing() {
-    let db = test_db().await;
-    let owner = create_test_user(&db.db, "calendar_owner").await;
-    let viewer = create_test_user(&db.db, "calendar_viewer").await;
-    db.db
-        .get()
+    let own = store
+        .save(owner.id, CalendarSource::Personal, None, &draft())
         .await
         .unwrap()
-        .execute("UPDATE users SET is_admin=true WHERE id=$1", &[&viewer.id])
-        .await
-        .unwrap();
+        .event;
+    assert_eq!(
+        refusal(store.event(admin.id, own.id).await.unwrap_err()),
+        CalendarRefusal::Gone
+    );
+    let from: NaiveDate = "2028-02-01".parse().unwrap();
+    let to: NaiveDate = "2028-04-01".parse().unwrap();
+    assert!(
+        store
+            .visible(admin.id, true, from, to, chrono_tz::UTC)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        refusal(
+            store
+                .delete(admin.id, own.id, own.revision)
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::ReadOnly
+    );
+    assert_eq!(
+        refusal(store.set_rsvp(admin.id, own.id, true).await.unwrap_err()),
+        CalendarRefusal::NoRsvp
+    );
+    // The owner sees it with the board hidden and with it shown.
+    for board in [false, true] {
+        let mine = store
+            .visible(owner.id, board, from, to, chrono_tz::UTC)
+            .await
+            .unwrap();
+        assert_eq!(mine.iter().map(|e| e.id).collect::<Vec<_>>(), vec![own.id]);
+    }
+}
+
+#[tokio::test]
+async fn the_daily_cap_counts_board_posts_only() {
+    let db = test_db().await;
+    let user = create_test_user(&db.db, "cal_poster").await;
     let store = CalendarStore::new(db.db.clone());
-    let server = store
-        .save(viewer.id, CalendarSource::Server, None, &draft())
-        .await
-        .unwrap();
-    let mut d = draft();
-    d.notice_lead_seconds = Some(0);
-    let personal = store
-        .save(owner.id, CalendarSource::Personal(owner.id), None, &d)
-        .await
-        .unwrap();
-    let from = "2028-02-01".parse().unwrap();
-    let to = "2028-03-01".parse().unwrap();
+    for _ in 0..BOARD_POSTS_PER_DAY {
+        store
+            .save(user.id, CalendarSource::Board, None, &draft())
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        refusal(
+            store
+                .save(user.id, CalendarSource::Board, None, &draft())
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::DailyCap
+    );
+    // Personal events are not posts, and an edit is not a post.
     assert!(
         store
-            .visible(
-                viewer.id,
-                CalendarSource::Personal(owner.id),
-                true,
-                from,
-                to,
-                chrono_tz::UTC
+            .save(user.id, CalendarSource::Personal, None, &draft())
+            .await
+            .is_ok()
+    );
+    let from: NaiveDate = "2028-02-01".parse().unwrap();
+    let to: NaiveDate = "2028-04-01".parse().unwrap();
+    let first = store
+        .visible(user.id, true, from, to, chrono_tz::UTC)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|e| e.is_board())
+        .unwrap();
+    assert!(
+        store
+            .save(
+                user.id,
+                CalendarSource::Board,
+                Some((first.id, first.revision)),
+                &draft()
             )
             .await
-            .is_err()
+            .is_ok()
     );
-    store
-        .save_preferences(
-            owner.id,
-            &CalendarPreferences {
-                public: true,
-                ..Default::default()
-            },
+}
+
+#[tokio::test]
+async fn rsvps_count_and_the_start_is_claimed_once() {
+    let db = test_db().await;
+    let poster = create_test_user(&db.db, "cal_host").await;
+    let guest = create_test_user(&db.db, "cal_guest").await;
+    let store = CalendarStore::new(db.db.clone());
+    let soon = store
+        .save(
+            poster.id,
+            CalendarSource::Board,
+            None,
+            &timed(Duration::minutes(30)),
         )
         .await
-        .unwrap();
-    let visible = store
-        .visible(
-            viewer.id,
-            CalendarSource::Personal(owner.id),
-            true,
-            from,
-            to,
-            chrono_tz::UTC,
+        .unwrap()
+        .event;
+    let on = store
+        .save(
+            poster.id,
+            CalendarSource::Board,
+            None,
+            &timed(-Duration::minutes(5)),
         )
         .await
-        .unwrap();
-    assert_eq!(visible.len(), 2);
-    assert!(
-        visible
-            .iter()
-            .any(|e| e.id == server.id && !event_access(e, owner.id, CreationTier::User).edit)
-    );
-    assert!(
-        visible
-            .iter()
-            .any(|e| e.id == personal.id && e.notice_lead_seconds.is_none())
-    );
+        .unwrap()
+        .event;
+    let over = store
+        .save(
+            poster.id,
+            CalendarSource::Board,
+            None,
+            &timed(-Duration::hours(5)),
+        )
+        .await
+        .unwrap()
+        .event;
+    let far = store
+        .save(
+            poster.id,
+            CalendarSource::Board,
+            None,
+            &timed(Duration::days(3)),
+        )
+        .await
+        .unwrap()
+        .event;
+
+    let counted = store.set_rsvp(guest.id, soon.id, true).await.unwrap();
+    assert_eq!(counted.going, 1);
+    // Saying it twice is one person.
     assert_eq!(
-        store
-            .visible(
-                viewer.id,
-                CalendarSource::Personal(owner.id),
-                false,
-                from,
-                to,
-                chrono_tz::UTC
-            )
-            .await
-            .unwrap()
-            .len(),
+        store.set_rsvp(guest.id, soon.id, true).await.unwrap().going,
         1
     );
-    assert!(
-        store
-            .upcoming_personal(viewer.id, personal.notice_start)
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert_eq!(store.rsvps(guest.id).await.unwrap(), vec![soon.id]);
     assert_eq!(
         store
-            .upcoming_personal(owner.id, personal.notice_start)
+            .set_rsvp(guest.id, soon.id, false)
             .await
             .unwrap()
-            .len(),
-        1
+            .going,
+        0
     );
-    assert!(
-        store
-            .upcoming_personal(owner.id, personal.notice_end)
-            .await
-            .unwrap()
-            .is_empty()
-    );
-    assert!(
-        store
-            .visible(
-                owner.id,
-                CalendarSource::Personal(owner.id),
-                false,
-                "2028-03-02".parse().unwrap(),
-                "2028-04-01".parse().unwrap(),
-                chrono_tz::UTC
-            )
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(store.rsvps(guest.id).await.unwrap().is_empty());
+    store.set_rsvp(poster.id, soon.id, true).await.unwrap();
+
+    // Upcoming is the horizon: the one three days out is not on it, the one
+    // five hours over is not either, the one on now still is.
+    let now = Utc::now();
+    let upcoming: Vec<_> = store
+        .upcoming_board(now)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    assert_eq!(upcoming, vec![on.id, soon.id]);
+    assert!(!far.upcoming(now));
+    assert!(!over.upcoming(now));
+    assert!(soon.on_strip(now) && on.on_strip(now) && !far.on_strip(now));
+    assert!(on.started(now) && !soon.started(now));
+
+    // The sweeper claims what started and is not over, once.
+    let claimed: Vec<_> = store
+        .claim_started(now)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.id, e.going))
+        .collect();
+    assert_eq!(claimed, vec![(on.id, 0)]);
+    assert!(store.claim_started(now).await.unwrap().is_empty());
+    // Half an hour on, the next one starts and is claimed with its count.
+    let later = now + Duration::minutes(31);
+    let claimed: Vec<_> = store
+        .claim_started(later)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.id, e.going))
+        .collect();
+    assert_eq!(claimed, vec![(soon.id, 1)]);
 }

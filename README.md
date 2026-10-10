@@ -22,7 +22,7 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 
 - SSH TUI with dashboard, chat, profile, news, and arcade screens
 - Mouse controls on Profiles (screen 5): click people, jobs, links, and form controls; wheel scrolls the hovered pane
-- Calendars on `7`: server, personal and public calendars, five views, mouse selection and context menus, flexible date entry, timezone-aware editing, iCalendar paste/URL import and clipboard export, and upcoming panels on Home and Calendars
+- The events board on `7`: anyone posts an event, everyone sees it, `i` says I'm in; your own events sit beside it, private. A post is a line in #lounge, the hour before it starts it heads the Home `now` strip and the Live panel, the start is a headline
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire
@@ -201,16 +201,14 @@ replaces its mark and tier.
 
 ## Verification
 
-For calendar development, run `make seed-calendar` after starting the current
-stack. Fixture accounts include ordinary users, a moderator, an admin, and
-public/private calendars; SSH keys live in `tmp/calendar-seed-keys/`. Press `7`,
-then `c` to choose a calendar, `v` to choose a view, or `s` for Calendar Settings.
-Choose **Import iCal** in New/Edit event to fill the form from pasted iCalendar
-content or a URL; `y` copies the selected event as iCalendar. See
-[CALENDAR.md](CALENDAR.md) for the review flow.
-Click once to select a day/event, double-click to open it, or right-click for
-available actions. Timed views also support selecting an empty slot to create an event.
-See [CALENDAR.md](CALENDAR.md) for controls, permissions, timing and the fixture.
+For events-board development, run `make seed-calendar` after starting the
+current stack. Fixture accounts are two ordinary users, a moderator and an
+admin, with a board of posts between them (one on now, one half an hour out),
+a few "I'm in"s and a private event; SSH keys live in
+`tmp/calendar-seed-keys/`. Press `1` to see the `now` strip and the Live
+panel, `7` for the board: `n` posts, `i` says I'm in, right-click offers what
+you may do. See [CALENDAR.md](CALENDAR.md) for the rules, the two #lounge
+lines, timing, telemetry and the fixture.
 
 Run the local gate before opening a PR:
 

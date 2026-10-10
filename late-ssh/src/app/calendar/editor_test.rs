@@ -1,22 +1,25 @@
-use super::*;
-use crate::app::calendar::svc::CalendarService;
-use late_core::db::{Db, DbConfig};
-use ratatui::{Terminal, backend::TestBackend};
+use super::{
+    editor::{
+        Editor, EditorCommand, EditorControl, Target, TargetAction, click, draw, field, handle_key,
+    },
+    state::CalendarState,
+    svc::CalendarService,
+};
+use crate::app::input::ParsedInput;
+use chrono::{NaiveDate, TimeZone, Utc};
+use late_core::{
+    db::{Db, DbConfig},
+    models::calendar::{CalendarEvent, CalendarSource, EventTiming},
+};
+use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use uuid::Uuid;
 
 fn today() -> NaiveDate {
     "2026-10-03".parse().unwrap()
 }
 
 fn editor() -> Editor {
-    Editor::new(
-        CalendarSource::Personal(Uuid::nil()),
-        today(),
-        EventAccess {
-            edit: true,
-            notifications: true,
-            delegate: false,
-        },
-    )
+    Editor::new(CalendarSource::Board, today())
 }
 
 fn state() -> CalendarState {
@@ -24,6 +27,27 @@ fn state() -> CalendarState {
         CalendarService::new(Db::new(&DbConfig::default()).unwrap()),
         Uuid::nil(),
     )
+}
+
+fn board_event() -> CalendarEvent {
+    let start = Utc.with_ymd_and_hms(2026, 10, 3, 21, 0, 0).unwrap();
+    CalendarEvent {
+        id: Uuid::from_u128(7),
+        owner_id: None,
+        creator_id: Uuid::nil(),
+        creator_name: "mat".into(),
+        title: "Movie night".into(),
+        description: String::new(),
+        timing: EventTiming::Timed {
+            start,
+            end: Some(start + chrono::Duration::hours(2)),
+        },
+        creator_timezone: "UTC".into(),
+        starts_at: start,
+        ends_at: start + chrono::Duration::hours(2),
+        going: 3,
+        revision: 2,
+    }
 }
 
 fn draw_editor(e: &Editor, s: &CalendarState, width: u16, height: u16) {
@@ -43,92 +67,108 @@ fn value_target(e: &Editor, control: EditorControl) -> Target {
         .unwrap()
 }
 
+/// A new draft offers where it goes; an opened event does not. The time
+/// fields appear once all-day is off, and a draft typed into the title
+/// fills them in.
 #[test]
-fn calendar_editor_focus_order_tracks_visible_controls_and_retains_time_drafts() {
+fn a_new_draft_picks_its_target_and_infers_its_timing_from_the_title() {
     use EditorControl::{
-        AllDay, Cancel, Description, EndDate, Import, LeadTime, Notifications, Save, StartDate,
-        StartTime, Title,
+        AllDay, Cancel, Description, EndDate, EndTime, Save, StartDate, StartTime, Target, Title,
     };
     let mut e = editor();
+    assert_eq!(e.source, CalendarSource::Board, "the board is the default");
     assert_eq!(
         e.visible_controls(today(), chrono_tz::UTC),
         vec![
             Title,
             Description,
+            Target,
             AllDay,
             StartDate,
             EndDate,
-            Notifications,
             Save,
-            Cancel,
-            Import
+            Cancel
         ]
     );
-    e.focus(AllDay, today(), chrono_tz::UTC);
-    handle_key(&mut e, &ParsedInput::Char(' '), today(), chrono_tz::UTC);
-    e.fields[3] = field("14:30");
-    e.fields[5] = field("15:45");
-    assert!(
-        e.visible_controls(today(), chrono_tz::UTC)
-            .contains(&StartTime)
-    );
+    e.focus(Target, today(), chrono_tz::UTC);
     handle_key(&mut e, &ParsedInput::Byte(b' '), today(), chrono_tz::UTC);
-    assert!(
-        !e.visible_controls(today(), chrono_tz::UTC)
-            .contains(&StartTime)
-    );
-    assert_eq!(e.text(3), "14:30");
-    assert_eq!(e.text(5), "15:45");
-    e.focus(Notifications, today(), chrono_tz::UTC);
-    handle_key(&mut e, &ParsedInput::Byte(b' '), today(), chrono_tz::UTC);
-    handle_key(&mut e, &ParsedInput::Byte(b'\t'), today(), chrono_tz::UTC);
-    assert_eq!(e.focus, LeadTime);
-    e.focus(Notifications, today(), chrono_tz::UTC);
-    handle_key(&mut e, &ParsedInput::Byte(b' '), today(), chrono_tz::UTC);
-    handle_key(&mut e, &ParsedInput::Byte(b'\t'), today(), chrono_tz::UTC);
-    assert_eq!(e.focus, Save);
-    e.focus = Title;
-    handle_key(&mut e, &ParsedInput::BackTab, today(), chrono_tz::UTC);
-    assert_eq!(e.focus, Import);
+    assert_eq!(e.source, CalendarSource::Personal);
+    assert!(e.dirty(), "flipping the target is a change worth keeping");
+
+    e.fields[0].insert_str("Movie night tomorrow at 9pm");
+    e.blur_title(today(), chrono_tz::UTC);
+    assert_eq!(e.text(0), "Movie night");
+    assert_eq!(e.text(2), "2026-10-04");
+    assert_eq!(e.text(3), "21:00");
+    assert!(!e.all_day);
     assert_eq!(
-        handle_key(&mut e, &ParsedInput::Byte(b'\r'), today(), chrono_tz::UTC),
-        EditorCommand::Import
+        e.visible_controls(today(), chrono_tz::UTC),
+        vec![
+            Title,
+            Description,
+            Target,
+            AllDay,
+            StartDate,
+            StartTime,
+            EndDate,
+            EndTime,
+            Save,
+            Cancel
+        ]
     );
+    let draft = e.draft(today(), chrono_tz::UTC).unwrap();
+    assert!(matches!(
+        draft.timing,
+        EventTiming::Timed { start, end: None } if start == Utc.with_ymd_and_hms(2026, 10, 4, 21, 0, 0).unwrap()
+    ));
+
+    let opened = Editor::from_event(&board_event(), Uuid::nil(), false, chrono_tz::UTC);
+    assert!(
+        !opened
+            .visible_controls(today(), chrono_tz::UTC)
+            .contains(&Target),
+        "where a saved event lives is fixed"
+    );
+    assert_eq!(opened.existing, Some((Uuid::from_u128(7), 2)));
+    assert_eq!(opened.text(0), "Movie night");
+    assert_eq!(opened.text(3), "21:00");
+    assert!(!opened.dirty());
 }
 
 #[test]
-fn calendar_editor_dst_choices_only_appear_for_ambiguous_local_times() {
-    let mut e = editor();
+fn dst_choices_only_appear_for_ambiguous_local_times() {
     let tz = chrono_tz::America::New_York;
+    let mut e = editor();
+    e.fields[0] = field("Fall back");
     e.all_day = false;
     e.fields[2] = field("2026-11-01");
     e.fields[3] = field("01:30");
-    e.fields[5] = field("01:45");
-    let controls = e.visible_controls(today(), tz);
-    assert!(controls.contains(&EditorControl::StartOccurrence));
-    assert!(controls.contains(&EditorControl::EndOccurrence));
-    e.fields[5] = field("02:30");
     assert!(
-        !e.visible_controls(today(), tz)
-            .contains(&EditorControl::EndOccurrence)
+        e.visible_controls(today(), tz)
+            .contains(&EditorControl::StartOccurrence)
     );
-    e.fields[2] = field("2026-03-08");
-    e.fields[3] = field("02:30");
+    assert!(
+        e.draft(today(), tz).is_err(),
+        "a repeated hour needs a choice"
+    );
+    e.focus(EditorControl::StartOccurrence, today(), tz);
+    handle_key(&mut e, &ParsedInput::Byte(b' '), today(), tz);
+    assert!(e.draft(today(), tz).is_ok());
+    e.fields[3] = field("03:30");
     assert!(
         !e.visible_controls(today(), tz)
             .contains(&EditorControl::StartOccurrence)
     );
-    e.all_day = true;
-    assert!(
-        !e.visible_controls(today(), tz)
-            .contains(&EditorControl::StartTime)
-    );
 }
 
 #[test]
-fn calendar_editor_discard_confirmation_defaults_to_keep_and_escape_returns_to_editing() {
+fn discard_confirmation_defaults_to_keep_and_escape_returns_to_editing() {
     let mut e = editor();
-    e.fields[0].insert_str("Unfinished appointment");
+    e.fields[0].insert_str("Draft");
+    assert_eq!(
+        handle_key(&mut e, &ParsedInput::Byte(0x1b), today(), chrono_tz::UTC),
+        EditorCommand::Cancel
+    );
     e.discard_prompt = true;
     assert_eq!(
         handle_key(&mut e, &ParsedInput::Byte(b'\r'), today(), chrono_tz::UTC),
@@ -143,37 +183,13 @@ fn calendar_editor_discard_confirmation_defaults_to_keep_and_escape_returns_to_e
         handle_key(&mut e, &ParsedInput::Byte(b'\r'), today(), chrono_tz::UTC),
         EditorCommand::Discard
     );
-    assert_eq!(e.text(0), "Unfinished appointment");
-    assert_eq!(
-        handle_key(&mut e, &ParsedInput::Char('d'), today(), chrono_tz::UTC),
-        EditorCommand::Discard
-    );
-}
-
-#[test]
-fn calendar_editor_mouse_columns_follow_unicode_graphemes() {
-    let text = "a界e\u{301}🙂z";
-    for (cell, expected) in [
-        (0, 0),
-        (1, 1),
-        (2, 1),
-        (3, 2),
-        (4, 4),
-        (5, 4),
-        (6, 5),
-        (20, 6),
-    ] {
-        assert_eq!(column_at_cell(text, cell), expected, "cell {cell}");
-    }
 }
 
 #[tokio::test]
-async fn calendar_editor_every_focused_control_is_visible_after_compact_resize() {
+async fn every_focused_control_is_visible_after_compact_resize() {
     let s = state();
     let mut e = editor();
     e.all_day = false;
-    e.notifications = true;
-    e.access.delegate = true;
     for (width, height) in [(120, 40), (80, 24), (48, 16), (48, 14), (22, 9)] {
         for control in e.visible_controls(today(), chrono_tz::UTC) {
             e.focus(control, today(), chrono_tz::UTC);
@@ -185,8 +201,6 @@ async fn calendar_editor_every_focused_control_is_visible_after_compact_resize()
                     TargetAction::Command(EditorCommand::Save) => control == EditorControl::Save,
                     TargetAction::Command(EditorCommand::Cancel) =>
                         control == EditorControl::Cancel,
-                    TargetAction::Command(EditorCommand::Import) =>
-                        control == EditorControl::Import,
                     _ => false,
                 }),
                 "{control:?} missing at {width}x{height}"
@@ -197,17 +211,12 @@ async fn calendar_editor_every_focused_control_is_visible_after_compact_resize()
                     target.area
                 );
             }
-            if control.field().is_some() {
-                drop(geometry);
-                let target = value_target(&e, control);
-                assert!(target.area.height > 0);
-            }
         }
     }
 }
 
 #[tokio::test]
-async fn calendar_editor_click_places_caret_and_keeps_unicode_intact() {
+async fn click_places_caret_and_keeps_unicode_intact() {
     let s = state();
     let mut e = editor();
     e.fields[0] = field("abcdef");
@@ -234,86 +243,4 @@ async fn calendar_editor_click_places_caret_and_keeps_unicode_intact() {
     );
     handle_key(&mut e, &ParsedInput::Char('X'), today(), chrono_tz::UTC);
     assert_eq!(e.text(0), "aX界e\u{301}🙂z");
-}
-
-#[tokio::test]
-async fn calendar_editor_mouse_click_accounts_for_horizontal_and_description_viewports() {
-    let s = state();
-    let mut e = editor();
-    e.fields[0] = field("abcdefghijklmnopqrstuvwxyz0123456789");
-    draw_editor(&e, &s, 22, 14);
-    let target = value_target(&e, EditorControl::Title);
-    let TargetAction::Value(_, _, left) = target.action else {
-        panic!()
-    };
-    assert!(left > 0);
-    click(
-        &mut e,
-        target.area.x + 1,
-        target.area.y,
-        today(),
-        chrono_tz::UTC,
-    );
-    assert_eq!(e.fields[0].cursor().1, left + 1);
-    handle_key(&mut e, &ParsedInput::Char('X'), today(), chrono_tz::UTC);
-    assert_eq!(e.text(0).chars().nth(left + 1), Some('X'));
-
-    e.fields[1] = field(
-        "zero\none\ntwo\nthree abcdefghijklmnopqrstuvwxyz\nfour abcdefghijklmnopqrstuvwxyz\nfive abcdefghijklmnopqrstuvwxyz",
-    );
-    e.focus(EditorControl::Description, today(), chrono_tz::UTC);
-    draw_editor(&e, &s, 22, 16);
-    let target = value_target(&e, EditorControl::Description);
-    let TargetAction::Value(_, top, left) = target.action else {
-        panic!()
-    };
-    assert_eq!(top, 3);
-    assert!(left > 0);
-    click(
-        &mut e,
-        target.area.x,
-        target.area.y,
-        today(),
-        chrono_tz::UTC,
-    );
-    assert_eq!(e.fields[1].cursor().0, 3);
-    assert_eq!(e.fields[1].cursor().1, left);
-    handle_key(&mut e, &ParsedInput::Char('X'), today(), chrono_tz::UTC);
-    assert_eq!(e.fields[1].lines()[3].chars().nth(left), Some('X'));
-}
-
-#[tokio::test]
-async fn calendar_editor_wheel_and_scrollbar_reach_hidden_fields_without_moving_focus() {
-    let s = state();
-    let mut e = editor();
-    e.all_day = false;
-    e.notifications = true;
-    draw_editor(&e, &s, 48, 16);
-    let area = e.geometry.borrow().viewport;
-    assert!(scroll(&mut e, area.x + 3, area.y + 2, 3));
-    draw_editor(&e, &s, 48, 16);
-    assert_eq!(e.scroll.get(), 3);
-    assert_eq!(e.focus, EditorControl::Title);
-    for _ in 0..8 {
-        click(
-            &mut e,
-            area.right() - 1,
-            area.bottom() - 1,
-            today(),
-            chrono_tz::UTC,
-        );
-        draw_editor(&e, &s, 48, 16);
-    }
-    assert_eq!(e.scroll.get(), e.geometry.borrow().max_scroll);
-    assert!(
-        e.geometry
-            .borrow()
-            .targets
-            .iter()
-            .any(|t| matches!(t.action, TargetAction::Focus(EditorControl::LeadTime)))
-    );
-    handle_key(&mut e, &ParsedInput::Byte(b'\t'), today(), chrono_tz::UTC);
-    draw_editor(&e, &s, 48, 16);
-    assert_eq!(e.focus, EditorControl::Description);
-    assert!(value_target(&e, EditorControl::Description).area.height > 0);
 }

@@ -507,6 +507,7 @@ impl App {
             self.chat.news.all_articles(),
             &self.chat.live_streams,
             &self.live_games.live_rows(),
+            &self.calendar,
             reading,
             picture_settings,
         );

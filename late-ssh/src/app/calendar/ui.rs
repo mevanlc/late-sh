@@ -1,14 +1,11 @@
 //! Theme resolution and hit geometry happen during this frame, never at load.
 use super::{
-    date_entry,
     navigation::Selection,
     state::{Action, CalendarState, Hit, Modal, Pane, ScrollPane, month_start},
 };
 use crate::app::common::{primitives::hint_line, theme};
-use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, TimeZone, Timelike, Utc};
-use late_core::models::calendar::{
-    CalendarEvent, CalendarSource, CalendarView, EventTiming, event_access,
-};
+use chrono::{DateTime, Datelike, Duration, LocalResult, NaiveDate, TimeZone, Utc};
+use late_core::models::calendar::{CalendarEvent, CalendarView, EventTiming, event_access};
 use ratatui::{
     Frame,
     layout::{Margin, Rect},
@@ -74,8 +71,8 @@ fn patch_line(mut line: Line<'static>, style: Style) -> Line<'static> {
 fn today_background() -> Color {
     theme::blend_toward(theme::BG_CANVAS(), theme::BORDER_ACTIVE(), 0.16)
 }
-/// Tint the day's canvas after its contents are drawn, preserving event cards
-/// and the stronger selection fill. Terminal-owned backgrounds remain untouched.
+/// Tint the day's canvas after its contents are drawn, preserving the
+/// stronger selection fill. Terminal-owned backgrounds remain untouched.
 fn shade_today(frame: &mut Frame, area: Rect, date: NaiveDate, s: &CalendarState) {
     let canvas = theme::BG_CANVAS();
     if date != s.today() || canvas == Color::Reset {
@@ -221,18 +218,6 @@ pub(super) fn button(
     hit(s, rect, action);
     *x += w;
 }
-pub fn source_label(s: &CalendarState) -> String {
-    match s.source {
-        CalendarSource::Server => "Server".into(),
-        CalendarSource::Personal(id) if id == s.viewer => "Personal".into(),
-        CalendarSource::Personal(id) => s
-            .public
-            .iter()
-            .find(|p| p.owner_id == id)
-            .map(|p| format!("@{}", p.username))
-            .unwrap_or_else(|| "Shared calendar".into()),
-    }
-}
 pub fn timing_label(e: &CalendarEvent, tz: chrono_tz::Tz) -> String {
     match e.timing {
         EventTiming::AllDay {
@@ -254,7 +239,7 @@ pub fn timing_label(e: &CalendarEvent, tz: chrono_tz::Tz) -> String {
         ),
     }
 }
-fn local_time_label(instant: DateTime<Utc>, tz: chrono_tz::Tz, date: bool) -> String {
+pub(super) fn local_time_label(instant: DateTime<Utc>, tz: chrono_tz::Tz, date: bool) -> String {
     let local = instant.with_timezone(&tz);
     let repeated = matches!(
         tz.from_local_datetime(&local.naive_local()),
@@ -268,19 +253,19 @@ fn local_time_label(instant: DateTime<Utc>, tz: chrono_tz::Tz, date: bool) -> St
     };
     local.format(format).to_string()
 }
+/// `·6 in` after a board event's title, nothing while nobody said so.
+fn going_span(e: &CalendarEvent) -> Option<Span<'static>> {
+    (e.is_board() && e.going > 0)
+        .then(|| Span::styled(format!(" ·{} in", e.going), base().fg(theme::AMBER_DIM())))
+}
+/// Who the event is from: the poster's name on the board, `you` on a
+/// personal event.
 fn source_span(e: &CalendarEvent) -> Span<'static> {
-    Span::styled(
-        if e.owner_id.is_none() {
-            "[Server]"
-        } else {
-            "[Personal]"
-        },
-        if e.owner_id.is_none() {
-            base().fg(theme::AMBER_DIM())
-        } else {
-            dim()
-        },
-    )
+    if e.is_board() {
+        Span::styled(format!("by {}", e.creator_name), dim())
+    } else {
+        Span::styled("just you", dim())
+    }
 }
 fn timing_line(e: &CalendarEvent, tz: chrono_tz::Tz) -> Line<'static> {
     let mut spans = Vec::new();
@@ -306,29 +291,27 @@ fn timing_line(e: &CalendarEvent, tz: chrono_tz::Tz) -> Line<'static> {
             }
         }
     }
+    spans.push(separator());
+    spans.push(source_span(e));
     Line::from(spans)
 }
+/// One row for an event: the time, the title, the count. A personal event
+/// reads dimmer than a board post, so the two tell apart in one grid.
 fn event_line(e: &CalendarEvent, tz: chrono_tz::Tz) -> Line<'static> {
     let time = match e.timing {
         EventTiming::AllDay { .. } => "all day".into(),
         EventTiming::Timed { start, .. } => local_time_label(start, tz, false),
     };
-    let mut spans = Vec::new();
-    if e.owner_id.is_none() {
-        spans.push(source_span(e));
-        spans.push(Span::raw(" "));
-    }
-    spans.push(Span::styled(time, muted()));
-    spans.push(Span::raw(" "));
-    spans.push(Span::styled(e.title.clone(), bright()));
+    let mut spans = vec![
+        Span::styled(time, muted()),
+        Span::raw(" "),
+        Span::styled(
+            e.title.clone(),
+            if e.is_board() { bright() } else { base() },
+        ),
+    ];
+    spans.extend(going_span(e));
     Line::from(spans)
-}
-fn labeled(label: &str, value: impl Into<String>, style: Style) -> Line<'static> {
-    Line::from(vec![
-        Span::styled(label.to_owned(), dim()),
-        Span::styled(": ", base().fg(theme::TEXT_FAINT())),
-        Span::styled(value.into(), style),
-    ])
 }
 pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
     s.hits.borrow_mut().clear();
@@ -340,23 +323,11 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
     }
     frame.render_widget(Paragraph::new("").style(base()), area);
     let header_height = super::toolbar::draw(frame, area, s);
-    let panel_height = if area.height < 20 || area.width < 50 {
-        1
-    } else {
-        5
-    };
-    let panel = Rect::new(
-        area.x,
-        area.bottom() - panel_height,
-        area.width,
-        panel_height,
-    );
-    draw_upcoming_panel(frame, panel, s);
     let body = Rect::new(
         area.x,
         area.y + header_height,
         area.width,
-        area.height.saturating_sub(header_height + panel_height),
+        area.height.saturating_sub(header_height),
     );
     match s.view {
         CalendarView::Month => {
@@ -375,14 +346,12 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 draw_month(frame, body, s);
             }
         }
-        CalendarView::List => draw_list(frame, body, s, false),
-        _ => draw_hours(frame, body, s),
+        CalendarView::List => draw_list(frame, body, s),
     }
 }
 #[allow(clippy::too_many_arguments)]
 fn grid_rule(
     frame: &mut Frame,
-    s: &CalendarState,
     area: Rect,
     widths: &[u16],
     y: u16,
@@ -396,7 +365,6 @@ fn grid_rule(
         text.push_str(if i == 6 { right } else { middle });
     }
     row(frame, Rect::new(area.x, y, area.width, 1), text, rule());
-    let _ = s;
 }
 fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
     if area.width < 15 || area.height < 9 {
@@ -423,7 +391,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
             );
             x += w;
         }
-        grid_rule(frame, s, area, &widths, area.y + 1, "╭", "┬", "╮");
+        grid_rule(frame, area, &widths, area.y + 1, "╭", "┬", "╮");
         for week in 0..6 {
             let mut x = area.x;
             for (col, w) in widths.iter().enumerate() {
@@ -478,7 +446,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 rule(),
             );
         }
-        grid_rule(frame, s, area, &widths, area.y + 8, "╰", "┴", "╯");
+        grid_rule(frame, area, &widths, area.y + 8, "╰", "┴", "╯");
         return;
     }
     let first = s.range().0;
@@ -503,7 +471,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
         *h += 1;
     }
     let mut y = area.y + 1;
-    grid_rule(frame, s, area, &widths, y, "╭", "┬", "╮");
+    grid_rule(frame, area, &widths, y, "╭", "┬", "╮");
     for (week, height) in heights.iter().enumerate() {
         let mut x = area.x;
         for (col, width) in widths.iter().enumerate() {
@@ -549,13 +517,12 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 };
                 for (n, e) in events.iter().take(previews).enumerate() {
                     let rect = Rect::new(cell.x, cell.y + 1 + n as u16, cell.width, 1);
-                    let mut spans = Vec::new();
-                    if s.source.owner().is_some() && e.owner_id.is_none() {
-                        spans.push(source_span(e));
-                        spans.push(Span::raw(" "));
-                    }
-                    spans.push(Span::styled(e.title.clone(), bright()));
-                    styled_row(frame, rect, Line::from(spans));
+                    let mut spans = vec![Span::styled(
+                        e.title.clone(),
+                        if e.is_board() { bright() } else { base() },
+                    )];
+                    spans.extend(going_span(e));
+                    styled_row(frame, rect, clipped_title(Line::from(spans), rect.width));
                     hit(s, rect, Action::EventAt(e.id, date));
                 }
                 if events.len() > previews && capacity > 0 {
@@ -586,7 +553,6 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
         y += height;
         grid_rule(
             frame,
-            s,
             area,
             &widths,
             y,
@@ -625,9 +591,9 @@ fn draw_agenda(frame: &mut Frame, area: Rect, s: &CalendarState) {
             .saturating_sub(inner.height as usize),
     );
     if events.is_empty() {
-        let mut line = Line::from(vec![Span::styled("No events", dim()), separator()]);
+        let mut line = Line::from(vec![Span::styled("Nothing on", dim()), separator()]);
         line.spans
-            .extend(hint_line(&[("n", "to add")]).spans.into_iter().skip(1));
+            .extend(hint_line(&[("n", "to post one")]).spans.into_iter().skip(1));
         styled_row(frame, inner, line);
         return;
     }
@@ -664,338 +630,14 @@ fn draw_agenda(frame: &mut Frame, area: Rect, s: &CalendarState) {
         );
     }
 }
-/// Greedy interval partitioning: each overlapping segment receives a distinct
-/// lane; intervals meeting exactly at an end boundary may reuse a lane.
-#[derive(Clone, Debug)]
-pub struct Segment {
-    pub event: usize,
-    pub start: u32,
-    pub end: u32,
-    pub lane: usize,
-    pub before: bool,
-    pub after: bool,
-    instant_start: DateTime<Utc>,
-    instant_end: DateTime<Utc>,
-}
-pub fn segments(events: &[CalendarEvent], date: NaiveDate, tz: chrono_tz::Tz) -> Vec<Segment> {
-    let mut segments = Vec::new();
-    for (i, e) in events.iter().enumerate() {
-        if let EventTiming::Timed { start, end } = e.timing {
-            let end = end.unwrap_or(start + Duration::hours(1));
-            let instant_start = start;
-            let instant_end = end;
-            let start = start.with_timezone(&tz);
-            let end = end.with_timezone(&tz);
-            if start.date_naive() > date
-                || end.date_naive() < date
-                || (end.date_naive() == date && end.time() == chrono::NaiveTime::MIN)
-            {
-                continue;
-            }
-            let before = start.date_naive() < date;
-            let after = end.date_naive() > date;
-            let a = if before {
-                0
-            } else {
-                start.hour() * 60 + start.minute()
-            };
-            let b = if after {
-                1440
-            } else {
-                end.hour() * 60 + end.minute()
-            };
-            segments.push(Segment {
-                event: i,
-                start: a,
-                end: b.max(a + 1),
-                lane: 0,
-                before,
-                after,
-                instant_start,
-                instant_end,
-            });
-        }
-    }
-    segments.sort_by_key(|s| (s.start, s.end, s.event));
-    let mut lanes: Vec<Vec<usize>> = Vec::new();
-    for i in 0..segments.len() {
-        let s = &segments[i];
-        // A repeated DST hour can reverse wall-clock endpoints. Both actual
-        // overlaps and collisions on the civil-hour grid need distinct lanes.
-        let lane = lanes
-            .iter()
-            .position(|previous| {
-                previous.iter().all(|&j| {
-                    let p = &segments[j];
-                    p.end.div_ceil(30) <= s.start / 30
-                        && (p.instant_end <= s.instant_start || s.instant_end <= p.instant_start)
-                })
-            })
-            .unwrap_or(lanes.len());
-        if lane == lanes.len() {
-            lanes.push(Vec::new());
-        }
-        lanes[lane].push(i);
-        segments[i].lane = lane;
-    }
-    segments
-}
-fn draw_hours(frame: &mut Frame, area: Rect, s: &CalendarState) {
-    if area.width < 12 || area.height < 5 {
-        styled_row(
-            frame,
-            area,
-            hint_line(&[("Enter:", "agenda"), ("PgUp/PgDn", "scroll hours")]),
-        );
-        return;
-    }
-    let (from, to) = s.range();
-    let n = (to - from).num_days();
-    let timeline_y = area.y + 5;
-    let visible = area.height - 5;
-    s.hour_rows.set(visible as usize);
-    let max_scroll = 48usize.saturating_sub(visible.min(48) as usize);
-    let scroll = s.hour_scroll.min(max_scroll) as u32 * 30;
-    pane(s, area, Pane::Grid);
-    styled_row(
-        frame,
-        Rect::new(area.x, area.y, area.width, 1),
-        hint_line(&[("PgUp/PgDn", "hours"), ("Ctrl+←/→", "columns")]),
-    );
-    for r in 0..visible {
-        let minute = scroll + r as u32 * 30;
-        if minute >= 1440 {
-            break;
-        }
-        row(
-            frame,
-            Rect::new(area.x, timeline_y + r, 5, 1),
-            if minute.is_multiple_of(60) {
-                format!("{:02}:00", minute / 60)
-            } else {
-                "    ·".into()
-            },
-            if minute.is_multiple_of(60) {
-                muted()
-            } else {
-                rule()
-            },
-        );
-    }
-    let viewport = Rect::new(area.x + 6, area.y + 1, area.width - 6, area.height - 1);
-    let mut columns: Vec<_> = (0..n)
-        .map(|day| {
-            let date = from + Duration::days(day);
-            let pieces = segments(&s.events, date, s.tz);
-            let lanes = pieces.iter().map(|p| p.lane + 1).max().unwrap_or(1);
-            (
-                date,
-                pieces,
-                lanes.saturating_mul(12).min(u16::MAX as usize) as u16,
-                lanes,
-            )
-        })
-        .collect();
-    let minimum: usize = columns.iter().map(|(_, _, width, _)| *width as usize).sum();
-    let extra = (viewport.width as usize).saturating_sub(minimum);
-    for (index, (_, _, width, _)) in columns.iter_mut().enumerate() {
-        *width += (extra / n as usize + usize::from(index < extra % n as usize)) as u16;
-    }
-    if s.reveal_selected.replace(false) || s.hours_geometry.get() != viewport {
-        let mut offset = 0;
-        for (date, _, width, _) in &columns {
-            if *date == s.selected {
-                let visible_width = (*width as usize).min(viewport.width as usize);
-                let current = s.day_scroll.get();
-                if offset < current || offset + visible_width > current + viewport.width as usize {
-                    s.day_scroll
-                        .set(if *width as usize >= viewport.width as usize {
-                            offset
-                        } else {
-                            (offset + visible_width).saturating_sub(viewport.width as usize)
-                        });
-                }
-                break;
-            }
-            offset += *width as usize;
-        }
-    }
-    s.hours_geometry.set(viewport);
-    let selected_event = s.selected_event().map(|event| event.id);
-    let total_width: usize = columns.iter().map(|(_, _, width, _)| *width as usize).sum();
-    s.max_days
-        .set(total_width.saturating_sub(viewport.width as usize));
-    if !s.loading && s.reveal_event.replace(false) {
-        let mut offset = 0;
-        for (date, pieces, width, lanes) in &columns {
-            if *date == s.selected
-                && let Some(piece) = pieces
-                    .iter()
-                    .find(|piece| selected_event == Some(s.events[piece.event].id))
-            {
-                let left = offset + piece.lane * *width as usize / lanes;
-                let right = offset + (piece.lane + 1) * *width as usize / lanes;
-                let current = s.day_scroll.get();
-                if left < current {
-                    s.day_scroll.set(left);
-                } else if right > current + viewport.width as usize {
-                    s.day_scroll
-                        .set(right.saturating_sub(viewport.width as usize));
-                }
-                break;
-            }
-            offset += *width as usize;
-        }
-    }
-    s.day_scroll.set(s.day_scroll.get().min(s.max_days.get()));
-    let mut virtual_x = 0i32;
-    for (date, pieces, width, lanes) in columns {
-        let origin = viewport.x as i32 + virtual_x - s.day_scroll.get() as i32;
-        let clip = |x: i32, y: u16, w: u16, h: u16| -> Rect {
-            let left = x.max(viewport.x as i32);
-            let right = (x + w as i32).min(viewport.right() as i32);
-            Rect::new(
-                left.max(0) as u16,
-                y,
-                right.saturating_sub(left).max(0) as u16,
-                h,
-            )
-        };
-        let head = clip(origin, area.y + 1, width - 1, 1);
-        let style = if date == s.today() || date == s.selected {
-            accent()
-        } else {
-            muted()
-        };
-        styled_row(
-            frame,
-            head,
-            selected_line(
-                Line::styled(date.format("%a %b %d").to_string(), style),
-                date == s.selected,
-            ),
-        );
-        hit(s, head, Action::Date(date));
-        let all: Vec<_> = s
-            .day_events(date)
-            .into_iter()
-            .filter(|e| matches!(e.timing, EventTiming::AllDay { .. }))
-            .collect();
-        for (i, e) in all.iter().take(2).enumerate() {
-            let rect = clip(origin, area.y + 2 + i as u16, width - 1, 1);
-            styled_row(
-                frame,
-                rect,
-                selected_line(event_line(e, s.tz), selected_event == Some(e.id)),
-            );
-            hit(s, rect, Action::EventAt(e.id, date));
-        }
-        if all.len() > 2 {
-            let rect = clip(origin, area.y + 4, width - 1, 1);
-            row(frame, rect, format!("+{} all-day", all.len() - 2), dim());
-            hit(s, rect, Action::Agenda(date));
-        }
-        for r in 0..visible {
-            let minute = scroll + r as u32 * 30;
-            if minute >= 1440 {
-                break;
-            }
-            let rect = clip(origin, timeline_y + r, width - 1, 1);
-            let selected = date == s.selected && s.selection == Selection::Slot(minute as u16);
-            let text = if selected {
-                format!("▸ {:02}:{:02}", minute / 60, minute % 60)
-            } else if minute.is_multiple_of(60) {
-                "─".repeat(width as usize - 1)
-            } else {
-                " ".repeat(width as usize - 1)
-            };
-            row(
-                frame,
-                rect,
-                text,
-                if selected { selection_style() } else { rule() },
-            );
-            hit(s, rect, Action::Slot(date, minute as u16));
-        }
-        for piece in pieces {
-            let bottom = scroll + visible as u32 * 30;
-            if piece.end <= scroll || piece.start >= bottom {
-                continue;
-            }
-            let y = ((piece.start.max(scroll) - scroll) / 30) as u16;
-            let end = ((piece.end.min(bottom) - scroll).div_ceil(30)) as u16;
-            let lane_start = piece.lane * width as usize / lanes;
-            let lane_end = (piece.lane + 1) * width as usize / lanes;
-            let rect = clip(
-                origin + lane_start as i32,
-                timeline_y + y,
-                (lane_end - lane_start).saturating_sub(1) as u16,
-                (end - y).max(1).min(visible - y),
-            );
-            let e = &s.events[piece.event];
-            let selected = selected_event == Some(e.id);
-            let mut spans = Vec::new();
-            if selected {
-                spans.push(Span::raw("▸"));
-            }
-            if piece.before || piece.start < scroll {
-                spans.push(Span::styled("↑", accent()));
-            }
-            if piece.after || piece.end > bottom {
-                spans.push(Span::styled("↓", accent()));
-            }
-            spans.push(Span::styled(e.title.clone(), bright()));
-            let mut metadata = Vec::new();
-            if let EventTiming::Timed { start, .. } = e.timing {
-                metadata.push(Span::styled(local_time_label(start, s.tz, false), muted()));
-            }
-            if e.owner_id.is_none() {
-                metadata.push(separator());
-                metadata.push(source_span(e));
-            }
-            let fill = if selected {
-                selection_style()
-            } else if theme::BG_CANVAS() == ratatui::style::Color::Reset {
-                Style::default()
-            } else {
-                Style::default().bg(theme::BG_HIGHLIGHT())
-            };
-            // Clear the hour rules before painting a card, including its padding.
-            frame.render_widget(Clear, rect);
-            frame.render_widget(
-                Paragraph::new(vec![
-                    clipped_title(patch_line(Line::from(spans), fill), rect.width),
-                    patch_line(Line::from(metadata), fill),
-                ])
-                .style(base().patch(fill)),
-                rect,
-            );
-            hit(s, rect, Action::EventAt(e.id, date));
-        }
-        shade_today(
-            frame,
-            clip(origin, viewport.y, width - 1, viewport.height),
-            date,
-            s,
-        );
-        virtual_x += width as i32;
-    }
-    s.max_days
-        .set((virtual_x - viewport.width as i32).max(0) as usize);
-}
 fn list_lines<'a>(
     s: &CalendarState,
     events: &[&'a CalendarEvent],
-    upcoming: bool,
-) -> Vec<(Line<'static>, Option<&'a CalendarEvent>, usize)> {
+) -> Vec<(Line<'static>, Option<&'a CalendarEvent>)> {
     let mut rows = Vec::new();
     let mut last = None;
-    for (n, e) in events.iter().enumerate() {
-        let date = e.timing.dates(s.tz).0.max(if upcoming {
-            NaiveDate::MIN
-        } else {
-            month_start(s.selected)
-        });
+    for e in events {
+        let date = e.timing.dates(s.tz).0.max(month_start(s.selected));
         if last != Some(date) {
             rows.push((
                 Line::styled(
@@ -1007,39 +649,27 @@ fn list_lines<'a>(
                     }),
                 ),
                 None,
-                n,
             ));
             last = Some(date);
         }
-        rows.push((event_line(e, s.tz), Some(*e), n));
+        let mut line = event_line(e, s.tz);
+        line.spans.push(separator());
+        line.spans.push(source_span(e));
+        rows.push((line, Some(*e)));
     }
     rows
 }
-fn draw_list(frame: &mut Frame, area: Rect, s: &CalendarState, upcoming: bool) {
-    let owned = s.upcoming();
-    let events = if upcoming {
-        owned.iter().collect()
-    } else {
-        s.ordered_events()
-    };
-    let rows = list_lines(s, &events, upcoming);
+fn draw_list(frame: &mut Frame, area: Rect, s: &CalendarState) {
+    let events = s.ordered_events();
+    let rows = list_lines(s, &events);
     s.max_scroll
         .set(rows.len().saturating_sub(area.height as usize));
     s.list_rows.set(area.height as usize);
-    pane(s, area, if upcoming { Pane::Upcoming } else { Pane::List });
+    pane(s, area, Pane::List);
     if rows.is_empty() {
-        row(
-            frame,
-            area,
-            if upcoming {
-                "No upcoming notices"
-            } else {
-                "No events this month"
-            },
-            dim(),
-        );
+        row(frame, area, "Nothing on this month", dim());
     }
-    for (r, (text, event, _)) in rows
+    for (r, (text, event)) in rows
         .iter()
         .skip(s.scroll.min(s.max_scroll.get()))
         .take(area.height as usize)
@@ -1050,64 +680,13 @@ fn draw_list(frame: &mut Frame, area: Rect, s: &CalendarState, upcoming: bool) {
             frame,
             rect,
             selected_line(
-                text.clone(),
+                clipped_title(text.clone(), rect.width),
                 event.is_some_and(|e| s.selection == Selection::Event(e.id)),
             ),
         );
         if let Some(e) = event {
             hit(s, rect, Action::Event(e.id));
         }
-    }
-}
-pub fn draw_upcoming_panel(frame: &mut Frame, area: Rect, s: &CalendarState) {
-    let notices = s.upcoming();
-    let heading = Line::from(vec![
-        Span::raw(" "),
-        Span::styled("u", key_style()),
-        Span::styled(" Upcoming events", bright().add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" ({}) ", notices.len()), dim()),
-    ]);
-    if area.height == 1 {
-        let mut heading = heading;
-        heading.spans.remove(0);
-        styled_row(frame, area, heading);
-        hit(s, area, Action::Upcoming);
-        return;
-    }
-    let b = border(heading);
-    let inner = b.inner(area);
-    frame.render_widget(b, area);
-    hit(s, area, Action::Upcoming);
-    if notices.is_empty() {
-        row(frame, inner, "No upcoming notices", dim());
-    }
-    for (i, e) in notices
-        .iter()
-        .take(3)
-        .take(inner.height as usize)
-        .enumerate()
-    {
-        let rect = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
-        let mut spans = vec![
-            source_span(e),
-            Span::raw(" "),
-            Span::styled(e.title.clone(), bright()),
-            separator(),
-        ];
-        spans.extend(timing_line(e, s.tz).spans);
-        styled_row(frame, rect, Line::from(spans));
-        hit(s, rect, Action::Event(e.id));
-    }
-    if notices.len() > 3 && inner.height > 0 {
-        let label = Line::from(vec![
-            Span::styled(format!("+{} more", notices.len() - 3), muted()),
-            separator(),
-            Span::styled("u", key_style()),
-        ]);
-        let w = (label.width() as u16).min(inner.width);
-        let rect = Rect::new(inner.right() - w, area.y, w, 1);
-        styled_row(frame, rect, label);
-        hit(s, rect, Action::Upcoming);
     }
 }
 fn centered(area: Rect, w: u16, h: u16) -> Rect {
@@ -1161,62 +740,6 @@ pub fn draw_modal(frame: &mut Frame, area: Rect, s: &CalendarState) {
     }
 }
 
-pub(super) fn picker(
-    frame: &mut Frame,
-    inner: Rect,
-    s: &CalendarState,
-    labels: &[Line<'static>],
-    selected: usize,
-) {
-    let height = inner.height.saturating_sub(2).max(1);
-    let content = Rect::new(inner.x, inner.y, inner.width, height);
-    picker_rows(frame, content, s, labels, selected);
-    if inner.height >= 2 {
-        let mut x = inner.x;
-        button(
-            frame,
-            s,
-            &mut x,
-            inner.bottom() - 1,
-            inner.right(),
-            "Close (Esc)",
-            Action::Cancel,
-            false,
-        );
-    }
-}
-
-pub(super) fn picker_rows(
-    frame: &mut Frame,
-    content: Rect,
-    s: &CalendarState,
-    labels: &[Line<'static>],
-    selected: usize,
-) {
-    let height = content.height;
-    if height == 0 {
-        return;
-    }
-    let maximum = labels.len().saturating_sub(height as usize);
-    s.picker_rows.set(height as usize);
-    s.max_picker.set(maximum);
-    let mut offset = s.picker_scroll.get().min(maximum);
-    if s.picker_reveal.replace(false) {
-        if selected < offset {
-            offset = selected;
-        } else if selected >= offset + height as usize {
-            offset = selected + 1 - height as usize;
-        }
-    }
-    s.picker_scroll.set(offset);
-    pane(s, content, Pane::Picker);
-    for (i, label) in labels.iter().enumerate().skip(offset).take(height as usize) {
-        let row = Rect::new(content.x, content.y + (i - offset) as u16, content.width, 1);
-        styled_row(frame, row, selected_line(label.clone(), i == selected));
-        hit(s, row, Action::Choice(i));
-    }
-}
-
 fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
     let Some(modal) = &s.modal else {
         return;
@@ -1227,26 +750,19 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
         area,
         76,
         match modal {
-            Modal::Editor(_) => 33,
+            Modal::Editor(_) => 30,
             Modal::Details(_) => 24,
-            Modal::Settings { .. } => 12,
-            Modal::Go(_) => 12,
-            Modal::Source(_) => ((s.public.len() + 6).min(24)) as u16,
-            Modal::View(_) => 9,
-            _ => 20,
+            Modal::Delete(_) => 8,
+            Modal::Agenda => 20,
         },
     );
     frame.render_widget(Clear, rect);
     let title = match modal {
-        Modal::Editor(_) => " Event editor ",
-        Modal::Details(_) => " Event details ",
-        Modal::Settings { .. } => " Calendar Settings ",
-        Modal::Source(_) => " Calendar source ",
-        Modal::View(_) => " Calendar view ",
-        Modal::Go(_) => " Go to date ",
-        Modal::Import(_) => " Import iCalendar event ",
+        Modal::Editor(e) if e.existing.is_some() => " Edit event ",
+        Modal::Editor(_) => " New event ",
+        Modal::Details(e) if e.is_board() => " On the board ",
+        Modal::Details(_) => " Your event ",
         Modal::Delete(_) => " Delete event? ",
-        Modal::Upcoming => " Upcoming events ",
         Modal::Agenda => " Selected-day agenda ",
     };
     let block = border(title)
@@ -1258,169 +774,6 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
         return;
     }
     match modal {
-        Modal::Import(import) => super::import::draw(frame, inner, s, import),
-        Modal::Source(selected) => {
-            let labels: Vec<_> = std::iter::once(Line::styled("Server", bright()))
-                .chain(std::iter::once(Line::styled(
-                    "My personal calendar",
-                    bright(),
-                )))
-                .chain(s.public.iter().map(|p| {
-                    Line::from(vec![
-                        Span::styled(format!("@{}", p.username), bright()),
-                        separator(),
-                        Span::styled("public, read-only", dim()),
-                    ])
-                }))
-                .collect();
-            picker(frame, inner, s, &labels, *selected);
-        }
-        Modal::View(selected) => {
-            let labels: Vec<_> = CalendarView::ALL
-                .iter()
-                .map(|v| Line::styled(v.label(), bright()))
-                .collect();
-            picker(frame, inner, s, &labels, *selected);
-        }
-        Modal::Go(input) => {
-            let mut ta = (**input).clone();
-            ta.set_style(base());
-            ta.set_cursor_line_style(base());
-            ta.set_cursor_style(selection_style());
-            frame.render_widget(&ta, Rect::new(inner.x, inner.y, inner.width, 1));
-            if inner.height >= 3 {
-                let text = input.lines().join("");
-                let result = date_entry::parse(&text, s.selected, s.today());
-                let preview = if let Some(error) = &s.error {
-                    Line::styled(error, base().fg(theme::ERROR()))
-                } else if let Ok(date) = result {
-                    Line::from(vec![
-                        Span::styled("Go to ", dim()),
-                        Span::styled(date.to_string(), accent()),
-                        separator(),
-                        Span::styled(date.format("%A").to_string(), muted()),
-                    ])
-                } else {
-                    Line::styled("Enter a date or calendar offset", dim())
-                };
-                let lines = vec![
-                    preview,
-                    Line::from(vec![
-                        Span::styled("Offsets from ", dim()),
-                        Span::styled(s.selected.to_string(), bright()),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Today ", dim()),
-                        Span::styled(s.today().to_string(), bright()),
-                        separator(),
-                        Span::styled(s.tz.to_string(), dim()),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("Oct 2, 2026", muted()),
-                        separator(),
-                        Span::styled("2 Oct", muted()),
-                        separator(),
-                        Span::styled("2026/10/2", muted()),
-                    ]),
-                    Line::from(vec![
-                        Span::styled("2 months ago", muted()),
-                        separator(),
-                        Span::styled("in 3 weeks", muted()),
-                        separator(),
-                        Span::styled("+2w", muted()),
-                    ]),
-                ];
-                frame.render_widget(
-                    Paragraph::new(lines)
-                        .wrap(Wrap { trim: false })
-                        .style(base()),
-                    Rect::new(inner.x, inner.y + 1, inner.width, inner.height - 2),
-                );
-                let mut x = inner.x;
-                button(
-                    frame,
-                    s,
-                    &mut x,
-                    inner.bottom() - 1,
-                    inner.right(),
-                    "Go (Enter)",
-                    Action::Save,
-                    false,
-                );
-                button(
-                    frame,
-                    s,
-                    &mut x,
-                    inner.bottom() - 1,
-                    inner.right(),
-                    "Cancel (Esc)",
-                    Action::Cancel,
-                    false,
-                );
-            }
-        }
-        Modal::Settings { draft, focus } => {
-            let labels = [
-                labeled(
-                    "Week starts",
-                    if draft.week_start == 0 {
-                        "Monday"
-                    } else {
-                        "Sunday"
-                    },
-                    bright(),
-                ),
-                labeled("Default view", draft.default_view.label(), bright()),
-                labeled(
-                    "Server overlay",
-                    if draft.server_overlay {
-                        "Enabled"
-                    } else {
-                        "Disabled"
-                    },
-                    bright(),
-                ),
-                labeled(
-                    "Personal calendar",
-                    if draft.public {
-                        "Public to signed-in users"
-                    } else {
-                        "Private"
-                    },
-                    bright(),
-                ),
-                Line::styled("Save", bright().add_modifier(Modifier::BOLD)),
-                Line::styled("Cancel", dim()),
-            ];
-            for (i, label) in labels.iter().enumerate().take(inner.height as usize) {
-                let r = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
-                styled_row(frame, r, selected_line(label.clone(), i == *focus));
-                hit(
-                    s,
-                    r,
-                    if i == 4 {
-                        Action::Save
-                    } else if i == 5 {
-                        Action::Cancel
-                    } else {
-                        Action::ToggleField(i)
-                    },
-                );
-            }
-            if inner.height > 7 {
-                let line = s.error.as_ref().map_or_else(
-                    || {
-                        hint_line(&[
-                            ("Tab", "focus"),
-                            ("Enter/Space", "change"),
-                            ("Ctrl+S", "save"),
-                        ])
-                    },
-                    |error| Line::styled(error.clone(), base().fg(theme::ERROR())),
-                );
-                styled_row(frame, Rect::new(inner.x, inner.y + 7, inner.width, 1), line);
-            }
-        }
         Modal::Editor(e) => super::editor::draw(frame, inner, s, e),
         Modal::Delete(e) => {
             styled_row(
@@ -1432,6 +785,17 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
                     Span::styled("”?", dim()),
                 ]),
             );
+            if inner.height > 1 && e.is_board() && e.creator_id != s.viewer {
+                row(
+                    frame,
+                    Rect::new(inner.x, inner.y + 1, inner.width, 1),
+                    format!(
+                        "Posted by {}. Taking it down is a moderator's call.",
+                        e.creator_name
+                    ),
+                    muted(),
+                );
+            }
             let mut x = inner.x;
             button(
                 frame,
@@ -1465,40 +829,28 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
             }
         }
         Modal::Details(e) => {
-            let access = event_access(e, s.viewer, s.role);
+            let access = event_access(e, s.viewer, s.staff);
+            let going = s.going(e.id);
+            let mut who = vec![source_span(e)];
+            if e.is_board() {
+                who.push(separator());
+                who.push(Span::styled(
+                    match (e.going, going) {
+                        (0, _) => "nobody's in yet".to_string(),
+                        (1, true) => "you're in".to_string(),
+                        (n, true) => format!("{n} in, you included"),
+                        (n, false) => format!("{n} in"),
+                    },
+                    if going { accent() } else { bright() },
+                ));
+            }
             let mut lines = vec![
                 Line::styled(&e.title, bright().add_modifier(Modifier::BOLD)),
                 timing_line(e, s.tz),
-                Line::from(vec![
-                    source_span(e),
-                    separator(),
-                    Span::styled(s.tz.to_string(), dim()),
-                    separator(),
-                    Span::styled(format!("revision {}", e.revision), dim()),
-                ]),
+                Line::from(who),
                 Line::from(""),
             ];
             lines.extend(e.description.lines().map(|s| Line::from(s.to_owned())));
-            if access.notifications {
-                lines.push(labeled(
-                    "Notifications",
-                    e.notice_lead_seconds
-                        .map(|n| {
-                            format!(
-                                "{} before",
-                                humantime::format_duration(std::time::Duration::from_secs(
-                                    n as u64
-                                ))
-                            )
-                        })
-                        .unwrap_or_else(|| "disabled".into()),
-                    if e.notice_lead_seconds.is_some() {
-                        bright()
-                    } else {
-                        dim()
-                    },
-                ));
-            }
             let content = Rect::new(
                 inner.x,
                 inner.y,
@@ -1518,22 +870,37 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 content,
             );
             let mut x = inner.x;
+            let y = inner.bottom() - 1;
+            if access.rsvp {
+                button(
+                    frame,
+                    s,
+                    &mut x,
+                    y,
+                    inner.right(),
+                    if going { "i I'm out" } else { "i I'm in" },
+                    Action::Rsvp,
+                    false,
+                );
+            }
             if access.edit {
                 button(
                     frame,
                     s,
                     &mut x,
-                    inner.bottom() - 1,
+                    y,
                     inner.right(),
                     "e Edit",
                     Action::Edit,
                     false,
                 );
+            }
+            if access.delete {
                 button(
                     frame,
                     s,
                     &mut x,
-                    inner.bottom() - 1,
+                    y,
                     inner.right(),
                     "Delete",
                     Action::Delete,
@@ -1544,57 +911,38 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 frame,
                 s,
                 &mut x,
-                inner.bottom() - 1,
-                inner.right(),
-                "y Copy iCal",
-                Action::Copy,
-                false,
-            );
-            button(
-                frame,
-                s,
-                &mut x,
-                inner.bottom() - 1,
+                y,
                 inner.right(),
                 "Close",
                 Action::Cancel,
                 false,
             );
         }
-        Modal::Upcoming | Modal::Agenda => {
+        Modal::Agenda => {
             let content = Rect::new(
                 inner.x,
                 inner.y,
                 inner.width,
                 inner.height.saturating_sub(2),
             );
-            if matches!(modal, Modal::Upcoming) {
-                draw_list(frame, content, s, true);
-            } else {
-                draw_agenda(frame, content, s);
-            }
+            draw_agenda(frame, content, s);
             let mut x = inner.x;
-            if matches!(modal, Modal::Agenda)
-                && (s.source == CalendarSource::Personal(s.viewer)
-                    || (s.source == CalendarSource::Server
-                        && s.role != late_core::models::calendar::CreationTier::User))
-            {
-                button(
-                    frame,
-                    s,
-                    &mut x,
-                    inner.bottom() - 1,
-                    inner.right(),
-                    "n New",
-                    Action::New,
-                    false,
-                );
-            }
+            let y = inner.bottom() - 1;
             button(
                 frame,
                 s,
                 &mut x,
-                inner.bottom() - 1,
+                y,
+                inner.right(),
+                "n New",
+                Action::New,
+                false,
+            );
+            button(
+                frame,
+                s,
+                &mut x,
+                y,
                 inner.right(),
                 "Close (Esc)",
                 Action::Cancel,

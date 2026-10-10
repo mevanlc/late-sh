@@ -1,198 +1,150 @@
 use super::{
-    editor::EditorControl,
+    navigation::Selection,
     state::*,
     svc::{CalendarService, Reply, Snapshot},
 };
-use chrono::{Duration, NaiveDate};
+use chrono::{Duration, NaiveDate, TimeZone, Utc};
 use late_core::{
     db::{Db, DbConfig},
     models::calendar::*,
 };
 use uuid::Uuid;
+
 fn date(s: &str) -> NaiveDate {
     s.parse().unwrap()
 }
-fn editor() -> Editor {
-    Editor::new(
-        CalendarSource::Personal(Uuid::nil()),
-        date("2026-10-02"),
-        EventAccess {
-            edit: true,
-            notifications: true,
-            delegate: false,
+
+fn service() -> CalendarService {
+    CalendarService::new(Db::new(&DbConfig::default()).unwrap())
+}
+
+fn event(id: u128, start: chrono::DateTime<Utc>, board: bool) -> CalendarEvent {
+    CalendarEvent {
+        id: Uuid::from_u128(id),
+        owner_id: (!board).then_some(Uuid::nil()),
+        creator_id: Uuid::nil(),
+        creator_name: "mat".into(),
+        title: format!("Event {id}"),
+        description: String::new(),
+        timing: EventTiming::Timed {
+            start,
+            end: Some(start + Duration::hours(1)),
         },
-    )
+        creator_timezone: "UTC".into(),
+        starts_at: start,
+        ends_at: start + Duration::hours(1),
+        going: 0,
+        revision: 1,
+    }
 }
+
 #[test]
-fn calendar_editor_infers_once_and_preserves_invalid_draft() {
-    let mut e = editor();
-    e.fields[0].insert_str("Tea tomorrow at 4pm");
-    e.blur_title(date("2026-10-02"), chrono_tz::UTC);
-    assert_eq!(e.text(0), "Tea");
-    assert_eq!(e.text(2), "2026-10-03");
-    assert_eq!(e.text(3), "16:00");
-    assert!(e.ever_assigned);
-    e.fields[0].insert_str(" tomorrow");
-    e.fields[2] = ratatui_textarea::TextArea::default();
-    e.blur_title(date("2026-10-02"), chrono_tz::UTC);
-    assert_eq!(e.text(0), "Tea tomorrow");
-    assert!(e.draft(date("2026-10-02"), chrono_tz::UTC).is_err());
-    assert_eq!(e.text(0), "Tea tomorrow");
-    let mut e = editor();
-    e.fields[0].insert_str("Leap Feb 29 2028");
-    let d = e.draft(date("2026-10-02"), chrono_tz::UTC).unwrap();
-    assert!(
-        matches!(d.timing,EventTiming::AllDay{end_exclusive,..} if end_exclusive==date("2028-03-01"))
-    );
-    e.ever_assigned = true;
-    e.fields[0].insert_str(" tomorrow");
-    e.blur_title(date("2026-10-02"), chrono_tz::UTC);
-    assert_eq!(e.text(0), "Leap tomorrow");
-}
-#[test]
-fn calendar_month_week_and_duration_boundaries() {
+fn month_and_week_boundaries() {
     assert_eq!(shift_month(date("2028-01-31"), 1), date("2028-02-29"));
     assert_eq!(shift_month(date("2026-01-31"), 1), date("2026-02-28"));
     assert_eq!(shift_month(date("2026-01-01"), -1), date("2025-12-01"));
-    assert_eq!(week_start(date("2026-10-04"), 0), date("2026-09-28"));
-    assert_eq!(week_start(date("2026-10-04"), 6), date("2026-10-04"));
-    assert_eq!(parse_duration("24h").unwrap(), 86400);
-    assert_eq!(parse_duration("0m").unwrap(), 0);
-    for (input, expected) in [
-        ("24 hours", 86400),
-        ("1 day", 86400),
-        ("1h 30m", 5400),
-        ("2 weeks 3 days", 17 * 86400),
-        ("0", 0),
-        ("3600", 3600),
-        ("1500ms 500ms", 2),
-        ("3650d", 315360000),
-    ] {
-        assert_eq!(parse_duration(input).unwrap(), expected, "{input}");
-    }
-    for s in [
-        "-1h",
-        "forever",
-        "99999999999999999999d",
-        "3651d",
-        "1ms",
-        "1.5s",
-    ] {
-        assert!(parse_duration(s).is_err());
-    }
+    assert_eq!(week_start(date("2026-10-04")), date("2026-09-28"));
+    assert_eq!(week_start(date("2026-09-28")), date("2026-09-28"));
 }
 
-#[test]
-fn calendar_editor_normalizes_human_dates_on_blur_and_save() {
-    let today = date("2026-10-02");
-    let mut e = editor();
-    e.fields[0].insert_str("Trip");
-    e.ever_assigned = true;
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["2 months ago".to_string()]);
-    e.focus = EditorControl::StartDate;
-    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
-    assert_eq!(e.text(2), "2026-08-02");
-    assert!(e.error.is_none());
-    e.fields[4] = ratatui_textarea::TextArea::from(vec!["Oct 3rd, 2026".to_string()]);
-    e.notifications = true;
-    e.fields[6] = ratatui_textarea::TextArea::from(vec!["1 day 2 hours".to_string()]);
-    let draft = e.draft(today, chrono_tz::UTC).unwrap();
-    assert_eq!(e.text(4), "2026-10-03");
-    assert_eq!(
-        draft.timing,
-        EventTiming::AllDay {
-            start: date("2026-08-02"),
-            end_exclusive: date("2026-10-04"),
-        }
-    );
-    assert_eq!(draft.notice_lead_seconds, Some(26 * 3600));
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["02/03/2026".to_string()]);
-    e.focus = EditorControl::StartDate;
-    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
-    assert!(e.error.as_deref().unwrap().contains("Ambiguous"));
-    assert_eq!(e.text(2), "02/03/2026");
-    assert!(e.draft(today, chrono_tz::UTC).is_err());
-    assert_eq!(e.text(0), "Trip");
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["Oct 2".to_string()]);
-    e.focus = EditorControl::StartDate;
-    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
-    assert!(e.error.is_none());
-    e.error = Some("Revision conflict; reload before saving".into());
-    e.focus = EditorControl::StartDate;
-    e.focus(EditorControl::EndDate, today, chrono_tz::UTC);
-    assert!(e.error.as_deref().unwrap().contains("Revision conflict"));
-}
-
-#[test]
-fn calendar_editor_requires_dst_choice_and_rejects_overnight_invalid_end() {
-    let mut e = editor();
-    e.fields[0].insert_str("DST appointment");
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["2026-11-01".to_string()]);
-    e.fields[3] = ratatui_textarea::TextArea::from(vec!["01:30".to_string()]);
-    e.all_day = false;
-    e.ever_assigned = true;
-    let tz = chrono_tz::America::New_York;
-    assert!(e.draft(date("2026-10-02"), tz).is_err());
-    e.occurrence = Some(Occurrence::Earlier);
-    let a = e.draft(date("2026-10-02"), tz).unwrap();
-    e.occurrence = Some(Occurrence::Later);
-    let b = e.draft(date("2026-10-02"), tz).unwrap();
-    assert_eq!(
-        b.timing.bounds(tz).unwrap().0 - a.timing.bounds(tz).unwrap().0,
-        Duration::hours(1)
-    );
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["2026-03-08".to_string()]);
-    e.fields[3] = ratatui_textarea::TextArea::from(vec!["02:30".to_string()]);
-    assert!(e.draft(date("2026-10-02"), tz).is_err());
-    assert_eq!(e.text(0), "DST appointment");
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["2026-11-01".to_string()]);
-    e.fields[3] = ratatui_textarea::TextArea::from(vec!["01:45".to_string()]);
-    e.fields[4] = ratatui_textarea::TextArea::from(vec!["2026-11-01".to_string()]);
-    e.fields[5] = ratatui_textarea::TextArea::from(vec!["01:15".to_string()]);
-    e.occurrence = Some(Occurrence::Earlier);
-    e.end_occurrence = Some(Occurrence::Later);
-    let folded = e.draft(date("2026-10-02"), tz).unwrap();
-    let bounds = folded.timing.bounds(tz).unwrap();
-    assert_eq!(bounds.1 - bounds.0, Duration::minutes(30));
-    e.set_timing(&folded.timing, tz);
-    assert_eq!(e.occurrence, Some(Occurrence::Earlier));
-    assert_eq!(e.end_occurrence, Some(Occurrence::Later));
-    e.fields[2] = ratatui_textarea::TextArea::from(vec!["2026-10-02".to_string()]);
-    e.fields[3] = ratatui_textarea::TextArea::from(vec!["23:30".to_string()]);
-    e.fields[4] = ratatui_textarea::TextArea::default();
-    e.fields[5] = ratatui_textarea::TextArea::from(vec!["01:30".to_string()]);
-    assert!(e.draft(date("2026-10-02"), tz).is_err());
-    e.fields[4] = ratatui_textarea::TextArea::from(vec!["2026-10-03".to_string()]);
-    assert!(e.draft(date("2026-10-02"), tz).is_ok());
-    assert_eq!(effective_timezone(Some("invalid zone")), chrono_tz::UTC);
-}
+/// A reply for a load the session has moved past is dropped, and the
+/// reply that does land carries the viewer's role and what they are in.
 #[tokio::test]
-async fn calendar_stale_responses_and_resize_geometry() {
-    let viewer = Uuid::now_v7();
-    let db = Db::new(&DbConfig::default()).unwrap();
-    let mut s = CalendarState::new(CalendarService::new(db), viewer);
-    let generation = s.generation;
+async fn stale_loads_are_ignored_and_a_fresh_load_lands_whole() {
+    let mut s = CalendarState::new(service(), Uuid::now_v7());
+    let stale = s.generation;
     s.selected += Duration::days(40);
     s.refresh();
+    let snapshot = |staff| Snapshot {
+        events: Vec::new(),
+        personal_upcoming: Vec::new(),
+        rsvps: vec![Uuid::from_u128(1)],
+        staff,
+    };
     assert!(!s.apply(Reply::Loaded {
-        generation,
-        result: Ok(Snapshot {
-            events: Vec::new(),
-            event_error: None,
-            personal_notices: Vec::new(),
-            public: Vec::new(),
-            preferences: CalendarPreferences {
-                public: true,
-                ..Default::default()
-            },
-            role: CreationTier::Admin
-        })
+        generation: stale,
+        result: Ok(snapshot(true)),
     }));
-    assert!(!s.preferences.public);
+    assert!(!s.staff);
+    assert!(s.apply(Reply::Loaded {
+        generation: s.generation,
+        result: Ok(snapshot(true)),
+    }));
+    assert!(s.staff);
+    assert!(s.going(Uuid::from_u128(1)));
     s.hits.borrow_mut().push(Hit {
         area: ratatui::layout::Rect::new(2, 3, 4, 5),
         action: Action::Today,
     });
     s.invalidate_geometry();
     assert!(s.hits.borrow().is_empty());
+}
+
+/// An "I'm in" answer flips the viewer's side and carries the count into
+/// every copy of the event the session holds.
+#[tokio::test]
+async fn an_rsvp_reply_flips_the_viewer_and_updates_the_count_everywhere() {
+    let mut s = CalendarState::new(service(), Uuid::now_v7());
+    s.loading = false;
+    let start = Utc.with_ymd_and_hms(2026, 10, 2, 21, 0, 0).unwrap();
+    let e = event(1, start, true);
+    s.events.push(e.clone());
+    s.personal_upcoming.push(e.clone());
+    s.modal = Some(Modal::Details(e.clone()));
+    let mut counted = e.clone();
+    counted.going = 4;
+    assert!(s.apply(Reply::Rsvp(Ok(counted.clone()))));
+    assert!(s.going(e.id));
+    assert_eq!(s.events[0].going, 4);
+    assert!(matches!(&s.modal, Some(Modal::Details(open)) if open.going == 4));
+    counted.going = 3;
+    s.apply(Reply::Rsvp(Ok(counted)));
+    assert!(!s.going(e.id));
+    assert_eq!(s.events[0].going, 3);
+    assert!(!s.pending);
+}
+
+/// Upcoming is the board's shared snapshot plus the viewer's own, soonest
+/// first, inside the horizon.
+#[tokio::test]
+async fn upcoming_merges_the_board_and_the_viewers_own_events() {
+    let service = service();
+    let mut s = CalendarState::new(service.clone(), Uuid::now_v7());
+    let now = Utc::now();
+    let soon = event(1, now + Duration::hours(2), true);
+    let later = event(2, now + Duration::hours(20), true);
+    let far = event(3, now + Duration::days(3), true);
+    service.publish_board(vec![later.clone(), soon.clone(), far]);
+    s.personal_upcoming = vec![event(4, now + Duration::hours(5), false)];
+    s.tick(false, chrono_tz::UTC);
+    let ids: Vec<_> = s.upcoming().into_iter().map(|e| e.id).collect();
+    assert_eq!(
+        ids,
+        vec![soon.id, Uuid::from_u128(4), later.id],
+        "soonest first, the far one is past the horizon"
+    );
+}
+
+/// Opening an event from the strip lands on its day with its details up,
+/// over whatever modal was open.
+#[tokio::test]
+async fn show_event_lands_on_its_day_with_details_open() {
+    let mut s = CalendarState::new(service(), Uuid::now_v7());
+    s.loading = false;
+    s.selected = date("2026-10-02");
+    s.modal = Some(Modal::Agenda);
+    let e = event(
+        9,
+        Utc.with_ymd_and_hms(2026, 11, 14, 20, 0, 0).unwrap(),
+        true,
+    );
+    s.show_event(e.clone());
+    assert_eq!(s.selected, date("2026-11-14"));
+    assert_eq!(s.selection, Selection::Event(e.id));
+    assert!(matches!(&s.modal, Some(Modal::Details(open)) if open.id == e.id));
+    assert_eq!(
+        s.modal_parents.len(),
+        1,
+        "the page is the only frame under it"
+    );
 }

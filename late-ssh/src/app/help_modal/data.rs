@@ -199,7 +199,7 @@ pub(crate) fn bot_app_context() -> String {
         - A Dark Room and Green Dragon ride the backtick cycle too, as its last stops after Lateania and the roguelikes: pressing ` inside either hops onward with the door still loaded (the village keeps growing, the character stays listed as online), and ` from Home hops back in. While loaded they wear the same green in-progress dot on the Games hub sidebar. A loaded door left alone for 30 minutes (no key in it and its screen not open) ends its visit with the same save an explicit leave does and drops off the cycle; in Green Dragon that also drops the online flag, so an absent character becomes an ordinary sleeping PvP target. Two keys the hop never takes: a ` typed into a Green Dragon talk line stays a character, and there is no hopping out of a Green Dragon fight or mid-ascent in A Dark Room.\n\
         - NetHack and DCSS take a per-account config file (.nethackrc / init.txt): press c on their Games hub card (or their landing page) to open a paste box, paste the whole file to save it, x clears back to defaults. It is stored on the account and applied at every launch, including resumes after a hangup-save. Brogue keeps its config per-player upstream already, so it has no paste box.\n\
         - Profiles page 5 lists people: one row per user who shared a project or posted a work card. Artboard has detailed page-local editing keybinds.\n\
-        - Calendars page 7 has server, personal and read-only public calendars; c selects a calendar, v selects Month/Week/3-day/Day/Event List, s opens local Calendar Settings, and u opens upcoming notices. Header labels highlight their mnemonic letter; either case works. Single-click selects a day/event/slot; double-click opens its agenda/details or creates in an empty timed slot. Right-click offers permitted actions. Timed-view arrows move days and half-hour slots; j/k selects and reveals events. Escape/Close returns to the previous dialog with its selection and scroll. g accepts dates like Oct 2, 2026 and offsets like 2 months ago or +2w from the selected date, with a preview. Editor date offsets use local today; notification leads accept 1 day or 1h 30m. n creates at the selected date/slot, e edits, Delete confirms deletion; times use account timezone or UTC. The editor shows applicable fields, supports wheel/page scrolling and click-to-place caret; Ctrl+S saves, Escape offers to discard, and Escape in that prompt keeps editing.\n\
+        - Calendars page 7 is the events board. Anyone can post an event to the board (five a day), everyone sees it, and i says I'm in or I'm out; the count of who is in shows on the event. Your own events live on the same grid, drawn dimmer, and nobody else ever sees them; b hides the board to see only yours, and a new event posted while the board is hidden is private. n creates (type a title like movie night tomorrow at 9pm and the time fills in; the editor asks whether it goes to the board or just you), e edits your own, Delete removes your own; moderators can delete any post. v switches Month and List, [ and ] move a month, t is today; click or Enter opens an event or a day's agenda, right-click offers the actions you are allowed. A post shows up as a line in #lounge, an hour before it starts it heads the now strip on Home and the Live panel (o or click opens it on the board), and when it starts #lounge gets a headline. Times use the account timezone or UTC.\n\
         - Leaderboards page 6 holds every board. The Boards section leads: Top Chips, Arcade Wins, Late Time (monthly + all-time), and Top Drinkers (buzz points from every drink you take, whoever paid, monthly + yearly). Then the Games section: Lateania Adventurers (living characters by level, class shown on the row) and Lateania PvP (rivals slain in the Wildbound Waste), then a board triple for each roguelike door in DCSS, NetHack, Brogue order: Wins (all-time), Deepest Dive, and Top Score (monthly + all-time), fed spoof-proof from the games' own log files, seconds after a game ends. Then per-game daily win counts and per-game high scores, each with monthly and all-time standings. A trailing Badge Guide entry explains what every award code means, how it is earned, and whether it pays chips. Daily quests render at the top of The Arcade (page 2). The Shop opens with Ctrl+S or the /shop composer command; active games, profile/job editors, and Artboard input keep their local Ctrl+S bindings.\n",
     );
     for topic in HelpTopic::ALL {
@@ -225,7 +225,7 @@ pub(crate) fn bot_app_context() -> String {
 /// in depth, so anything past "which screen / which key" should route there.
 pub(crate) fn bartender_app_context() -> String {
     "APP CONTEXT (basic navigation):\n\
-    - Screens: 0 Clubhouse (this room, the Late Lounge tavern), 1 Home (chat + music), 2 The Arcade (single-player games, daily quests at the top), 3 Games hub (Lateania, NetHack, DCSS, Brogue, Usurper, Green Dragon, A Dark Room, dopewars, CodeKeep, BashQuest, Rebels, Minecraft), 4 Artboard (shared ASCII canvas), 5 Profiles (the people: their projects and open-to-work cards), 6 Leaderboards (every board, monthly and all-time), 7 Calendars (server, personal and public calendars).\n\
+    - Screens: 0 Clubhouse (this room, the Late Lounge tavern), 1 Home (chat + music), 2 The Arcade (single-player games, daily quests at the top), 3 Games hub (Lateania, NetHack, DCSS, Brogue, Usurper, Green Dragon, A Dark Room, dopewars, CodeKeep, BashQuest, Rebels, Minecraft), 4 Artboard (shared ASCII canvas), 5 Profiles (the people: their projects and open-to-work cards), 6 Leaderboards (every board, monthly and all-time), 7 Calendars (the events board: anyone posts, i says I'm in; your own private events beside it).\n\
     - Tab / Shift+Tab cycles screens; number keys 0-7 jump straight to one.\n\
     - Ctrl+F opens Zen from anywhere and the same chord hands you back (Esc does not leave it): Rice, your bonsai, the reef (live for everyone, fish once the Shop unlocks them), pet, the room Home has selected, music, a clock, and the lobby as tiles you arrange yourself: Tab and the arrows focus, space opens the tile picker for a tile, S splits, X closes, < > change width and { } height, F flips, z zooms it over the whole screen, b g t restyle borders, gaps, and titles, R resets, ? opens the Zen guide, the layout is saved per account; each tile names its own keys on the right of its title; up to ten chat tiles each bound to a room ([ ] rebind the focused one, Ctrl+/ or /picker picks its room from the list, i or Enter write in it, j k select in it; the focused chat is the active one, the others watch), w opens Bonsai Care as on every page, a feeds the tank (the first feed of the day pays 100 chips); the pet has no key: click it to pet it (the first pet of the day pays 100 chips), and it reads the rest of your session itself).\n\
     - Ctrl+O opens Settings from anywhere. Ctrl+G opens the Lobby (daily correspondence games plus the fixed house tables: Poker, Blackjack, Asterion, Tron, Super Snake). Ctrl+S opens the Shop (active games, profile/job editors, and Artboard input keep their local binding); /shop is its typed fallback.\n\
@@ -1298,32 +1298,19 @@ fn overview_lines() -> Vec<String> {
         "  4 Artboard        shared persistent ASCII canvas, and the gallery: frame your work, hang it, applaud others",
         "  5 Profiles        the people, one row each: their projects and work cards",
         "  6 Leaderboards    every board, monthly and all-time",
-        "  7 Calendars       server, personal and publicly shared calendars",
+        "  7 Calendars       the events board: anyone posts, i says I'm in; your own events beside it",
         "",
-        "Calendars: c calendar, v view (Month, Week, 3-day, Day, Event List).",
-        "Header labels highlight their shortcut letter; either case works.",
-        "Header Calendar/View arrows cycle choices; click labels/values for pickers.",
-        "[/] previous/next period, t today, g date; month arrows move days/weeks.",
-        "Timed arrows: Left/Right day, Up/Down half-hour; j/k reveals events.",
-        "Click selects; double-click opens day agenda/event details or creates at a slot.",
-        "Right-click for permitted actions; overflow counts open the day agenda.",
-        "Go to date: Oct 2, 2026, +2w, or 2 months ago; offsets from selection.",
-        "Today/weekday words use your local today. Editor offsets also use today.",
-        "Enter opens selection; a timed slot starts a draft. n new, e edit, Delete confirms.",
-        "New/Edit event: Import iCal fills the form from pasted content or an http(s)/webcal URL.",
-        "y copies the selected/details event as iCalendar; event menus also offer Copy as iCal.",
-        "Escape/Close returns to the previous dialog, selection and scroll; u upcoming.",
-        "s Calendar Settings: week start, default view, overlay, sharing.",
-        "PgUp/PgDn hours/agenda/lists, Ctrl+Left/Right columns; wheel targets its pane.",
-        "Source/view pickers: arrows or j/k select, PgUp/PgDn and wheel scroll; Enter chooses.",
-        "Editor: Tab/Shift+Tab applicable fields, click text to place caret, Ctrl+S Save.",
-        "PgUp/PgDn/wheel scroll the form; description Enter is newline; Esc Cancel.",
-        "Changed drafts ask before discard; Enter or Esc initially keeps editing.",
+        "Calendars: the board is everyone's, your own events are yours alone.",
+        "n new event (a title like movie night tomorrow at 9pm fills the time in),",
+        "e edit your own, Delete your own (moderators any post), i I'm in or I'm out.",
+        "v Month or List, b show or hide the board, [ ] month, t today.",
+        "Arrows move days (List: events), j/k select events, Enter opens one or the day.",
+        "Click selects; double-click opens; right-click offers what you may do.",
+        "Editor: Tab fields, Post to picks the board or just me, Ctrl+S saves,",
+        "Esc asks before discarding a changed draft. Dates take Oct 2, +2w, tomorrow.",
+        "A post is a line in #lounge; an hour before it starts it heads the now strip",
+        "on Home and the Live panel (o or click opens it); the start is a headline.",
         "Times use your account timezone (UTC fallback); all-day dates do not shift.",
-        "Server staff permissions follow event creation tier and admin delegation.",
-        "Own personal events are editable; shared personal calendars are read-only.",
-        "Notifications start disabled; enable for a 24h lead; try 1 day or 1h 30m.",
-        "Home and Calendars show server + your personal notices; u opens the list.",
         "",
         "Leaderboards: j/k or arrows select a board; click its row to switch.",
         "Ctrl+J/K scroll the content. The wheel over the rail selects boards;",

@@ -57,7 +57,6 @@ pub(crate) struct ProfileModalState {
     /// outside it can dismiss the modal. Interior-mutable: published by the
     /// immutable `draw` path.
     popup_area: Cell<Rect>,
-    pub(crate) calendar_link: Cell<Rect>,
     profile_awards: Vec<ProfileAward>,
     gild_counts: GildCounts,
     gallery_counts: GalleryCounts,
@@ -95,7 +94,6 @@ impl ProfileModalState {
             aquarium: RefCell::new(None),
             aquarium_area: Cell::new(Rect::default()),
             popup_area: Cell::new(Rect::default()),
-            calendar_link: Cell::new(Rect::default()),
             profile_awards: Vec::new(),
             gild_counts: GildCounts::default(),
             gallery_counts: GalleryCounts::default(),
@@ -109,7 +107,6 @@ impl ProfileModalState {
     }
 
     pub(crate) fn open(&mut self, user_id: Uuid, fallback_name: impl Into<String>) {
-        self.calendar_link.set(Rect::default());
         self.prune_current_channel();
         self.viewed_user_id = Some(user_id);
         self.fallback_name = fallback_name.into();
@@ -305,9 +302,6 @@ impl ProfileModalState {
 
     pub(crate) fn profile(&self) -> Option<&Profile> {
         self.profile.as_ref()
-    }
-    pub(crate) fn viewed_user_id(&self) -> Option<Uuid> {
-        self.viewed_user_id
     }
 
     pub(crate) fn chip_balance(&self) -> Option<i64> {

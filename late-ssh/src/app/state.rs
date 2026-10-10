@@ -2825,9 +2825,6 @@ impl App {
         self.calendar.invalidate_geometry();
         self.calendar.clear_click();
         self.calendar.context_menu = None;
-        self.profile_modal_state
-            .calendar_link
-            .set(ratatui::layout::Rect::default());
         tracing::debug!(cols, rows, "window resized");
         self.size = (cols, rows);
         self.leaderboard_page.clear_hit_regions();

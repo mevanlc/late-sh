@@ -2,11 +2,14 @@ pub mod date_entry;
 #[cfg(test)]
 mod date_entry_test;
 pub mod editor;
-mod ical;
 #[cfg(test)]
-mod ical_test;
-mod import;
+mod editor_test;
 pub mod input;
+#[cfg(test)]
+mod input_test;
+pub mod live;
+#[cfg(test)]
+mod live_test;
 pub mod navigation;
 #[cfg(test)]
 mod navigation_test;

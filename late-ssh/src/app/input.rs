@@ -3927,11 +3927,7 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
                 && !app.tag_picker.is_open()
                 && !matches!(
                     app.calendar.modal,
-                    Some(
-                        crate::app::calendar::state::Modal::Editor(_)
-                            | crate::app::calendar::state::Modal::Import(_)
-                            | crate::app::calendar::state::Modal::Settings { .. }
-                    )
+                    Some(crate::app::calendar::state::Modal::Editor(_))
                 ) =>
         {
             open_shop_modal_globally(app);

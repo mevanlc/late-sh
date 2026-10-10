@@ -1,113 +1,71 @@
-//! Calendar truth and authorization. Every write locks the current actor and event.
+//! The house events board and personal calendars: truth and authorization.
+//!
+//! A board event (`owner_id` NULL) is posted by anyone who is not banned,
+//! read by everyone, and anyone may say they are in. A personal event belongs
+//! to one account and nobody else ever reads it. Every write locks the actor
+//! and the event row, so a stale editor cannot overwrite a newer revision and
+//! two posts at once cannot beat the daily cap.
 use crate::db::Db;
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use deadpool_postgres::GenericClient;
-use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 use uuid::Uuid;
 
 pub const CALENDAR_CHANGED_CHANNEL: &str = "calendar_changed";
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// Board posts one account may make per UTC day.
+pub const BOARD_POSTS_PER_DAY: i64 = 5;
+/// How far ahead "upcoming" looks: the Live panel's rows and the shared
+/// board snapshot every replica keeps.
+pub const UPCOMING_HORIZON: Duration = Duration::hours(24);
+/// How long before its start an event reaches the live strip.
+pub const STRIP_LEAD: Duration = Duration::hours(1);
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CalendarView {
     #[default]
     Month,
-    Week,
-    ThreeDay,
-    Day,
     List,
 }
 impl CalendarView {
-    pub const ALL: [Self; 5] = [
-        Self::Month,
-        Self::Week,
-        Self::ThreeDay,
-        Self::Day,
-        Self::List,
-    ];
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Month => "month",
-            Self::Week => "week",
-            Self::ThreeDay => "three_day",
-            Self::Day => "day",
-            Self::List => "list",
-        }
-    }
     pub fn label(self) -> &'static str {
         match self {
             Self::Month => "Month",
-            Self::Week => "Week",
-            Self::ThreeDay => "3-day",
-            Self::Day => "Day",
-            Self::List => "Event List",
+            Self::List => "List",
         }
     }
-    pub fn parse(s: &str) -> Self {
-        Self::ALL
-            .into_iter()
-            .find(|v| v.key() == s)
-            .unwrap_or_default()
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Month => Self::List,
+            Self::List => Self::Month,
+        }
     }
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+
+/// Where an event lives: on the board for everyone, or in the viewer's own
+/// calendar.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum CalendarSource {
-    Server,
-    Personal(Uuid),
+    #[default]
+    Board,
+    Personal,
 }
 impl CalendarSource {
-    pub fn owner(self) -> Option<Uuid> {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Server => None,
-            Self::Personal(id) => Some(id),
+            Self::Board => "the board",
+            Self::Personal => "just me",
         }
     }
-}
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CalendarPreferences {
-    pub week_start: u8,
-    pub default_view: CalendarView,
-    pub server_overlay: bool,
-    pub public: bool,
-    pub revision: i64,
-}
-impl Default for CalendarPreferences {
-    fn default() -> Self {
-        Self {
-            week_start: 0,
-            default_view: CalendarView::Month,
-            server_overlay: true,
-            public: false,
-            revision: 0,
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CreationTier {
-    User,
-    Moderator,
-    Admin,
-}
-impl CreationTier {
-    pub fn key(self) -> &'static str {
+    pub fn toggled(self) -> Self {
         match self {
-            Self::User => "user",
-            Self::Moderator => "moderator",
-            Self::Admin => "admin",
-        }
-    }
-    pub fn from_flags(admin: bool, moderator: bool) -> Self {
-        if admin {
-            Self::Admin
-        } else if moderator {
-            Self::Moderator
-        } else {
-            Self::User
+            Self::Board => Self::Personal,
+            Self::Personal => Self::Board,
         }
     }
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EventTiming {
     /// The editor displays end_exclusive - one day.
@@ -136,6 +94,7 @@ impl EventTiming {
         }
         Ok(())
     }
+    /// The event as instants. A start-only timed event lasts an hour.
     pub fn bounds(&self, tz: Tz) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
         self.validate()?;
         match self {
@@ -146,6 +105,7 @@ impl EventTiming {
             Self::Timed { start, end } => Ok((*start, end.unwrap_or(*start + Duration::hours(1)))),
         }
     }
+    /// The civil dates the event covers in `tz`, end exclusive.
     pub fn dates(&self, tz: Tz) -> (NaiveDate, NaiveDate) {
         match self {
             Self::AllDay {
@@ -183,11 +143,11 @@ pub fn local_instant(
 ) -> Result<DateTime<Utc>> {
     match tz.from_local_datetime(&local) {
         LocalResult::Single(t) => Ok(t.with_timezone(&Utc)),
-        LocalResult::None => bail!("This local time does not exist in {tz}"),
+        LocalResult::None => anyhow::bail!("This local time does not exist in {tz}"),
         LocalResult::Ambiguous(a, b) => match occurrence {
             Some(Occurrence::Earlier) => Ok(a.min(b).with_timezone(&Utc)),
             Some(Occurrence::Later) => Ok(a.max(b).with_timezone(&Utc)),
-            None => bail!("This local time repeats in {tz}; choose Earlier or Later"),
+            None => anyhow::bail!("This local time repeats in {tz}; choose Earlier or Later"),
         },
     }
 }
@@ -204,90 +164,47 @@ pub fn day_boundary(date: NaiveDate, tz: Tz) -> Result<DateTime<Utc>> {
             return Ok(t);
         }
     }
-    bail!("{date} does not exist in {tz}")
+    anyhow::bail!("{date} does not exist in {tz}")
 }
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CalendarEvent {
     pub id: Uuid,
     pub owner_id: Option<Uuid>,
     pub creator_id: Uuid,
-    pub creation_tier: CreationTier,
-    pub mod_editable: bool,
+    /// The poster's name as the board shows it; `someone` once the account
+    /// is gone.
+    pub creator_name: String,
     pub title: String,
     pub description: String,
     pub timing: EventTiming,
     pub creator_timezone: String,
-    pub notice_lead_seconds: Option<i64>,
-    pub notice_start: DateTime<Utc>,
-    pub notice_end: DateTime<Utc>,
+    pub starts_at: DateTime<Utc>,
+    pub ends_at: DateTime<Utc>,
+    /// How many said they are in. Always zero on a personal event.
+    pub going: i64,
     pub revision: i64,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct EventDraft {
-    pub title: String,
-    pub description: String,
-    pub timing: EventTiming,
-    pub notice_lead_seconds: Option<i64>,
-    pub mod_editable: bool,
-}
-impl EventDraft {
-    pub fn validate(&self) -> Result<()> {
-        ensure!(!self.title.trim().is_empty(), "Title is required");
-        ensure!(
-            self.title.chars().count() <= 300,
-            "Title is limited to 300 characters"
-        );
-        ensure!(
-            self.description.chars().count() <= 10000,
-            "Description is limited to 10000 characters"
-        );
-        ensure!(
-            self.notice_lead_seconds
-                .is_none_or(|n| (0..=315360000).contains(&n)),
-            "Lead time must be between 0 and 3650 days"
-        );
-        self.timing.validate()
-    }
-}
-impl From<&CalendarEvent> for EventDraft {
-    fn from(e: &CalendarEvent) -> Self {
-        Self {
-            title: e.title.clone(),
-            description: e.description.clone(),
-            timing: e.timing.clone(),
-            notice_lead_seconds: e.notice_lead_seconds,
-            mod_editable: e.mod_editable,
+impl CalendarEvent {
+    pub fn source(&self) -> CalendarSource {
+        match self.owner_id {
+            None => CalendarSource::Board,
+            Some(_) => CalendarSource::Personal,
         }
     }
-}
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct EventAccess {
-    pub edit: bool,
-    pub notifications: bool,
-    pub delegate: bool,
-}
-pub fn event_access(e: &CalendarEvent, viewer: Uuid, role: CreationTier) -> EventAccess {
-    if let Some(owner) = e.owner_id {
-        let own = owner == viewer;
-        return EventAccess {
-            edit: own,
-            notifications: own,
-            delegate: false,
-        };
+    pub fn is_board(&self) -> bool {
+        self.owner_id.is_none()
     }
-    let admin = role == CreationTier::Admin;
-    let moderator = role == CreationTier::Moderator;
-    EventAccess {
-        edit: admin
-            || (moderator && (e.creation_tier == CreationTier::Moderator || e.mod_editable)),
-        notifications: admin
-            || (moderator && e.creation_tier == CreationTier::Admin && e.mod_editable),
-        delegate: admin && e.creation_tier == CreationTier::Admin,
-    }
-}
-impl CalendarEvent {
+    /// Inside [`UPCOMING_HORIZON`] of its start, or on and not yet over.
     pub fn upcoming(&self, now: DateTime<Utc>) -> bool {
-        self.notice_lead_seconds.is_some() && self.notice_start <= now && now < self.notice_end
+        self.starts_at <= now + UPCOMING_HORIZON && now < self.ends_at
+    }
+    /// Inside [`STRIP_LEAD`] of its start, or on and not yet over.
+    pub fn on_strip(&self, now: DateTime<Utc>) -> bool {
+        self.starts_at - STRIP_LEAD <= now && now < self.ends_at
+    }
+    pub fn started(&self, now: DateTime<Utc>) -> bool {
+        self.starts_at <= now
     }
     fn from_row(r: Row) -> Self {
         let timing = match r.get::<_, Option<NaiveDate>>("start_date") {
@@ -300,40 +217,183 @@ impl CalendarEvent {
                 end: r.get("end_at"),
             },
         };
-        let creation_tier = match r.get::<_, String>("creation_tier").as_str() {
-            "admin" => CreationTier::Admin,
-            "moderator" => CreationTier::Moderator,
-            _ => CreationTier::User,
-        };
         Self {
             id: r.get("id"),
             owner_id: r.get("owner_id"),
             creator_id: r.get("creator_id"),
-            creation_tier,
-            mod_editable: r.get("mod_editable"),
+            creator_name: r.get("creator_name"),
             title: r.get("title"),
             description: r.get("description"),
             timing,
             creator_timezone: r.get("creator_timezone"),
-            notice_lead_seconds: r.get("notice_lead_seconds"),
-            notice_start: r.get("notice_start"),
-            notice_end: r.get("notice_end"),
+            starts_at: r.get("starts_at"),
+            ends_at: r.get("ends_at"),
+            going: r.get("going"),
             revision: r.get("revision"),
         }
     }
-    fn for_viewer(mut self, viewer: Uuid) -> Self {
-        if self.owner_id.is_some_and(|o| o != viewer) {
-            self.notice_start += Duration::seconds(self.notice_lead_seconds.unwrap_or(0));
-            self.notice_lead_seconds = None;
-        }
-        self
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventDraft {
+    pub title: String,
+    pub description: String,
+    pub timing: EventTiming,
+}
+impl EventDraft {
+    pub fn validate(&self) -> Result<()> {
+        ensure!(!self.title.trim().is_empty(), "Title is required");
+        ensure!(
+            self.title.chars().count() <= 300,
+            "Title is limited to 300 characters"
+        );
+        ensure!(
+            self.description.chars().count() <= 10000,
+            "Description is limited to 10000 characters"
+        );
+        self.timing.validate()
     }
 }
-#[derive(Clone, Debug)]
-pub struct PublicCalendar {
-    pub owner_id: Uuid,
-    pub username: String,
+impl From<&CalendarEvent> for EventDraft {
+    fn from(e: &CalendarEvent) -> Self {
+        Self {
+            title: e.title.clone(),
+            description: e.description.clone(),
+            timing: e.timing.clone(),
+        }
+    }
 }
+
+/// What one viewer may do to one event. The three rules of the board: the
+/// poster edits and deletes their own post, staff delete any post, anyone
+/// says they are in. A personal event answers only to its owner.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EventAccess {
+    pub edit: bool,
+    pub delete: bool,
+    pub rsvp: bool,
+}
+pub fn event_access(e: &CalendarEvent, viewer: Uuid, staff: bool) -> EventAccess {
+    match e.owner_id {
+        Some(owner) => {
+            let own = owner == viewer;
+            EventAccess {
+                edit: own,
+                delete: own,
+                rsvp: false,
+            }
+        }
+        None => {
+            let own = e.creator_id == viewer;
+            EventAccess {
+                edit: own,
+                delete: own || staff,
+                rsvp: true,
+            }
+        }
+    }
+}
+
+/// Why a write was refused. Every variant is a thing the user did, worded
+/// for them; a database failure is not one of these.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CalendarRefusal {
+    /// A moderator took away posting to the board.
+    Banned,
+    /// [`BOARD_POSTS_PER_DAY`] board posts already today.
+    DailyCap,
+    /// Not this viewer's to edit or delete.
+    ReadOnly,
+    /// Somebody saved a newer revision first.
+    Revision,
+    /// The event is gone, or was never this viewer's to read.
+    Gone,
+    /// Only a board event takes an "I'm in".
+    NoRsvp,
+    /// The draft itself: an empty title, an end before its start.
+    Invalid(String),
+}
+impl CalendarRefusal {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Banned => "You cannot post to the board".into(),
+            Self::DailyCap => {
+                format!("The board takes {BOARD_POSTS_PER_DAY} posts a day from one account")
+            }
+            Self::ReadOnly => "This event is not yours to change".into(),
+            Self::Revision => {
+                "Event changed elsewhere; reload before saving (draft retained)".into()
+            }
+            Self::Gone => "Event unavailable; reload the calendar".into(),
+            Self::NoRsvp => "Only board events take an I'm in".into(),
+            Self::Invalid(why) => why.clone(),
+        }
+    }
+    pub fn kind(&self) -> CalendarRefusalKind {
+        match self {
+            Self::Banned => CalendarRefusalKind::Banned,
+            Self::DailyCap => CalendarRefusalKind::DailyCap,
+            Self::ReadOnly => CalendarRefusalKind::ReadOnly,
+            Self::Revision => CalendarRefusalKind::Revision,
+            Self::Gone => CalendarRefusalKind::Gone,
+            Self::NoRsvp => CalendarRefusalKind::NoRsvp,
+            Self::Invalid(_) => CalendarRefusalKind::Invalid,
+        }
+    }
+}
+/// The refusal without its words, for a metric label.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalendarRefusalKind {
+    Banned,
+    DailyCap,
+    ReadOnly,
+    Revision,
+    Gone,
+    NoRsvp,
+    Invalid,
+}
+
+#[derive(Debug)]
+pub enum CalendarError {
+    Refused(CalendarRefusal),
+    Failed(anyhow::Error),
+}
+impl From<anyhow::Error> for CalendarError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+impl From<tokio_postgres::Error> for CalendarError {
+    fn from(error: tokio_postgres::Error) -> Self {
+        Self::Failed(error.into())
+    }
+}
+impl From<deadpool_postgres::PoolError> for CalendarError {
+    fn from(error: deadpool_postgres::PoolError) -> Self {
+        Self::Failed(error.into())
+    }
+}
+fn refuse<T>(refusal: CalendarRefusal) -> Result<T, CalendarError> {
+    Err(CalendarError::Refused(refusal))
+}
+
+/// A save, and whether it made a new event: a new board post is a story,
+/// an edit is not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Saved {
+    pub event: CalendarEvent,
+    pub created: bool,
+}
+
+/// A delete, and whether staff did it to someone else's post.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Deleted {
+    pub by_staff: bool,
+}
+
+const EVENT_COLUMNS: &str = "e.*, COALESCE(u.username,'someone') AS creator_name, \
+    (SELECT count(*) FROM calendar_rsvps r WHERE r.event_id=e.id) AS going";
+
 #[derive(Clone)]
 pub struct CalendarStore {
     db: Db,
@@ -342,109 +402,80 @@ impl CalendarStore {
     pub fn new(db: Db) -> Self {
         Self { db }
     }
-    pub async fn preferences(&self, viewer: Uuid) -> Result<CalendarPreferences> {
+    /// Whether the viewer is a moderator or admin right now.
+    pub async fn staff(&self, viewer: Uuid) -> Result<bool> {
         let c = self.db.get().await?;
         let r = c
-            .query_opt(
-                "SELECT * FROM calendar_preferences WHERE user_id=$1",
+            .query_one(
+                "SELECT is_admin OR is_moderator FROM users WHERE id=$1",
                 &[&viewer],
             )
             .await?;
-        Ok(r.map(|r| CalendarPreferences {
-            week_start: r.get::<_, i16>("week_start") as u8,
-            default_view: CalendarView::parse(&r.get::<_, String>("default_view")),
-            server_overlay: r.get("server_overlay"),
-            public: r.get("public"),
-            revision: r.get("revision"),
-        })
-        .unwrap_or_default())
+        Ok(r.get(0))
     }
-    pub async fn save_preferences(
-        &self,
-        viewer: Uuid,
-        p: &CalendarPreferences,
-    ) -> Result<CalendarPreferences> {
-        ensure!(matches!(p.week_start, 0 | 6), "Invalid week start");
-        let mut c = self.db.get().await?;
-        let tx = c.transaction().await?;
-        tx.query_one("SELECT id FROM users WHERE id=$1 FOR SHARE", &[&viewer])
-            .await?;
-        let r=tx.query_opt("INSERT INTO calendar_preferences(user_id,week_start,default_view,server_overlay,public) SELECT $1,$2,$3,$4,$5 WHERE $6::bigint=0 ON CONFLICT(user_id) DO NOTHING RETURNING revision",&[&viewer,&(p.week_start as i16),&p.default_view.key(),&p.server_overlay,&p.public,&p.revision]).await?;
-        let revision = if let Some(r) = r {
-            r.get("revision")
-        } else {
-            tx.query_opt("UPDATE calendar_preferences SET week_start=$2,default_view=$3,server_overlay=$4,public=$5,revision=revision+1 WHERE user_id=$1 AND revision=$6 RETURNING revision",&[&viewer,&(p.week_start as i16),&p.default_view.key(),&p.server_overlay,&p.public,&p.revision]).await?.ok_or_else(||anyhow::anyhow!("Calendar Settings changed elsewhere; reload"))?.get("revision")
-        };
-        tx.commit().await?;
-        Ok(CalendarPreferences {
-            revision,
-            ..p.clone()
-        })
-    }
-    pub async fn public_calendars(&self, viewer: Uuid) -> Result<Vec<PublicCalendar>> {
-        let c = self.db.get().await?;
-        Ok(c.query("SELECT p.user_id,u.username FROM calendar_preferences p JOIN users u ON u.id=p.user_id WHERE p.public AND p.user_id<>$1 ORDER BY lower(u.username),p.user_id",&[&viewer]).await?.into_iter().map(|r|PublicCalendar{owner_id:r.get(0),username:r.get(1)}).collect())
-    }
-    pub async fn role(&self, viewer: Uuid) -> Result<CreationTier> {
-        let c = self.db.get().await?;
-        Self::actor(&c, viewer).await.map(|a| a.0)
-    }
-    async fn actor<C: GenericClient + Sync>(c: &C, viewer: Uuid) -> Result<(CreationTier, Tz)> {
+    /// The actor under a row lock: a save or delete reads the role and the
+    /// zone it will act with, and two posts at once serialize on the row so
+    /// the daily cap is exact.
+    async fn actor<C: GenericClient + Sync>(c: &C, viewer: Uuid) -> Result<Actor> {
         let r = c
             .query_one(
-                "SELECT is_admin,is_moderator,settings FROM users WHERE id=$1 FOR SHARE",
+                "SELECT is_admin,is_moderator,settings FROM users WHERE id=$1 FOR UPDATE",
                 &[&viewer],
             )
             .await?;
         let settings: serde_json::Value = r.get("settings");
-        Ok((
-            CreationTier::from_flags(r.get(0), r.get(1)),
-            effective_timezone(settings.get("timezone").and_then(|v| v.as_str())),
-        ))
+        Ok(Actor {
+            staff: r.get::<_, bool>(0) || r.get::<_, bool>(1),
+            tz: effective_timezone(settings.get("timezone").and_then(|v| v.as_str())),
+        })
     }
-    #[allow(clippy::too_many_arguments)] // Explicit session scope and date/zone bounds.
+    /// The events one viewer sees between two civil dates in `tz`: their own,
+    /// plus the board when `board` is set. The owner scope is inside the
+    /// statement, never applied after.
     pub async fn visible(
         &self,
         viewer: Uuid,
-        source: CalendarSource,
-        overlay: bool,
+        board: bool,
         from: NaiveDate,
         to: NaiveDate,
         tz: Tz,
     ) -> Result<Vec<CalendarEvent>> {
         ensure!(to > from, "Invalid visible range");
         let c = self.db.get().await?;
-        if let Some(owner) = source.owner().filter(|o| *o != viewer) {
-            ensure!(
-                c.query_opt(
-                    "SELECT user_id FROM calendar_preferences WHERE user_id=$1 AND public",
-                    &[&owner]
-                )
-                .await?
-                .is_some(),
-                "This calendar is private or no longer shared"
-            );
-        }
         let begin = day_boundary(from, tz)?;
         let end = day_boundary(to, tz)?;
-        let owner = source.owner();
-        // Authorization is also inside this statement so a concurrent unshare
-        // cannot grant a subsequent query access using an earlier check.
-        let rows=c.query("SELECT e.* FROM calendar_events e WHERE ((e.owner_id IS NOT DISTINCT FROM $1::uuid AND (e.owner_id IS NULL OR e.owner_id=$2 OR EXISTS(SELECT 1 FROM calendar_preferences p WHERE p.user_id=e.owner_id AND p.public))) OR ($3 AND e.owner_id IS NULL)) AND ((e.start_date IS NOT NULL AND daterange(e.start_date,e.end_date,'[)') && daterange($4,$5,'[)')) OR (e.start_at IS NOT NULL AND tstzrange(e.start_at,e.notice_end,'[)') && tstzrange($6,$7,'[)'))) ORDER BY COALESCE(e.start_at,e.notice_start), e.id",&[&owner,&viewer,&(overlay&&owner.is_some()),&from,&to,&begin,&end]).await?;
-        Ok(rows
-            .into_iter()
-            .map(CalendarEvent::from_row)
-            .map(|e| e.for_viewer(viewer))
-            .collect())
+        let rows = c
+            .query(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
+                     WHERE (e.owner_id=$1 OR ($2 AND e.owner_id IS NULL)) \
+                     AND ((e.start_date IS NOT NULL AND daterange(e.start_date,e.end_date,'[)') && daterange($3,$4,'[)')) \
+                       OR (e.start_at IS NOT NULL AND tstzrange(e.starts_at,e.ends_at,'[)') && tstzrange($5,$6,'[)'))) \
+                     ORDER BY e.starts_at, e.id"
+                ),
+                &[&viewer, &board, &from, &to, &begin, &end],
+            )
+            .await?;
+        Ok(rows.into_iter().map(CalendarEvent::from_row).collect())
     }
-    pub async fn event(&self, viewer: Uuid, id: Uuid) -> Result<CalendarEvent> {
+    /// One event the viewer may read: on the board, or their own.
+    pub async fn event(&self, viewer: Uuid, id: Uuid) -> Result<CalendarEvent, CalendarError> {
         let c = self.db.get().await?;
-        let r=c.query_opt("SELECT e.* FROM calendar_events e WHERE e.id=$1 AND (e.owner_id IS NULL OR e.owner_id=$2 OR EXISTS(SELECT 1 FROM calendar_preferences p WHERE p.user_id=e.owner_id AND p.public))",&[&id,&viewer]).await?;
-        Ok(CalendarEvent::from_row(
-            r.ok_or_else(|| anyhow::anyhow!("Event unavailable; reload calendar"))?,
-        )
-        .for_viewer(viewer))
+        let r = c
+            .query_opt(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
+                     WHERE e.id=$1 AND (e.owner_id IS NULL OR e.owner_id=$2)"
+                ),
+                &[&id, &viewer],
+            )
+            .await?;
+        match r {
+            Some(r) => Ok(CalendarEvent::from_row(r)),
+            None => refuse(CalendarRefusal::Gone),
+        }
     }
+    /// The viewer's own events inside [`UPCOMING_HORIZON`], soonest first.
     pub async fn upcoming_personal(
         &self,
         viewer: Uuid,
@@ -452,8 +483,9 @@ impl CalendarStore {
     ) -> Result<Vec<CalendarEvent>> {
         self.upcoming_scope(Some(viewer), now).await
     }
-    /// Only the replica service calls this, to build a shared server snapshot.
-    pub async fn upcoming_server(&self, now: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
+    /// The board inside [`UPCOMING_HORIZON`], soonest first. The replica
+    /// service reads this into the snapshot every session shares.
+    pub async fn upcoming_board(&self, now: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
         self.upcoming_scope(None, now).await
     }
     async fn upcoming_scope(
@@ -462,79 +494,105 @@ impl CalendarStore {
         now: DateTime<Utc>,
     ) -> Result<Vec<CalendarEvent>> {
         let c = self.db.get().await?;
-        Ok(c.query("SELECT * FROM calendar_events WHERE owner_id IS NOT DISTINCT FROM $1::uuid AND notice_lead_seconds IS NOT NULL AND tstzrange(notice_start,notice_end,'[)') @> $2::timestamptz ORDER BY notice_start + notice_lead_seconds * interval '1 second',id",&[&owner,&now]).await?.into_iter().map(CalendarEvent::from_row).collect())
+        let horizon = now + UPCOMING_HORIZON;
+        Ok(c.query(
+            &format!(
+                "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
+                 WHERE e.owner_id IS NOT DISTINCT FROM $1::uuid AND e.starts_at <= $2 AND e.ends_at > $3 \
+                 ORDER BY e.starts_at, e.id"
+            ),
+            &[&owner, &horizon, &now],
+        )
+        .await?
+        .into_iter()
+        .map(CalendarEvent::from_row)
+        .collect())
     }
+    /// The board events the viewer said they are in.
+    pub async fn rsvps(&self, viewer: Uuid) -> Result<Vec<Uuid>> {
+        let c = self.db.get().await?;
+        Ok(c.query(
+            "SELECT event_id FROM calendar_rsvps WHERE user_id=$1",
+            &[&viewer],
+        )
+        .await?
+        .into_iter()
+        .map(|r| r.get(0))
+        .collect())
+    }
+    /// Create or update. `existing` is the event and the revision the editor
+    /// was opened on; a newer revision in the table refuses the save and the
+    /// caller keeps the draft.
     pub async fn save(
         &self,
         viewer: Uuid,
         source: CalendarSource,
         existing: Option<(Uuid, i64)>,
         draft: &EventDraft,
-    ) -> Result<CalendarEvent> {
-        draft.validate()?;
+    ) -> Result<Saved, CalendarError> {
+        if let Err(why) = draft.validate() {
+            return refuse(CalendarRefusal::Invalid(why.to_string()));
+        }
         let mut c = self.db.get().await?;
         let tx = c.transaction().await?;
-        let (role, tz) = Self::actor(&tx, viewer).await?;
-        ensure!(
-            source.owner().is_none_or(|o| o == viewer),
-            "Shared calendars are read-only"
-        );
-        let old = if let Some((id, revision)) = existing {
-            let e = CalendarEvent::from_row(
-                tx.query_opt(
-                    "SELECT * FROM calendar_events WHERE id=$1 FOR UPDATE",
-                    &[&id],
-                )
-                .await?
-                .ok_or_else(|| anyhow::anyhow!("Event deleted elsewhere; reload"))?,
-            );
-            ensure!(
-                e.owner_id == source.owner(),
-                "Event belongs to a different calendar"
-            );
-            ensure!(
-                e.revision == revision,
-                "Event changed elsewhere; reload before saving (draft retained)"
-            );
-            let access = event_access(&e, viewer, role);
-            ensure!(access.edit, "You cannot edit this event");
-            ensure!(
-                access.notifications || e.notice_lead_seconds == draft.notice_lead_seconds,
-                "Only an admin can change this event's notifications"
-            );
-            ensure!(
-                access.delegate || e.mod_editable == draft.mod_editable,
-                "Only an admin can delegate this event"
-            );
-            Some(e)
-        } else {
-            ensure!(
-                source.owner().is_some() || role != CreationTier::User,
-                "Server events require a moderator or admin"
-            );
-            ensure!(
-                source.owner().is_some()
-                    || role == CreationTier::Admin
-                    || draft.notice_lead_seconds.is_none(),
-                "Only an admin can enable moderator-event notifications"
-            );
-            ensure!(
-                !draft.mod_editable
-                    || (source == CalendarSource::Server && role == CreationTier::Admin),
-                "Only admin-created server events can be delegated"
-            );
-            None
+        let actor = Self::actor(&tx, viewer).await?;
+        let old = match existing {
+            Some((id, revision)) => {
+                let Some(row) = tx
+                    .query_opt(
+                        &format!(
+                            "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
+                             WHERE e.id=$1 FOR UPDATE OF e"
+                        ),
+                        &[&id],
+                    )
+                    .await?
+                else {
+                    return refuse(CalendarRefusal::Gone);
+                };
+                let e = CalendarEvent::from_row(row);
+                if e.source() != source {
+                    return refuse(CalendarRefusal::ReadOnly);
+                }
+                if !event_access(&e, viewer, actor.staff).edit {
+                    return refuse(CalendarRefusal::ReadOnly);
+                }
+                if e.revision != revision {
+                    return refuse(CalendarRefusal::Revision);
+                }
+                Some(e)
+            }
+            None => {
+                if source == CalendarSource::Board {
+                    if Self::banned(&tx, viewer).await? {
+                        return refuse(CalendarRefusal::Banned);
+                    }
+                    let today: i64 = tx
+                        .query_one(
+                            "SELECT count(*) FROM calendar_events WHERE creator_id=$1 AND owner_id IS NULL \
+                             AND created >= date_trunc('day', CURRENT_TIMESTAMP)",
+                            &[&viewer],
+                        )
+                        .await?
+                        .get(0);
+                    if today >= BOARD_POSTS_PER_DAY {
+                        return refuse(CalendarRefusal::DailyCap);
+                    }
+                }
+                None
+            }
         };
         let creator_timezone = old
             .as_ref()
             .map(|e| e.creator_timezone.clone())
-            .unwrap_or_else(|| tz.to_string());
-        let (begin, end) = draft
+            .unwrap_or_else(|| actor.tz.to_string());
+        let (starts_at, ends_at) = match draft
             .timing
-            .bounds(effective_timezone(Some(&creator_timezone)))?;
-        let notice_start = begin
-            .checked_sub_signed(Duration::seconds(draft.notice_lead_seconds.unwrap_or(0)))
-            .ok_or_else(|| anyhow::anyhow!("Lead time is outside supported dates"))?;
+            .bounds(effective_timezone(Some(&creator_timezone)))
+        {
+            Ok(bounds) => bounds,
+            Err(why) => return refuse(CalendarRefusal::Invalid(why.to_string())),
+        };
         let (sd, ed, st, et) = match draft.timing {
             EventTiming::AllDay {
                 start,
@@ -544,34 +602,162 @@ impl CalendarStore {
         };
         let id = old.as_ref().map(|e| e.id).unwrap_or_else(Uuid::now_v7);
         let creator = old.as_ref().map(|e| e.creator_id).unwrap_or(viewer);
-        let tier = old.as_ref().map(|e| e.creation_tier).unwrap_or(role);
-        let row=tx.query_one("INSERT INTO calendar_events(id,owner_id,creator_id,creation_tier,mod_editable,title,description,start_date,end_date,start_at,end_at,creator_timezone,notice_lead_seconds,notice_start,notice_end) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO UPDATE SET mod_editable=EXCLUDED.mod_editable,title=EXCLUDED.title,description=EXCLUDED.description,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,start_at=EXCLUDED.start_at,end_at=EXCLUDED.end_at,notice_lead_seconds=EXCLUDED.notice_lead_seconds,notice_start=EXCLUDED.notice_start,notice_end=EXCLUDED.notice_end,revision=calendar_events.revision+1 RETURNING *",&[&id,&source.owner(),&creator,&tier.key(),&draft.mod_editable,&draft.title.trim(),&draft.description,&sd,&ed,&st,&et,&creator_timezone,&draft.notice_lead_seconds,&notice_start,&end]).await?;
+        let owner = match source {
+            CalendarSource::Board => None,
+            CalendarSource::Personal => Some(viewer),
+        };
+        let saved: Uuid = tx
+            .query_one(
+                "INSERT INTO calendar_events(id,owner_id,creator_id,title,description,start_date,end_date,start_at,end_at,creator_timezone,starts_at,ends_at) \
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) \
+                 ON CONFLICT(id) DO UPDATE SET title=EXCLUDED.title,description=EXCLUDED.description,start_date=EXCLUDED.start_date,end_date=EXCLUDED.end_date,start_at=EXCLUDED.start_at,end_at=EXCLUDED.end_at,starts_at=EXCLUDED.starts_at,ends_at=EXCLUDED.ends_at,revision=calendar_events.revision+1 \
+                 RETURNING id",
+                &[
+                    &id,
+                    &owner,
+                    &creator,
+                    &draft.title.trim(),
+                    &draft.description,
+                    &sd,
+                    &ed,
+                    &st,
+                    &et,
+                    &creator_timezone,
+                    &starts_at,
+                    &ends_at,
+                ],
+            )
+            .await?
+            .get(0);
+        let row = tx
+            .query_one(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id WHERE e.id=$1"
+                ),
+                &[&saved],
+            )
+            .await?;
         tx.commit().await?;
-        Ok(CalendarEvent::from_row(row))
+        Ok(Saved {
+            event: CalendarEvent::from_row(row),
+            created: old.is_none(),
+        })
     }
-    pub async fn delete(&self, viewer: Uuid, id: Uuid, revision: i64) -> Result<()> {
+    async fn banned<C: GenericClient + Sync>(c: &C, viewer: Uuid) -> Result<bool> {
+        Ok(c.query_opt(
+            "SELECT 1 FROM calendar_bans WHERE target_user_id=$1 AND (expires_at IS NULL OR expires_at > CURRENT_TIMESTAMP)",
+            &[&viewer],
+        )
+        .await?
+        .is_some())
+    }
+    pub async fn delete(
+        &self,
+        viewer: Uuid,
+        id: Uuid,
+        revision: i64,
+    ) -> Result<Deleted, CalendarError> {
         let mut c = self.db.get().await?;
         let tx = c.transaction().await?;
-        let (role, _) = Self::actor(&tx, viewer).await?;
-        let e = CalendarEvent::from_row(
-            tx.query_opt(
-                "SELECT * FROM calendar_events WHERE id=$1 FOR UPDATE",
+        let actor = Self::actor(&tx, viewer).await?;
+        let Some(row) = tx
+            .query_opt(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
+                     WHERE e.id=$1 FOR UPDATE OF e"
+                ),
                 &[&id],
             )
             .await?
-            .ok_or_else(|| anyhow::anyhow!("Event deleted elsewhere"))?,
-        );
-        ensure!(
-            event_access(&e, viewer, role).edit,
-            "You cannot delete this event"
-        );
-        ensure!(
-            e.revision == revision,
-            "Event changed elsewhere; reload before deleting"
-        );
+        else {
+            return refuse(CalendarRefusal::Gone);
+        };
+        let e = CalendarEvent::from_row(row);
+        let access = event_access(&e, viewer, actor.staff);
+        if !access.delete {
+            return refuse(CalendarRefusal::ReadOnly);
+        }
+        if e.revision != revision {
+            return refuse(CalendarRefusal::Revision);
+        }
         tx.execute("DELETE FROM calendar_events WHERE id=$1", &[&id])
             .await?;
         tx.commit().await?;
-        Ok(())
+        Ok(Deleted {
+            by_staff: !access.edit,
+        })
     }
+    /// Say you are in, or take it back. Returns the event with its new count.
+    pub async fn set_rsvp(
+        &self,
+        viewer: Uuid,
+        id: Uuid,
+        going: bool,
+    ) -> Result<CalendarEvent, CalendarError> {
+        let mut c = self.db.get().await?;
+        let tx = c.transaction().await?;
+        let Some(row) = tx
+            .query_opt(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
+                     WHERE e.id=$1 FOR UPDATE OF e"
+                ),
+                &[&id],
+            )
+            .await?
+        else {
+            return refuse(CalendarRefusal::Gone);
+        };
+        let e = CalendarEvent::from_row(row);
+        if !e.is_board() {
+            return refuse(CalendarRefusal::NoRsvp);
+        }
+        if going {
+            tx.execute(
+                "INSERT INTO calendar_rsvps(event_id,user_id) VALUES($1,$2) ON CONFLICT DO NOTHING",
+                &[&id, &viewer],
+            )
+            .await?;
+        } else {
+            tx.execute(
+                "DELETE FROM calendar_rsvps WHERE event_id=$1 AND user_id=$2",
+                &[&id, &viewer],
+            )
+            .await?;
+        }
+        let row = tx
+            .query_one(
+                &format!(
+                    "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id WHERE e.id=$1"
+                ),
+                &[&id],
+            )
+            .await?;
+        tx.commit().await?;
+        Ok(CalendarEvent::from_row(row))
+    }
+    /// Claim the board events that started and were never announced. The
+    /// stamp is the claim: of every replica sweeping, one gets each row back
+    /// and posts its line. An event already over is never claimed, so a
+    /// restart cannot announce yesterday.
+    pub async fn claim_started(&self, now: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
+        let c = self.db.get().await?;
+        Ok(c.query(
+            &format!(
+                "WITH claimed AS (UPDATE calendar_events SET announced_at=$1 \
+                 WHERE owner_id IS NULL AND announced_at IS NULL AND starts_at <= $1 AND ends_at > $1 RETURNING *) \
+                 SELECT {EVENT_COLUMNS} FROM claimed e LEFT JOIN users u ON u.id=e.creator_id ORDER BY e.starts_at, e.id"
+            ),
+            &[&now],
+        )
+        .await?
+        .into_iter()
+        .map(CalendarEvent::from_row)
+        .collect())
+    }
+}
+
+struct Actor {
+    staff: bool,
+    tz: Tz,
 }
