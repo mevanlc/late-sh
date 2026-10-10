@@ -288,39 +288,39 @@ fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
     let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
         return;
     };
+    // The discard question is answered with the keys.
+    if app.directory_editor.confirm_discard() {
+        return;
+    }
     let target = app.directory_editor.mouse.target(x, y, app.size);
     match mouse.kind {
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-            if app.directory_editor.confirm_discard() {
-                return;
-            }
             let delta = if mouse.kind == MouseEventKind::ScrollUp {
                 -3
             } else {
                 3
             };
-            if let Some(MouseTarget::Caret(field, _, _)) = target.filter(|target| matches!(target, MouseTarget::Caret(field, _, _) if field.kind() == FieldKind::Multi)) {
-                app.directory_editor.field_mut(field).scroll(ratatui_textarea::Scrolling::Delta { rows: delta as i16, cols: 0 });
-                app.directory_editor.mouse.invalidate();
-            } else { app.directory_editor.mouse.scroll(x, y, delta, app.size); }
+            match target {
+                // A multiline row scrolls its own text under the wheel.
+                Some(MouseTarget::Field(field)) if field.kind() == FieldKind::Multi => {
+                    app.directory_editor.field_mut(field).scroll(
+                        ratatui_textarea::Scrolling::Delta {
+                            rows: delta as i16,
+                            cols: 0,
+                        },
+                    );
+                    app.directory_editor.mouse.invalidate();
+                }
+                _ => {
+                    app.directory_editor.mouse.scroll(x, y, delta, app.size);
+                }
+            }
         }
         MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
-            if app.directory_editor.confirm_discard() {
-                match target {
-                    Some(MouseTarget::Discard) => {
-                        app.directory_editor.confirm_discard_yes();
-                    }
-                    Some(MouseTarget::Keep) => app.directory_editor.confirm_discard_no(),
-                    _ => {}
-                }
-            } else if !app.directory_editor.mouse.click_track(x, y, app.size) {
+            if !app.directory_editor.mouse.click_track(x, y, app.size) {
                 match target {
                     Some(MouseTarget::Page(page)) => app.directory_editor.select_page(page),
-                    Some(MouseTarget::Field(field) | MouseTarget::Caret(field, _, _)) => {
-                        let caret = match target {
-                            Some(MouseTarget::Caret(_, row, col)) => Some((row, col)),
-                            _ => None,
-                        };
+                    Some(MouseTarget::Field(field)) => {
                         app.directory_editor.stop_editing();
                         if let Some(index) = app
                             .directory_editor
@@ -336,17 +336,7 @@ fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
                                 Field::Langs => {
                                     tag_picker::input::open(app, TagPickerTarget::EditorLangs)
                                 }
-                                _ => {
-                                    app.directory_editor.start_editing();
-                                    if let Some((row, col)) = caret {
-                                        app.directory_editor.field_mut(field).cancel_selection();
-                                        app.directory_editor.field_mut(field).move_cursor(
-                                            ratatui_textarea::CursorMove::Jump(
-                                                row as u16, col as u16,
-                                            ),
-                                        );
-                                    }
-                                }
+                                _ => app.directory_editor.start_editing(),
                             }
                         }
                     }
@@ -382,10 +372,7 @@ fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
                     Some(MouseTarget::DeleteProject) => {
                         handle_project_list_key(app, &ParsedInput::Byte(b'd'))
                     }
-                    Some(MouseTarget::Save) => save(app),
-                    Some(MouseTarget::Close) => app.directory_editor.request_leave(true),
-                    Some(MouseTarget::Back) => app.directory_editor.request_leave(false),
-                    Some(MouseTarget::Discard | MouseTarget::Keep) | None => {}
+                    None => {}
                 }
             }
             app.directory_editor.mouse.invalidate();

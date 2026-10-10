@@ -32,15 +32,7 @@ impl ScrollExtent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum MouseTarget {
-    Close,
-    Copy(String),
-    ScrollTo(u16),
-}
-
 pub(crate) struct ProfileModalState {
-    pub(crate) mouse: crate::app::common::mouse::MouseState<MouseTarget, ()>,
     profile_service: ProfileService,
     /// The viewed user's own showcases, newest first, loaded with the
     /// profile rather than filtered out of the capped shared feed.
@@ -89,7 +81,6 @@ impl Drop for ProfileModalState {
 impl ProfileModalState {
     pub(crate) fn new(profile_service: ProfileService) -> Self {
         Self {
-            mouse: Default::default(),
             profile_service,
             showcases: Vec::new(),
             viewed_user_id: None,
@@ -116,7 +107,6 @@ impl ProfileModalState {
     }
 
     pub(crate) fn open(&mut self, user_id: Uuid, fallback_name: impl Into<String>) {
-        self.mouse.invalidate();
         self.prune_current_channel();
         self.viewed_user_id = Some(user_id);
         self.fallback_name = fallback_name.into();
@@ -146,7 +136,6 @@ impl ProfileModalState {
     }
 
     pub(crate) fn close(&mut self) {
-        self.mouse.invalidate();
         self.prune_current_channel();
         self.viewed_user_id = None;
         self.fallback_name.clear();
@@ -194,7 +183,6 @@ impl ProfileModalState {
     }
 
     fn apply_snapshot(&mut self, snapshot: ProfileSnapshot) {
-        self.mouse.invalidate();
         let matches = self.viewed_user_id.is_some() && snapshot.user_id == self.viewed_user_id;
         if !matches {
             self.profile = None;
@@ -328,26 +316,17 @@ impl ProfileModalState {
         self.scroll_offset.get()
     }
 
-    pub(crate) fn scroll_to(&self, offset: u16) {
-        self.scroll_offset
-            .set(offset.min(self.extent.get().max_offset()));
-        self.mouse.clear_hits();
-    }
-
     pub(crate) fn scroll_by(&self, delta: i16) {
-        self.mouse.clear_hits();
         let next = self.scroll_offset.get() as i32 + delta as i32;
         self.scroll_offset
             .set(next.clamp(0, self.extent.get().max_offset() as i32) as u16);
     }
 
     pub(crate) fn scroll_to_top(&self) {
-        self.mouse.clear_hits();
         self.scroll_offset.set(0);
     }
 
     pub(crate) fn scroll_to_bottom(&self) {
-        self.mouse.clear_hits();
         self.scroll_offset.set(self.extent.get().max_offset());
     }
 

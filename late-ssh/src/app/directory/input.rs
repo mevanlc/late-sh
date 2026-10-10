@@ -86,7 +86,6 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
                     app.banner = Some(Banner::success("Link copied!"));
                 }
                 Target::Profile(id, name) => app.open_profile_modal(id, name),
-                Target::SearchCaret(col) => app.directory_state.position_search_cursor(col),
                 Target::Back => {
                     if on_jobs {
                         app.jobs.close_detail();
@@ -227,8 +226,6 @@ pub(crate) fn handle_search_input(app: &mut App, event: &ParsedInput) -> bool {
         ParsedInput::Arrow(b'A') | ParsedInput::Byte(0x0B) => {
             app.directory_state.move_selection(-1, len);
         }
-        ParsedInput::Arrow(b'C') => app.directory_state.move_search_cursor(1),
-        ParsedInput::Arrow(b'D') => app.directory_state.move_search_cursor(-1),
         ParsedInput::PageDown => app.directory_state.move_selection(8, len),
         ParsedInput::PageUp => app.directory_state.move_selection(-8, len),
         ParsedInput::Char(ch) => app.directory_state.search_push(*ch),

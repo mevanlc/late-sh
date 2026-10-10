@@ -139,7 +139,7 @@ fn draw_page(frame: &mut Surface<'_>, area: Rect, view: DirectoryPageView<'_>) {
     draw_shelf_strip(frame, strip, &view, entries.len(), &own_tags);
     mouse_ui::buttons(frame, controls, &view.directory.mouse, &actions);
     if view.directory.search_mode() {
-        draw_search_box(frame, search, view.directory);
+        draw_search_box(frame, search, view.directory.search_query());
     }
 
     match view.directory.shelf() {
@@ -286,7 +286,7 @@ fn draw_shelf_strip(
     );
 }
 
-fn draw_search_box(frame: &mut Surface<'_>, area: Rect, state: &DirectoryState) {
+fn draw_search_box(frame: &mut Surface<'_>, area: Rect, query: &str) {
     if area.is_empty() {
         return;
     }
@@ -296,20 +296,13 @@ fn draw_search_box(frame: &mut Surface<'_>, area: Rect, state: &DirectoryState) 
         .border_style(Style::default().fg(theme::BORDER_ACTIVE()));
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let mut input = ratatui_textarea::TextArea::from([state.search_query()]);
-    input.move_cursor(ratatui_textarea::CursorMove::Jump(
-        0,
-        state.search_cursor() as u16,
-    ));
-    input.set_cursor_style(
-        Style::default()
-            .fg(theme::AMBER())
-            .add_modifier(Modifier::REVERSED),
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(query.to_string(), Style::default().fg(theme::TEXT_BRIGHT())),
+            Span::styled("▏", Style::default().fg(theme::AMBER())),
+        ])),
+        inner,
     );
-    frame.render_widget(&input, inner);
-    mouse_ui::text_hits(&input, inner, &state.mouse, |_, col| {
-        Target::SearchCaret(col)
-    });
 }
 
 fn draw_people_list(

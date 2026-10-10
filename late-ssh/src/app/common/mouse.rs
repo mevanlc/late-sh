@@ -46,14 +46,6 @@ impl<T: Clone, P: Copy + PartialEq> MouseState<T, P> {
         self.valid.set(false);
     }
 
-    pub(crate) fn is_current(&self, size: (u16, u16)) -> bool {
-        self.valid.get() && self.size.get() == size
-    }
-
-    pub(crate) fn clear_hits(&self) {
-        self.hits.borrow_mut().clear();
-    }
-
     pub(crate) fn reveal_selection(&self) {
         self.reveal.set(true);
         self.invalidate();
@@ -112,17 +104,6 @@ impl<T: Clone, P: Copy + PartialEq> MouseState<T, P> {
         self.set_offset(pane, offset);
         self.panes.borrow_mut().push((area, pane, max));
         offset
-    }
-
-    pub(crate) fn over_pane(&self, x: u16, y: u16, size: (u16, u16)) -> Option<P> {
-        if !self.valid.get() || self.size.get() != size {
-            return None;
-        }
-        self.panes
-            .borrow()
-            .iter()
-            .rev()
-            .find_map(|(area, pane, _)| area.contains((x, y).into()).then_some(*pane))
     }
 
     /// The final column of an overflowing pane is its scrollbar track.

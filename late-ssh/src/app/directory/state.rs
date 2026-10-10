@@ -164,7 +164,6 @@ impl<'a> PersonEntry<'a> {
 pub(crate) struct DirectoryState {
     pub(crate) mine_only: bool,
     pub(crate) mouse: super::mouse::MouseState,
-    search_cursor: usize,
     shelf: Shelf,
     /// Under the stacked layout the detail pane opens over the list.
     detail_open: bool,
@@ -184,7 +183,6 @@ impl DirectoryState {
         Self {
             mine_only: false,
             mouse: Default::default(),
-            search_cursor: 0,
             shelf: Shelf::People,
             detail_open: false,
             narrow: Cell::new(false),
@@ -315,7 +313,6 @@ impl DirectoryState {
         self.mouse.reset_pane(super::mouse::Pane::PeopleDetail);
         self.search_mode = true;
         self.search_query.clear();
-        self.search_cursor = 0;
         self.selected = 0;
         self.focus = 0;
     }
@@ -323,7 +320,6 @@ impl DirectoryState {
     pub(crate) fn exit_search(&mut self) {
         self.search_mode = false;
         self.search_query.clear();
-        self.search_cursor = 0;
     }
 
     pub(crate) fn search_mode(&self) -> bool {
@@ -334,41 +330,18 @@ impl DirectoryState {
         &self.search_query
     }
 
-    pub(crate) fn search_cursor(&self) -> usize {
-        self.search_cursor
-    }
-    pub(crate) fn position_search_cursor(&mut self, col: usize) {
-        self.search_cursor = col.min(self.search_query.chars().count());
-        self.mouse.invalidate();
-    }
-    pub(crate) fn move_search_cursor(&mut self, delta: isize) {
-        self.position_search_cursor(self.search_cursor.saturating_add_signed(delta));
-    }
     pub(crate) fn search_push(&mut self, ch: char) {
         if !ch.is_control() {
-            let at = self
-                .search_query
-                .char_indices()
-                .nth(self.search_cursor)
-                .map_or(self.search_query.len(), |(i, _)| i);
-            self.search_query.insert(at, ch);
-            self.search_cursor += 1;
+            self.search_query.push(ch);
             self.search_changed();
         }
     }
+
     pub(crate) fn search_backspace(&mut self) {
-        if self.search_cursor > 0 {
-            self.search_cursor -= 1;
-            let at = self
-                .search_query
-                .char_indices()
-                .nth(self.search_cursor)
-                .map(|(i, _)| i)
-                .unwrap();
-            self.search_query.remove(at);
-            self.search_changed();
-        }
+        self.search_query.pop();
+        self.search_changed();
     }
+
     fn search_changed(&mut self) {
         self.selected = 0;
         self.focus = 0;

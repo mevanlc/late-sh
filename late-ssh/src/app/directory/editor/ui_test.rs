@@ -69,7 +69,7 @@ fn an_empty_row_being_typed_puts_the_cursor_on_the_hints_first_letter() {
 }
 
 #[test]
-fn short_editor_scrolls_full_fields_and_discard_prompt_owns_every_hit() {
+fn short_editor_scrolls_full_fields_under_the_wheel() {
     use super::state::MouseTarget;
     let mut editor = EditorState::default();
     editor.open_own(Uuid::now_v7(), None, &Profile::default(), Page::Card);
@@ -85,19 +85,6 @@ fn short_editor_scrolls_full_fields_and_discard_prompt_owns_every_hit() {
     assert!(lines[usize::from(rect.y)].contains("summary"));
     assert!(rect.bottom() <= 16);
     assert_eq!(editor.row(), 0, "wheel did not move keyboard selection");
-    editor.field_mut(Field::Headline).insert_str("a draft");
-    editor.request_leave(true);
-    render_at(&editor, 50, 16);
-    assert!(
-        editor
-            .mouse
-            .hits()
-            .iter()
-            .all(|(_, target)| matches!(target, MouseTarget::Discard | MouseTarget::Keep))
-    );
-    editor.confirm_discard_no();
-    assert_eq!(editor.field_text(Field::Headline), "a draft");
-    assert!(editor.is_open());
 }
 
 #[test]

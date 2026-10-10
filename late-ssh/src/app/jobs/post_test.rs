@@ -108,7 +108,7 @@ fn the_form_walks_its_rows_cycles_the_scope_and_lands_on_the_failing_row() {
     assert_eq!(next_scope(RemoteKind::Hybrid, true), RemoteKind::Worldwide);
     assert_eq!(next_scope(RemoteKind::Worldwide, false), RemoteKind::Hybrid);
     form.set_tags(vec!["rust".to_string()]);
-    assert_eq!(form.tags(), &["rust"]);
+    assert_eq!(form.field_text(PostField::Tags), "rust");
 
     // Ctrl+S with no regions and no excerpt: the first bad row wins.
     let by = Uuid::now_v7();

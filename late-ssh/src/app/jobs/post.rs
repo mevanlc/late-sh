@@ -154,17 +154,7 @@ pub(crate) struct PostValues {
     pub(crate) excerpt: String,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PostTarget {
-    Field(PostField),
-    Caret(PostField, usize, usize),
-    Scope(bool),
-    Post,
-    Close,
-}
-
 pub(crate) struct PostForm {
-    pub(crate) mouse: crate::app::common::mouse::MouseState<PostTarget, ()>,
     open: bool,
     row: usize,
     editing: bool,
@@ -196,7 +186,6 @@ fn joined(ta: &TextArea<'static>, sep: &str) -> String {
 impl Default for PostForm {
     fn default() -> Self {
         Self {
-            mouse: Default::default(),
             open: false,
             row: 0,
             editing: false,
@@ -288,13 +277,14 @@ impl PostForm {
         }
     }
 
-    pub(crate) fn select_field(&mut self, field: PostField) {
-        self.stop_editing();
-        self.row = POST_FIELDS
-            .iter()
-            .position(|candidate| *candidate == field)
-            .unwrap_or(0);
-        self.sync_cursors();
+    /// The text of a row as it shows when not being typed into.
+    pub(crate) fn field_text(&self, field: PostField) -> String {
+        match field.kind() {
+            PostKind::Choice => scope_choice_label(self.scope).to_string(),
+            PostKind::Tags => self.tags.join(" · "),
+            PostKind::Text => joined(self.field(field), " "),
+            PostKind::Multi => joined(self.field(field), "\n"),
+        }
     }
 
     pub(crate) fn move_row(&mut self, delta: isize) {
@@ -389,7 +379,6 @@ impl PostForm {
                 Some(posting)
             }
             Err((field, message)) => {
-                self.mouse.reveal_selection();
                 self.row = POST_FIELDS
                     .iter()
                     .position(|known| *known == field)
@@ -418,14 +407,7 @@ impl PostForm {
         for field in POST_FIELDS {
             if matches!(field.kind(), PostKind::Text | PostKind::Multi) {
                 let visible = active == Some(field);
-                let input = self.field_mut(field);
-                set_themed_textarea_cursor_visible(input, visible);
-                if !visible {
-                    // The widget scrolls to keep its cursor in view, so an
-                    // idle row parks the cursor at the start to show the
-                    // start of its text.
-                    input.move_cursor(ratatui_textarea::CursorMove::Jump(0, 0));
-                }
+                set_themed_textarea_cursor_visible(self.field_mut(field), visible);
             }
         }
     }

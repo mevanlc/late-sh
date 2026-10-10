@@ -13,7 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap},
 };
 
-use super::post::{POST_FIELDS, PostField, PostForm, PostKind, PostTarget, scope_choice_label};
+use super::post::{POST_FIELDS, PostField, PostForm, PostKind, scope_choice_label};
 use super::state::{JobsState, match_line, scope_label};
 use crate::app::common::composer::placeholder_with_cursor;
 use crate::app::common::primitives::{
@@ -515,22 +515,9 @@ const POST_MODAL_W: u16 = 84;
 /// The post form centred over the page: the rows, a line on what a
 /// posting is here for, the error, the keys.
 pub(crate) fn draw_post_form(frame: &mut Frame, area: Rect, form: &PostForm) {
-    let size = frame.area();
-    form.mouse.begin((size.width, size.height));
-    draw_post_surface(
-        &mut Surface {
-            buffer: frame.buffer_mut(),
-        },
-        area,
-        form,
-    );
-    form.mouse.finish();
-}
-
-fn draw_post_surface(frame: &mut Surface<'_>, area: Rect, form: &PostForm) {
     let rows_height: u16 = POST_FIELDS.iter().map(|field| field.height()).sum();
     // frame(2) + padding(2) + rows + blank(1) + note(1) + error(1) + keys(1)
-    let wanted = rows_height + 9;
+    let wanted = rows_height + 8;
     let width = POST_MODAL_W.min(area.width);
     let height = wanted.min(area.height);
     let popup = Rect {
@@ -555,7 +542,7 @@ fn draw_post_surface(frame: &mut Surface<'_>, area: Rect, form: &PostForm) {
     frame.render_widget(block, popup);
 
     let [body, _, note_row, error_row, keys_row] = Layout::vertical([
-        Constraint::Fill(1),
+        Constraint::Length(rows_height),
         Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
@@ -563,53 +550,14 @@ fn draw_post_surface(frame: &mut Surface<'_>, area: Rect, form: &PostForm) {
     ])
     .areas(inner);
 
-    let actions = [("[Post]", PostTarget::Post), ("[Close]", PostTarget::Close)];
-    let [controls, viewport] = Layout::vertical([
-        Constraint::Length(mouse_ui::buttons_height(body.width, &actions)),
-        Constraint::Fill(1),
-    ])
-    .areas(body);
-    if !form.pending() {
-        mouse_ui::buttons(frame, controls, &form.mouse, &actions);
-        mouse_ui::buttons(
-            frame,
-            Rect::new(
-                popup.right().saturating_sub(4).max(popup.x),
-                popup.y,
-                popup.width.min(3),
-                popup.height.min(1),
-            ),
-            &form.mouse,
-            &[("[x]", PostTarget::Close)],
-        );
-    }
-    let focus: usize = POST_FIELDS
+    let constraints: Vec<Constraint> = POST_FIELDS
         .iter()
-        .take(form.row())
-        .map(|field| usize::from(field.height()))
-        .sum();
-    mouse_ui::scroll(
-        frame,
-        viewport,
-        &form.mouse,
-        (),
-        usize::from(rows_height),
-        focus..focus + usize::from(form.active_field().height()),
-        |frame, content, window| {
-            let rows = Layout::vertical(
-                POST_FIELDS
-                    .iter()
-                    .map(|field| Constraint::Length(field.height())),
-            )
-            .split(content);
-            for (idx, (field, row_area)) in POST_FIELDS.iter().zip(rows.iter().copied()).enumerate()
-            {
-                if row_area.intersects(window) {
-                    draw_post_row(frame, row_area, form, *field, idx == form.row());
-                }
-            }
-        },
-    );
+        .map(|field| Constraint::Length(field.height()))
+        .collect();
+    let rows = Layout::vertical(constraints).split(body);
+    for (idx, (field, row_area)) in POST_FIELDS.iter().zip(rows.iter().copied()).enumerate() {
+        draw_post_row(frame, row_area, form, *field, idx == form.row());
+    }
 
     let faint = Style::default().fg(theme::TEXT_FAINT());
     frame.render_widget(
@@ -649,14 +597,8 @@ fn draw_post_surface(frame: &mut Surface<'_>, area: Rect, form: &PostForm) {
     frame.render_widget(on_canvas(keys), keys_row);
 }
 
-fn draw_post_row(
-    frame: &mut Surface<'_>,
-    area: Rect,
-    form: &PostForm,
-    field: PostField,
-    active: bool,
-) {
-    form.mouse.hit(area, PostTarget::Field(field));
+fn draw_post_row(frame: &mut Frame, area: Rect, form: &PostForm, field: PostField, active: bool) {
+    let typing = active && form.editing();
     let [gutter, label_col, _, value_col] = Layout::horizontal([
         Constraint::Length(POST_GUTTER),
         Constraint::Length(POST_LABEL_W),
@@ -717,17 +659,6 @@ fn draw_post_row(
                 on_canvas(row_with_hint(spans, right, value_col.width as usize)),
                 value_col,
             );
-            if value_col.width >= 7 {
-                mouse_ui::buttons(
-                    frame,
-                    Rect::new(value_col.right() - 7, value_col.y, 7, 1),
-                    &form.mouse,
-                    &[
-                        ("[<]", PostTarget::Scope(false)),
-                        ("[>]", PostTarget::Scope(true)),
-                    ],
-                );
-            }
         }
         PostKind::Tags => {
             let mut spans: Vec<Span<'static>> = Vec::new();
@@ -758,32 +689,38 @@ fn draw_post_row(
             );
         }
         PostKind::Text | PostKind::Multi => {
-            let input = form.field(field);
-            if input.is_empty() {
-                // An empty row draws its own hint: a bare `TextArea` puts a
-                // cursor cell before its placeholder, typing or not, so the
-                // hint would sit one cell right and the block cursor in a
-                // cell of its own instead of on the hint's first letter.
-                let hint = if active && form.editing() {
-                    placeholder_with_cursor(field.placeholder())
-                } else {
-                    Line::from(Span::styled(
-                        field.placeholder().to_string(),
-                        Style::default().fg(theme::TEXT_FAINT()),
-                    ))
-                };
+            if typing && form.field_text(field).is_empty() {
                 frame.render_widget(
-                    Paragraph::new(hint).style(Style::default().bg(theme::BG_CANVAS())),
+                    Paragraph::new(placeholder_with_cursor(field.placeholder()))
+                        .style(Style::default().bg(theme::BG_CANVAS())),
                     value_col,
                 );
+            } else if typing {
+                frame.render_widget(form.field(field), value_col);
             } else {
-                frame.render_widget(input, value_col);
-            }
-            form.mouse.hit(value_col, PostTarget::Caret(field, 0, 0));
-            if !input.is_empty() {
-                mouse_ui::text_hits(input, value_col, &form.mouse, |row, col| {
-                    PostTarget::Caret(field, row, col)
-                });
+                let text = form.field_text(field);
+                let lines: Vec<Line<'static>> = if text.is_empty() {
+                    vec![Line::from(Span::styled(
+                        field.placeholder().to_string(),
+                        faint,
+                    ))]
+                } else {
+                    let style = Style::default().fg(if active {
+                        theme::TEXT_BRIGHT()
+                    } else {
+                        theme::TEXT()
+                    });
+                    text.lines()
+                        .take(value_col.height as usize)
+                        .map(|line| Line::from(Span::styled(line.to_string(), style)))
+                        .collect()
+                };
+                frame.render_widget(
+                    Paragraph::new(lines)
+                        .wrap(Wrap { trim: false })
+                        .style(Style::default().bg(theme::BG_CANVAS())),
+                    value_col,
+                );
             }
         }
     }

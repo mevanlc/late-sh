@@ -1,5 +1,5 @@
 //! Rendering helpers for mouse surfaces. Drawing and hit geometry share one
-//! buffer, including wrapped lines and textareas' own screen-coordinate map.
+//! buffer, wrapped lines included.
 use super::{mouse::MouseState, theme};
 use ratatui::{
     buffer::Buffer,
@@ -8,7 +8,6 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Paragraph, Widget, Wrap},
 };
-use ratatui_textarea::{CursorMove, TextArea};
 
 pub(crate) struct Surface<'a> {
     pub(crate) buffer: &'a mut Buffer,
@@ -162,68 +161,6 @@ pub(crate) fn lines<T: Clone, P: Copy + PartialEq>(
             }
         }
         y = y.saturating_add(height);
-    }
-}
-
-/// Record the widget's own mapping after rendering. InViewport exposes the
-/// last viewport origin without repainting or moving the live textarea.
-pub(crate) fn text_hits<T: Clone, P: Copy + PartialEq>(
-    input: &TextArea<'_>,
-    area: Rect,
-    mouse: &MouseState<T, P>,
-    target: impl Fn(usize, usize) -> T,
-) {
-    if area.is_empty() {
-        return;
-    }
-    let mut probe = input.clone();
-    probe.cancel_selection();
-    probe.move_cursor(CursorMove::Jump(0, 0));
-    probe.move_cursor(CursorMove::InViewport);
-    let origin = probe.screen_cursor();
-    let mut positions = Vec::new();
-    for (row, line) in input.lines().iter().enumerate() {
-        let chars: Vec<_> = line.chars().collect();
-        for col in 0..=chars.len() {
-            probe.move_cursor(CursorMove::Jump(row as u16, col as u16));
-            let cursor = probe.screen_cursor();
-            positions.push((
-                cursor.row,
-                cursor.col,
-                row,
-                col,
-                chars
-                    .get(col)
-                    .map_or(0, |ch| Span::raw(ch.to_string()).width()),
-            ));
-        }
-    }
-    for y in 0..area.height {
-        let screen_row = origin.row + usize::from(y);
-        let row_positions: Vec<_> = positions
-            .iter()
-            .filter(|position| position.0 == screen_row)
-            .collect();
-        for x in 0..area.width {
-            let screen_col = origin.col + usize::from(x);
-            let Some(position) = row_positions
-                .iter()
-                .rev()
-                .find(|position| position.1 <= screen_col)
-                .copied()
-                .or_else(|| row_positions.first().copied())
-                .or_else(|| positions.last())
-            else {
-                continue;
-            };
-            let (_, start, row, col, glyph_width) = *position;
-            let col = if glyph_width > 0 && screen_col >= start + glyph_width {
-                col + 1
-            } else {
-                col
-            };
-            mouse.hit(Rect::new(area.x + x, area.y + y, 1, 1), target(row, col));
-        }
     }
 }
 

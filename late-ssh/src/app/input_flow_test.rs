@@ -6873,12 +6873,12 @@ async fn profiles_mouse_scroll_and_click_preserve_routing_and_narrow_back() {
 }
 
 #[tokio::test]
-async fn profiles_mouse_editor_retains_draft_and_saves_about_with_explicit_button() {
+async fn profiles_mouse_editor_retains_the_draft_on_a_click_outside() {
     use crate::app::{
         common::primitives::Screen,
         directory::editor::state::{Field, MouseTarget, Page},
     };
-    use late_core::models::{profile::Profile, user::InteractionMode};
+    use late_core::models::user::InteractionMode;
     let db = new_test_db().await;
     let user = create_test_user(&db.db, "profiles-mouse-editor").await;
     let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-editor");
@@ -6905,7 +6905,7 @@ async fn profiles_mouse_editor_retains_draft_and_saves_about_with_explicit_butto
         .mouse
         .hits()
         .into_iter()
-        .find(|(_, target)| *target == MouseTarget::Caret(Field::Bio, 0, 0))
+        .find(|(_, target)| *target == MouseTarget::Field(Field::Bio))
         .unwrap()
         .0;
     screen5_click(&mut app, bio);
@@ -6914,133 +6914,11 @@ async fn profiles_mouse_editor_retains_draft_and_saves_about_with_explicit_butto
     screen5_click(&mut app, ratatui::layout::Rect::new(0, 0, 1, 1));
     assert!(app.directory_editor.is_open());
     assert_eq!(app.directory_editor.field_text(Field::Bio), "draft bio");
-    app.render().unwrap();
-    let close = app
-        .directory_editor
-        .mouse
-        .hits()
-        .into_iter()
-        .find(|(_, target)| *target == MouseTarget::Close)
-        .unwrap()
-        .0;
-    screen5_click(&mut app, close);
-    app.render().unwrap();
-    assert!(app.directory_editor.confirm_discard());
-    screen5_click(&mut app, about);
-    assert_eq!(
-        app.directory_editor.page(),
-        Page::About,
-        "discard question owns input"
-    );
-    app.render().unwrap();
-    let keep = app
-        .directory_editor
-        .mouse
-        .hits()
-        .into_iter()
-        .find(|(_, target)| *target == MouseTarget::Keep)
-        .unwrap()
-        .0;
-    screen5_click(&mut app, keep);
-    app.render().unwrap();
-    let save = app
-        .directory_editor
-        .mouse
-        .hits()
-        .into_iter()
-        .find(|(_, target)| *target == MouseTarget::Save)
-        .unwrap()
-        .0;
-    screen5_click(&mut app, save);
-    assert!(!app.directory_editor.is_open());
-    wait_until(
-        || {
-            let db = db.db.clone();
-            async move {
-                let client = db.get().await.unwrap();
-                Profile::load(&client, user.id).await.unwrap().bio == "draft bio"
-            }
-        },
-        "mouse save to persist",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn profiles_mouse_post_form_activates_fields_and_waits_for_pending_save() {
-    use crate::app::{
-        common::primitives::Screen,
-        jobs::post::{PostField, PostTarget},
-    };
-    use late_core::models::user::InteractionMode;
-    let db = new_test_db().await;
-    let user = create_test_user(&db.db, "profiles-mouse-post").await;
-    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-post");
-    app.resize(100, 30).unwrap();
-    app.set_screen(Screen::Profiles);
-    app.jobs.post.open();
-    for (field, text) in [
-        (PostField::Company, "Garden"),
-        (PostField::Title, "Engineer"),
-        (PostField::Link, "https://example.com/job"),
-        (PostField::Excerpt, "Build things"),
-    ] {
-        app.render().unwrap();
-        let rect = app
-            .jobs
-            .post
-            .mouse
-            .hits()
-            .into_iter()
-            .find(|(_, target)| *target == PostTarget::Caret(field, 0, 0))
-            .unwrap()
-            .0;
-        app.interaction_mode = InteractionMode::Keyboard;
-        screen5_click(&mut app, rect);
-        app.interaction_mode = InteractionMode::Hybrid;
-        screen5_click(&mut app, rect);
-        assert_eq!(app.jobs.post.active_field(), field);
-        assert!(app.jobs.post.editing());
-        app.handle_input(text.as_bytes());
-    }
-    app.render().unwrap();
-    screen5_click(&mut app, ratatui::layout::Rect::new(0, 0, 1, 1));
-    assert!(app.jobs.post.is_open());
-    app.render().unwrap();
-    let close = app
-        .jobs
-        .post
-        .mouse
-        .hits()
-        .into_iter()
-        .find(|(_, target)| *target == PostTarget::Close)
-        .unwrap()
-        .0;
-    let post = app
-        .jobs
-        .post
-        .mouse
-        .hits()
-        .into_iter()
-        .find(|(_, target)| *target == PostTarget::Post)
-        .unwrap()
-        .0;
-    screen5_click(&mut app, post);
-    assert!(app.jobs.post.pending());
-    screen5_click(&mut app, close);
-    assert!(app.jobs.post.is_open(), "pending post cannot be dismissed");
-    crate::test_helpers::wait_for_app(&mut app, "post save to settle", |app| {
-        !app.jobs.post.is_open()
-    })
-    .await;
-    assert!(!app.jobs.post.is_open());
 }
 
 #[tokio::test]
 async fn profiles_mouse_search_selects_person_and_profile_popup_owns_input() {
-    use crate::app::{
-        common::primitives::Screen, directory::mouse::Target, profile_modal::state::MouseTarget,
-    };
+    use crate::app::{common::primitives::Screen, directory::mouse::Target};
     use late_core::models::{
         showcase::{Showcase, ShowcaseParams},
         user::InteractionMode,
@@ -7119,23 +6997,6 @@ async fn profiles_mouse_search_selects_person_and_profile_popup_owns_input() {
     app.handle_input(b"\x1b[<0;15;1M");
     assert_eq!(app.screen, Screen::Profiles, "popup blocks page switches");
     assert!(!app.show_profile_modal, "outside click dismisses the popup");
-    app.open_profile_modal(author.id, "profiles-mouse-author");
-    wait_for_render_contains(&mut app, "profile · profiles-mouse-author").await;
-    app.render().unwrap();
-    let close = app
-        .profile_modal_state
-        .mouse
-        .hits()
-        .into_iter()
-        .find(|(_, target)| *target == MouseTarget::Close)
-        .unwrap()
-        .0;
-    app.interaction_mode = InteractionMode::Keyboard;
-    screen5_click(&mut app, close);
-    assert!(app.show_profile_modal);
-    app.interaction_mode = InteractionMode::Hybrid;
-    screen5_click(&mut app, close);
-    assert!(!app.show_profile_modal);
 }
 
 /// On Zen too, any key after `s` is swallowed, whichever tile has the

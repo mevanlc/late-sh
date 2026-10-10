@@ -7,11 +7,11 @@ use crate::app::common::primitives::Banner;
 use crate::app::common::textarea_input::{
     EditOutcome, handle_multiline_edit, handle_single_line_edit,
 };
-use crate::app::input::{MouseButton, MouseEventKind, ParsedInput};
+use crate::app::input::ParsedInput;
 use crate::app::state::App;
 use crate::app::tag_picker::{self, state::TagPickerTarget};
 
-use super::post::{PostField, PostKind, PostTarget};
+use super::post::{PostField, PostKind};
 use super::state::viewer_tags;
 
 const CTRL_S: u8 = 0x13;
@@ -142,66 +142,6 @@ pub(crate) fn handle_post_input(app: &mut App, event: &ParsedInput) {
     if app.jobs.post.pending() {
         return;
     }
-    if let ParsedInput::Mouse(mouse) = event {
-        if !app.interaction_mode.mouse_enabled() {
-            return;
-        }
-        let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
-            return;
-        };
-        let form = &mut app.jobs.post;
-        let target = form.mouse.target(x, y, app.size);
-        match mouse.kind {
-            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                let delta = if mouse.kind == MouseEventKind::ScrollUp {
-                    -3
-                } else {
-                    3
-                };
-                if matches!(target, Some(PostTarget::Caret(PostField::Excerpt, _, _))) {
-                    form.field_mut(PostField::Excerpt)
-                        .scroll(ratatui_textarea::Scrolling::Delta {
-                            rows: delta as i16,
-                            cols: 0,
-                        });
-                    form.mouse.invalidate();
-                } else {
-                    form.mouse.scroll(x, y, delta, app.size);
-                }
-            }
-            MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
-                if !form.mouse.click_track(x, y, app.size) {
-                    match target {
-                        Some(PostTarget::Field(field) | PostTarget::Caret(field, _, _)) => {
-                            form.select_field(field);
-                            if field == PostField::Tags {
-                                tag_picker::input::open(app, TagPickerTarget::JobPost);
-                            } else {
-                                form.start_editing();
-                                if let Some(PostTarget::Caret(_, row, col)) = target {
-                                    form.field_mut(field).cancel_selection();
-                                    form.field_mut(field).move_cursor(
-                                        ratatui_textarea::CursorMove::Jump(row as u16, col as u16),
-                                    );
-                                }
-                            }
-                        }
-                        Some(PostTarget::Scope(forward)) => {
-                            form.select_field(PostField::Scope);
-                            form.cycle_scope(forward);
-                        }
-                        Some(PostTarget::Post) => submit_post(app),
-                        Some(PostTarget::Close) => form.close(),
-                        None => {}
-                    }
-                }
-                app.jobs.post.mouse.invalidate();
-            }
-            _ => {}
-        }
-        return;
-    }
-    app.jobs.post.mouse.reveal_selection();
     if matches!(event, ParsedInput::Byte(CTRL_S) | ParsedInput::AltS) {
         submit_post(app);
         return;

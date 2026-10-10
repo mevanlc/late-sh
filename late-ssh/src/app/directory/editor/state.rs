@@ -347,17 +347,11 @@ pub(crate) enum EscapeOutcome {
 pub(crate) enum MouseTarget {
     Page(Page),
     Field(Field),
-    Caret(Field, usize, usize),
     Choice(Field, bool),
     Project(Uuid),
     Add,
     EditProject,
     DeleteProject,
-    Save,
-    Back,
-    Close,
-    Discard,
-    Keep,
 }
 
 pub(crate) struct EditorState {
@@ -391,7 +385,6 @@ pub(crate) struct EditorState {
     // projects
     projects_view: ProjectsView,
     pub(crate) mouse: crate::app::common::mouse::MouseState<MouseTarget, Page>,
-    discard_closes: bool,
 }
 
 fn text_input(field: Field) -> TextArea<'static> {
@@ -530,7 +523,6 @@ impl Default for EditorState {
             about_baseline: AboutValues::default(),
             projects_view: ProjectsView::List { selected: 0 },
             mouse: Default::default(),
-            discard_closes: false,
         }
     }
 }
@@ -1057,20 +1049,6 @@ impl EditorState {
         self.mouse.reveal_selection();
         self.sync_cursors();
     }
-    pub(crate) fn request_leave(&mut self, close: bool) {
-        self.stop_editing();
-        self.discard_closes = close;
-        if close {
-            if self.dirty() {
-                self.confirm_discard = true;
-            } else {
-                self.close();
-            }
-        } else {
-            let _ = self.escape();
-        }
-        self.mouse.invalidate();
-    }
     pub(crate) fn switch_page(&mut self, forward: bool) {
         let pages = self.scope.pages();
         if pages.len() < 2 {
@@ -1155,15 +1133,12 @@ impl EditorState {
     /// project form goes back to its list; the modal asks before losing
     /// unsaved work, and closes when there is none.
     pub(crate) fn escape(&mut self) -> EscapeOutcome {
-        if !self.confirm_discard {
-            self.discard_closes = false;
-        }
         if self.editing {
             self.stop_editing();
             return EscapeOutcome::Stayed;
         }
         if self.confirm_discard {
-            self.confirm_discard_no();
+            self.confirm_discard = false;
             return EscapeOutcome::Stayed;
         }
         if self.scope == Scope::Own && matches!(self.projects_view, ProjectsView::Form(_)) {
@@ -1186,10 +1161,6 @@ impl EditorState {
     /// drop everything and close.
     pub(crate) fn confirm_discard_yes(&mut self) -> EscapeOutcome {
         self.confirm_discard = false;
-        if self.discard_closes {
-            self.close();
-            return EscapeOutcome::Closed;
-        }
         if self.scope == Scope::Own
             && matches!(self.projects_view, ProjectsView::Form(_))
             && self.project_form_dirty()
@@ -1203,7 +1174,6 @@ impl EditorState {
 
     pub(crate) fn confirm_discard_no(&mut self) {
         self.confirm_discard = false;
-        self.discard_closes = false;
     }
 
     /// Ctrl+S. On a project form: that project alone, and the form returns

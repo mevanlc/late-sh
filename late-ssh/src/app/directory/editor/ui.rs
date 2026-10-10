@@ -86,65 +86,23 @@ fn draw_surface(frame: &mut Surface<'_>, area: Rect, view: &EditorView<'_>) {
     .areas(inner);
 
     draw_page_strip(frame, strip, state, &subject);
-    let close = Rect::new(
-        popup.right().saturating_sub(4).max(popup.x),
-        popup.y,
-        popup.width.min(3),
-        popup.height.min(1),
-    );
-    mouse_ui::buttons(frame, close, &state.mouse, &[("[x]", MouseTarget::Close)]);
-    if state.confirm_discard() {
-        state.mouse.clear_surface();
-        frame.render_widget(Clear, body);
-        let question = vec![(Line::from("Discard unsaved changes?"), None)];
-        let question_row = Rect {
-            height: body.height.min(1),
-            ..body
-        };
-        mouse_ui::lines(frame, question_row, question_row, &state.mouse, &question);
-        mouse_ui::buttons(
-            frame,
-            Rect {
-                y: body.y.saturating_add(1),
-                height: body.height.saturating_sub(1),
-                ..body
-            },
-            &state.mouse,
-            &[
-                ("[Discard]", MouseTarget::Discard),
-                ("[Keep editing]", MouseTarget::Keep),
-            ],
-        );
-        return;
-    }
-
     let projects_list = state.page() == Page::Projects
         && matches!(state.projects_view(), ProjectsView::List { .. });
-    let actions = if projects_list {
-        vec![
+    let actions: &[(&str, MouseTarget)] = if projects_list {
+        &[
             ("[Add]", MouseTarget::Add),
             ("[Edit]", MouseTarget::EditProject),
             ("[Delete]", MouseTarget::DeleteProject),
-            ("[Close]", MouseTarget::Close),
-        ]
-    } else if state.page() == Page::Projects && state.scope() == &Scope::Own {
-        vec![
-            ("[Save project]", MouseTarget::Save),
-            ("[Back]", MouseTarget::Back),
-            ("[Close]", MouseTarget::Close),
         ]
     } else {
-        vec![
-            ("[Save]", MouseTarget::Save),
-            ("[Close]", MouseTarget::Close),
-        ]
+        &[]
     };
     let [controls, viewport] = Layout::vertical([
-        Constraint::Length(mouse_ui::buttons_height(body.width, &actions)),
+        Constraint::Length(mouse_ui::buttons_height(body.width, actions)),
         Constraint::Fill(1),
     ])
     .areas(body);
-    mouse_ui::buttons(frame, controls, &state.mouse, &actions);
+    mouse_ui::buttons(frame, controls, &state.mouse, actions);
     let rows = if projects_list {
         view.projects.len().max(1)
     } else {
@@ -393,12 +351,6 @@ fn draw_field_row(
                 );
             } else {
                 frame.render_widget(input, value_col);
-            }
-            state.mouse.hit(value_col, MouseTarget::Caret(field, 0, 0));
-            if !input.is_empty() {
-                mouse_ui::text_hits(input, value_col, &state.mouse, |row, col| {
-                    MouseTarget::Caret(field, row, col)
-                });
             }
         }
     }

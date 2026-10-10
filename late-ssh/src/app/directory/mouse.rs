@@ -17,6 +17,5 @@ pub(crate) enum Target {
     Item(FocusedItem, u8),
     Copy(String),
     Profile(Uuid, String),
-    SearchCaret(usize),
     Back,
 }
