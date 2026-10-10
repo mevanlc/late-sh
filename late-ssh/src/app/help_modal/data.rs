@@ -1350,7 +1350,6 @@ fn overview_lines() -> Vec<String> {
         "  v then v          open the Music Booth (submit + queue + votes)",
         "  v then x          switch audio source: Radio ⇄ YouTube",
         "  v then s          skip-vote the current YouTube track",
-        "  v then i          copy the selected source's now-playing track info to clipboard",
         "  v then 1..5       tune to a pinned station (radio active)",
         "  v then r          open Stations: every radio, live now-playing, pin to v1..v5",
         "  w, m, + / - and the v music prefix are off on the Artboard: that page",
@@ -2068,13 +2067,10 @@ Global keys (work anywhere)
   ?                open this guide, including Pair and terminal-specific tabs
   m                 mute paired client
   + / -             volume up / down
-  v then i          copy the selected source's full now-playing track text to clipboard
-                    radio: Artist - Title; YouTube: Channel - Title
-                    reports when track info is unavailable (including the YouTube fallback)
 
 Tune a station
   v then 1..5       tune to the station pinned in that slot (radio active)
-  v then r          open Stations: ↑↓ move, Enter listen, 1-5 pin to a slot, 0 unpin, Esc close
+  v then r          open Stations: ↑↓ move, Enter listen, 1-5 pin to a slot, 0 unpin, Ctrl+Y copy the track, Esc close
                     every row shows what that station is playing right now, so you can check before you switch
 
 Swap which source you hear
@@ -2086,6 +2082,7 @@ Music Booth (v then v)
 
   Tab               switch focus between submit, queue, and history
   [ or ]            switch Queue / History
+  Ctrl+Y            copy a YouTube link: the playing track from submit, the selected row in Queue/History
   Esc               close
 
   Submit focus:
@@ -2112,6 +2109,8 @@ Music Booth (v then v)
     /               filter the list
     Enter           queue selected track fresh
     d               delete selected track (staff)
+
+  Under Now Playing sits the track's YouTube link, so you can select it by hand if your terminal doesn't pass the copy through.
 
   Bringing a track pays you 100 chips, whether you submit a URL or queue one from History, repeats included: at most 5 a day (UTC), and past that it still queues, it just pays nothing.
   The queue is ordered by score, so upvotes pull tracks toward the front. You can't vote on the track that's already playing, but you can skip-vote it.
