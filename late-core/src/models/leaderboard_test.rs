@@ -724,7 +724,8 @@ async fn an_old_best_stays_off_the_monthly_board_when_the_player_plays_again() {
 
 /// Top Drinkers sums the buzz of every drink taken: paid or comped, either
 /// bar, past the buzz cap, this month and this year. The welcome pour is not
-/// a drink anybody took, and last year's drinks are off both windows.
+/// a drink anybody took, non-intoxicating pours add no points, and last
+/// year's drinks are off both windows.
 #[tokio::test]
 async fn top_drinkers_sums_buzz_by_month_and_year() {
     let test_db = test_db().await;
@@ -733,28 +734,37 @@ async fn top_drinkers_sums_buzz_by_month_and_year() {
     let steady = create_test_user(&test_db.db, "drinkers-steady").await;
     let newcomer = create_test_user(&test_db.db, "drinkers-newcomer").await;
     let lapsed = create_test_user(&test_db.db, "drinkers-lapsed").await;
+    let sober = create_test_user(&test_db.db, "drinkers-sober").await;
 
     // Three big pours: the stored buzz caps at 4000, the board does not.
     for _ in 0..3 {
-        UserDrinks::record_purchase(&client, binger.id, Bar::Tavern, 2_000)
+        UserDrinks::record_purchase(&client, binger.id, Bar::Tavern, 2_000, true)
             .await
             .expect("pour");
     }
-    UserDrinks::record_purchase(&client, steady.id, Bar::Nightcap, 250)
+    UserDrinks::record_purchase(&client, steady.id, Bar::Nightcap, 250, true)
         .await
         .expect("pour");
-    UserDrinks::record_comped_pour(&client, steady.id, Bar::Tavern, 400)
+    UserDrinks::record_comped_pour(&client, steady.id, Bar::Tavern, 400, true)
         .await
         .expect("round credit");
-    UserDrinks::record_purchase(&client, steady.id, Bar::Nightcap, 1_000)
+    UserDrinks::record_purchase(&client, steady.id, Bar::Nightcap, 1_000, true)
         .await
         .expect("pour");
     UserDrinks::record_welcome_pour(&client, newcomer.id, WELCOME_DRINK_POINTS)
         .await
         .expect("welcome");
-    UserDrinks::record_purchase(&client, lapsed.id, Bar::Tavern, 1_000)
+    UserDrinks::record_purchase(&client, lapsed.id, Bar::Tavern, 1_000, true)
         .await
         .expect("pour");
+    for user in [&steady, &sober] {
+        UserDrinks::record_purchase(&client, user.id, Bar::Tavern, 50, false)
+            .await
+            .expect("coffee");
+        UserDrinks::record_comped_pour(&client, user.id, Bar::Nightcap, 400, false)
+            .await
+            .expect("comped water");
+    }
 
     // steady's top shelf was the first night of the year; lapsed drank last
     // year. Only drink_pours is moved: it is the table the board reads.

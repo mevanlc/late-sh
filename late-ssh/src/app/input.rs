@@ -796,18 +796,6 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         app.apply_primary_device_attributes(attrs);
         return;
     }
-    // `/brb` holds "until your next key". A bare mouse move is not one: with
-    // any-event tracking on, the pointer merely crossing the terminal reports
-    // here, and must not bring the session back. Keys, clicks, drags and
-    // scrolls do; the 1Hz edge publishes it.
-    match &event {
-        ParsedInput::Mouse(MouseEvent {
-            kind: MouseEventKind::Moved,
-            ..
-        }) => {}
-        _ => app.sent_away = false,
-    }
-
     // The Late Edition sits above everything else: it is the first thing
     // a session sees after the splash and the tour.
     if app.paper.modal_visible() {
@@ -851,6 +839,12 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     // input ahead of both.
     if app.tag_picker.is_open() {
         crate::app::tag_picker::input::handle_input(app, event);
+        return;
+    }
+
+    // Over the Zen page, from its ascii tile.
+    if app.piece_picker.is_open() {
+        crate::app::ascii::picker::input::handle_input(app, event);
         return;
     }
 
@@ -979,6 +973,19 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     // Picker intercepts all input when open (ESC is handled via dispatch_escape).
     if app.icon_picker_open {
         handle_icon_picker_input(app, event);
+        return;
+    }
+
+    if app.artboard_disclaimer_visible() {
+        // Quit stays global on the prompt, as it is on the page behind it.
+        if matches!(
+            event,
+            ParsedInput::Byte(b'q' | b'Q') | ParsedInput::Char('q' | 'Q')
+        ) {
+            trigger_global_quit(app);
+            return;
+        }
+        crate::app::artboard::disclaimer::handle_input(app, &event);
         return;
     }
 
@@ -2186,6 +2193,10 @@ fn dispatch_escape(app: &mut App) {
         crate::app::tag_picker::input::close(app);
         return;
     }
+    if app.piece_picker.is_open() {
+        crate::app::ascii::picker::input::close(app);
+        return;
+    }
     if app.show_settings {
         settings_modal::input::handle_escape(app);
         return;
@@ -2285,6 +2296,10 @@ fn dispatch_escape(app: &mut App) {
     }
     if app.chat.has_image_modal() {
         close_image_modal(app);
+        return;
+    }
+    if app.artboard_disclaimer_visible() {
+        crate::app::artboard::disclaimer::handle_input(app, &ParsedInput::Byte(0x1B));
         return;
     }
     let ctx = InputContext::from_app(app);
@@ -3557,6 +3572,8 @@ pub(crate) fn open_message_search_modal_globally(app: &mut App, query: &str) {
 
 fn open_settings_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
+    // A piece picker left open over Zen would take the modal's keys.
+    app.piece_picker.close();
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
@@ -3662,6 +3679,8 @@ fn open_bonsai_modal_globally(app: &mut App) {
 
 pub(crate) fn open_daily_modal_globally(app: &mut App) {
     clear_prefix_arms(app);
+    // A piece picker left open over Zen would take the modal's keys.
+    app.piece_picker.close();
     app.show_help = false;
     app.show_mod_modal = false;
     app.show_hub_modal = false;
@@ -3721,6 +3740,13 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
         _ => return true,
     };
     match (step, byte) {
+        // The Artboard stop lands behind its content disclaimer: `s` shows
+        // the art for this visit only, Enter skips ahead without it. Neither
+        // touches the account tweak; the standalone dialog never runs here.
+        (TourStep::Enter, b's' | b'S') if app.artboard_disclaimer_visible() => {
+            app.artboard_content_accepted = true;
+            app.sync_dartboard_connection();
+        }
         (TourStep::Enter, b'\r' | b'\n') => tour_advance(app),
         // The table's one shot has to be played: Enter or Space strikes the
         // break, and only then does Enter move on. A terminal the table does
@@ -3896,7 +3922,8 @@ fn handle_reserved_global_chord(app: &mut App, event: &ParsedInput) -> bool {
 fn focus_zen_tile_at(app: &mut App, x: u16, y: u16) {
     use crate::app::zen::layout as zen_layout;
     let (cols, rows) = app.size;
-    let (tiles_area, _) = zen_layout::rice_areas(Rect::new(0, 0, cols, rows), app.zen_status_row());
+    let page = Rect::new(0, 0, cols, rows);
+    let (tiles_area, _) = zen_layout::rice_areas(page, zen_layout::rice_row(page, app.zen.zoomed));
     let zoomed = app.zen.zoomed.then_some(app.zen.focus);
     let rects = zen_layout::tile_rects(
         &app.zen.rice.root,
@@ -4073,13 +4100,12 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         return true;
     }
 
-    // While the reaction leader is armed, every digit belongs to it: `1`-`9`
-    // are the quick reactions and `0` opens the custom icon picker. Let them
-    // fall through to the chat message-action handler instead of the global
-    // page switch (`0` now lands on the Clubhouse, `1`-`6` on other pages).
+    // While the reaction leader is armed, its shortcuts belong to chat:
+    // `1`-`9` quick-react, `w` waves, and `0` opens the custom icon picker.
+    // Let them reach the message-action handler before global page/Bonsai keys.
     if matches!(
         byte,
-        b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9'
+        b'0' | b'1' | b'2' | b'3' | b'4' | b'5' | b'6' | b'7' | b'8' | b'9' | b'w' | b'W'
     ) && ctx.screen == Screen::Dashboard
         && app.chat.is_reaction_leader_active()
     {
