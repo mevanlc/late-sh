@@ -96,7 +96,7 @@ fn an_idle_row_shows_the_start_of_a_long_value() {
     editor.start_editing();
     editor
         .field_mut(Field::Ide)
-        .insert_str(&format!("start-{}-end", "x".repeat(150)));
+        .insert_str(format!("start-{}-end", "x".repeat(150)));
     editor.stop_editing();
 
     let idle = render(&editor);
