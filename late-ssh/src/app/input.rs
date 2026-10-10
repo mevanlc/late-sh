@@ -2012,6 +2012,9 @@ fn door_games_allows_global_help(event: &ParsedInput) -> bool {
 }
 
 fn handle_directory_catalog_input(app: &mut App, event: &ParsedInput) -> bool {
+    if let ParsedInput::Mouse(mouse) = event {
+        return crate::app::directory::input::handle_mouse(app, *mouse);
+    }
     if app.directory_state.search_mode() {
         return crate::app::directory::input::handle_search_input(app, event);
     }

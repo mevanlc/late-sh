@@ -2331,6 +2331,8 @@ impl App {
                         work_marker: ctx.chat_view.work_view.marker_read_at,
                         showcase_marker: ctx.chat_view.showcase_view.marker_read_at,
                         current_user_id: ctx.chat_view.work_view.current_user_id,
+                        can_moderate: ctx.chat_view.work_view.is_admin,
+                        can_retract_jobs: ctx.is_admin || ctx.is_moderator,
                         profile_base_url: ctx.chat_view.work_view.profile_base_url,
                     },
                 );
