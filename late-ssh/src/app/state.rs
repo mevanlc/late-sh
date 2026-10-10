@@ -956,6 +956,9 @@ pub struct App {
     /// View mode stays connected to the shared board but reserves global
     /// screen hotkeys like `1-4` and `Tab`.
     pub(crate) artboard_interacting: bool,
+    /// Consent lasts until this Artboard visit ends.
+    pub(crate) artboard_content_accepted: bool,
+    pub(crate) artboard_disclaimer_choices: std::cell::Cell<[Rect; 3]>,
     /// Page-5 Profiles feed state (filter, selection, search). Work and
     /// Showcase data continue to live on `ChatState`; this stores only the
     /// page-level view state over their merged feed.
@@ -1861,6 +1864,8 @@ impl App {
             scratchpad: None,
             directory_state: crate::app::directory::state::DirectoryState::new(),
             artboard_interacting: false,
+            artboard_content_accepted: false,
+            artboard_disclaimer_choices: std::cell::Cell::default(),
             dartboard_server,
             dartboard_provenance,
             artboard_snapshot_service,
@@ -1887,9 +1892,7 @@ impl App {
             pending_chat_profile_open: None,
             last_terminal_bg: None,
         };
-        if app.screen == Screen::Artboard {
-            app.enter_dartboard();
-        }
+        app.sync_dartboard_connection();
         // The landing screen skips `set_screen`, so run its entry hook by
         // hand. Clubhouse: immediate crowd refresh plus the first-visit
         // tutorial. Home: refresh the room list (sync_selection runs just
@@ -2499,9 +2502,7 @@ impl App {
             if screen == Screen::Codekeep {
                 self.enter_codekeep();
             }
-            if screen == Screen::Artboard {
-                self.enter_dartboard();
-            }
+            self.sync_dartboard_connection();
             self.sync_visible_chat_room();
             return;
         }
@@ -2519,6 +2520,7 @@ impl App {
         }
 
         if self.screen == Screen::Artboard {
+            self.artboard_content_accepted = false;
             self.deactivate_artboard_interaction();
             self.leave_dartboard();
         }
@@ -2654,9 +2656,7 @@ impl App {
             self.chat.sync_selection();
         }
 
-        if self.screen == Screen::Artboard {
-            self.enter_dartboard();
-        }
+        self.sync_dartboard_connection();
         // The Games hub draws this account's character list on the Lateania
         // card and the landing draws it in full: read it from the database the
         // first time either is opened (and retry there if that read failed).
