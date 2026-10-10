@@ -21,6 +21,7 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 ## What It Includes
 
 - SSH TUI with dashboard, chat, profile, news, and arcade screens
+- Mouse controls on Profiles (screen 5): click people, jobs, links, and form controls; wheel scrolls the hovered pane
 - Calendars on `7`: server, personal and public calendars, five views, mouse selection and context menus, flexible date entry, timezone-aware editing, iCalendar paste/URL import and clipboard export, and upcoming panels on Home and Calendars
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page

@@ -212,6 +212,11 @@ impl App {
         );
         let chat_tick = self.chat.tick();
         changed |= chat_tick.changed;
+        if chat_tick.changed {
+            self.directory_state.feed_changed();
+            self.directory_editor.feed_changed();
+            self.jobs.feed_changed();
+        }
         if let Some(b) = chat_tick.banner {
             self.banner = Some(b);
             changed = true;
