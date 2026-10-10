@@ -822,7 +822,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         return;
     }
 
-    if !app.artboard_disclaimer_visible() && handle_tour_gate(app, &event) {
+    if handle_tour_gate(app, &event) {
         return;
     }
 
@@ -2155,7 +2155,7 @@ fn dispatch_escape(app: &mut App) {
     }
     // A lone Esc skips the tour gate the same way, and would close the modal
     // or the practice table a stop is holding open.
-    if app.clubhouse.tutorial_forced_step().is_some() && !app.artboard_disclaimer_visible() {
+    if app.clubhouse.tutorial_forced_step().is_some() {
         return;
     }
     if app.show_help {
@@ -3727,6 +3727,12 @@ fn handle_tour_gate(app: &mut App, event: &ParsedInput) -> bool {
         _ => return true,
     };
     match (step, byte) {
+        // The Artboard stop lands behind its content disclaimer: `s` shows
+        // the art for this visit only, Enter skips ahead without it. Neither
+        // touches the account tweak; the standalone dialog never runs here.
+        (TourStep::Enter, b's' | b'S') if app.artboard_disclaimer_visible() => {
+            app.artboard_content_accepted = true;
+        }
         (TourStep::Enter, b'\r' | b'\n') => tour_advance(app),
         // The table's one shot has to be played: Enter or Space strikes the
         // break, and only then does Enter move on. A terminal the table does

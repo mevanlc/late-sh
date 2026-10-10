@@ -164,12 +164,10 @@ room is the chat surface, and the full history lives in #lounge on Home.
   `VisitMusic` (still on Home) -> `VisitArcade` -> `VisitLobby` (still on
   The Arcade) -> `VisitTable` -> `VisitGames` -> `VisitDungeon` (still on Games) -> `VisitArtboard` -> `VisitDirectory` ->
   `VisitLeaderboard` -> `VisitZen` -> `Homecoming` (back in the tavern).
-- At `VisitArtboard`, the content disclaimer owns input and rendering until
-  View is chosen. Every tour choice is temporary: Always View is hidden, and
-  even its `A` shortcut only allows this visit without saving a preference.
-  Back to Chat (`B`/Esc) returns to Home without
-  showing art or disabling the disclaimer; the tour's skipped-artboard box
-  offers Enter to continue directly to Profiles.
+- At `VisitArtboard`, the stop lands behind the content disclaimer: the page
+  stays bare and the tour box offers `S` (show the art for this visit) or
+  Enter (skip to Profiles). The standalone disclaimer dialog never draws in
+  the tour, the gate keeps every other key, and no choice saves a preference.
   `State::tutorial_advance` is the only thing that moves the stage; it
   returns a `TourMove` telling the gate where the next stop lives.
   `Homecoming`'s Enter finishes the tour in place and frees input.

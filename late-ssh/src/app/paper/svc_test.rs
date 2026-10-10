@@ -592,7 +592,8 @@ async fn a_newcomers_paper_waits_until_the_tour_is_walked() {
     assert_eq!(app.clubhouse.tutorial, Tutorial::Welcome);
 
     // Nothing pops while the tour holds the keys, however long it takes.
-    // Enter advances each stop; Artboard requires View before continuing.
+    // Enter is the only key the route takes, stop after stop (it skips the
+    // hidden Artboard without showing it).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     while app.clubhouse.tutorial != Tutorial::Homecoming {
         assert!(
@@ -601,9 +602,6 @@ async fn a_newcomers_paper_waits_until_the_tour_is_walked() {
             app.clubhouse.tutorial
         );
         app.handle_input(b"\r");
-        if app.artboard_disclaimer_visible() {
-            app.handle_input(b"v");
-        }
         let frame = render_plain(&mut app);
         assert!(!frame.contains("The Late Edition"), "{frame}");
     }

@@ -2067,12 +2067,17 @@ impl App {
             }
             Screen::Artboard => {
                 if ctx.artboard_disclaimer_visible {
-                    artboard::disclaimer::draw(
-                        frame,
-                        content_area,
-                        ctx.artboard_disclaimer_choices,
-                        ctx.clubhouse_state.tutorial_forced_step().is_some(),
-                    );
+                    // The tour's own stop box offers show or skip; the
+                    // page under it stays bare so no art shows.
+                    if ctx.clubhouse_state.tutorial_forced_step().is_some() {
+                        frame.render_widget(ratatui::widgets::Clear, content_area);
+                    } else {
+                        artboard::disclaimer::draw(
+                            frame,
+                            content_area,
+                            ctx.artboard_disclaimer_choices,
+                        );
+                    }
                 } else if let Some(state) = ctx.dartboard_state {
                     artboard::ui::draw_game(
                         frame,
@@ -2553,12 +2558,13 @@ impl App {
         // The first-visit tour's page-stop box (top-right). The clubhouse
         // draws its own tutorial overlays; toasts draw after, so they win
         // the corner while they last.
-        if screen != Screen::Clubhouse && !ctx.artboard_disclaimer_visible {
+        if screen != Screen::Clubhouse {
             crate::app::clubhouse::ui::draw_tour_overlay(
                 frame,
                 inner,
                 ctx.clubhouse_state.tutorial,
                 screen,
+                ctx.artboard_disclaimer_visible,
             );
         }
 
@@ -3187,7 +3193,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
             .map(|state| (state.gallery().focus(), state.gallery().is_framing()));
         let hints: &[(&str, &str)] = if ctx.artboard_disclaimer_visible {
             if ctx.clubhouse_state.tutorial_forced_step().is_some() {
-                &[("V", "view"), ("B", "back to chat")]
+                &[("S", "show"), ("Enter", "skip")]
             } else {
                 &[("V", "view"), ("A", "always view"), ("B", "back to chat")]
             }

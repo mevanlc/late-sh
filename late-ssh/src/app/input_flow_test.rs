@@ -133,47 +133,46 @@ async fn artboard_disclaimer_tour_choice_keeps_account_settings() {
     use crate::app::common::primitives::Screen;
 
     let test_db = new_test_db().await;
-    for profile_loaded in [false, true] {
-        let user = create_test_user(&test_db.db, &format!("tour-choice-{profile_loaded}")).await;
-        let mut app = make_app(test_db.db.clone(), user.id, "tour-choice-flow-it");
-        if profile_loaded {
-            wait_for_esc_effect(
-                &mut app,
-                |app| !app.profile_state.profile().username.is_empty(),
-                "profile loaded",
-            )
-            .await;
-        }
-        app.clubhouse.tutorial = Tutorial::VisitArtboard;
-        app.set_screen(Screen::Artboard);
-        let frame = render_plain(&mut app);
-        assert!(frame.contains("Back to Chat"));
-        assert!(!frame.contains("Always View"));
-        assert!(!frame.contains("always view"));
-        assert_eq!(app.artboard_disclaimer_choices.get()[1].width, 0);
+    let user = create_test_user(&test_db.db, "tour-choice-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-choice-flow-it");
+    app.resize(80, 24).unwrap();
+    app.clubhouse.tutorial = Tutorial::VisitArtboard;
+    app.set_screen(Screen::Artboard);
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("[S] show · [Enter] skip: the profiles"),
+        "frame={frame:?}"
+    );
+    assert!(!frame.contains("Artboard may contain NSFW content"));
+    assert!(!frame.contains("Always View"));
+    assert!(!frame.contains("Mode       view"));
 
-        // Even the normal dialog's shortcut cannot save a preference in the tour.
-        app.handle_input(b"a");
-        assert!(app.artboard_content_accepted);
-        assert!(app.profile_state.profile().artboard_disclaimer);
-        wait_for_render_contains(&mut app, "Mode       view").await;
-        assert_render_not_contains_for(
-            &mut app,
-            "Artboard may contain NSFW content",
-            Duration::from_millis(200),
-        )
-        .await;
-        let client = test_db.db.get().await.unwrap();
-        let stored = User::get(&client, user.id).await.unwrap().unwrap();
-        assert_eq!(stored.settings, user.settings);
-        assert_eq!(stored.username, user.username);
+    // The standalone dialog's keys mean nothing here: the stop keeps the art hidden.
+    app.handle_input(b"vab");
+    assert_eq!(app.screen, Screen::Artboard);
+    assert!(!app.artboard_content_accepted);
 
-        app.clubhouse.tutorial = Tutorial::Off;
-        app.set_screen(Screen::Dashboard);
-        app.handle_input(b"4");
-        assert!(app.artboard_disclaimer_visible());
-        assert!(render_plain(&mut app).contains("Always View"));
-    }
+    // Show grants this visit only; the account tweak is untouched.
+    app.handle_input(b"s");
+    assert!(app.artboard_content_accepted);
+    assert!(app.profile_state.profile().artboard_disclaimer);
+    wait_for_render_contains(&mut app, "Mode       view").await;
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("[Enter] next: the profiles"),
+        "frame={frame:?}"
+    );
+    assert!(!frame.contains("Artboard may contain NSFW content"));
+    let client = test_db.db.get().await.unwrap();
+    let stored = User::get(&client, user.id).await.unwrap().unwrap();
+    assert_eq!(stored.settings, user.settings);
+    assert_eq!(stored.username, user.username);
+
+    app.clubhouse.tutorial = Tutorial::Off;
+    app.set_screen(Screen::Dashboard);
+    app.handle_input(b"4");
+    assert!(app.artboard_disclaimer_visible());
+    assert!(render_plain(&mut app).contains("Always View"));
 }
 
 #[tokio::test]
@@ -3848,7 +3847,8 @@ async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
         assert_eq!(app.clubhouse.tutorial, Tutorial::VisitDungeon);
     }
 
-    // Enter continues the route after consenting to the Artboard visit.
+    // The rest of the route is Enter alone; at the Artboard stop `s` shows
+    // the art first, so this walk sees it.
     for screen in [
         Screen::Artboard,
         Screen::Profiles,
@@ -3859,7 +3859,8 @@ async fn forced_tour_walks_the_house_on_enter_with_one_shot_of_pool() {
         app.handle_input(b"\r");
         assert_eq!(app.screen, screen);
         if screen == Screen::Artboard {
-            app.handle_input(b"v");
+            app.handle_input(b"s");
+            assert!(app.artboard_content_accepted);
         }
     }
     assert_eq!(app.clubhouse.tutorial, Tutorial::Homecoming);
@@ -3878,49 +3879,51 @@ async fn forced_tour_can_skip_artboard_without_viewing_it() {
 
     let test_db = new_test_db().await;
     let user = create_test_user(&test_db.db, "tour-artboard-skip-it").await;
-    for key in [&b"B"[..], &b"\x1b"[..]] {
-        let mut app = make_app(test_db.db.clone(), user.id, "tour-artboard-skip-flow-it");
-        app.resize(80, 24).unwrap();
-        app.clubhouse.tutorial = Tutorial::VisitArtboard;
-        app.set_screen(Screen::Artboard);
+    let mut app = make_app(test_db.db.clone(), user.id, "tour-artboard-skip-flow-it");
+    app.resize(80, 24).unwrap();
+    app.clubhouse.tutorial = Tutorial::VisitArtboard;
+    app.set_screen(Screen::Artboard);
 
-        let frame = render_plain(&mut app);
-        assert!(frame.contains("Back to Chat"), "frame={frame:?}");
-        assert!(!frame.contains("the tour · [4] the artboard"));
-        assert!(!frame.contains("Mode       view"));
-        app.handle_input(key);
-        if key == b"\x1b" {
-            app.pending_escape_started_at =
-                Some(std::time::Instant::now() - Duration::from_secs(1));
-            crate::app::input::flush_pending_escape(&mut app);
-        }
-        assert_eq!(app.screen, Screen::Dashboard);
-        assert!(!app.artboard_content_accepted);
-        assert!(app.profile_state.profile().artboard_disclaimer);
-        assert!(app.dartboard_state.is_none());
-        let frame = render_plain(&mut app);
-        assert!(frame.contains("artboard skipped"), "frame={frame:?}");
-        assert!(
-            frame.contains("[Enter] next: the profiles"),
-            "frame={frame:?}"
-        );
+    let frame = render_plain(&mut app);
+    assert!(
+        frame.contains("the tour · [4] the artboard"),
+        "frame={frame:?}"
+    );
+    assert!(
+        frame.contains("[S] show · [Enter] skip: the profiles"),
+        "frame={frame:?}"
+    );
+    assert!(!frame.contains("Mode       view"));
+    assert!(!frame.contains("Back to Chat"));
 
-        for screen in [
-            Screen::Profiles,
-            Screen::Leaderboard,
-            Screen::Zen,
-            Screen::Clubhouse,
-        ] {
-            app.handle_input(b"\r");
-            assert_eq!(app.screen, screen);
-            assert!(!render_plain(&mut app).contains("Mode       view"));
-        }
+    // Esc, the dialog's own Back key and the reserved chords (settings, zen)
+    // all stay with the gate: the stop cannot be left sideways.
+    app.handle_input(b"\x1b");
+    app.pending_escape_started_at = Some(std::time::Instant::now() - Duration::from_secs(1));
+    crate::app::input::flush_pending_escape(&mut app);
+    app.handle_input(b"B\x0f\x06");
+    assert_eq!(app.screen, Screen::Artboard);
+    assert_eq!(app.clubhouse.tutorial, Tutorial::VisitArtboard);
+    assert!(!app.show_settings);
+    assert!(!app.artboard_content_accepted);
+
+    for screen in [
+        Screen::Profiles,
+        Screen::Leaderboard,
+        Screen::Zen,
+        Screen::Clubhouse,
+    ] {
         app.handle_input(b"\r");
-        assert_eq!(app.clubhouse.tutorial, Tutorial::Done);
-
-        app.handle_input(b"4");
-        assert!(app.artboard_disclaimer_visible());
+        assert_eq!(app.screen, screen);
+        assert!(!render_plain(&mut app).contains("Mode       view"));
     }
+    assert!(!app.artboard_content_accepted);
+    assert!(app.profile_state.profile().artboard_disclaimer);
+    app.handle_input(b"\r");
+    assert_eq!(app.clubhouse.tutorial, Tutorial::Done);
+
+    app.handle_input(b"4");
+    assert!(app.artboard_disclaimer_visible());
 }
 
 /// The practice table needs more room than a default terminal has. There

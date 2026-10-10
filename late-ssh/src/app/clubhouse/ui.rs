@@ -1371,9 +1371,17 @@ fn draw_tutorial(frame: &mut Frame, inner: Rect, view: &ClubhouseView<'_>) -> bo
 
 /// The page stops of the first-visit tour, drawn centered over the page
 /// they pitch (`render.rs` calls this on every non-clubhouse screen). The
-/// Artboard can return to chat without showing content, where Enter continues
-/// the tour. Other screen mismatches, like off-tour stages, draw nothing.
-pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen: Screen) {
+/// forced gate guarantees the current screen is the stop's own page, so a
+/// mismatch, like off-tour stages, draws nothing. The Artboard stop lands
+/// behind the content disclaimer (`artboard_hidden`): it offers to show the
+/// art or skip ahead, and reads as a normal stop once shown.
+pub fn draw_tour_overlay(
+    frame: &mut Frame,
+    area: Rect,
+    stage: Tutorial,
+    screen: Screen,
+    artboard_hidden: bool,
+) {
     let key = Style::default()
         .fg(theme::AMBER_GLOW())
         .add_modifier(Modifier::BOLD);
@@ -1492,16 +1500,26 @@ pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen:
             ],
             "a taste of the dungeon",
         ),
-        Tutorial::VisitArtboard if screen == Screen::Dashboard => (
-            Screen::Dashboard,
-            " ✦ the tour · artboard skipped ",
+        Tutorial::VisitArtboard if artboard_hidden => (
+            Screen::Artboard,
+            " ✦ the tour · [4] the artboard ",
             vec![
                 Line::from(Span::styled(
-                    "you can leave the canvas for another visit.",
+                    "one shared canvas, the whole house draws at once.",
+                    text,
+                )),
+                Line::from(vec![
+                    Span::styled("it may contain ", text),
+                    Span::styled("NSFW", name),
+                    Span::styled(" content, so it stays hidden until you say so.", text),
+                ]),
+                Line::default(),
+                Line::from(Span::styled(
+                    "show it for this visit, or skip ahead. nothing is saved",
                     text,
                 )),
                 Line::from(Span::styled(
-                    "you'll be asked again if you visit later.",
+                    "either way: the artboard asks again next time you open it.",
                     text,
                 )),
             ],
@@ -1654,13 +1672,20 @@ pub fn draw_tour_overlay(frame: &mut Frame, area: Rect, stage: Tutorial, screen:
     if screen != home {
         return;
     }
+    let mut keys = Vec::new();
+    let enter_verb = if stage == Tutorial::VisitArtboard && artboard_hidden {
+        keys.push(Span::styled("[S] ", key));
+        keys.push(Span::styled("show · ", text));
+        "skip"
+    } else {
+        "next"
+    };
+    keys.push(Span::styled("[Enter] ", key));
+    keys.push(Span::styled(format!("{enter_verb}: {next_label}"), text));
     TourHeader {
         title: title.trim(),
         lines: pitch,
-        keys: vec![
-            Span::styled("[Enter] ", key),
-            Span::styled(format!("next: {next_label}"), text),
-        ],
+        keys,
     }
     .draw_box(frame, area);
 }

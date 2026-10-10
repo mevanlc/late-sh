@@ -68,15 +68,13 @@ pub(crate) fn handle_input(app: &mut App, event: &ParsedInput) {
         Some(b'B' | 0x1B) => app.set_screen(Screen::Dashboard),
         Some(b'A') => {
             app.artboard_content_accepted = true;
-            if app.clubhouse.tutorial_forced_step().is_none() {
-                app.profile_state.dismiss_artboard_disclaimer();
-            }
+            app.profile_state.dismiss_artboard_disclaimer();
         }
         _ => {}
     }
 }
 
-pub(crate) fn draw(frame: &mut Frame, area: Rect, choices: &Cell<[Rect; 3]>, in_tour: bool) {
+pub(crate) fn draw(frame: &mut Frame, area: Rect, choices: &Cell<[Rect; 3]>) {
     // Clear the whole page, not just the dialog: no art may show around it.
     frame.render_widget(Clear, area);
     let warning = warning_line(false);
@@ -118,12 +116,7 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, choices: &Cell<[Rect; 3]>, in_
         Rect::new(aside_x, inner.y + warning_row + 1, aside_width, 1).intersection(inner),
     );
     let mut rects = [Rect::default(); 3];
-    for (position, (index, (_, label, explanation, gap, color))) in OPTIONS
-        .iter()
-        .enumerate()
-        .filter(|(_, (key, ..))| !in_tour || *key != b'A')
-        .enumerate()
-    {
+    for (index, (_, label, explanation, gap, color)) in OPTIONS.iter().enumerate() {
         let (initial, rest) = label.split_at(1);
         let line = Line::from(vec![
             Span::styled(initial, Style::default().fg(*color)),
@@ -137,9 +130,9 @@ pub(crate) fn draw(frame: &mut Frame, area: Rect, choices: &Cell<[Rect; 3]>, in_
         let option_row = row(
             inner,
             if spacious {
-                4 + position as u16 * 2
+                4 + index as u16 * 2
             } else {
-                2 + position as u16
+                2 + index as u16
             },
         );
         let line_width = (line.width() as u16).min(option_row.width);
