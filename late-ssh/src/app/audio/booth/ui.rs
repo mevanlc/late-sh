@@ -698,10 +698,7 @@ fn draw_footer(
         " copy  ",
         Style::default().fg(theme::TEXT_DIM()),
     ));
-    spans.push(Span::styled(
-        "Esc/q",
-        Style::default().fg(theme::AMBER_DIM()),
-    ));
+    spans.push(Span::styled("Esc", Style::default().fg(theme::AMBER_DIM())));
     spans.push(Span::styled(
         " close",
         Style::default().fg(theme::TEXT_DIM()),

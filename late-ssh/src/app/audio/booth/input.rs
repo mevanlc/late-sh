@@ -194,7 +194,9 @@ fn copy_focused_track(app: &mut App) {
     let state = &app.booth_modal_state;
     let video_id = match state.focus() {
         BoothFocus::Submit => snapshot.current.as_ref().map(|item| &item.video_id),
-        BoothFocus::Queue => state.selected_item(&snapshot.queue).map(|item| &item.video_id),
+        BoothFocus::Queue => state
+            .selected_item(&snapshot.queue)
+            .map(|item| &item.video_id),
         BoothFocus::History => state
             .selected_history_item(&snapshot.history)
             .map(|item| &item.video_id),

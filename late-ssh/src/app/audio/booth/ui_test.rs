@@ -96,7 +96,8 @@ fn now_playing_shows_the_watch_link_under_the_track_and_the_footer_names_copy() 
         "https://www.youtube.com/watch?v=aaaaaaaaaaa",
         "{screen}"
     );
-    assert!(screen.contains("^y copy"), "{screen}");
+    assert!(screen.contains("^y copy  Esc close"), "{screen}");
+    assert!(!screen.contains("Esc/q"), "{screen}");
 }
 
 #[test]
