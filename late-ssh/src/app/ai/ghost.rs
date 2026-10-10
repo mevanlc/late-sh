@@ -46,7 +46,7 @@ use late_core::{
         chat_room_member::ChatRoomMember,
         chips::{CHIP_FLOOR, UserChips},
         drink_round::{Bar, BarOrder, GIFT_DRINK_PRICE, ROUND_PRICE_PER_PATRON, bar_order},
-        drinks::{DRINK_PRICE_MAX, DRINK_PRICE_MIN, UserDrinks, drunk_level_word},
+        drinks::{DRINK_PRICE_MAX, DRINK_PRICE_MIN, SOFT_DRINK_PRICE, UserDrinks, drunk_level_word},
         user::{User, UserParams},
     },
 };
@@ -217,13 +217,12 @@ const BARTENDER_PERSONA: &str = "You are @bartender, the keeper of The Late Loun
     You are warm, unhurried, and quietly funny: classic late-night bartender energy. \
     You pour imaginary drinks with terminal-flavored names (a double SIGTERM neat, a Bash Old Fashioned, \
     a Segfault Sour, warm milk for the juniors, decaf for anyone shipping on a Friday). \
-    The welcome pour for a brand-new face is on the house, but after that drinks go on the tab and cost Late Chips: \
-    intoxicating drinks run 100 to 1,000 chips; non-intoxicating drinks run exactly 50 chips. \
+    The welcome pour for a brand-new face is on the house, but after that drinks go on the tab and cost Late Chips, at the prices the tab rules below set. \
     You invent the drink and set the price yourself, always a round number that fits the pour. \
     You never pour what a patron cannot afford; you slide them something in their range instead, kindly. \
     You keep the good stuff coming while a patron can still hold it. \
     If someone is truly wasted, barely upright, you cut them off and switch them to water instead of anything stronger. \
-    If a patron explicitly asks for a non-alcoholic drink (e.g. \"NA\", Shirley Temple) or orders an obviously non-intoxicating beverage (water, coffee, orange juice, milk, etc.), or if you cut them off, set `intoxicating: false` and price it at 50 chips. Otherwise, default to `true`. \
+    If a patron explicitly asks for a non-alcoholic drink (e.g. \"NA\", Shirley Temple) or orders an obviously non-intoxicating beverage (water, coffee, orange juice, milk, etc.), or if you cut them off, set `intoxicating: false`. Otherwise, default to `true`. \
     You know the house well enough to point at the right door: which screen, which key, which page. \
     When someone asks how something works, answer only from the basic navigation in your app context, phrased like a bartender giving directions. \
     You are not the help desk — for anything deeper (commands, game rules, settings, IRC, accounts), don't guess: tell them to go ask @bot, he knows all of that. \
@@ -929,7 +928,7 @@ impl GhostService {
             - Leaving one drink on another person's tab is rung up by the bar itself, before you answer, when a patron says it plainly as an order naming exactly one person, like \"buy @user a drink\", \"I'll get @user a beer\", \"one for @user\" or \"@user's next one is on me\". It costs {gift_price} chips. If you are seeing such a request, the bar did not take it: it was a question, the words came in the middle of a longer sentence, it named more than one person, it came in the same message as a round, or it used other words. If they were only talking about a drink, or telling you not to, use \"chat\" and answer that. If they do want it rung up, use \"chat\" and give them the words to say, on their own and with the real name in it: \"buy @user a drink\". Never pour or charge for another person yourself.\n\
             - Buying the whole house a round is the one exception, and it is still not yours to pour: the bar rings that up itself, but only when a patron says it plainly and says who it is for or that it is on them, like \"round for everyone\", \"I'll buy everyone a drink\" or \"drinks on me\". If they ask about it, circle around asking for one (\"we should get a round in\"), or bury it in a longer sentence, use \"chat\" and tell them the words to say on their own: \"round for everyone\". It costs {round_price} chips a head and buys each of them a drink to claim whenever they walk up. Never announce that a round happened and never quote what one cost, you would only be guessing; the bar says so itself when it does.\n\n\
             Decide ONE action:\n\
-            - \"pour\": ONLY when the patron themselves asked for a drink for themselves — read their intent generously, an order comes in many forms (\"get me a stout\", \"what's strong tonight\", \"the usual\", \"surprise me\", \"I'll take one\"). But a pour spends their chips, so if it is a greeting, a house question, banter, or you are at all unsure, do NOT pour. Invent the drink and explicitly set intoxicating: false for non-alcoholic requests, water, coffee, juice, milk, or a cut-off substitute; true for intoxicating drinks. For a paying patron, non-intoxicating drinks cost exactly 50 chips; intoxicating drinks cost a whole-number price between {price_min} and {price_max} that fits the pour (ale cheap, top shelf dear). The price must fit their spendable chips. For an already-bought drink, set price to null and still classify intoxicating. If you name the price in your line it MUST equal the price field exactly.\n\
+            - \"pour\": ONLY when the patron themselves asked for a drink for themselves — read their intent generously, an order comes in many forms (\"get me a stout\", \"what's strong tonight\", \"the usual\", \"surprise me\", \"I'll take one\"). But a pour spends their chips, so if it is a greeting, a house question, banter, or you are at all unsure, do NOT pour. Invent the drink and explicitly set intoxicating: false for non-alcoholic requests, water, coffee, juice, milk, or a cut-off substitute; true for intoxicating drinks. For a paying patron, non-intoxicating drinks cost exactly {soft_price} chips; intoxicating drinks cost a whole-number price between {price_min} and {price_max} that fits the pour (ale cheap, top shelf dear). The price must fit their spendable chips. For an already-bought drink, set price to null and still classify intoxicating. If you name the price in your line it MUST equal the price field exactly.\n\
             - \"offer\": the patron asked for a drink but cannot afford it (or wants more than their spendable). Charge nothing; counter-offer something in their range, with its price, kindly.\n\
             - \"chat\": everything else — greetings, house questions, banter, requests to drink or pour for someone else, anything ambiguous. Answer exactly as you always do. No charge. When in doubt, chat; never charge on a maybe.\n\n\
             Return ONLY a JSON object, no markdown fences:\n\
@@ -942,6 +941,7 @@ impl GhostService {
             floor = CHIP_FLOOR,
             price_min = DRINK_PRICE_MIN,
             price_max = DRINK_PRICE_MAX,
+            soft_price = SOFT_DRINK_PRICE,
             round_price = ROUND_PRICE_PER_PATRON,
             gift_price = GIFT_DRINK_PRICE,
         );
@@ -1667,13 +1667,14 @@ fn parse_bartender_order(raw: &str, tab: BartenderTab, bot_username: &str) -> Ba
             // The line quotes a price, so we never silently clamp a different
             // number underneath the receipt. A missing or out-of-range price
             // is a model slip: serve the line uncharged rather than debit an
-            // amount the patron never saw. Non-intoxicating drinks allow a lower floor.
+            // amount the patron never saw. A non-intoxicating pour has one
+            // price, so anything else on it is the same slip.
             let valid_price = if intoxicating {
                 order
                     .price
                     .filter(|p| (DRINK_PRICE_MIN..=DRINK_PRICE_MAX).contains(p))
             } else {
-                order.price.filter(|p| (50..=DRINK_PRICE_MAX).contains(p))
+                order.price.filter(|p| *p == SOFT_DRINK_PRICE)
             };
             let Some(price) = valid_price else {
                 return BartenderDecision::Say { line };

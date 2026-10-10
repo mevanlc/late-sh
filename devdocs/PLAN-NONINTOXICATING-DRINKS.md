@@ -5,10 +5,10 @@ Implement a way for `@bartender` to pour non-intoxicating drinks (like water, co
 
 ## AI Schema & Prompt Updates
 - **Schema (`late-ssh/src/app/ai/ghost.rs`)**: `bartender_order_schema()` requires the nullable boolean `intoxicating` field. The prompt and response example request an explicit boolean for pours and offers, with null allowed for chat. Parsing defaults missing/null classifications to intoxicating for legacy or repaired responses.
-- **Prompt**: Updated the bartender's system prompt to explicitly instruct it to set `intoxicating: false` if a patron is cut off, if they explicitly ask for a non-alcoholic drink (e.g., "NA", "Shirley Temple"), or if they order an obviously non-intoxicating beverage (water, coffee, orange juice, milk, etc.). The prompt also dictates the pricing tiers: intoxicating drinks run 100-1000 chips, while the prompt asks for 50 chips on non-intoxicating drinks and the server accepts 50-1000 for them.
+- **Prompt**: Updated the bartender's system prompt to explicitly instruct it to set `intoxicating: false` if a patron is cut off, if they explicitly ask for a non-alcoholic drink (e.g., "NA", "Shirley Temple"), or if they order an obviously non-intoxicating beverage (water, coffee, orange juice, milk, etc.). The prompt also dictates the pricing tiers: intoxicating drinks run 100-1000 chips, while non-intoxicating drinks are exactly 50 chips (`SOFT_DRINK_PRICE`), and the server refuses any other price on them.
 
 ## Backend Parsing Logic
-- **Price Floors (`parse_bartender_order`)**: Modified the price-validation bounds. Previously, any drink under 100 chips was silently downgraded to an uncharged chat line. Now, if `intoxicating` is `false`, the floor drops to 50 chips, allowing the 50-chip coffee order to be processed as a valid `Pour`.
+- **Price Floors (`parse_bartender_order`)**: Modified the price-validation bounds. Previously, any drink under 100 chips was silently downgraded to an uncharged chat line. Now, if `intoxicating` is `false`, the only accepted price is `SOFT_DRINK_PRICE` (50 chips), so the 50-chip coffee order is processed as a valid `Pour`.
 
 ## Service Layer (ChipService)
 - **`buy_drink` & `cash_round_drink` (`late-ssh/src/app/games/chips/svc.rs`)**: Both core methods now accept an `intoxicating: bool` argument.

@@ -25,6 +25,10 @@ use super::drink_round::Bar;
 /// Bounds on what the bartender may charge for a single pour.
 pub const DRINK_PRICE_MIN: i64 = 100;
 pub const DRINK_PRICE_MAX: i64 = 1_000;
+/// What every non-intoxicating pour (water, coffee, a cut-off substitute)
+/// costs. One fixed price: the bartender is told it and the server refuses
+/// any other, so a model slip can never charge top-shelf for a coffee.
+pub const SOFT_DRINK_PRICE: i64 = 50;
 /// Buzz comped to a newcomer on their first walk up to the bar. Sized to land
 /// exactly on the first drunk level so the welcome round already glows.
 pub const WELCOME_DRINK_POINTS: i64 = 100;
@@ -221,7 +225,7 @@ impl UserDrinks {
                      )
                      INSERT INTO user_drinks
                         (user_id, drunk_points, lifetime_spent, drink_count, last_drink_at)
-                     VALUES ($1, 0, $2::bigint, 1, '1970-01-01 00:00:00Z'::timestamp)
+                     VALUES ($1, 0, $2::bigint, 1, '1970-01-01 00:00:00Z'::timestamptz)
                      ON CONFLICT (user_id) DO UPDATE SET
                         lifetime_spent = user_drinks.lifetime_spent + $2::bigint,
                         drink_count = user_drinks.drink_count + 1,

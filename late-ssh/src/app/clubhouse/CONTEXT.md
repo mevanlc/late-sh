@@ -138,8 +138,8 @@ room is the chat surface, and the full history lives in #lounge on Home.
   intoxicating drink 100-1000 chips and non-intoxicating drinks at 50 chips.
   The response explicitly classifies `intoxicating`; non-intoxicating paid
   and comped pours increment the drink count without changing stored buzz or
-  its decay timestamp. The server accepts a 50-1000 price for non-intoxicating
-  drinks and refuses any out-of-range or unaffordable
+  its decay timestamp. The server pins a non-intoxicating pour to
+  `SOFT_DRINK_PRICE` and refuses any out-of-range or unaffordable
   price (served uncharged, so the debit always matches the quoted line),
   floor-guards, and debits via
   `ChipService::buy_drink` (atomic with the `user_drinks` upsert and the
