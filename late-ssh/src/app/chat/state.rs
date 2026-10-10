@@ -2542,6 +2542,7 @@ impl ChatState {
             .all_articles()
             .iter()
             .find(|item| item.article.id == article_id)
+            .cloned()
         else {
             return false;
         };
@@ -2938,8 +2939,9 @@ impl ChatState {
         composer::set_themed_textarea_cursor_visible(&mut self.composer, composing);
     }
 
-    /// Open the article modal on a News article by id, the one the live
-    /// strip features. False when it left the snapshot (deleted).
+    /// Open the article modal on a News article by id (the live strip, the
+    /// Live panel, a Zen Live tile), marking that article read. False when
+    /// it left the snapshot (deleted).
     pub(crate) fn open_news_modal_for_article(&mut self, article_id: Uuid) -> bool {
         self.reaction_leader_active = false;
         let Some(item) = self
@@ -2947,6 +2949,7 @@ impl ChatState {
             .all_articles()
             .iter()
             .find(|item| item.article.id == article_id)
+            .cloned()
         else {
             return false;
         };
@@ -2961,6 +2964,7 @@ impl ChatState {
             meta: news_modal_meta(&author, item.article.created),
             article_id,
         });
+        self.news.mark_article_read(&item);
         true
     }
 
