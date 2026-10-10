@@ -1015,9 +1015,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
         // The frame stays clickable even when a page captures all input
         // (drawing, framing, naming/rating a piece, or playing a game).
         // App-wide modals above retain their input priority.
-        if handle_topbar_screen_click(app, ctx.screen, *mouse)
-            || (ctx.screen == Screen::Profiles && handle_status_bar_click(app, *mouse))
-        {
+        if handle_topbar_screen_click(app, ctx.screen, *mouse) {
             return;
         }
     }

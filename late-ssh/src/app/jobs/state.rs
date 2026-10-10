@@ -56,6 +56,12 @@ impl JobsState {
         }
     }
 
+    /// The postings behind the rows moved: what the last frame recorded
+    /// may name rows that are no longer where they were.
+    pub(crate) fn feed_changed(&self) {
+        self.mouse.invalidate();
+    }
+
     pub(crate) fn select_and_open(&mut self, index: usize) {
         if self.selected != index {
             self.mouse

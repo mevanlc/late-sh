@@ -26,8 +26,6 @@ pub(crate) const DESCRIPTION_MAX: usize = 800;
 /// vocabulary's cap.
 pub(crate) const SKILLS_LIMIT: usize = vocab::TAG_LIMIT;
 
-/// The most rows any page draws; the click map is sized to it.
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Page {
     Card,
@@ -991,16 +989,24 @@ impl EditorState {
         for field in CARD_FIELDS.into_iter().chain(ABOUT_FIELDS) {
             if matches!(field.kind(), FieldKind::Text | FieldKind::Multi) {
                 let visible = active == Some(field);
-                set_themed_textarea_cursor_visible(self.field_mut(field), visible);
+                let input = self.field_mut(field);
+                set_themed_textarea_cursor_visible(input, visible);
+                if !visible {
+                    // The widget scrolls to keep its cursor in view, so an
+                    // idle row parks the cursor at the start to show the
+                    // start of its text.
+                    input.move_cursor(CursorMove::Jump(0, 0));
+                }
             }
         }
         if let ProjectsView::Form(draft) = &mut self.projects_view {
             for field in PROJECT_FIELDS {
                 let visible = active == Some(field);
-                set_themed_textarea_cursor_visible(
-                    draft.field_mut(field).expect("project field"),
-                    visible,
-                );
+                let input = draft.field_mut(field).expect("project field");
+                set_themed_textarea_cursor_visible(input, visible);
+                if !visible {
+                    input.move_cursor(CursorMove::Jump(0, 0));
+                }
             }
         }
     }
@@ -1030,6 +1036,12 @@ impl EditorState {
                 );
             }
         }
+    }
+
+    /// The showcase feed behind the projects list moved: what the last
+    /// frame recorded may name rows that are no longer where they were.
+    pub(crate) fn feed_changed(&self) {
+        self.mouse.invalidate();
     }
 
     // Pages

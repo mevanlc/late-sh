@@ -362,17 +362,14 @@ fn handle_mouse(app: &mut App, mouse: crate::app::input::MouseEvent) {
                             app.directory_editor.cycle_choice(forward);
                         }
                     }
+                    // A click selects the row, as the keys do; Edit and
+                    // Delete then act on it, so a stray click cannot open
+                    // or drop a project on its own.
                     Some(MouseTarget::Project(id)) => {
                         let projects = projects_of(app.chat.showcase.all_items(), app.user_id);
-                        if let Some((index, project)) = projects
-                            .iter()
-                            .enumerate()
-                            .find(|(_, project)| project.id == id)
-                        {
+                        if let Some(index) = projects.iter().position(|project| project.id == id) {
                             app.directory_editor
                                 .set_project_selection(index, projects.len());
-                            app.directory_editor.start_editing_project(project);
-                            app.directory_editor.mouse.reset_pane(Page::Projects);
                         }
                     }
                     Some(MouseTarget::Add) => {

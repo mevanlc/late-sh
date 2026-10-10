@@ -355,13 +355,16 @@ fn draw_people_list(
         Pane::PeopleList,
         entries.len() * usize::from(item_height),
         focus..focus + usize::from(item_height),
-        |frame, body| {
+        |frame, content, window| {
             for (index, entry) in entries.iter().enumerate() {
                 let y = (index * usize::from(item_height)) as u16;
-                if y >= body.height {
+                if y >= window.bottom() {
                     break;
                 }
-                let row_area = Rect::new(0, y, body.width, item_height.min(body.height - y));
+                let row_area = Rect::new(0, y, content.width, item_height.min(content.height - y));
+                if row_area.bottom() <= window.y {
+                    continue;
+                }
                 let block = Block::default()
                     .borders(Borders::BOTTOM)
                     .border_style(Style::default().fg(theme::BORDER_DIM()))
@@ -753,7 +756,9 @@ fn draw_person_detail(
         Pane::PeopleDetail,
         rows,
         focus..focus + 1,
-        |frame, area| mouse_ui::lines(frame, area, &view.directory.mouse, &lines),
+        |frame, content, window| {
+            mouse_ui::lines(frame, content, window, &view.directory.mouse, &lines)
+        },
     );
 }
 

@@ -99,3 +99,27 @@ fn short_editor_scrolls_full_fields_and_discard_prompt_owns_every_hit() {
     assert_eq!(editor.field_text(Field::Headline), "a draft");
     assert!(editor.is_open());
 }
+
+#[test]
+fn an_idle_row_shows_the_start_of_a_long_value() {
+    let mut editor = EditorState::default();
+    editor.open_own(Uuid::now_v7(), None, &Profile::default(), Page::About);
+    editor.set_row(1);
+    assert_eq!(editor.active_field(), Some(Field::Ide));
+    editor.start_editing();
+    editor
+        .field_mut(Field::Ide)
+        .insert_str(&format!("start-{}-end", "x".repeat(150)));
+    editor.stop_editing();
+
+    let idle = render(&editor);
+    let row = idle
+        .iter()
+        .find(|line| line.contains("ide "))
+        .expect("ide row");
+    assert!(
+        row.contains("start-"),
+        "an idle row begins at its start:\n{row}"
+    );
+    assert!(!row.contains("-end"), "not at its end:\n{row}");
+}

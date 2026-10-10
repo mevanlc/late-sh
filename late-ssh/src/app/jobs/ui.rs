@@ -15,6 +15,7 @@ use ratatui::{
 
 use super::post::{POST_FIELDS, PostField, PostForm, PostKind, PostTarget, scope_choice_label};
 use super::state::{JobsState, match_line, scope_label};
+use crate::app::common::composer::placeholder_with_cursor;
 use crate::app::common::primitives::{
     format_relative_time, format_relative_time_short, hint_line, row_with_hint,
 };
@@ -156,18 +157,21 @@ fn draw_list(
         Pane::JobsList,
         visible.len() * item_height,
         focus..focus + item_height,
-        |frame, body| {
+        |frame, content, window| {
             for (index, posting) in visible.iter().enumerate() {
-                let y = index * item_height;
-                if y >= usize::from(body.height) {
+                let y = (index * item_height) as u16;
+                if y >= window.bottom() {
                     break;
                 }
                 let rect = Rect::new(
                     0,
-                    y as u16,
-                    body.width,
-                    (item_height as u16).min(body.height - y as u16),
+                    y,
+                    content.width,
+                    (item_height as u16).min(content.height - y),
                 );
+                if rect.bottom() <= window.y {
+                    continue;
+                }
                 let block = Block::default()
                     .borders(Borders::BOTTOM)
                     .border_style(Style::default().fg(theme::BORDER_DIM()))
@@ -401,7 +405,7 @@ fn draw_detail(
         Pane::JobsDetail,
         rows,
         0..1,
-        |frame, area| mouse_ui::lines(frame, area, &view.jobs.mouse, &lines),
+        |frame, content, window| mouse_ui::lines(frame, content, window, &view.jobs.mouse, &lines),
     );
 }
 
@@ -591,16 +595,18 @@ fn draw_post_surface(frame: &mut Surface<'_>, area: Rect, form: &PostForm) {
         (),
         usize::from(rows_height),
         focus..focus + usize::from(form.active_field().height()),
-        |frame, area| {
+        |frame, content, window| {
             let rows = Layout::vertical(
                 POST_FIELDS
                     .iter()
                     .map(|field| Constraint::Length(field.height())),
             )
-            .split(area);
+            .split(content);
             for (idx, (field, row_area)) in POST_FIELDS.iter().zip(rows.iter().copied()).enumerate()
             {
-                draw_post_row(frame, row_area, form, *field, idx == form.row());
+                if row_area.intersects(window) {
+                    draw_post_row(frame, row_area, form, *field, idx == form.row());
+                }
             }
         },
     );
@@ -752,11 +758,33 @@ fn draw_post_row(
             );
         }
         PostKind::Text | PostKind::Multi => {
-            frame.render_widget(form.field(field), value_col);
+            let input = form.field(field);
+            if input.is_empty() {
+                // An empty row draws its own hint: a bare `TextArea` puts a
+                // cursor cell before its placeholder, typing or not, so the
+                // hint would sit one cell right and the block cursor in a
+                // cell of its own instead of on the hint's first letter.
+                let hint = if active && form.editing() {
+                    placeholder_with_cursor(field.placeholder())
+                } else {
+                    Line::from(Span::styled(
+                        field.placeholder().to_string(),
+                        Style::default().fg(theme::TEXT_FAINT()),
+                    ))
+                };
+                frame.render_widget(
+                    Paragraph::new(hint).style(Style::default().bg(theme::BG_CANVAS())),
+                    value_col,
+                );
+            } else {
+                frame.render_widget(input, value_col);
+            }
             form.mouse.hit(value_col, PostTarget::Caret(field, 0, 0));
-            mouse_ui::text_hits(form.field(field), value_col, &form.mouse, |row, col| {
-                PostTarget::Caret(field, row, col)
-            });
+            if !input.is_empty() {
+                mouse_ui::text_hits(input, value_col, &form.mouse, |row, col| {
+                    PostTarget::Caret(field, row, col)
+                });
+            }
         }
     }
 }

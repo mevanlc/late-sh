@@ -467,3 +467,29 @@ fn jobs_wheel_keeps_selection_and_targets_the_visible_posting() {
         }
     }
 }
+
+#[test]
+fn opening_a_person_past_the_first_page_reveals_their_row() {
+    use crate::app::directory::mouse::Pane;
+    let mut fixture = fixture();
+    fixture.people = (0..20)
+        .map(|index| card(Uuid::now_v7(), &format!("person{index}"), index))
+        .collect();
+    fixture.projects.clear();
+    let mut state = DirectoryState::new();
+    render(&fixture, &state, 120, 20);
+    state.enter_search();
+    render(&fixture, &state, 120, 20);
+    state.exit_search();
+    state.select_and_open(15);
+    let lines = render(&fixture, &state, 120, 20);
+    assert!(
+        state.mouse.offset(Pane::PeopleList) > 0,
+        "the list scrolls to the person"
+    );
+    assert!(
+        lines.iter().any(|line| line.starts_with("▎@person")),
+        "the selected row is on screen:\n{}",
+        lines.join("\n")
+    );
+}

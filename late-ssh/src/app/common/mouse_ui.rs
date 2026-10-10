@@ -62,6 +62,11 @@ pub(crate) fn buttons<T: Clone, P: Copy + PartialEq>(
     }
 }
 
+/// A pane of `rows` virtual lines shown through `area`. `draw` gets the whole
+/// virtual content rect to lay out in, and the window of it that is on
+/// screen: only what overlaps the window needs painting, and the buffer
+/// behind it is only that tall. Widgets clip to it, so a row half out of
+/// view is drawn as far as it shows.
 pub(crate) fn scroll<T: Clone, P: Copy + PartialEq>(
     surface: &mut Surface<'_>,
     area: Rect,
@@ -69,7 +74,7 @@ pub(crate) fn scroll<T: Clone, P: Copy + PartialEq>(
     pane: P,
     rows: usize,
     focus: std::ops::Range<usize>,
-    draw: impl FnOnce(&mut Surface<'_>, Rect),
+    draw: impl FnOnce(&mut Surface<'_>, Rect, Rect),
 ) {
     if area.is_empty() {
         return;
@@ -78,29 +83,31 @@ pub(crate) fn scroll<T: Clone, P: Copy + PartialEq>(
         .max(usize::from(area.height))
         .min(usize::from(u16::MAX));
     let offset = mouse.pane_range(area, pane, rows, focus);
-    let local = Rect::new(0, 0, area.width.saturating_sub(1), rows as u16);
-    if local.width == 0 {
+    let content = Rect::new(0, 0, area.width.saturating_sub(1), rows as u16);
+    if content.width == 0 {
         return;
     }
-    let mut buffer = Buffer::empty(local);
+    let window = Rect::new(0, offset as u16, content.width, area.height);
+    let mut buffer = Buffer::empty(window);
     let mark = mouse.mark();
     draw(
         &mut Surface {
             buffer: &mut buffer,
         },
-        local,
+        content,
+        window,
     );
     mouse.translate(
         mark,
         Rect {
-            width: local.width,
+            width: content.width,
             ..area
         },
         offset,
     );
     for y in 0..area.height {
-        for x in 0..local.width {
-            surface.buffer[(area.x + x, area.y + y)] = buffer[(x, y + offset as u16)].clone();
+        for x in 0..content.width {
+            surface.buffer[(area.x + x, area.y + y)] = buffer[(x, window.y + y)].clone();
         }
     }
     if rows > usize::from(area.height) {
@@ -129,22 +136,30 @@ pub(crate) fn line_height(line: &Line<'_>, width: u16) -> usize {
         .line_count(width)
         .max(1)
 }
+/// Lines laid out in `area`, painted only where they overlap `window` (the
+/// whole area when nothing scrolls).
 pub(crate) fn lines<T: Clone, P: Copy + PartialEq>(
     surface: &mut Surface<'_>,
     area: Rect,
+    window: Rect,
     mouse: &MouseState<T, P>,
     lines: &[(Line<'static>, Option<T>)],
 ) {
     let mut y = area.y;
     for (line, target) in lines {
-        let height = (line_height(line, area.width) as u16).min(area.bottom().saturating_sub(y));
+        if y >= area.bottom() || y >= window.bottom() {
+            break;
+        }
+        let height = (line_height(line, area.width) as u16).min(area.bottom() - y);
         let rect = Rect::new(area.x, y, area.width, height);
-        surface.render_widget(
-            Paragraph::new(line.clone()).wrap(Wrap { trim: false }),
-            rect,
-        );
-        if let Some(target) = target {
-            mouse.hit(rect, target.clone());
+        if rect.bottom() > window.y {
+            surface.render_widget(
+                Paragraph::new(line.clone()).wrap(Wrap { trim: false }),
+                rect,
+            );
+            if let Some(target) = target {
+                mouse.hit(rect, target.clone());
+            }
         }
         y = y.saturating_add(height);
     }

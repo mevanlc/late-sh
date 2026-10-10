@@ -260,6 +260,13 @@ impl DirectoryState {
     pub(crate) fn select_and_open(&mut self, index: usize) {
         self.select(index);
         self.detail_open = true;
+        self.mouse.reveal_selection();
+    }
+
+    /// The feeds behind the rows moved: what the last frame recorded may
+    /// name rows that are no longer where they were.
+    pub(crate) fn feed_changed(&self) {
+        self.mouse.invalidate();
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize, len: usize) {

@@ -418,7 +418,14 @@ impl PostForm {
         for field in POST_FIELDS {
             if matches!(field.kind(), PostKind::Text | PostKind::Multi) {
                 let visible = active == Some(field);
-                set_themed_textarea_cursor_visible(self.field_mut(field), visible);
+                let input = self.field_mut(field);
+                set_themed_textarea_cursor_visible(input, visible);
+                if !visible {
+                    // The widget scrolls to keep its cursor in view, so an
+                    // idle row parks the cursor at the start to show the
+                    // start of its text.
+                    input.move_cursor(ratatui_textarea::CursorMove::Jump(0, 0));
+                }
             }
         }
     }

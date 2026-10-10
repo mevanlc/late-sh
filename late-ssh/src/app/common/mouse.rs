@@ -149,9 +149,11 @@ impl<T: Clone, P: Copy + PartialEq> MouseState<T, P> {
         false
     }
 
-    pub(crate) fn scroll(&self, x: u16, y: u16, delta: isize, size: (u16, u16)) {
+    /// Scroll the pane under the pointer; false when no pane is there, so
+    /// the caller can let the wheel fall through.
+    pub(crate) fn scroll(&self, x: u16, y: u16, delta: isize, size: (u16, u16)) -> bool {
         if !self.valid.get() || self.size.get() != size {
-            return;
+            return false;
         }
         let hovered = self
             .panes
@@ -160,13 +162,15 @@ impl<T: Clone, P: Copy + PartialEq> MouseState<T, P> {
             .rev()
             .find(|(area, _, _)| area.contains((x, y).into()))
             .map(|(_, pane, max)| (*pane, *max));
-        if let Some((pane, max)) = hovered {
-            self.set_offset(
-                pane,
-                self.offset(pane).saturating_add_signed(delta).min(max),
-            );
-            self.hits.borrow_mut().clear();
-        }
+        let Some((pane, max)) = hovered else {
+            return false;
+        };
+        self.set_offset(
+            pane,
+            self.offset(pane).saturating_add_signed(delta).min(max),
+        );
+        self.hits.borrow_mut().clear();
+        true
     }
 
     /// Where the next recorded hit will land; pass it to `translate` after

@@ -10,6 +10,7 @@ use ratatui::{
 
 use super::state::{EditorState, Field, FieldKind, Page, ProjectRow, ProjectsView, Scope};
 use crate::app::common::{
+    composer::placeholder_with_cursor,
     primitives::{format_relative_time_short, hint_line, row_with_hint},
     theme,
 };
@@ -96,15 +97,11 @@ fn draw_surface(frame: &mut Surface<'_>, area: Rect, view: &EditorView<'_>) {
         state.mouse.clear_surface();
         frame.render_widget(Clear, body);
         let question = vec![(Line::from("Discard unsaved changes?"), None)];
-        mouse_ui::lines(
-            frame,
-            Rect {
-                height: body.height.min(1),
-                ..body
-            },
-            &state.mouse,
-            &question,
-        );
+        let question_row = Rect {
+            height: body.height.min(1),
+            ..body
+        };
+        mouse_ui::lines(frame, question_row, question_row, &state.mouse, &question);
         mouse_ui::buttons(
             frame,
             Rect {
@@ -182,11 +179,18 @@ fn draw_surface(frame: &mut Surface<'_>, area: Rect, view: &EditorView<'_>) {
                         .active_field()
                         .map_or(1, |field| usize::from(field.height()))
                 },
-        |frame, area| {
+        |frame, content, window| {
             if projects_list {
-                draw_project_list(frame, area, state, view.projects, state.project_selected());
+                draw_project_list(
+                    frame,
+                    content,
+                    window,
+                    state,
+                    view.projects,
+                    state.project_selected(),
+                );
             } else {
-                draw_fields(frame, area, state);
+                draw_fields(frame, content, window, state);
             }
         },
     );
@@ -259,7 +263,7 @@ fn page_height(state: &EditorState, project_count: usize) -> u16 {
 
 /// Every row of the page: `label  value`, the active row marked by a bar in
 /// the gutter and a bright label, the row being typed showing its cursor.
-fn draw_fields(frame: &mut Surface<'_>, area: Rect, state: &EditorState) {
+fn draw_fields(frame: &mut Surface<'_>, area: Rect, window: Rect, state: &EditorState) {
     let fields = state.fields();
     let constraints: Vec<Constraint> = fields
         .iter()
@@ -267,6 +271,9 @@ fn draw_fields(frame: &mut Surface<'_>, area: Rect, state: &EditorState) {
         .collect();
     let rows = Layout::vertical(constraints).split(area);
     for (idx, (field, row_area)) in fields.iter().zip(rows.iter().copied()).enumerate() {
+        if !row_area.intersects(window) {
+            continue;
+        }
         state.mouse.hit(row_area, MouseTarget::Field(*field));
         draw_field_row(frame, row_area, state, *field, idx == state.row());
     }
@@ -367,11 +374,32 @@ fn draw_field_row(
         FieldKind::Tags => draw_tags_value(frame, value_col, state, field, active),
         FieldKind::Text | FieldKind::Multi => {
             let input = state.field(field);
-            frame.render_widget(input, value_col);
+            if input.is_empty() {
+                // An empty row draws its own hint: a bare `TextArea` puts a
+                // cursor cell before its placeholder, typing or not, so the
+                // hint would sit one cell right and the block cursor in a
+                // cell of its own instead of on the hint's first letter.
+                let hint = if active && state.editing() {
+                    placeholder_with_cursor(field.placeholder())
+                } else {
+                    Line::from(Span::styled(
+                        field.placeholder().to_string(),
+                        Style::default().fg(theme::TEXT_FAINT()),
+                    ))
+                };
+                frame.render_widget(
+                    Paragraph::new(hint).style(Style::default().bg(theme::BG_CANVAS())),
+                    value_col,
+                );
+            } else {
+                frame.render_widget(input, value_col);
+            }
             state.mouse.hit(value_col, MouseTarget::Caret(field, 0, 0));
-            mouse_ui::text_hits(input, value_col, &state.mouse, |row, col| {
-                MouseTarget::Caret(field, row, col)
-            });
+            if !input.is_empty() {
+                mouse_ui::text_hits(input, value_col, &state.mouse, |row, col| {
+                    MouseTarget::Caret(field, row, col)
+                });
+            }
         }
     }
 }
@@ -429,6 +457,7 @@ fn draw_tags_value(
 fn draw_project_list(
     frame: &mut Surface<'_>,
     area: Rect,
+    window: Rect,
     state: &EditorState,
     projects: &[ProjectRow],
     selected: usize,
@@ -443,15 +472,18 @@ fn draw_project_list(
         );
         return;
     }
-    let visible = area.height as usize;
-    let start = 0;
-    for (offset, project) in projects.iter().skip(start).take(visible).enumerate() {
-        let idx = start + offset;
+    for (idx, project) in projects.iter().enumerate() {
         let row_area = Rect {
-            y: area.y + offset as u16,
+            y: area.y + idx as u16,
             height: 1,
             ..area
         };
+        if row_area.y >= area.bottom() || row_area.y >= window.bottom() {
+            break;
+        }
+        if row_area.y < window.y {
+            continue;
+        }
         state.mouse.hit(row_area, MouseTarget::Project(project.id));
         let is_selected = idx == selected;
         let marker_style = if is_selected {

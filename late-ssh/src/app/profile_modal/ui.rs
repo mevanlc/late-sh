@@ -189,23 +189,8 @@ pub(crate) fn draw(
         viewport_height: viewport.height,
         chips_top,
     });
+    // set_scroll_extent clamps the offset; the body's geometry follows it.
     let offset = state.scroll_offset();
-
-    // set_scroll_extent clamps the offset; publish geometry afterwards.
-    state.mouse.begin((size.width, size.height));
-    mouse_ui::buttons(
-        &mut Surface {
-            buffer: frame.buffer_mut(),
-        },
-        Rect::new(
-            popup.right().saturating_sub(4).max(popup.x),
-            popup.y,
-            popup.width.min(3),
-            popup.height.min(1),
-        ),
-        &state.mouse,
-        &[("[x]", MouseTarget::Close)],
-    );
     state
         .mouse
         .pane(rows[1], (), usize::from(rows[1].height), 0);

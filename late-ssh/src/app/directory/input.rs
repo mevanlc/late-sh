@@ -6,12 +6,15 @@ use super::mouse::Target;
 use super::state::{PersonFocus, Shelf, person_entries};
 use crate::app::input::{MouseButton, MouseEvent, MouseEventKind};
 
+/// True when the event landed on something this page draws. Anything else
+/// (keyboard-only mode, a click on empty space, moves and releases) falls
+/// through to the global handlers: the sidebar, the status bar, the frame.
 pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
     if !app.interaction_mode.mouse_enabled() {
-        return true;
+        return false;
     }
     let (Some(x), Some(y)) = (mouse.x.checked_sub(1), mouse.y.checked_sub(1)) else {
-        return true;
+        return false;
     };
     let size = app.size;
     match mouse.kind {
@@ -22,9 +25,9 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
                 3
             };
             if app.directory_state.shelf() == Shelf::Jobs {
-                app.jobs.mouse.scroll(x, y, delta, size);
+                app.jobs.mouse.scroll(x, y, delta, size)
             } else {
-                app.directory_state.mouse.scroll(x, y, delta, size);
+                app.directory_state.mouse.scroll(x, y, delta, size)
             }
         }
         MouseEventKind::Down if mouse.button == Some(MouseButton::Left) => {
@@ -39,12 +42,15 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
                 .mouse
                 .target(x, y, size)
                 .or_else(|| on_jobs.then(|| app.jobs.mouse.target(x, y, size)).flatten());
+            let Some(target) = target else {
+                return false;
+            };
             match target {
-                Some(Target::Shelf(shelf)) => {
+                Target::Shelf(shelf) => {
                     app.directory_state.set_shelf(shelf);
                     app.jobs.mouse.invalidate();
                 }
-                Some(Target::Person(id)) => {
+                Target::Person(id) => {
                     let entries = person_entries(
                         app.chat.showcase.all_items(),
                         app.chat.work.all_items(),
@@ -59,7 +65,7 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
                         }
                     }
                 }
-                Some(Target::Job(id)) => {
+                Target::Job(id) => {
                     let tags = crate::app::jobs::input::own_tags(app);
                     if let Some(index) = app.jobs.visible(&tags).iter().position(|job| job.id == id)
                     {
@@ -67,35 +73,34 @@ pub(crate) fn handle_mouse(app: &mut App, mouse: MouseEvent) -> bool {
                         app.jobs.select_and_open(index);
                     }
                 }
-                Some(Target::Key(key)) => {
+                Target::Key(key) => {
                     handle_idle_byte(app, key);
                 }
-                Some(Target::Item(item, key)) => {
+                Target::Item(item, key) => {
                     if focus_item(app, item) && key != 0 {
                         handle_people_byte(app, key);
                     }
                 }
-                Some(Target::Copy(url)) => {
+                Target::Copy(url) => {
                     app.pending_clipboard = Some(url);
                     app.banner = Some(Banner::success("Link copied!"));
                 }
-                Some(Target::Profile(id, name)) => app.open_profile_modal(id, name),
-                Some(Target::SearchCaret(col)) => app.directory_state.position_search_cursor(col),
-                Some(Target::Back) => {
+                Target::Profile(id, name) => app.open_profile_modal(id, name),
+                Target::SearchCaret(col) => app.directory_state.position_search_cursor(col),
+                Target::Back => {
                     if on_jobs {
                         app.jobs.close_detail();
                     } else {
                         app.directory_state.close_detail();
                     }
                 }
-                None => {}
             }
             app.directory_state.mouse.invalidate();
             app.jobs.mouse.invalidate();
+            true
         }
-        _ => {}
+        _ => false,
     }
-    true
 }
 
 fn focus_item(app: &mut App, wanted: FocusedItem) -> bool {
