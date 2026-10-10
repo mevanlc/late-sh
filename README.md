@@ -175,6 +175,14 @@ piece to vote. Fixture SSH identities are retained in the gitignored
 ssh -o IdentitiesOnly=yes -i tmp/artboard-seed-keys/art_artist1 -p 2222 localhost
 ```
 
+Artboard opens behind a content disclaimer because the art may be NSFW.
+Press `V` (**View**) for this visit, `A` (**Always View**) to turn off future
+reminders, or `B` (**Back to Chat**) to return to Home (screen `1`). The default-on **Artboard
+content disclaimer** toggle in Settings → Tweaks can turn reminders off or on.
+During the newcomer tour the dialog does not appear: the tour box at the
+Artboard stop offers `S` to show the art for that visit or Enter to skip to
+Profiles, and neither changes the preference.
+
 Accounts are `art_artist1`–`art_artist3`, `art_voter1`–`art_voter4`, `art_mod1`/
 `art_mod2`, and `art_admin1`/`art_admin2`, each with a matching key filename.
 Their tutorial is already marked completed, including when reseeding existing
