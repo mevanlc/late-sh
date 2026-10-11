@@ -8,8 +8,9 @@ transport and renderer.
 
 **Status:** implemented, with local validation on 2026-10-09. The pinned stories,
 modified standalone Frotz, private host, native menus, six slots, workspace
-detach/resume, and delivery wiring are present. Development entry is enabled;
-production entry stays disabled until image publication and cluster verification.
+detach/resume, and delivery wiring are present. Entry is enabled in both client
+profiles; production follows the rollout order in the component context, which
+ships the host and its secret before the SSH client that requires it.
 Validation evidence and the existing macOS repository-test limitation are recorded
 below. Current component contracts and commands are in
 `late-ssh/src/app/door/zork/CONTEXT.md`. Repository observations used for the
@@ -424,9 +425,9 @@ Use these integration defaults:
 | `LATE_ZORK_LISTEN_ADDR` / `LATE_ZORK_PORT` | `0.0.0.0` / `2331`, cluster-internal listener. |
 | `LATE_ZORK_IDLE_TIMEOUT` | Host connection fallback of 3600 seconds; the client applies the 20-minute gameplay inactivity policy. |
 
-Port 2331 is unused in the inspected door configuration. Keep the door disabled
-in production until the host, secret, and storage are ready; a disabled client
-must not make existing deployments fail startup for a missing new secret.
+Port 2331 is unused in the inspected door configuration. The enabled production
+client requires the secret at startup, so the host, its identity secret, and the
+SSH deployment's secret reference must be live before an SSH image ships.
 
 The implementation must cover the complete packaging chain:
 

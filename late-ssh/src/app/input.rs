@@ -1283,7 +1283,7 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
 /// The key byte a door launcher should see, if the event carries one. The vt
 /// parser emits printables as `Char` and control bytes (Enter, backspace) as
 /// `Byte`; the arcade-name claim prompt needs both.
-fn launcher_key_byte(event: &ParsedInput) -> Option<u8> {
+pub(crate) fn launcher_key_byte(event: &ParsedInput) -> Option<u8> {
     match event {
         ParsedInput::Byte(b) => Some(*b),
         ParsedInput::Char(c) if c.is_ascii() => Some(*c as u8),
@@ -1652,12 +1652,7 @@ fn launch_games_hub_selection(app: &mut App, game: crate::app::door::hub::state:
             app.set_screen(Screen::Darkroom);
             app.enter_darkroom();
         }
-        HubGame::Zork => {
-            app.set_screen(Screen::Zork);
-            if let Some(state) = app.zork_state.as_mut() {
-                state.open_menu();
-            }
-        }
+        HubGame::Zork => crate::app::door::zork::input::launch(app),
         HubGame::Codekeep => {
             if !app.codekeep_enabled {
                 app.banner = Some(crate::app::common::primitives::Banner::error(
@@ -1862,40 +1857,9 @@ fn handle_dedicated_screen_input(app: &mut App, ctx: InputContext, event: &Parse
     }
 
     if ctx.screen == Screen::Zork {
-        if let Some(state) = app.zork_state.as_mut() {
-            if state.in_exit_grace() {
-                return true;
-            }
-            match event {
-                ParsedInput::Arrow(b'A') => {
-                    state.step(false);
-                    return true;
-                }
-                ParsedInput::Arrow(b'B') => {
-                    state.step(true);
-                    return true;
-                }
-                ParsedInput::Byte(0x1b | b'q') | ParsedInput::Char('q') => {
-                    if state.back() {
-                        app.set_screen(Screen::Games);
-                    }
-                    return true;
-                }
-                _ => {}
-            }
-            if let Some(byte) = launcher_key_byte(event)
-                && state.menu_key(byte)
-            {
-                return true;
-            }
-            if matches!(
-                state.mode(),
-                crate::app::door::zork::state::Mode::Confirm(_)
-            ) {
-                return true;
-            }
-        }
-        return false;
+        // Running-mode bytes are intercepted in App::handle_input; this is
+        // the edition and save menus.
+        return crate::app::door::zork::input::handle_menu_event(app, event);
     }
     if ctx.screen == Screen::Codekeep {
         // Running bytes are intercepted before parsed input, and a non-running

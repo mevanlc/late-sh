@@ -147,6 +147,12 @@ const CURSOR_SHAPE_STEADY_BLOCK: &[u8] = b"\x1b[2 q";
 const CURSOR_SHAPE_DEFAULT: &[u8] = b"\x1b[0 q";
 const CURSOR_SHAPE_STEADY_UNDERLINE: &[u8] = b"\x1b[4 q";
 
+/// Backtick, the workspace-cycle key, matched as a whole input chunk (like
+/// the doors' F1 remap): inside a running roguelike or Zork game it detaches
+/// instead of reaching the game. DCSS's own ` (repeat previous command) is the
+/// accepted casualty.
+pub(crate) const DOOR_DETACH_KEY: &[u8] = b"`";
+
 /// Name the window we're borrowing. `CSI 22;2t` pushes the title the user
 /// already had onto the terminal's own stack first, so [`POP_WINDOW_TITLE`]
 /// can hand it back on the way out: an `ssh late.sh` in one tab of ten should
@@ -2957,11 +2963,6 @@ impl App {
         if self.haunt.breakthrough_playing() {
             return;
         }
-        /// Backtick, the workspace-cycle key, matched as a whole input chunk
-        /// (like the doors' F1 remap): inside a running roguelike it detaches
-        /// instead of reaching the game. DCSS's own ` (repeat previous
-        /// command) is the accepted casualty.
-        const DOOR_DETACH_KEY: &[u8] = b"`";
         // While the proxied rebels game is running, every byte (keys + mouse)
         // goes straight to the remote; late.sh parses nothing. Exit is by
         // quitting rebels itself (Esc/Ctrl-C), which closes the channel.
@@ -3109,20 +3110,10 @@ impl App {
         {
             return;
         }
-        if self.screen == Screen::Zork
-            && let Some(state) = self.zork_state.as_mut()
-        {
-            if state.in_exit_grace() {
-                return;
-            }
-            if state.game_visible() {
-                if data == DOOR_DETACH_KEY {
-                    self.detach_door_game();
-                } else {
-                    state.forward_input(data);
-                }
-                return;
-            }
+        // Zork: a visible game takes every byte, ` detaching it; the menus
+        // fall through to the parsed-key path (`door/zork/input.rs`).
+        if self.screen == Screen::Zork && crate::app::door::zork::input::handle_raw(self, data) {
+            return;
         }
         // CodeKeep is another network PTY door. Ink owns every key while the
         // game is live; Ctrl-C triggers upstream's graceful save-and-exit.

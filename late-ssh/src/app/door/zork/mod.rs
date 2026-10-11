@@ -2,6 +2,9 @@
 pub mod identity;
 #[cfg(test)]
 mod identity_test;
+pub mod input;
+#[cfg(test)]
+mod input_test;
 pub mod protocol;
 pub mod proxy;
 #[cfg(test)]

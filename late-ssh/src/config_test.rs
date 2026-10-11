@@ -71,7 +71,9 @@ fn zork_secret_is_required_only_when_entry_is_enabled() {
     let mut config = valid_config();
     config.zork_secret.clear();
     config.zork_enabled = false;
-    config.validate().expect("disabled rollout may omit secret");
+    config
+        .validate()
+        .expect("a disabled door may omit its secret");
     config.zork_enabled = true;
     assert!(config.validate().unwrap_err().to_string().contains("zork"));
 }

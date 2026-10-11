@@ -110,7 +110,7 @@ const MIN_HEIGHT: u16 = 6;
 /// One row of the sidebar: a muted group header, a selectable game (index
 /// into the session's roster), a blank separator between groups, or the faint
 /// always-on backtick hint at the top (the games that detach and hop:
-/// Lateania, the roguelikes, and the two native remakes).
+/// Lateania, the roguelikes, the two native remakes, and the Zork Trilogy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SidebarRow {
     Header(&'static str),

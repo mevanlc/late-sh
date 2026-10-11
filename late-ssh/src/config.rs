@@ -498,10 +498,10 @@ impl Config {
             codekeep_host: "late-codekeep-sv".to_string(),
             codekeep_port: 2328,
             codekeep_secret: required("LATE_CODEKEEP_SECRET")?,
-            zork_enabled: false,
+            zork_enabled: true,
             zork_host: "late-zork-sv".to_string(),
             zork_port: 2331,
-            zork_secret: optional("LATE_ZORK_SECRET").unwrap_or_default(),
+            zork_secret: required("LATE_ZORK_SECRET")?,
         })
     }
 

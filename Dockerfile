@@ -130,7 +130,11 @@ COPY late-dopewars/Cargo.toml late-dopewars/Cargo.toml
 COPY late-usurper/Cargo.toml late-usurper/Cargo.toml
 COPY late-bashquest/Cargo.toml late-bashquest/Cargo.toml
 COPY late-webview/Cargo.toml late-webview/Cargo.toml
-COPY vendor vendor
+# Only the vendored Rust crates: vendor/frotz is the door-zork image's C
+# source, and copying it here would invalidate every cook layer below on an
+# interpreter edit. A new vendored crate needs its line in each stage.
+COPY vendor/asterion-core vendor/asterion-core
+COPY vendor/irc-proto vendor/irc-proto
 
 # Create dummy source files for cargo-chef to analyze. late-webview is never
 # built in these images (CLI-only YouTube helper), but it is a workspace member
@@ -163,7 +167,8 @@ FROM chef AS builder
 
 # Copy recipe and cook ssh/web dependencies (cached until any dep changes)
 COPY --from=planner /app/recipe.json recipe.json
-COPY vendor vendor
+COPY vendor/asterion-core vendor/asterion-core
+COPY vendor/irc-proto vendor/irc-proto
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/app/target,sharing=locked \
@@ -175,7 +180,8 @@ COPY Cargo.toml Cargo.lock ./
 COPY late-core late-core
 COPY late-ssh late-ssh
 COPY late-web late-web
-COPY vendor vendor
+COPY vendor/asterion-core vendor/asterion-core
+COPY vendor/irc-proto vendor/irc-proto
 COPY late-cli/Cargo.toml late-cli/Cargo.toml
 COPY late-webview/Cargo.toml late-webview/Cargo.toml
 COPY late-codekeep/Cargo.toml late-codekeep/Cargo.toml
@@ -219,7 +225,8 @@ RUN cd late-web && npm install && npm run tailwind:build
 # The doors have no otel feature; they build without the workspace flag.
 FROM chef AS door-builder-base
 COPY --from=planner /app/recipe.json recipe.json
-COPY vendor vendor
+COPY vendor/asterion-core vendor/asterion-core
+COPY vendor/irc-proto vendor/irc-proto
 
 FROM door-builder-base AS builder-codekeep
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \

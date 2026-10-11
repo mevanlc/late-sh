@@ -18,9 +18,21 @@ pub enum ProxyStatus {
     Running,
     Closed,
 }
+/// How the host connection ended.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Ending {
+    /// The channel closed without an exit status.
+    #[default]
+    Closed,
+    /// The host's exit status (`protocol::EXIT_*`).
+    Exited(u32),
+    /// Connect, auth, the launch request, or the stream failed before an
+    /// exit status arrived.
+    Failed,
+}
 #[derive(Clone, Default)]
 pub struct Outcome {
-    pub code: Option<u32>,
+    pub ending: Ending,
     pub message: String,
 }
 struct AcceptHost;
@@ -143,8 +155,13 @@ impl Process {
             .await
             {
                 tracing::warn!(?error, "Zork proxy ended with error");
-                task_outcome.lock().expect("outcome mutex").message =
-                    "Unable to connect to Zork. Please try again.".into();
+                let mut outcome = task_outcome.lock().expect("outcome mutex");
+                match outcome.ending {
+                    // An exit status that already arrived still decides it.
+                    Ending::Exited(_) => {}
+                    Ending::Closed | Ending::Failed => outcome.ending = Ending::Failed,
+                }
+                outcome.message = "Unable to connect to Zork. Please try again.".into();
             }
             *task_status.lock().expect("status mutex") = ProxyStatus::Closed;
             if let Some(repaint) = cfg.repaint {
@@ -225,7 +242,7 @@ async fn run(
                         outcome.message.extend(String::from_utf8_lossy(&data).chars().filter(|ch| !ch.is_control()));
                     }
                 }
-                Some(ChannelMsg::ExitStatus { exit_status }) => outcome.lock().expect("outcome mutex").code = Some(exit_status),
+                Some(ChannelMsg::ExitStatus { exit_status }) => outcome.lock().expect("outcome mutex").ending = Ending::Exited(exit_status),
                 Some(ChannelMsg::Close) | None => break,
                 _ => {}
             }

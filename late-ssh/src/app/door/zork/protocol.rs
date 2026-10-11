@@ -43,6 +43,17 @@ impl Action {
     }
 }
 
+/// Exit statuses a `play` request ends with: the host's and the Frotz door
+/// build's contract (`door/zork/CONTEXT.md`).
+pub const EXIT_QUIT: u32 = 0;
+/// A checkpointed return to the menus: RESTORE, or a requested switch.
+pub const EXIT_RETURNED: u32 = 20;
+/// The selected save is invalid or unavailable.
+pub const EXIT_SAVE_REJECTED: u32 = 21;
+/// Try again later: the account's game is held by another session, or the
+/// host is shutting down.
+pub const EXIT_BUSY: u32 = 75;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Availability {

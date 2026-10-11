@@ -1,6 +1,10 @@
-use super::protocol::{Action, Availability, Catalogue, Edition, EditionSlots};
-use super::proxy::{self, Connection, Process, ProxyStatus};
+use super::protocol::{
+    Action, Availability, Catalogue, EXIT_BUSY, EXIT_QUIT, EXIT_RETURNED, EXIT_SAVE_REJECTED,
+    Edition, EditionSlots,
+};
+use super::proxy::{self, Connection, Ending, Process, ProxyStatus};
 use crate::app::door::keys;
+use crate::metrics::{self, ZorkCatalogueRead, ZorkSessionEnd, ZorkSwitchResult};
 use crate::render_signal::RenderSignal;
 use futures_util::FutureExt;
 use ratatui::layout::Rect;
@@ -172,8 +176,12 @@ impl State {
                 .now_or_never()
                 .expect("finished lookup result")
             {
-                Ok(Ok(catalogue)) => self.catalogue = Some(catalogue),
+                Ok(Ok(catalogue)) => {
+                    metrics::record_zork_catalogue_read(ZorkCatalogueRead::Read);
+                    self.catalogue = Some(catalogue);
+                }
                 error => {
+                    metrics::record_zork_catalogue_read(ZorkCatalogueRead::Failed);
                     tracing::warn!(?error, "Zork save catalogue unavailable");
                     self.catalogue = None;
                     self.message = "Unable to read saves. Press r to retry.".into();
@@ -187,24 +195,28 @@ impl State {
         {
             changed = true;
             let outcome = self.proxy.take().expect("closed proxy").outcome();
-            let previous = self.live.take();
+            let previous = self
+                .live
+                .take()
+                .expect("a proxy always runs a live edition");
+            metrics::record_zork_session_end(previous, session_end(outcome.ending));
             if let Some((edition, action, _)) = self.pending.take() {
-                if outcome.code == Some(20) {
+                if outcome.ending == Ending::Exited(EXIT_RETURNED) {
+                    metrics::record_zork_switch(ZorkSwitchResult::Switched);
                     self.start(edition, action);
                     return true;
                 }
+                metrics::record_zork_switch(ZorkSwitchResult::SaveFailed);
                 self.message =
                     "The current game did not finish saving. Choose Continue before trying again."
                         .into();
             } else if !outcome.message.is_empty() {
                 self.message = outcome.message;
-            } else if !matches!(outcome.code, Some(0 | 20)) {
+            } else if !matches!(outcome.ending, Ending::Exited(EXIT_QUIT | EXIT_RETURNED)) {
                 self.message =
                     "Zork closed unexpectedly. Continue uses the last completed autosave.".into();
             }
-            if let Some(edition) = previous {
-                self.edition = edition;
-            }
+            self.edition = previous;
             self.mode = Mode::Actions;
             self.exit_grace = 10;
             self.refresh();
@@ -214,6 +226,7 @@ impl State {
             .is_some_and(|(_, _, started)| started.elapsed() >= RETURN_TIMEOUT)
         {
             changed = true;
+            metrics::record_zork_switch(ZorkSwitchResult::TimedOut);
             self.pending = None;
             self.mode = Mode::Actions;
             if let Some(edition) = self.live {
@@ -221,8 +234,11 @@ impl State {
             }
             self.message = "The current game could not finish saving. It is still open; try again after the next prompt.".into();
         }
-        if self.live.is_some() && self.last_input.elapsed() >= IDLE_SHUTDOWN {
+        if let Some(edition) = self.live
+            && self.last_input.elapsed() >= IDLE_SHUTDOWN
+        {
             changed = true;
+            metrics::record_zork_session_end(edition, ZorkSessionEnd::Idle);
             self.proxy = None;
             self.live = None;
             self.pending = None;
@@ -267,6 +283,7 @@ impl State {
         }
     }
     fn start(&mut self, edition: Edition, action: Action) {
+        metrics::record_zork_launch(edition, action);
         self.proxy = Some(Process::spawn(
             self.connection.clone(),
             edition,
@@ -367,6 +384,18 @@ impl State {
         }
     }
 }
+/// The telemetry tag for a closed session, from the host's exit statuses.
+fn session_end(ending: Ending) -> ZorkSessionEnd {
+    match ending {
+        Ending::Exited(EXIT_QUIT) => ZorkSessionEnd::Quit,
+        Ending::Exited(EXIT_RETURNED) => ZorkSessionEnd::Returned,
+        Ending::Exited(EXIT_SAVE_REJECTED) => ZorkSessionEnd::SaveRejected,
+        Ending::Exited(EXIT_BUSY) => ZorkSessionEnd::Busy,
+        Ending::Exited(_) | Ending::Closed => ZorkSessionEnd::Crashed,
+        Ending::Failed => ZorkSessionEnd::ConnectFailed,
+    }
+}
+
 /// SSH data packets need not coincide with terminal escape sequences. Hold
 /// incomplete escapes briefly, so mouse/paste wrappers cannot leak into a
 /// command and application-cursor translation sees whole arrow sequences.

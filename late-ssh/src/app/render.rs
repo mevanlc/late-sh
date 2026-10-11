@@ -3195,7 +3195,12 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         }
     }
 
-    if screen == Screen::Zork {
+    if screen == Screen::Zork
+        && ctx
+            .zork_state
+            .as_deref()
+            .is_some_and(|state| state.game_visible())
+    {
         spans.push(Span::styled(
             "· SAVE manual save · RESTORE menu · ` step out ",
             Style::default().fg(theme::TEXT_DIM()),

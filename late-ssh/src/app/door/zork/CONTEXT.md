@@ -2,13 +2,14 @@
 
 Scope: `app/door/zork`, the standalone `late-zork` host, `vendor/frotz`, and
 `assets/zork`. Parent: root `CONTEXT.md`. Design/acceptance history:
-`devdocs/PLAN-ZORK-DOORS.md`. Development entry is enabled; production entry is
-disabled pending the rollout below.
+`devdocs/PLAN-ZORK-DOORS.md`. Entry is enabled in both client profiles; the
+first production deploy follows the rollout order below.
 
 ## Player contract
 
-One **Zork Trilogy** Games card opens edition selection, then Continue,
-Load manual save, Start new game, and Back. Each account has two slots per
+One **Zork Trilogy** Games card, filed under "remakes" after A Dark Room, opens
+edition selection, then Continue, Load manual save, Start new game, and Back.
+Entry is gated on the client's `zork_enabled`. Each account has two slots per
 edition: automatic progress and a deliberate manual fallback. These are six
 slots, not six independent campaigns. Missing, invalid, and unavailable slots
 are distinct; Continue and manual load are disabled unless their slot is ready
@@ -41,10 +42,11 @@ metadata requests do not reset the gameplay timer.
 
 | File | Responsibility |
 |---|---|
-| `state.rs` | Native menu/confirmation state, async metadata, one proxy, switch ordering, timers, incremental input filtering. |
+| `state.rs` | Native menu/confirmation state, async metadata, one proxy, switch ordering, timers, incremental input filtering, and all of the client's telemetry (see Telemetry). |
+| `input.rs` | Games-card launch (gated on `zork_enabled`), parsed menu keys, raw passthrough to a visible game with backtick detach. `App` only calls in. |
 | `render.rs` | Games landing, native edition/save menus, slot metadata, existing vt100 cell blit with theme text for default game foregrounds. |
-| `proxy.rs` | Private SSH client, bounded metadata JSON request, PTY exec/input/resize, exit status/errors, task teardown. |
-| `protocol.rs` | Fixed wire editions/actions and metadata types; deliberately independent of the host crate. |
+| `proxy.rs` | Private SSH client, bounded metadata JSON request, PTY exec/input/resize, the tagged `Ending` (exit status, closed, failed), task teardown. |
+| `protocol.rs` | Fixed wire editions/actions, exit statuses, and metadata types; deliberately independent of the host crate. |
 | `identity.rs` | Zork-specific shared-secret key derivation; no account names or handles in credentials. |
 | `late-zork/src/server.rs` | SSH authentication, allowlisted exec requests/TERM, account-wide leases and metadata routing. |
 | `late-zork/src/host.rs` | Private edition HOME, environment allowlist, child PTY, input/output bounds, resize/signals/reaping. |
@@ -101,8 +103,8 @@ Voluntary switching uses SIGUSR1 and refuses exit on failed persistence.
 
 | Setting | Default / policy |
 |---|---|
-| Client profile | Dev enabled, `service-zork:2331`; production disabled, `late-zork-sv:2331`. |
-| `LATE_ZORK_SECRET` | Required by the host and enabled clients; never passed to Frotz. |
+| Client profile | Enabled in both; dev `service-zork:2331`, production `late-zork-sv:2331`. |
+| `LATE_ZORK_SECRET` | Required by the host and by both client profiles at startup; never passed to Frotz. |
 | `LATE_ZORK_BIN` | `/usr/games/frotz`. |
 | `LATE_ZORK_STORY_DIR` | `/usr/share/late-zork`. |
 | `LATE_ZORK_DATA_DIR` | `/var/lib/late-zork`. |
@@ -122,13 +124,43 @@ launcher fixes volume ownership and uses `runuser` to execute the host as `late`
 Frotz refuses root, so both development gameplay and the production runtime must
 keep the host/interpreter under that unprivileged user.
 
-Rollout order: publish the pinned `door-zork:2.56pre-r1` asset using the door
-workflow's Zork dispatch on the introducing branch; build/release/deploy the
-`-zork` runtime and bootstrap `module.door["zork"]`; verify all three editions
-and volume persistence; then enable `zork_enabled` in the production client
-profile and deploy SSH. Its optional secret reference permits deploying the
-disabled client before the Zork secret exists. Rollback disables entry and
-keeps the PVC. Do not downgrade the checkpoint format silently.
+Rollout order, first production deploy:
+
+1. Publish the pinned `door-zork:2.56pre-r1` asset with the door workflow's
+   Zork dispatch.
+2. Release `-zork`: `deploy_service` finds no `late-zork` deployment and
+   bootstraps `module.door["zork"]` (PVC, identity secret, deployment,
+   service). Verify all three editions and volume persistence.
+3. Release `-infra`: the full apply adds the `LATE_ZORK_SECRET` reference to
+   `service-ssh`. It is a required reference, so it needs the secret from
+   step 2.
+4. Release the SSH image. The production profile requires `LATE_ZORK_SECRET`
+   at startup, so this must come after step 3. Do not use `-full` for steps
+   3 and 4: it ships the image before the apply, and the new pods would fail
+   startup (the rolling update keeps the old pods serving, but the rollout
+   fails and the apply leg never runs).
+
+Rollback sets `zork_enabled` false in the production profile and keeps the
+PVC. Do not downgrade the checkpoint format silently.
+
+## Telemetry
+
+Every client-side metric is recorded in `state.rs` (`tick` and `start`), the
+one place that sees each session close, switch, idle reap, and save read.
+Labels are closed enums from `metrics.rs`; `edition` and `action` reuse the
+wire keys.
+
+| Metric | Labels | Recorded when |
+|---|---|---|
+| `late_ssh_zork_launches_total` | `edition`, `action` (`auto`/`manual`/`new`) | A host child is requested. Continue on the live edition resumes and records nothing. |
+| `late_ssh_zork_session_ends_total` | `edition`, `end` (`quit`, `returned`, `save_rejected`, `busy`, `crashed`, `connect_failed`, `idle`) | A proxy closes, mapped from the exit status, or the 20-minute reap drops it. |
+| `late_ssh_zork_switches_total` | `result` (`switched`, `save_failed`, `timed_out`) | A switch away from a live game resolves. |
+| `late_ssh_zork_catalogue_reads_total` | `result` (`read`, `failed`) | A menu save-slot read lands. |
+
+Grafana: the "Zork Trilogy" row in `monitoring/dashboards/observability.json`
+(launches, session ends, switches and save reads, and a trouble panel that
+should stay at zero). Connect and catalogue failures also log a warning with
+the error.
 
 ## Validation
 

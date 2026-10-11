@@ -204,14 +204,12 @@ resource "kubernetes_deployment_v1" "service_ssh" {
             }
           }
 
-          # Optional while the production Zork client is disabled for rollout.
           env {
             name = "LATE_ZORK_SECRET"
             value_from {
               secret_key_ref {
-                name     = module.door["zork"].identity_secret_name
-                key      = "secret"
-                optional = true
+                name = module.door["zork"].identity_secret_name
+                key  = "secret"
               }
             }
           }
