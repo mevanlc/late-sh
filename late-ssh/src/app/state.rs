@@ -490,6 +490,8 @@ pub struct App {
     /// A bracketed paste woke the session from under the screensaver and
     /// its close has not arrived: the chunks up to it are swallowed too.
     pub(crate) waking_paste_open: bool,
+    /// Transient choice and timer for the current away activation.
+    pub(crate) screensaver_playback: Option<super::ascii::playback::Playback>,
     /// Second-boundary edge state for the shared 1Hz block in tick():
     /// None = never fired (fire immediately so first frames have presence,
     /// directory, and clock state).
@@ -1061,6 +1063,7 @@ impl App {
             return false;
         }
         self.away = away;
+        self.sync_screensaver(Instant::now(), &mut rand::thread_rng());
         if let Some(active_users) = &self.active_users {
             crate::app::common::away::set_session_away(
                 active_users,
@@ -1083,11 +1086,26 @@ impl App {
     /// while it is here or with the Tweak off (Settings, Tweaks,
     /// `Screensaver`).
     pub(crate) fn screensaver(&self) -> Option<late_core::models::user::AsciiPiece> {
-        use late_core::models::user::Screensaver;
-        match (self.away, self.profile_state.profile().screensaver) {
-            (true, Screensaver::Piece(piece)) => Some(piece),
-            (true, Screensaver::Off) | (false, _) => None,
+        if !self.away {
+            return None;
         }
+        let selection = self.profile_state.profile().screensaver.selection()?;
+        match selection {
+            late_core::models::user::AsciiSelection::Piece(piece) => Some(piece),
+            late_core::models::user::AsciiSelection::Random
+            | late_core::models::user::AsciiSelection::Randomer => self
+                .screensaver_playback
+                .filter(|state| state.selection() == selection)
+                .map(super::ascii::playback::Playback::piece),
+        }
+    }
+
+    pub(crate) fn sync_screensaver(&mut self, now: Instant, rng: &mut impl rand::Rng) -> bool {
+        let selection = self
+            .away
+            .then(|| self.profile_state.profile().screensaver.selection())
+            .flatten();
+        super::ascii::playback::Playback::sync(&mut self.screensaver_playback, selection, now, rng)
     }
 
     /// The rail modes this session renders from: this device's stored layout if
@@ -1536,6 +1554,7 @@ impl App {
             last_active_at: Instant::now(),
             presence_held: Vec::new(),
             waking_paste_open: false,
+            screensaver_playback: None,
             last_one_hz_index: None,
             attention_mark: Instant::now(),
             attention_spot: None,
@@ -1905,6 +1924,7 @@ impl App {
             LandingPage::Home => app.chat.request_list(),
             LandingPage::Zen => {
                 app.zen.note_opened();
+                app.zen.enter(Instant::now(), &mut rand::thread_rng());
                 app.sync_aquarium_bounds();
             }
         }
@@ -2632,9 +2652,13 @@ impl App {
         if screen_changed && self.screen == Screen::Zen {
             self.flush_zen_layout();
             self.zen.close_kind_picker();
+            self.zen.leave();
             self.zen_return_screen = None;
         }
         self.screen = screen;
+        if screen == Screen::Zen {
+            self.zen.enter(Instant::now(), &mut rand::thread_rng());
+        }
         // The aquarium sim is sized for whichever surface shows it next.
         self.sync_aquarium_bounds();
 

@@ -10,7 +10,7 @@ use late_core::models::statusline::{
     LabelMode, StatusComponent, StatusComponentSetting, StatusVariant,
 };
 use late_core::models::user::{
-    AsciiPiece, InteractionMode, RightSidebarComponentSetting, RightSidebarMode, RoomListMode,
+    AsciiSelection, InteractionMode, RightSidebarComponentSetting, RightSidebarMode, RoomListMode,
     Screensaver, normalize_text_brightness_adjustment, sanitize_username_input,
 };
 use ratatui::style::{Modifier, Style};
@@ -54,7 +54,7 @@ pub(crate) enum PickerKind {
 /// Off, then every piece: the Screensaver row's choices, in picker order.
 pub(crate) fn screensaver_choices() -> Vec<Screensaver> {
     std::iter::once(Screensaver::Off)
-        .chain(AsciiPiece::ALL.into_iter().map(Screensaver::Piece))
+        .chain(AsciiSelection::ALL.into_iter().map(Screensaver::On))
         .collect()
 }
 

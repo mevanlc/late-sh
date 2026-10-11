@@ -762,11 +762,13 @@ fn landing_page_reads_the_choice_and_falls_back_to_the_clubhouse() {
 
 #[test]
 fn screensaver_reads_the_choice_and_falls_back_to_earthrise() {
-    use crate::models::user::{AsciiPiece, Scene, SceneStyle, Screensaver, extract_screensaver};
-    let earthrise = Screensaver::Piece(AsciiPiece {
+    use crate::models::user::{
+        AsciiPiece, AsciiSelection, Scene, SceneStyle, Screensaver, extract_screensaver,
+    };
+    let earthrise = Screensaver::On(AsciiSelection::Piece(AsciiPiece {
         scene: Scene::Earthrise,
         style: SceneStyle::Dots,
-    });
+    }));
     assert_eq!(extract_screensaver(&json!({})), earthrise);
     assert_eq!(
         extract_screensaver(&json!({ "screensaver": "off" })),
@@ -774,17 +776,17 @@ fn screensaver_reads_the_choice_and_falls_back_to_earthrise() {
     );
     assert_eq!(
         extract_screensaver(&json!({ "screensaver": "aurora_fjord" })),
-        Screensaver::Piece(AsciiPiece {
+        Screensaver::On(AsciiSelection::Piece(AsciiPiece {
             scene: Scene::AuroraFjord,
             style: SceneStyle::Dots
-        })
+        }))
     );
     assert_eq!(
         extract_screensaver(&json!({ "screensaver": "alpine_dawn_pixels" })),
-        Screensaver::Piece(AsciiPiece {
+        Screensaver::On(AsciiSelection::Piece(AsciiPiece {
             scene: Scene::AlpineDawn,
             style: SceneStyle::Pixels
-        })
+        }))
     );
     // A piece this binary does not know (a rolled-back deploy, or one of the
     // text pieces that were dropped) plays the default rather than
@@ -797,8 +799,8 @@ fn screensaver_reads_the_choice_and_falls_back_to_earthrise() {
         );
     }
     // Every stored key reads back as itself.
-    for saver in
-        std::iter::once(Screensaver::Off).chain(AsciiPiece::ALL.into_iter().map(Screensaver::Piece))
+    for saver in std::iter::once(Screensaver::Off)
+        .chain(AsciiSelection::ALL.into_iter().map(Screensaver::On))
     {
         assert_eq!(Screensaver::from_key(saver.as_str()), Some(saver));
     }
@@ -806,7 +808,7 @@ fn screensaver_reads_the_choice_and_falls_back_to_earthrise() {
 
 #[test]
 fn screensaver_cycle_walks_off_then_every_piece() {
-    use crate::models::user::{AsciiPiece, Scene, SceneStyle, Screensaver};
+    use crate::models::user::{AsciiPiece, AsciiSelection, Scene, SceneStyle, Screensaver};
     let mut seen = vec![Screensaver::Off];
     let mut at = Screensaver::Off.cycle(true);
     while at != Screensaver::Off {
@@ -817,38 +819,40 @@ fn screensaver_cycle_walks_off_then_every_piece() {
         seen,
         vec![
             Screensaver::Off,
-            Screensaver::Piece(AsciiPiece {
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::Earthrise,
                 style: SceneStyle::Dots
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::Earthrise,
                 style: SceneStyle::Pixels
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::MistyForest,
                 style: SceneStyle::Dots
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::MistyForest,
                 style: SceneStyle::Pixels
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::AuroraFjord,
                 style: SceneStyle::Dots
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::AuroraFjord,
                 style: SceneStyle::Pixels
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::AlpineDawn,
                 style: SceneStyle::Dots
-            }),
-            Screensaver::Piece(AsciiPiece {
+            })),
+            Screensaver::On(AsciiSelection::Piece(AsciiPiece {
                 scene: Scene::AlpineDawn,
                 style: SceneStyle::Pixels
-            }),
+            })),
+            Screensaver::On(AsciiSelection::Random),
+            Screensaver::On(AsciiSelection::Randomer),
         ]
     );
     for saver in seen {
@@ -1142,4 +1146,27 @@ fn an_ascii_piece_serialises_as_its_key() {
     for piece in AsciiPiece::ALL {
         assert_eq!(AsciiPiece::from_key(piece.as_str()), Some(piece));
     }
+}
+
+#[test]
+fn ascii_selections_round_trip_and_cycle_through_random_modes() {
+    use crate::models::user::{AsciiSelection, Screensaver, extract_screensaver};
+    for selection in AsciiSelection::ALL {
+        let json = serde_json::to_value(selection).unwrap();
+        assert_eq!(json, serde_json::json!(selection.as_str()));
+        assert_eq!(
+            serde_json::from_value::<AsciiSelection>(json).unwrap(),
+            selection
+        );
+        assert_eq!(selection.cycle(true).cycle(false), selection);
+        assert_eq!(
+            extract_screensaver(&serde_json::json!({"screensaver": selection.as_str()})),
+            Screensaver::On(selection)
+        );
+    }
+    assert_eq!(AsciiSelection::Random.cycle(true), AsciiSelection::Randomer);
+    assert_eq!(
+        AsciiSelection::Randomer.cycle(true),
+        AsciiSelection::DEFAULT
+    );
 }

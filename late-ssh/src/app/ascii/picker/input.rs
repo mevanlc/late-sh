@@ -8,7 +8,7 @@ use crate::app::state::App;
 /// Open on the focused Zen ascii tile's piece; nothing when the focused
 /// tile is not an ascii tile.
 pub(crate) fn open(app: &mut App) {
-    let Some(piece) = app.zen.focused_piece() else {
+    let Some(piece) = app.zen.focused_selection() else {
         return;
     };
     app.piece_picker.open(piece);
@@ -19,7 +19,7 @@ pub(crate) fn open(app: &mut App) {
 fn pick(app: &mut App) {
     let piece = app.piece_picker.selected();
     app.piece_picker.close();
-    if app.zen.set_focused_piece(piece) {
+    if app.zen.set_focused_selection(piece) {
         app.mark_zen_layout_dirty();
     }
 }

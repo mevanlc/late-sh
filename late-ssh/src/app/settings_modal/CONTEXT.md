@@ -54,6 +54,9 @@ closes; Esc/[x] cancels. Language filtering matches English/native names and
 stored codes in the existing 17-language order. Interaction mode offers
 Keyboard, Mouse, and Hybrid, explains that Keyboard disables clicks/wheel, and
 uses App's setter for terminal reporting and persistence.
+Screensaver offers Off, the eight fixed scene/style choices, Random, then Randomer.
+Random holds one choice per activation; Randomer changes landscape every five
+minutes. Both store the mode, with transient playback owned by the session.
 Interaction-mode persistence coalesces rapid choices through one writer per
 account, so an older asynchronous write cannot overwrite the final choice.
 Chooser values show `…` two spaces after the current label. Width padding follows

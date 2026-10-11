@@ -24,6 +24,7 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 - Mouse controls on Profiles (screen 5): click people, jobs, links, and form controls; wheel scrolls the hovered pane
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
+- Animated ASCII scenes in Zen tiles and away screensavers, with random and five-minute randomer modes
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire
 - Web frontend for landing, profiles, and the token-less `/listen` page
 - Companion CLI for local audio playback and synced visualizer data
