@@ -330,10 +330,11 @@ a version bump is a reviewed diff.
 
 PRs touching `infra/` run `terraform fmt -check -recursive` and
 `terraform validate`, initialized with `terraform init -backend=false -input=false`
-so validation needs no cluster or state credentials. The `terraform_plan`
-workflow also checks live state and rejects planned destroys for same-repository
-PRs and manual dispatches. Fork PRs skip that live plan because GitHub withholds
-environment secrets.
+so validation needs no cluster or state credentials. For same-repository PRs the
+`terraform_plan` workflow also plans against live production state and rejects
+planned destroys. It runs on PRs only, with no manual trigger. Fork PRs skip the
+live plan because GitHub withholds environment secrets; to plan a fork's infra
+change, push its branch to this repository and open the PR from there.
 
 ## Production Considerations
 
