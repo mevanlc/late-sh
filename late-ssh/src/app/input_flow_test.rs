@@ -1453,6 +1453,9 @@ async fn shift_tab_cycles_screens_backwards() {
     wait_for_render_contains(&mut app, " Clubhouse ").await;
 
     app.handle_input(b"\x1b[Z");
+    wait_for_render_contains(&mut app, " Calendars ").await;
+
+    app.handle_input(b"\x1b[Z");
     wait_for_render_contains(&mut app, " Leaderboards ").await;
 
     app.handle_input(b"\x1b[Z");
@@ -1502,6 +1505,9 @@ async fn tab_cycles_screens_forward_through_all_including_profiles() {
 
     app.handle_input(b"\t");
     wait_for_render_contains(&mut app, " Leaderboards ").await;
+
+    app.handle_input(b"\t");
+    wait_for_render_contains(&mut app, " Calendars ").await;
 
     app.handle_input(b"\t");
     wait_for_render_contains(&mut app, " Clubhouse ").await;
@@ -3155,13 +3161,12 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
         .expect("join lounge room");
     let mut app = make_app(test_db.db.clone(), user.id, "rails-flow-it");
     wait_for_render_contains(&mut app, " Home ").await;
-    // Both rails up to start with: the room rail's footer hints and the
-    // sidebar's music panel are both on screen. (The sidebar's pinned presence
-    // row sits under the banner popup, so the panel header is the stable
-    // marker once a banner is showing.)
+    // Both rails up to start with: use footer hints to detect each rail.
+    // A banner covers the sidebar's presence rows and music panel heading,
+    // but leaves the music source shortcut visible below it.
     wait_for_render_contains(&mut app, "sort/fold").await;
     let frame = render_plain(&mut app);
-    assert!(frame.contains("music"), "sidebar missing; frame={frame:?}");
+    assert!(frame.contains("v+x"), "sidebar missing; frame={frame:?}");
 
     // First press hides the room rail, and says which scope it changed.
     app.handle_input(b"\\");
@@ -3171,7 +3176,7 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
         "expected a per-device banner; frame={frame:?}"
     );
     assert!(
-        !frame.contains("sort/fold"),
+        !frame.contains("sort/fold") && frame.contains("v+x"),
         "expected the room rail to be hidden; frame={frame:?}"
     );
 
@@ -3183,7 +3188,7 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
         "expected the auto step in the cycle; frame={frame:?}"
     );
     assert!(
-        frame.contains("sort/fold") && frame.contains("music"),
+        frame.contains("sort/fold") && frame.contains("v+x"),
         "a 100-column terminal should keep both rails on auto; frame={frame:?}"
     );
 
@@ -3192,13 +3197,13 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
     app.resize(50, 32).expect("resize narrow");
     let frame = render_plain(&mut app);
     assert!(
-        !frame.contains("sort/fold") && !frame.contains("music"),
+        !frame.contains("sort/fold") && !frame.contains("v+x"),
         "auto should fold both rails on a narrow terminal; frame={frame:?}"
     );
     app.resize(100, 32).expect("resize wide");
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains("sort/fold"),
+        frame.contains("sort/fold") && frame.contains("v+x"),
         "auto should restore the rails when the terminal grows; frame={frame:?}"
     );
 

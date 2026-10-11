@@ -170,6 +170,7 @@ fn push_quit_confirm_sayonara_placement(
 }
 
 struct DrawContext<'a> {
+    calendar: &'a crate::app::calendar::state::CalendarState,
     dashboard_view: chat::ui::DashboardChatView<'a>,
     chat_view: chat::ui::ChatRenderInput<'a>,
     game_selection: usize,
@@ -454,6 +455,7 @@ struct DrawContext<'a> {
 
 impl App {
     pub fn render(&mut self) -> anyhow::Result<Vec<u8>> {
+        self.calendar.invalidate_geometry();
         // Computed up front: the method borrows all of `self`, which would
         // collide with the mutable field borrows the view structs hold below
         // (some door states are even taken out of `self` for the draw).
@@ -745,6 +747,10 @@ impl App {
         let live_panel_rows = crate::app::live::panel::rows(
             &self.chat.live_streams,
             &live_rows,
+            &crate::app::calendar::live::panel_events(
+                &self.calendar.live_at(live_panel_now),
+                self.calendar.tz,
+            ),
             self.chat.news.all_articles(),
             self.chat.news.reads(),
             self.live_games.open_watches(),
@@ -761,6 +767,7 @@ impl App {
                 &self.chat.live_streams,
                 &live_rows,
                 &self.live_games,
+                &self.calendar,
             )
         } else {
             None
@@ -816,6 +823,7 @@ impl App {
                     &self.chat.live_streams,
                     &live_rows,
                     &self.live_games,
+                    &self.calendar,
                 )
                 .map(|strip| crate::app::live::ui::status_text(&strip))
         } else {
@@ -893,6 +901,15 @@ impl App {
             active_poll: dashboard_active_poll,
             live_strip: dashboard_live_strip,
             live_strip_hit: &self.live.hit,
+            // The board's day, on the #lounge card alone like the strip.
+            board_day: if home_selected {
+                crate::app::calendar::live::day_text(
+                    &self.calendar.live_at(live_panel_now),
+                    live_panel_now,
+                )
+            } else {
+                None
+            },
             inline_images: &self.chat.inline_image_cache,
             keep_composer_focused: self.profile_state.profile().keep_composer_focused,
             composer_rect_slot: Some(&self.chat.last_composer_rect),
@@ -1543,6 +1560,7 @@ impl App {
                     area,
                     screen,
                     DrawContext {
+                        calendar: &self.calendar,
                         dashboard_view,
                         chat_view,
                         game_selection: self.game_selection,
@@ -2088,6 +2106,7 @@ impl App {
                     );
                 }
             }
+            Screen::Calendars => crate::app::calendar::ui::draw(frame, inner, ctx.calendar),
             // The tour's dungeon stop plays its fight where the hub would be.
             Screen::Games if tour_header.is_some() => crate::app::clubhouse::fight::draw(
                 frame,
@@ -2603,6 +2622,8 @@ impl App {
             draw_banner(frame, notif_inner, &banner);
         }
 
+        crate::app::calendar::ui::draw_modal(frame, inner, ctx.calendar);
+
         if ctx.show_settings {
             settings_modal::ui::draw(
                 frame,
@@ -2880,7 +2901,9 @@ impl App {
 }
 
 fn foreground_terminal_overlay_open(ctx: &DrawContext<'_>) -> bool {
-    ctx.show_settings
+    ctx.calendar.modal.is_some()
+        || ctx.calendar.context_menu.is_some()
+        || ctx.show_settings
         || ctx.show_quit_confirm
         || ctx.show_mod_modal
         || ctx.show_hub_modal
@@ -2930,6 +2953,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         (Screen::Artboard, "4"),
         (Screen::Profiles, "5"),
         (Screen::Leaderboard, "6"),
+        (Screen::Calendars, "7"),
     ];
     for (idx, (tab_screen, key)) in tabs.iter().enumerate() {
         if idx > 0 {
@@ -2986,6 +3010,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
         Screen::Artboard => "Artboard",
         Screen::Profiles => "Profiles",
         Screen::Leaderboard => "Leaderboards",
+        Screen::Calendars => "Calendars",
         Screen::Clubhouse => "Clubhouse",
         Screen::Nightcap => "Nightcap",
         Screen::City => "Undercity",
@@ -3174,7 +3199,7 @@ fn app_frame_title(screen: Screen, ctx: &DrawContext<'_>) -> Line<'static> {
     if screen == Screen::Clubhouse {
         spans.push(Span::styled(
             format!(
-                "· {} inside · Tab/0-5 pages · arrows/hjkl walk · Enter interact · i say · s sit · w wave · x dance · n out back ",
+                "· {} inside · Tab/0-7 pages · arrows/hjkl walk · Enter interact · i say · s sit · w wave · x dance · n out back ",
                 ctx.clubhouse_state.headcount()
             ),
             Style::default().fg(theme::TEXT_DIM()),

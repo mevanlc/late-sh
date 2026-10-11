@@ -33,7 +33,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::app::deadchannel::fight::data::{
@@ -66,6 +66,13 @@ use super::state::{Enter, State};
 
 /// Widest a floor label gets.
 const LABEL_MAX: usize = 10;
+/// Every shop's panel is this wide, border included, whatever it holds
+/// (narrower only on a narrower screen): room for the longest line any
+/// panel says, so a purchase or the counter's word never resizes it.
+const PANEL_WIDTH: u16 = 96;
+/// Rows at the foot of a shop's panel kept for the counter's last word,
+/// blank until there is one.
+const PANEL_WORD_ROWS: u16 = 2;
 /// The camera looks up the street: it centers this many rows north of
 /// the runner, so a short terminal shows the shopfronts, not the drop.
 const LOOK_NORTH: u16 = 8;
@@ -1645,40 +1652,122 @@ fn draw_popover(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
     );
 }
 
-/// A shop's panel, centered over the street. The armorer trades; the
-/// other catalogs are on the counter with their tills shut.
+/// A shop's panel, centered over the street, at one size whatever
+/// happens in it: [`PANEL_WIDTH`] wide, its rows the panel's lines
+/// wrapped to that width, then a blank row and [`PANEL_WORD_ROWS`] for the
+/// counter's last word. Every panel says the same number of lines in
+/// every state (a refusal takes the row its key would have), and the
+/// word lands in rows already there, so nothing a key does moves the
+/// frame. On a screen too short for all of it the blank row goes first,
+/// then the panel gives up the rows it is short by (the armorer from its
+/// wall, `panel_lines`), so the keys and the word stay on the screen.
 fn draw_panel(frame: &mut Frame, area: Rect, view: &CityView<'_>) {
     let Some(landmark) = view.state.panel() else {
         return;
     };
     let neon = landmark_neon(landmark);
-    let lines = panel_lines(landmark, view);
-    let width = (lines.iter().map(Line::width).max().unwrap_or(0) + 4)
-        .min(usize::from(area.width).saturating_sub(2)) as u16;
-    let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(1));
+    let word = match landmark {
+        Landmark::Tailor => view.tailor.word,
+        Landmark::Armorer
+        | Landmark::Lockers
+        | Landmark::Bands
+        | Landmark::Bar
+        | Landmark::Repairs
+        | Landmark::Board
+        | Landmark::Bits
+        | Landmark::Blades
+        | Landmark::Screen
+        | Landmark::Noodles
+        | Landmark::Umbrellas
+        | Landmark::Reader
+        | Landmark::Stairs
+        | Landmark::Wire
+        | Landmark::Ledge
+        | Landmark::Ink
+        | Landmark::Baths
+        | Landmark::Sleep
+        | Landmark::Shrine
+        | Landmark::Market
+        | Landmark::Coin
+        | Landmark::Vids
+        | Landmark::Pawn => view.till,
+    };
+    let width = PANEL_WIDTH.min(area.width.saturating_sub(2));
+    let inner_width = width.saturating_sub(2);
+    // The rows inside the frame, one row of street left showing, and what
+    // is left of them over the word.
+    let room = area.height.saturating_sub(1 + 2);
+    let body_room = usize::from(room.saturating_sub(PANEL_WORD_ROWS));
+    let body_for = |short_by: usize| {
+        Paragraph::new(panel_lines(landmark, view, short_by)).wrap(Wrap { trim: false })
+    };
+    let whole = body_for(0);
+    let body = match whole.line_count(inner_width).saturating_sub(body_room) {
+        0 => whole,
+        short_by => body_for(short_by),
+    };
+    let body_rows = body.line_count(inner_width) as u16;
+    let spacer = match body_rows + 1 + PANEL_WORD_ROWS <= room {
+        true => 1,
+        false => 0,
+    };
+    let height = (body_rows + spacer + PANEL_WORD_ROWS + 2).min(area.height.saturating_sub(1));
     let rect = Rect {
         x: area.x + (area.width.saturating_sub(width)) / 2,
         y: area.y + (area.height.saturating_sub(height)) / 2,
         width,
         height,
     };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .style(ink(INK))
+        .border_style(glow(neon))
+        .title(Span::styled(
+            format!(" {} ", data::title(landmark)),
+            lit(neon),
+        ))
+        .title_bottom(Span::styled(" Esc closes ", ink(INK_DIM)));
     frame.render_widget(Clear, rect);
-    frame.render_widget(
-        Paragraph::new(lines).style(ink(INK)).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(glow(neon))
-                .title(Span::styled(
-                    format!(" {} ", data::title(landmark)),
-                    lit(neon),
-                ))
-                .title_bottom(Span::styled(" Esc closes ", ink(INK_DIM))),
-        ),
-        rect,
-    );
+    draw_framed(frame, rect, block, body, word, PANEL_WORD_ROWS);
 }
 
-fn panel_lines(landmark: Landmark, view: &CityView<'_>) -> Vec<Line<'static>> {
+/// A framed box with a last word kept at its foot: `body` from the top,
+/// and `word` wrapped into the bottom `word_rows` of the inside, blank
+/// until there is one, so a word arriving never moves what is above it.
+pub(super) fn draw_framed(
+    frame: &mut Frame,
+    rect: Rect,
+    block: Block<'_>,
+    body: Paragraph<'_>,
+    word: Option<&str>,
+    word_rows: u16,
+) {
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let word_rows = word_rows.min(inner.height);
+    let body_rect = Rect {
+        height: inner.height - word_rows,
+        ..inner
+    };
+    let word_rect = Rect {
+        y: inner.y + inner.height - word_rows,
+        height: word_rows,
+        ..inner
+    };
+    frame.render_widget(body, body_rect);
+    if let Some(word) = word {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(word.to_string(), lit(Neon::Cyan))))
+                .wrap(Wrap { trim: true }),
+            word_rect,
+        );
+    }
+}
+
+/// What a shop's panel says. `short_by` is how many rows the screen is
+/// short of all of it: the armorer gives them up from its wall; every
+/// other panel says everything and is cut at its foot.
+fn panel_lines(landmark: Landmark, view: &CityView<'_>, short_by: usize) -> Vec<Line<'static>> {
     let text = ink(INK);
     let dim_text = ink(INK_DIM);
     let muted_text = ink(INK_MUTED);
@@ -1687,7 +1776,7 @@ fn panel_lines(landmark: Landmark, view: &CityView<'_>) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let blank = || Line::default();
     match landmark {
-        Landmark::Armorer => lines.extend(armorer_lines(view)),
+        Landmark::Armorer => lines.extend(armorer_lines(view, short_by)),
         Landmark::Tailor => lines.extend(tailor_ui::mirror_lines(&view.tailor)),
         Landmark::Lockers => lines.extend(locker_lines(view)),
         Landmark::Bands => {
@@ -1869,15 +1958,12 @@ fn patch_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         ),
         dim_text,
     )));
-    if let Some(till) = view.till {
-        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
-    }
     lines
 }
 
 /// The lockers: what is on hand and what is locked up, the two keys priced
-/// (the deposit net of the cut), the refusal ahead of a key that would
-/// meet one, and the locker's last word.
+/// (the deposit net of the cut), and the refusal ahead of a key that would
+/// meet one.
 fn locker_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
     let text = ink(INK);
     let dim_text = ink(INK_DIM);
@@ -1901,10 +1987,14 @@ fn locker_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::default());
     match sheet.fight.is_some() {
-        true => lines.push(Line::from(Span::styled(
-            "not with a glyph waiting on you. the locker can wait.",
-            text,
-        ))),
+        // Two rows, like the two keys it stands in for.
+        true => lines.extend([
+            Line::from(Span::styled(
+                "not with a glyph waiting on you. the locker can wait.",
+                text,
+            )),
+            Line::default(),
+        ]),
         false => {
             let fee = sheet.deposit_fee();
             match (sheet.bits, sheet.bits - fee) {
@@ -1947,14 +2037,11 @@ fn locker_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         "an Old Signal mark empties it. so does the ledge.",
         dim_text,
     )));
-    if let Some(till) = view.till {
-        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
-    }
     lines
 }
 
 /// The bits machine: what is owed against the cap, the two keys priced,
-/// its terms, and its last word.
+/// and its terms.
 fn machine_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
     let text = ink(INK);
     let dim_text = ink(INK_DIM);
@@ -1987,10 +2074,14 @@ fn machine_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
     ]));
     lines.push(Line::default());
     match sheet.fight.is_some() {
-        true => lines.push(Line::from(Span::styled(
-            "not with a glyph waiting on you. the machine can wait.",
-            text,
-        ))),
+        // Two rows, like the two keys it stands in for.
+        true => lines.extend([
+            Line::from(Span::styled(
+                "not with a glyph waiting on you. the machine can wait.",
+                text,
+            )),
+            Line::default(),
+        ]),
         false => {
             match sheet.loan_room() {
                 0 => lines.push(Line::from(Span::styled(
@@ -2029,16 +2120,14 @@ fn machine_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         "a drop does not clear it. neither does a mark, or the ledge.",
         dim_text,
     )));
-    if let Some(till) = view.till {
-        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
-    }
     lines
 }
 
 /// The armorer's wall: the ladder with the cursor on it, what you carry
-/// lit, the two keys priced for the picked row net of the trade-in, and
-/// the last thing the armorer said.
-fn armorer_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
+/// lit, and the two keys priced for the picked row net of the trade-in.
+/// `short_by` rows come off the ladder, the tiers kept the ones around
+/// the cursor, so a short screen keeps the keys.
+fn armorer_lines(view: &CityView<'_>, short_by: usize) -> Vec<Line<'static>> {
     let text = ink(INK);
     let dim_text = ink(INK_DIM);
     let muted_text = ink(INK_MUTED);
@@ -2073,7 +2162,12 @@ fn armorer_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         ),
         head,
     )));
-    for index in 0..data::COST_LADDER.len() {
+    let tiers = data::COST_LADDER.len();
+    let shown = tiers.saturating_sub(short_by).max(1);
+    let first = ((picked - 1) as usize)
+        .saturating_sub(shown / 2)
+        .min(tiers - shown);
+    for index in first..first + shown {
         let tier = index as i32 + 1;
         let price = wall_price(tier);
         let cell = |slot: GearSlot, name: &'static str| {
@@ -2105,9 +2199,14 @@ fn armorer_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         ]));
     }
     lines.push(Line::default());
-    let mut keys = vec![Span::styled("[↑↓] ", key), Span::styled("pick   ", text)];
+    lines.push(Line::from(vec![
+        Span::styled("[↑↓] ", key),
+        Span::styled("pick a tier", text),
+    ]));
+    // A row per key, so a purchase that changes what it says never
+    // changes how many rows the panel has.
     for (label, slot) in [("[w] ", GearSlot::Weapon), ("[a] ", GearSlot::Armor)] {
-        keys.push(Span::styled(label, key));
+        let mut keys = vec![Span::styled(label, key)];
         match picked > sheet.tier_of(slot) {
             true => {
                 let price = sheet.outfit_price(slot, picked);
@@ -2126,9 +2225,8 @@ fn armorer_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
             }
             false => keys.push(Span::styled("you carry that, or better", muted_text)),
         }
-        keys.push(Span::styled("   ", text));
+        lines.push(Line::from(keys));
     }
-    lines.push(Line::from(keys));
     lines.push(Line::from(Span::styled(
         format!(
             "power equals tier. {}% back on what you hand in. bits only, no credit.",
@@ -2136,16 +2234,12 @@ fn armorer_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         ),
         dim_text,
     )));
-    if let Some(till) = view.till {
-        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
-    }
     lines
 }
 
 /// Dead Air: the crystals on hand and the glass in you, the menu with
-/// each glass's key and what it does at this level, the refusal the row
-/// would give spelled out ahead of the keys, and the bartender's last
-/// word.
+/// each glass's key and what it does at this level, and the refusal the
+/// row would give spelled out ahead of the keys.
 fn bar_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
     let text = ink(INK);
     let dim_text = ink(INK_DIM);
@@ -2215,22 +2309,20 @@ fn bar_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         Span::styled("\"ask when you have a mark.\"", muted_text),
     ]));
     lines.push(Line::default());
-    if let Some(reason) = refusal {
-        lines.push(Line::from(Span::styled(reason, text)));
-    }
+    // The refusal's row is there, blank, while the bartender would pour.
+    lines.push(match refusal {
+        Some(reason) => Line::from(Span::styled(reason, text)),
+        None => Line::default(),
+    });
     lines.push(Line::from(Span::styled(
         format!("a glass is {DRINK_CRYSTALS} crystal. one a day, and it wears off at the roll."),
         dim_text,
     )));
-    if let Some(till) = view.till {
-        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
-    }
     lines
 }
 
 /// The blade shop: what the armorer won't sell for bits. The next tier
-/// up in each slot, priced in crystals alone, red where short, and the
-/// vendor's last word.
+/// up in each slot, priced in crystals alone, red where short.
 fn cart_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
     let text = ink(INK);
     let dim_text = ink(INK_DIM);
@@ -2290,9 +2382,6 @@ fn cart_lines(view: &CityView<'_>) -> Vec<Line<'static>> {
         "the next tier up from what you carry, for crystals and no bits. no receipts, no names.",
         dim_text,
     )));
-    if let Some(till) = view.till {
-        lines.push(Line::from(Span::styled(till.to_string(), lit(Neon::Cyan))));
-    }
     lines
 }
 

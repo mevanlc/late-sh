@@ -202,6 +202,14 @@ impl App {
         }
 
         // Services
+        // Only the page and its modals read the session's own month; Home's
+        // strip and Live panel read the replica's shared board snapshot.
+        changed |= self.calendar.tick(
+            self.screen == Screen::Calendars || self.calendar.modal.is_some(),
+            late_core::models::calendar::effective_timezone(
+                self.profile_state.profile().timezone.as_deref(),
+            ),
+        );
         let chat_tick = self.chat.tick();
         changed |= chat_tick.changed;
         if chat_tick.changed {
@@ -499,6 +507,7 @@ impl App {
             self.chat.news.all_articles(),
             &self.chat.live_streams,
             &self.live_games.live_rows(),
+            &self.calendar,
             reading,
             picture_settings,
         );
@@ -1633,6 +1642,7 @@ impl App {
             | Screen::GreenDragon
             | Screen::Darkroom
             | Screen::Leaderboard
+            | Screen::Calendars
             | Screen::Clubhouse
             | Screen::Nightcap
             | Screen::City

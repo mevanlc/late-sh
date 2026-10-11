@@ -488,3 +488,19 @@ async fn randomer_screensaver_rotation_updates_the_wake_tier_without_input() {
         Screensaver::On(AsciiSelection::Randomer)
     );
 }
+
+#[tokio::test]
+async fn attention_follows_the_calendar_screen() {
+    use crate::metrics::Place;
+
+    let (_test_db, mut app) = chat_compose_app("tick-calendar-place").await;
+    app.set_screen(Screen::Calendars);
+    app.last_one_hz_index = None;
+    app.tick();
+    assert_eq!(app.attention_spot, Some((Screen::Calendars, Place::Whole)));
+
+    app.set_screen(Screen::Arcade);
+    app.last_one_hz_index = None;
+    app.tick();
+    assert_eq!(app.attention_spot, Some((Screen::Arcade, Place::Whole)));
+}
