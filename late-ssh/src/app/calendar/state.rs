@@ -93,8 +93,6 @@ pub struct CalendarState {
     pub selected: NaiveDate,
     pub tz: Tz,
     pub events: Vec<CalendarEvent>,
-    /// The viewer's own events inside the upcoming horizon.
-    pub personal_upcoming: Vec<CalendarEvent>,
     /// The board events the viewer said they are in.
     pub rsvps: Vec<Uuid>,
     pub modal: Option<Modal>,
@@ -136,7 +134,7 @@ impl CalendarState {
     pub fn new(service: CalendarService, viewer: Uuid) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         let changed = service.subscribe();
-        let board = service.board_upcoming();
+        let board = service.board_live();
         let mut s = Self {
             viewer,
             staff: false,
@@ -145,7 +143,6 @@ impl CalendarState {
             selected: Utc::now().date_naive(),
             tz: chrono_tz::UTC,
             events: Vec::new(),
-            personal_upcoming: Vec::new(),
             rsvps: Vec::new(),
             modal: None,
             error: None,
@@ -281,6 +278,10 @@ impl CalendarState {
             .open(self.viewer, id, self.open_generation, self.tx.clone());
         self.error = None;
     }
+    /// The replica service behind this session's mirror.
+    pub fn service(&self) -> &CalendarService {
+        &self.service
+    }
     pub fn service_reload(&mut self, id: Uuid) {
         self.open_generation += 1;
         self.reload_request = true;
@@ -372,7 +373,6 @@ impl CalendarState {
             // cache. Preserve browser UUIDs until the authorized load arrives.
             self.loading = true;
             self.events.clear();
-            self.personal_upcoming.clear();
             self.clear_click();
             self.invalidate_geometry();
             self.generation += 1;
@@ -404,28 +404,20 @@ impl CalendarState {
         while let Ok(reply) = self.rx.try_recv() {
             changed |= self.apply(reply);
         }
-        let now = Utc::now();
-        let before = self.personal_upcoming.len();
-        self.personal_upcoming.retain(|e| e.upcoming(now));
-        changed |= before != self.personal_upcoming.len();
         changed
     }
-    /// The board's next 24 hours plus the viewer's own, soonest first.
-    pub fn upcoming(&self) -> Vec<CalendarEvent> {
-        self.upcoming_at(Utc::now())
+    /// The board's live posts, soonest first: the shared snapshot minus
+    /// what ended since it was read. Personal events are never here.
+    pub fn live(&self) -> Vec<CalendarEvent> {
+        self.live_at(Utc::now())
     }
-    pub fn upcoming_at(&self, now: DateTime<Utc>) -> Vec<CalendarEvent> {
-        let mut events: Vec<_> = self
-            .board
+    pub fn live_at(&self, now: DateTime<Utc>) -> Vec<CalendarEvent> {
+        self.board
             .borrow()
             .iter()
-            .chain(self.personal_upcoming.iter())
-            .filter(|e| e.upcoming(now))
+            .filter(|e| e.live(now))
             .cloned()
-            .collect();
-        events.sort_by_key(|e| (e.starts_at, e.id));
-        events.dedup_by_key(|e| e.id);
-        events
+            .collect()
     }
     pub fn apply(&mut self, reply: Reply) -> bool {
         match reply {
@@ -435,7 +427,6 @@ impl CalendarState {
                     Ok(s) => {
                         let previous_range = self.range();
                         self.events = s.events;
-                        self.personal_upcoming = s.personal_upcoming;
                         self.rsvps = s.rsvps;
                         self.staff = s.staff;
                         self.initialized = true;
@@ -547,11 +538,6 @@ impl CalendarState {
     /// Swap a fresh copy of an event into every surface holding one.
     fn replace_event(&mut self, event: CalendarEvent) {
         for loaded in &mut self.events {
-            if loaded.id == event.id {
-                *loaded = event.clone();
-            }
-        }
-        for loaded in &mut self.personal_upcoming {
             if loaded.id == event.id {
                 *loaded = event.clone();
             }

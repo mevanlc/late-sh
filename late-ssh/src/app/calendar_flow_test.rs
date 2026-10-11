@@ -9,12 +9,14 @@ use crate::{
         live::pick::LiveSource,
         state::App,
     },
+    pg_listener::Signal,
     test_helpers::{make_app, new_test_db, render_plain, wait_for_app},
 };
 use chrono::{Duration, Utc};
 use late_core::models::calendar::{CalendarSource, CalendarStore, EventDraft, EventTiming};
 use late_core::test_utils::create_test_user;
 use ratatui::layout::Rect;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 fn event_hit(app: &mut App, id: Uuid) -> Rect {
@@ -68,6 +70,12 @@ async fn posting_to_the_board_and_saying_youre_in() {
     };
     assert_eq!(e.text(0), "Movie night");
     assert_eq!(e.text(3), "21:00");
+    // A draft is private until the poster flips it: Tab to the target, Space.
+    assert_eq!(e.source, CalendarSource::Personal);
+    app.handle_input(b"\t ");
+    let Some(Modal::Editor(e)) = &app.calendar.modal else {
+        panic!("no editor");
+    };
     assert_eq!(e.source, CalendarSource::Board);
     app.handle_input(b"\x13");
     wait_for_app(&mut app, "board post saved", |a| !a.calendar.pending).await;
@@ -208,7 +216,7 @@ async fn an_event_about_to_start_opens_from_the_live_strip() {
     let event = CalendarStore::new(db.db.clone())
         .save(
             user.id,
-            CalendarSource::Personal,
+            CalendarSource::Board,
             None,
             &EventDraft {
                 title: "Standup".into(),
@@ -222,15 +230,10 @@ async fn an_event_about_to_start_opens_from_the_live_strip() {
         .await
         .unwrap()
         .event;
-    app.handle_input(b"7");
-    wait_for_app(&mut app, "own upcoming loaded", |a| {
-        !a.calendar.loading
-            && a.calendar
-                .personal_upcoming
-                .iter()
-                .any(|e| e.id == event.id)
-    })
-    .await;
+    // The replica's board worker, nudged once as a write's notify would.
+    let (signals, worker) = mpsc::unbounded_channel();
+    let _worker = app.calendar.service().start_notify_worker(worker);
+    signals.send(Signal::Resync).unwrap();
     app.handle_input(b"1");
     assert_eq!(app.screen, Screen::Dashboard);
     wait_for_app(&mut app, "strip shows the event", |a| {
@@ -238,15 +241,16 @@ async fn an_event_about_to_start_opens_from_the_live_strip() {
     })
     .await;
     // The test database has no #lounge, so no card carries the strip; the
-    // Live panel on the sidebar lists it as the viewer's own.
+    // Live panel on the sidebar lists it with its start.
     let rendered = render_plain(&mut app);
+    let time = start.format("%H:%M").to_string();
     assert!(
-        rendered.contains("yours") && rendered.contains("in 5"),
+        rendered.contains("event") && rendered.contains(&time),
         "{rendered}"
     );
     assert!(crate::app::live::input::open_from_key(&mut app));
     assert_eq!(app.screen, Screen::Calendars);
     assert!(matches!(&app.calendar.modal, Some(Modal::Details(e)) if e.id == event.id));
     let rendered = render_plain(&mut app);
-    assert!(rendered.contains("Your event"), "{rendered}");
+    assert!(rendered.contains("On the board"), "{rendered}");
 }

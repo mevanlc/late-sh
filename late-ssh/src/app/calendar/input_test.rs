@@ -54,16 +54,16 @@ fn click(x: u16, y: u16, button: MouseButton) -> MouseEvent {
     }
 }
 
-/// `n` posts to the board while the board is shown, and to the viewer's
-/// own calendar once it is hidden: the page is what the draft goes to.
+/// `n` opens a private draft whether or not the board is shown: posting to
+/// everyone is a deliberate flip of the target, never the default.
 #[tokio::test]
-async fn a_new_draft_goes_where_the_page_is_looking() {
+async fn a_new_draft_is_private_until_flipped() {
     let mut s = state();
     act(&mut s, Action::New);
     let Some(Modal::Editor(e)) = &s.modal else {
         panic!("no editor");
     };
-    assert_eq!(e.source, CalendarSource::Board);
+    assert_eq!(e.source, CalendarSource::Personal);
     escape(&mut s);
     act(&mut s, Action::Board);
     assert!(!s.show_board);

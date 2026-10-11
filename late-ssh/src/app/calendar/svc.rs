@@ -85,8 +85,6 @@ pub struct CalendarService {
 #[derive(Debug)]
 pub struct Snapshot {
     pub events: Vec<CalendarEvent>,
-    /// The viewer's own events inside the upcoming horizon.
-    pub personal_upcoming: Vec<CalendarEvent>,
     /// The board events the viewer said they are in.
     pub rsvps: Vec<Uuid>,
     pub staff: bool,
@@ -161,8 +159,8 @@ impl CalendarService {
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
     }
-    /// The board's next 24 hours, shared by every session on this replica.
-    pub fn board_upcoming(&self) -> watch::Receiver<Vec<CalendarEvent>> {
+    /// The board's live posts, shared by every session on this replica.
+    pub fn board_live(&self) -> watch::Receiver<Vec<CalendarEvent>> {
         self.board.subscribe()
     }
     pub fn start_notify_worker(
@@ -189,7 +187,7 @@ impl CalendarService {
                 svc.publish_board(Vec::new());
                 svc.changed.send_replace(epoch);
                 read_until_ok(Refresh::CalendarNotices, || async {
-                    let events = svc.store.upcoming_board(Utc::now()).await?;
+                    let events = svc.store.live_board(Utc::now()).await?;
                     svc.publish_board(events);
                     Ok(())
                 })
@@ -243,13 +241,11 @@ impl CalendarService {
         tokio::spawn(
             async move {
                 let result = async {
-                    let now = Utc::now();
                     Ok::<_, CalendarError>(Snapshot {
                         events: svc
                             .store
                             .visible(q.viewer, q.board, q.from, q.to, q.tz)
                             .await?,
-                        personal_upcoming: svc.store.upcoming_personal(q.viewer, now).await?,
                         rsvps: svc.store.rsvps(q.viewer).await?,
                         staff: svc.store.staff(q.viewer).await?,
                     })

@@ -42,7 +42,7 @@ use uuid::Uuid;
 
 use super::pick::LiveSource;
 use super::ui::truncate_chars;
-use crate::app::calendar::live::when_at;
+use crate::app::calendar::live::PanelEvent;
 use crate::app::chat::news::state::{Reads, is_unread_at};
 use crate::app::common::theme;
 use crate::app::door::spectate::{
@@ -51,7 +51,6 @@ use crate::app::door::spectate::{
     ui::duration_label,
 };
 use crate::app::stream::registry::LiveStreamView;
-use late_core::models::calendar::CalendarEvent;
 
 /// Rows under the rule. The rule is the title, so this is all rows.
 pub(crate) const LIVE_PANEL_HEIGHT: u16 = 4;
@@ -70,10 +69,8 @@ const KEY_COLS: usize = 3;
 const KIND_COLS: usize = 7;
 const STREAM_KIND: &str = "stream";
 const NEWS_KIND: &str = "news";
-/// A board event's kind, and a personal one's: the viewer's own is marked
-/// as theirs since nobody else is seeing it.
+/// A timed board post's kind.
 const EVENT_KIND: &str = "event";
-const OWN_EVENT_KIND: &str = "yours";
 
 /// One thing the house can watch or read, as the panel lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,15 +93,15 @@ pub enum LivePanelRow {
         /// People with the game's watch open.
         watching: usize,
     },
-    /// A board event inside the upcoming horizon, or one of the viewer's
-    /// own (`personal`), soonest first.
+    /// A timed board post from an hour before its start until it ends,
+    /// soonest first. All-day posts take the #lounge topic row instead.
     Event {
         event_id: Uuid,
         title: String,
-        starts_at: DateTime<Utc>,
-        /// How many said they are in; zero on a personal event.
+        /// The start as a clock time in the viewer's zone.
+        time: String,
+        /// How many said they are in.
         going: i64,
-        personal: bool,
     },
     /// A News article shared within [`NEWS_LIFETIME`].
     News {
@@ -159,7 +156,7 @@ pub(crate) struct LivePanelProps<'a> {
 pub(crate) fn rows(
     streams: &[LiveStreamView],
     live: &[LiveRow],
-    events: &[CalendarEvent],
+    events: &[PanelEvent],
     articles: &[ArticleFeedItem],
     reads: &Reads,
     open_watches: &OpenWatches,
@@ -213,13 +210,11 @@ pub(crate) fn rows(
     // make. `events` arrive in that order from the calendar mirror.
     let events: Vec<LivePanelRow> = events
         .iter()
-        .filter(|event| event.upcoming(now))
         .map(|event| LivePanelRow::Event {
             event_id: event.id,
             title: event.title.clone(),
-            starts_at: event.starts_at,
+            time: event.time.clone(),
             going: event.going,
-            personal: !event.is_board(),
         })
         .collect();
     streams.sort_by_key(|(stamp, _)| std::cmp::Reverse(*stamp));
@@ -369,42 +364,13 @@ fn row_line(width: usize, number: usize, row: &LivePanelRow, now: DateTime<Utc>)
             )
         }
         LivePanelRow::Event {
-            title,
-            starts_at,
-            going,
-            personal,
-            ..
-        } => {
-            // `when_at` reads the row's own instant against now, so the
-            // panel says `in 2h` and then `on now` without a re-read.
-            let probe = CalendarEvent {
-                id: Uuid::nil(),
-                owner_id: None,
-                creator_id: Uuid::nil(),
-                creator_name: String::new(),
-                title: String::new(),
-                description: String::new(),
-                timing: late_core::models::calendar::EventTiming::Timed {
-                    start: *starts_at,
-                    end: None,
-                },
-                creator_timezone: String::new(),
-                starts_at: *starts_at,
-                ends_at: *starts_at + Duration::hours(1),
-                going: 0,
-                revision: 0,
-            };
-            (
-                if *personal {
-                    OWN_EVENT_KIND
-                } else {
-                    EVENT_KIND
-                },
-                Style::default().fg(theme::AMBER_DIM()),
-                format!("{} {title}", when_at(&probe, now)),
-                Edge::Watching(usize::try_from(*going).unwrap_or(0)),
-            )
-        }
+            title, time, going, ..
+        } => (
+            EVENT_KIND,
+            Style::default().fg(theme::AMBER_DIM()),
+            format!("{time} {title}"),
+            Edge::Watching(usize::try_from(*going).unwrap_or(0)),
+        ),
         LivePanelRow::News { title, unread, .. } => (
             NEWS_KIND,
             Style::default().fg(theme::TEXT_FAINT()),

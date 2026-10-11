@@ -15,14 +15,13 @@ controls and the fixture are in root `CALENDAR.md`.
   `start_sweeper_task` claims started board events every minute
   (`CalendarStore::claim_started`) and ships `EventStarting` for each.
   `start_notify_worker` turns `CalendarChanged` and a minute tick into an
-  epoch bump plus a re-read of the board's next 24 hours into the shared
+  epoch bump plus a re-read of the board's live events into the shared
   `watch`.
-- `state.rs`: the session's mirror. Events for the visible range, the
-  viewer's own upcoming events, the ids they said they are in, the modal
-  stack, the cursor. `tick` drains the epoch, the board watch and the
-  private reply channel; `upcoming` merges the board watch and the viewer's
-  own, soonest first; `show_event` is how the strip and the panel land on
-  the page. Never writes, never queries.
+- `state.rs`: the session's mirror. Events for the visible range, the ids
+  they said they are in, the modal stack, the cursor. `tick` drains the
+  epoch, the board watch and the private reply channel; `live_at` is the
+  board watch minus what ended; `show_event` is how the strip and the
+  panel land on the page. Never writes, never queries.
 - `navigation.rs`: selection, double-click identity, the context menu's
   items from `event_access`, modal frames that restore the cursor on pop,
   `finish_delete`, `replace_saved`.
@@ -38,25 +37,30 @@ controls and the fixture are in root `CALENDAR.md`.
   draw and cleared on resize.
 - `input.rs`: page keys and clicks on screen 7, everything while a
   calendar modal or menu is up, nothing elsewhere.
-- `live.rs`: the strip source (`LiveSource::BoardEvent`): candidates
-  stamped an hour before the start and again at the start, the drawn
-  calendar page, the words, the compact line, `when_at` which the Live
-  panel row reuses.
+- `live.rs`: the board on the house's surfaces. The strip source
+  (`LiveSource::BoardEvent`): timed events stamped an hour before the start
+  and again at the start, the drawn calendar page, the words, the compact
+  line. `panel_events`: the Live panel's rows, timed events with the start
+  as a clock time in the viewer's zone. `day_text`: the #lounge topic row
+  on a day with all-day board events.
 
 ## Contracts
 
-- The board is shared, the rest is private. Board events reach every
-  session through the replica's `watch`; a viewer's own events and their
-  "I'm in" list travel on their session channel only.
+- The board is shared, the rest is private. Live board events reach every
+  session through the replica's `watch`; a viewer's "I'm in" list travels
+  on their session channel only. A viewer's own events are on this page
+  alone: never the strip, the panel or the topic row.
+- Timed events get the strip and the panel from `STRIP_LEAD` before the
+  start and the start headline; all-day events get the topic row for their
+  day and no headline.
 - An invalidation clears the mirror, re-reads when the page is visible,
   and re-reads an open details modal; a post staff took down closes with
   `Gone`.
-- A new draft goes to the board while the board is shown and to the
-  viewer's own calendar while it is hidden.
+- A new draft is private; the editor's target control flips it to the
+  board. Board titles paint amber, the viewer's own green.
 - Rendering and the tick do no database I/O.
-- The two #lounge lines, the strip window and the panel horizon are
-  constants (`STRIP_LEAD`, `UPCOMING_HORIZON`, `BOARD_POSTS_PER_DAY` in
-  `late-core`), not settings.
+- The two #lounge lines, the live window and the daily cap are constants
+  (`STRIP_LEAD`, `BOARD_POSTS_PER_DAY` in `late-core`), not settings.
 
 ## Tests
 

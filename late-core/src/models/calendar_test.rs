@@ -25,6 +25,19 @@ fn timed(from_now: Duration) -> EventDraft {
     }
 }
 
+/// An all-day board post on today's UTC date.
+fn today_all_day() -> EventDraft {
+    let today = Utc::now().date_naive();
+    EventDraft {
+        title: "Hackathon".into(),
+        description: String::new(),
+        timing: EventTiming::AllDay {
+            start: today,
+            end_exclusive: today.succ_opt().unwrap(),
+        },
+    }
+}
+
 fn refusal(error: CalendarError) -> CalendarRefusal {
     match error {
         CalendarError::Refused(refusal) => refusal,
@@ -336,6 +349,12 @@ async fn rsvps_count_and_the_start_is_claimed_once() {
         .unwrap()
         .event;
 
+    let day = store
+        .save(poster.id, CalendarSource::Board, None, &today_all_day())
+        .await
+        .unwrap()
+        .event;
+
     let counted = store.set_rsvp(guest.id, soon.id, true).await.unwrap();
     assert_eq!(counted.going, 1);
     // Saying it twice is one person.
@@ -355,23 +374,24 @@ async fn rsvps_count_and_the_start_is_claimed_once() {
     assert!(store.rsvps(guest.id).await.unwrap().is_empty());
     store.set_rsvp(poster.id, soon.id, true).await.unwrap();
 
-    // Upcoming is the horizon: the one three days out is not on it, the one
-    // five hours over is not either, the one on now still is.
+    // Live is the window: the one three days out is not in it, the one
+    // five hours over is not either, the one on now and the one an hour
+    // out are, and the all-day one is for its whole day.
     let now = Utc::now();
-    let upcoming: Vec<_> = store
-        .upcoming_board(now)
+    let live: Vec<_> = store
+        .live_board(now)
         .await
         .unwrap()
         .into_iter()
         .map(|e| e.id)
         .collect();
-    assert_eq!(upcoming, vec![on.id, soon.id]);
-    assert!(!far.upcoming(now));
-    assert!(!over.upcoming(now));
-    assert!(soon.on_strip(now) && on.on_strip(now) && !far.on_strip(now));
+    assert_eq!(live, vec![day.id, on.id, soon.id]);
+    assert!(soon.live(now) && on.live(now) && day.live(now));
+    assert!(!far.live(now) && !over.live(now));
     assert!(on.started(now) && !soon.started(now));
 
-    // The sweeper claims what started and is not over, once.
+    // The sweeper claims what started and is not over, once. The all-day
+    // post is on and is never claimed.
     let claimed: Vec<_> = store
         .claim_started(now)
         .await

@@ -2,11 +2,13 @@
 
 Page 7 is the house events board with a private calendar behind it. Anyone
 posts to the board; everyone sees it; anyone says they are in. Your own
-events sit on the same grid, drawn dimmer, and nobody else ever sees them.
-The board's job is to ship a story into the room: a post is a line in
-#lounge, the hour before an event it heads the Home `now` strip and the
-Live panel, and the start is a headline. `7` and the Tab cycle enter the
-page; the session keeps the view, the date and whether the board is shown.
+events sit on the same grid, drawn green, and nobody else ever sees them;
+they live on this page and nowhere else. The board's job is to ship a
+story into the room: a post is a line in #lounge, a timed event heads the
+Home `now` strip and the Live panel from the hour before, an all-day event
+takes the #lounge topic row for its day, and a start is a headline. `7` and
+the Tab cycle enter the page; the session keeps the view, the date and
+whether the board is shown.
 
 ## What is on the page
 
@@ -18,7 +20,8 @@ when there is one.
 Month is six Monday-start weeks; a day's events preview in its cell with
 the count of who is in (`·6 in`), and on a wide terminal the selected day's
 agenda sits beside the grid. List is the month in day order. Board posts
-read bright, your own events read plain. Short terminals get a compact grid
+read amber, your own events read green. The header says `loading` while a
+month is fetched. Short terminals get a compact grid
 with `2+12` counts.
 
 Keys: `n` new, `e` edit, `i` I'm in or I'm out, Delete (confirmation),
@@ -29,8 +32,8 @@ right-click offers Open, I'm in or out, Edit and Delete as the rules allow.
 
 Details show the title, the timing in your zone, who posted it and who is
 in (`6 in, you included`), the description, then the buttons the rules
-give you. The editor takes a title, a description, where it goes (the
-board, or just me; fixed once saved), all-day or a start and end, with the
+give you. The editor takes a title, a description, where it goes (just
+me by default, or the board; fixed once saved), all-day or a start and end, with the
 DST choices appearing only for a repeated local hour. A title like
 `movie night tomorrow at 9pm` fills the date and time in once; the editor
 never infers again after that. Date fields take `Oct 2`, `2026-10-02`,
@@ -58,17 +61,25 @@ touches nothing else; posts already up stay until deleted.
 - **A post** ships a `#lounge` ticker line: `mat posted Movie night to the
   board, in 2d 3h`. The title is mention-safe. One line per post, five
   posts a day per account at most.
-- **The hour before** an event starts it joins the Home `now` strip
+- **The hour before** a timed event starts it joins the Home `now` strip
   (`app/live`): a drawn calendar page, the title, `in 58m · 6 in`, who
   posted it, `o` or a click for the board. It joins again when it starts,
-  lit, reading `on now`. Your own events ride the strip too, for you alone.
-- **The Live panel** on the sidebar lists the board's next 24 hours and
-  your own, soonest first: `event   in 2h Movie night ·6`, `yours   in 30m
-  Standup`, `on now` once it started. `s` plus the row's digit, or a click,
-  opens it.
-- **The start** is a headline that stays in #lounge history: `📅 Movie night
-  is on now, 6 in. Press 7 for the board.` Every replica sweeps once a
-  minute; the row's `announced_at` stamp is the claim, so one replica posts.
+  lit, reading `on now`.
+- **The Live panel** on the sidebar holds a row for each timed board event
+  from the hour before its start until it ends, soonest first, with the
+  start as a clock time in your zone: `event   21:00 Movie night ·6`. `s`
+  plus the row's digit, or a click, opens it.
+- **An all-day event** takes the #lounge topic row for its day, in the
+  board's amber: `📅 today · Hackathon · Community call`, with `7 board`
+  where `/rules` sits. The `now` strip still wins its five minutes. The
+  Live panel and the strip never show an all-day event, and it gets no
+  start headline: its start is midnight somewhere.
+- **The start** of a timed event is a headline that stays in #lounge
+  history: `📅 Movie night is on now, 6 in. Press 7 for the board.` Every
+  replica sweeps once a minute; the row's `announced_at` stamp is the
+  claim, so one replica posts.
+
+Your own events reach none of this. The page is their only home.
 
 Opening from the strip or the panel lands on the event's day with its
 details up, over the page, and counts in `late_ssh_calendar_opens_total`
@@ -95,10 +106,12 @@ PostgreSQL owns the truth: `calendar_events` (a board post has
 person per post), `calendar_bans`. Statement triggers on events and rsvps
 fire `calendar_changed`; the central listener's `CalendarChanged` channel
 bumps an epoch every session reads on its tick, so it drops what it
-loaded and reads again. The board's next 24 hours are one process-shared
-`watch` per replica, re-read on every notify and once a minute. A viewer's
-own events and their "I'm in" list return on their session's channel and
-never enter a process-global watch. A session with a post's details open
+loaded and reads again. The board's live events (`CalendarStore::live_board`:
+timed ones from `STRIP_LEAD` before the start, all-day ones on their day,
+none past its end) are one process-shared `watch` per replica, re-read on
+every notify and once a minute; the strip, the panel and the topic row all
+read it. A viewer's "I'm in" list returns on their session's channel and
+never enters a process-global watch. A session with a post's details open
 reads it again after an invalidation and closes it if staff took it down.
 
 Rendering and the tick do no database I/O. Hit geometry is recorded at
@@ -123,10 +136,10 @@ from the strip or the panel (`late_ssh_calendar_opens_total{from}`). Each
 `make seed-calendar` creates `cal_user`, `cal_other`, `cal_mod` and
 `cal_admin` with keys in `tmp/calendar-seed-keys/`, a board with posts
 from each of them (one on now, one in half an hour, one tomorrow evening,
-a crowded day), a few "I'm in"s, and a private event for `cal_user`.
-Connect with `ssh -o IdentitiesOnly=yes -i tmp/calendar-seed-keys/cal_user
--p 2222 localhost`, press `1` to watch the strip and the panel, `7` for the
-board. The fixture restores only its deterministic event ids; rerun to
+an all-day one today, a crowded day), a few "I'm in"s, and a private event
+for `cal_user`. Connect with `ssh -o IdentitiesOnly=yes -i
+tmp/calendar-seed-keys/cal_user -p 2222 localhost`, press `1` to watch the
+strip, the panel and the topic row, `7` for the board. The fixture restores only its deterministic event ids; rerun to
 reset them.
 
 Targeted checks: `make test-llm ARGS="-p late-core -p late-ssh -E

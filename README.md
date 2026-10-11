@@ -22,7 +22,7 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 
 - SSH TUI with dashboard, chat, profile, news, and arcade screens
 - Mouse controls on Profiles (screen 5): click people, jobs, links, and form controls; wheel scrolls the hovered pane
-- The events board on `7`: anyone posts an event, everyone sees it, `i` says I'm in; your own events sit beside it, private. A post is a line in #lounge, the hour before it starts it heads the Home `now` strip and the Live panel, the start is a headline
+- The events board on `7`: anyone posts an event, everyone sees it, `i` says I'm in; your own events sit beside it, private. A post is a line in #lounge, the hour before a timed event it heads the Home `now` strip and the Live panel, an all-day event takes the #lounge topic row for its day, the start is a headline
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire

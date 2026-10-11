@@ -407,7 +407,6 @@ impl CalendarState {
             })
             .and_then(|frame| frame.neighbor);
         self.events.retain(|e| e.id != id);
-        self.personal_upcoming.retain(|e| e.id != id);
         self.rsvps.retain(|going| *going != id);
         self.pop_modal();
         while matches!(&self.modal, Some(Modal::Details(e) | Modal::Delete(e)) if e.id == id) {

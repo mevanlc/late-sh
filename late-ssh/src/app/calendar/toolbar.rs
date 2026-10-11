@@ -32,7 +32,8 @@ fn context(s: &CalendarState, width: u16) -> Line<'static> {
         ]);
     }
     if s.loading {
-        line.spans.push(Span::styled(" …", dim()));
+        line.spans.push(separator());
+        line.spans.push(Span::styled("loading", dim()));
     }
     clipped_title(line, width)
 }

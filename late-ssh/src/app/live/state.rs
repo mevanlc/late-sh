@@ -128,10 +128,7 @@ impl LiveState {
         candidates.extend(news_live::candidates(articles));
         candidates.extend(stream_live::candidates(streams));
         candidates.extend(door_live::candidates(door_games));
-        candidates.extend(event_live::candidates(
-            &calendar.upcoming_at(now_utc),
-            now_utc,
-        ));
+        candidates.extend(event_live::candidates(&calendar.live_at(now_utc), now_utc));
         let changed = self.refresh(&candidates, Instant::now(), now_utc, reading);
         let thumbnail = match self.showing() {
             Some(LiveSource::BoothTrack(item_id)) => audio
@@ -282,7 +279,7 @@ impl LiveState {
             }
             LiveSource::BoardEvent(id) => {
                 let now = Utc::now();
-                event_live::view(&calendar.upcoming_at(now), id, calendar.tz, now)
+                event_live::view(&calendar.live_at(now), id, calendar.tz, now)
                     .map(LiveStripView::Event)
             }
         }

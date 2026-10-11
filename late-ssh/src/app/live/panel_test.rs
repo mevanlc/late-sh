@@ -348,45 +348,26 @@ fn nobody_playing_says_so_in_the_first_slot_alone() {
     assert_eq!(hit_sources(&[]), [None; LIVE_PANEL_ROWS]);
 }
 
-/// A board event takes a row of its own kind, soonest first, saying how
-/// long until it starts and how many are in; the viewer's own is marked
-/// as theirs, and one that started reads `on now`.
+/// A board post takes a row of its own kind in the order given, saying
+/// its start as a clock time and how many are in.
 #[test]
-fn an_event_row_says_when_and_how_many_are_in() {
-    use late_core::models::calendar::{CalendarEvent, EventTiming};
-    let event = |id: u128, minutes: i64, board: bool, going: i64| {
-        let starts_at = now() + Duration::minutes(minutes);
-        CalendarEvent {
-            id: Uuid::from_u128(id),
-            owner_id: (!board).then_some(Uuid::nil()),
-            creator_id: Uuid::nil(),
-            creator_name: "mat".into(),
-            title: "Movie night".into(),
-            description: String::new(),
-            timing: EventTiming::Timed {
-                start: starts_at,
-                end: None,
-            },
-            creator_timezone: "UTC".into(),
-            starts_at,
-            ends_at: starts_at + Duration::hours(1),
-            going,
-            revision: 1,
-        }
+fn an_event_row_says_the_time_and_how_many_are_in() {
+    use crate::app::calendar::live::PanelEvent;
+    let event = |id: u128, time: &str, going: i64| PanelEvent {
+        id: Uuid::from_u128(id),
+        title: "Movie night".into(),
+        time: time.into(),
+        going,
     };
-    let events = [
-        event(1, 120, true, 6),
-        event(2, 30, false, 0),
-        event(3, -10, true, 0),
-    ];
+    let events = [event(1, "21:00", 6), event(2, "22:30", 0)];
     let open_watches = OpenWatches::new();
     let rows = rows(&[], &[], &events, &[], &no_reads(), &open_watches, now());
     assert_eq!(
         texts(&rows),
         vec![
-            "event   in 2h … ·6 s1".to_string(),
-            "yours   in 30m Mo… s2".to_string(),
-            "event   on now Mo… s3".to_string(),
+            "event   21:00 … ·6 s1".to_string(),
+            "event   22:30 Mov… s2".to_string(),
+            String::new(),
             String::new(),
         ]
     );

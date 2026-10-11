@@ -213,7 +213,6 @@ async fn refusals_are_told_and_a_load_carries_the_viewers_side() {
     let loaded = snapshot(&svc, user.id, true).await;
     assert!(!loaded.staff);
     assert_eq!(loaded.rsvps, vec![post.id]);
-    assert_eq!(loaded.personal_upcoming.len(), 1);
     assert!(
         loaded
             .events
@@ -265,17 +264,17 @@ async fn the_listener_keeps_the_board_in_step_and_closes_a_deleted_post() {
             poster.id,
             CalendarSource::Board,
             None,
-            &timed(Duration::hours(2)),
+            &timed(Duration::minutes(30)),
         )
         .await
         .unwrap()
         .event;
-    let mut board = svc.board_upcoming();
+    let mut board = svc.board_live();
     contains(&mut board, post.id, true).await;
 
     // Kill only this isolated database's LISTEN connection, then move the
-    // event out of the horizon while notifications are down. Resync must
-    // reconstruct the snapshot.
+    // event out of the live window while notifications are down. Resync
+    // must reconstruct the snapshot.
     let client = db.db.get().await.unwrap();
     let pid: i32 = client.query_one("SELECT pid FROM pg_stat_activity WHERE datname=current_database() AND query LIKE 'LISTEN calendar_changed;%' AND pid<>pg_backend_pid()", &[]).await.unwrap().get(0);
     client

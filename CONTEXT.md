@@ -1220,9 +1220,11 @@ are in; the poster edits and deletes their own post, staff delete any; a
 viewer's own events sit on the same grid and nobody else reads them. Tables and
 rules are in `late-core/src/models/calendar.rs`, bans in `calendar_ban.rs`. The
 board ships two #lounge lines (`ActivityKind::EventPosted` on a post,
-`EventStarting` from a sweeper that claims each started row once), heads the
-Home `now` strip from an hour before the start (`LiveSource::BoardEvent`), and
-lists its next 24 hours on the Live panel. There is no Home panel of its own.
+`EventStarting` from a sweeper that claims each started timed row once). A
+timed event heads the Home `now` strip from an hour before the start
+(`LiveSource::BoardEvent`) and holds a Live panel row until it ends; an
+all-day event takes the #lounge topic row for its day. Personal events reach
+none of these. There is no Home panel of its own.
 The central listener's `CalendarChanged` channel invalidates session reads and
 re-reads the replica's shared board snapshot. `/mod ban calendar @name` stops
 posting. See `CALENDAR.md` for controls, telemetry and the fixture.

@@ -381,14 +381,12 @@ pub fn act(s: &mut CalendarState, action: Action) {
             s.open(id);
         }
         Action::New => {
-            // A new draft goes to the board unless the board is hidden, in
-            // which case the viewer is looking at their own calendar.
-            let source = if s.show_board {
-                CalendarSource::Board
-            } else {
-                CalendarSource::Personal
-            };
-            s.push_modal(Modal::Editor(Box::new(Editor::new(source, s.selected))));
+            // A new draft is private until the poster flips it to the board:
+            // nobody posts to everyone by mistake.
+            s.push_modal(Modal::Editor(Box::new(Editor::new(
+                CalendarSource::Personal,
+                s.selected,
+            ))));
         }
         Action::Rsvp => s.toggle_rsvp(),
         Action::Edit | Action::Delete => {

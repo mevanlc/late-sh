@@ -57,7 +57,6 @@ async fn stale_loads_are_ignored_and_a_fresh_load_lands_whole() {
     s.refresh();
     let snapshot = |staff| Snapshot {
         events: Vec::new(),
-        personal_upcoming: Vec::new(),
         rsvps: vec![Uuid::from_u128(1)],
         staff,
     };
@@ -89,7 +88,6 @@ async fn an_rsvp_reply_flips_the_viewer_and_updates_the_count_everywhere() {
     let start = Utc.with_ymd_and_hms(2026, 10, 2, 21, 0, 0).unwrap();
     let e = event(1, start, true);
     s.events.push(e.clone());
-    s.personal_upcoming.push(e.clone());
     s.modal = Some(Modal::Details(e.clone()));
     let mut counted = e.clone();
     counted.going = 4;
@@ -104,24 +102,23 @@ async fn an_rsvp_reply_flips_the_viewer_and_updates_the_count_everywhere() {
     assert!(!s.pending);
 }
 
-/// Upcoming is the board's shared snapshot plus the viewer's own, soonest
-/// first, inside the horizon.
+/// Live is the board's shared snapshot minus what has ended since it was
+/// read; the session never adds its own events to it.
 #[tokio::test]
-async fn upcoming_merges_the_board_and_the_viewers_own_events() {
+async fn live_is_the_shared_snapshot_minus_what_ended() {
     let service = service();
     let mut s = CalendarState::new(service.clone(), Uuid::now_v7());
     let now = Utc::now();
-    let soon = event(1, now + Duration::hours(2), true);
-    let later = event(2, now + Duration::hours(20), true);
-    let far = event(3, now + Duration::days(3), true);
-    service.publish_board(vec![later.clone(), soon.clone(), far]);
-    s.personal_upcoming = vec![event(4, now + Duration::hours(5), false)];
+    let soon = event(1, now + Duration::minutes(30), true);
+    let on = event(2, now - Duration::minutes(10), true);
+    let over = event(3, now - Duration::hours(3), true);
+    service.publish_board(vec![soon.clone(), on.clone(), over]);
     s.tick(false, chrono_tz::UTC);
-    let ids: Vec<_> = s.upcoming().into_iter().map(|e| e.id).collect();
+    let ids: Vec<_> = s.live().into_iter().map(|e| e.id).collect();
     assert_eq!(
         ids,
-        vec![soon.id, Uuid::from_u128(4), later.id],
-        "soonest first, the far one is past the horizon"
+        vec![soon.id, on.id],
+        "the snapshot's order, the over one gone"
     );
 }
 

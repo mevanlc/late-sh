@@ -16,10 +16,8 @@ use uuid::Uuid;
 pub const CALENDAR_CHANGED_CHANNEL: &str = "calendar_changed";
 /// Board posts one account may make per UTC day.
 pub const BOARD_POSTS_PER_DAY: i64 = 5;
-/// How far ahead "upcoming" looks: the Live panel's rows and the shared
-/// board snapshot every replica keeps.
-pub const UPCOMING_HORIZON: Duration = Duration::hours(24);
-/// How long before its start an event reaches the live strip.
+/// How long before its start a timed board post goes live: the strip's
+/// nudge, the Live panel's row. An all-day post goes live for its day.
 pub const STRIP_LEAD: Duration = Duration::hours(1);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -195,13 +193,18 @@ impl CalendarEvent {
     pub fn is_board(&self) -> bool {
         self.owner_id.is_none()
     }
-    /// Inside [`UPCOMING_HORIZON`] of its start, or on and not yet over.
-    pub fn upcoming(&self, now: DateTime<Utc>) -> bool {
-        self.starts_at <= now + UPCOMING_HORIZON && now < self.ends_at
+    pub fn timed(&self) -> bool {
+        matches!(self.timing, EventTiming::Timed { .. })
     }
-    /// Inside [`STRIP_LEAD`] of its start, or on and not yet over.
-    pub fn on_strip(&self, now: DateTime<Utc>) -> bool {
-        self.starts_at - STRIP_LEAD <= now && now < self.ends_at
+    /// Live on the house's surfaces: a timed post inside [`STRIP_LEAD`] of
+    /// its start or on, an all-day post on its day. Over is never live.
+    pub fn live(&self, now: DateTime<Utc>) -> bool {
+        let lead = if self.timed() {
+            STRIP_LEAD
+        } else {
+            Duration::zero()
+        };
+        self.starts_at - lead <= now && now < self.ends_at
     }
     pub fn started(&self, now: DateTime<Utc>) -> bool {
         self.starts_at <= now
@@ -475,33 +478,20 @@ impl CalendarStore {
             None => refuse(CalendarRefusal::Gone),
         }
     }
-    /// The viewer's own events inside [`UPCOMING_HORIZON`], soonest first.
-    pub async fn upcoming_personal(
-        &self,
-        viewer: Uuid,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<CalendarEvent>> {
-        self.upcoming_scope(Some(viewer), now).await
-    }
-    /// The board inside [`UPCOMING_HORIZON`], soonest first. The replica
-    /// service reads this into the snapshot every session shares.
-    pub async fn upcoming_board(&self, now: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
-        self.upcoming_scope(None, now).await
-    }
-    async fn upcoming_scope(
-        &self,
-        owner: Option<Uuid>,
-        now: DateTime<Utc>,
-    ) -> Result<Vec<CalendarEvent>> {
+    /// The board posts live at `now` (see [`CalendarEvent::live`]), soonest
+    /// first. The replica service reads this into the snapshot every
+    /// session shares. Personal events are never live anywhere.
+    pub async fn live_board(&self, now: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
         let c = self.db.get().await?;
-        let horizon = now + UPCOMING_HORIZON;
+        let lead = now + STRIP_LEAD;
         Ok(c.query(
             &format!(
                 "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
-                 WHERE e.owner_id IS NOT DISTINCT FROM $1::uuid AND e.starts_at <= $2 AND e.ends_at > $3 \
+                 WHERE e.owner_id IS NULL AND e.ends_at > $1 \
+                   AND ((e.start_at IS NOT NULL AND e.starts_at <= $2) OR (e.start_date IS NOT NULL AND e.starts_at <= $1)) \
                  ORDER BY e.starts_at, e.id"
             ),
-            &[&owner, &horizon, &now],
+            &[&now, &lead],
         )
         .await?
         .into_iter()
@@ -736,16 +726,18 @@ impl CalendarStore {
         tx.commit().await?;
         Ok(CalendarEvent::from_row(row))
     }
-    /// Claim the board events that started and were never announced. The
-    /// stamp is the claim: of every replica sweeping, one gets each row back
-    /// and posts its line. An event already over is never claimed, so a
-    /// restart cannot announce yesterday.
+    /// Claim the timed board events that started and were never announced.
+    /// The stamp is the claim: of every replica sweeping, one gets each row
+    /// back and posts its line. An event already over is never claimed, so
+    /// a restart cannot announce yesterday. An all-day post starts at
+    /// midnight somewhere, so it is never announced: it owns the topic row
+    /// for its day instead.
     pub async fn claim_started(&self, now: DateTime<Utc>) -> Result<Vec<CalendarEvent>> {
         let c = self.db.get().await?;
         Ok(c.query(
             &format!(
                 "WITH claimed AS (UPDATE calendar_events SET announced_at=$1 \
-                 WHERE owner_id IS NULL AND announced_at IS NULL AND starts_at <= $1 AND ends_at > $1 RETURNING *) \
+                 WHERE owner_id IS NULL AND start_at IS NOT NULL AND announced_at IS NULL AND starts_at <= $1 AND ends_at > $1 RETURNING *) \
                  SELECT {EVENT_COLUMNS} FROM claimed e LEFT JOIN users u ON u.id=e.creator_id ORDER BY e.starts_at, e.id"
             ),
             &[&now],

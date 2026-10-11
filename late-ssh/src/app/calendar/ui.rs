@@ -37,6 +37,22 @@ pub(super) fn separator() -> Span<'static> {
 pub(super) fn accent() -> Style {
     base().fg(theme::AMBER()).add_modifier(Modifier::BOLD)
 }
+/// A board post's title: warm, the colour the Live panel gives events.
+pub(super) fn board_title() -> Style {
+    base().fg(theme::AMBER_DIM())
+}
+/// The viewer's own event's title: green, a colour the board never uses.
+pub(super) fn own_title() -> Style {
+    base().fg(theme::SUCCESS())
+}
+/// The title style for an event of either kind.
+pub(super) fn title_style(e: &CalendarEvent) -> Style {
+    if e.is_board() {
+        board_title()
+    } else {
+        own_title()
+    }
+}
 fn border(title: impl Into<Line<'static>>) -> Block<'static> {
     Block::default()
         .title(title)
@@ -305,10 +321,7 @@ fn event_line(e: &CalendarEvent, tz: chrono_tz::Tz) -> Line<'static> {
     let mut spans = vec![
         Span::styled(time, muted()),
         Span::raw(" "),
-        Span::styled(
-            e.title.clone(),
-            if e.is_board() { bright() } else { base() },
-        ),
+        Span::styled(e.title.clone(), title_style(e)),
     ];
     spans.extend(going_span(e));
     Line::from(spans)
@@ -517,10 +530,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 };
                 for (n, e) in events.iter().take(previews).enumerate() {
                     let rect = Rect::new(cell.x, cell.y + 1 + n as u16, cell.width, 1);
-                    let mut spans = vec![Span::styled(
-                        e.title.clone(),
-                        if e.is_board() { bright() } else { base() },
-                    )];
+                    let mut spans = vec![Span::styled(e.title.clone(), title_style(e))];
                     spans.extend(going_span(e));
                     styled_row(frame, rect, clipped_title(Line::from(spans), rect.width));
                     hit(s, rect, Action::EventAt(e.id, date));

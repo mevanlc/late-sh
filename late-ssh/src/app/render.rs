@@ -747,7 +747,10 @@ impl App {
         let live_panel_rows = crate::app::live::panel::rows(
             &self.chat.live_streams,
             &live_rows,
-            &self.calendar.upcoming_at(live_panel_now),
+            &crate::app::calendar::live::panel_events(
+                &self.calendar.live_at(live_panel_now),
+                self.calendar.tz,
+            ),
             self.chat.news.all_articles(),
             self.chat.news.reads(),
             self.live_games.open_watches(),
@@ -898,6 +901,15 @@ impl App {
             active_poll: dashboard_active_poll,
             live_strip: dashboard_live_strip,
             live_strip_hit: &self.live.hit,
+            // The board's day, on the #lounge card alone like the strip.
+            board_day: if home_selected {
+                crate::app::calendar::live::day_text(
+                    &self.calendar.live_at(live_panel_now),
+                    live_panel_now,
+                )
+            } else {
+                None
+            },
             inline_images: &self.chat.inline_image_cache,
             keep_composer_focused: self.profile_state.profile().keep_composer_focused,
             composer_rect_slot: Some(&self.chat.last_composer_rect),

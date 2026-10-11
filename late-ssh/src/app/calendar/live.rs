@@ -1,9 +1,12 @@
-//! A board event on the live strip (`app/live/`) and the Live panel: an hour
-//! before it starts the room sees what it is, who posted it and how many are
-//! in; when it starts it goes up again, lit. A drawn calendar page sits in
-//! the picture column; the words beside it are the title, how long until
-//! it starts or that it is on, the count, and who posted it. The viewer's
-//! own events ride the same surfaces for the viewer alone.
+//! A board post on the house's surfaces. A timed post: an hour before it
+//! starts the live strip (`app/live/`) shows what it is, who posted it and
+//! how many are in; when it starts it goes up again, lit; the Live panel
+//! holds a row for it from the hour before until it ends. A drawn calendar
+//! page sits in the strip's picture column; the words beside it are the
+//! title, how long until it starts or that it is on, the count, and who
+//! posted it. An all-day post never touches the strip or the panel: it
+//! takes the #lounge topic row for its day. Personal events reach none of
+//! this; they are the viewer's and live on screen 7 alone.
 
 use chrono::{DateTime, Datelike, Utc};
 use chrono_tz::Tz;
@@ -31,14 +34,13 @@ pub struct EventStripView {
     pub now: DateTime<Utc>,
 }
 
-/// Every upcoming event inside [`STRIP_LEAD`] of its start or already on.
+/// Every timed post inside [`STRIP_LEAD`] of its start or already on.
 /// Stamped an hour before its start, and again at the start, so it joins the
 /// queue twice: once as a heads-up, once as the thing happening. Both stamps
 /// are the row's own instant, shared by every replica.
-pub(crate) fn candidates(upcoming: &[CalendarEvent], now: DateTime<Utc>) -> Vec<LiveCandidate> {
-    upcoming
-        .iter()
-        .filter(|event| event.on_strip(now))
+pub(crate) fn candidates(live: &[CalendarEvent], now: DateTime<Utc>) -> Vec<LiveCandidate> {
+    live.iter()
+        .filter(|event| event.timed() && event.live(now))
         .map(|event| LiveCandidate {
             source: LiveSource::BoardEvent(event.id),
             updated: if event.started(now) {
@@ -53,14 +55,13 @@ pub(crate) fn candidates(upcoming: &[CalendarEvent], now: DateTime<Utc>) -> Vec<
 
 /// One event as the strip paints it. `None` once it is over or gone.
 pub(crate) fn view(
-    upcoming: &[CalendarEvent],
+    live: &[CalendarEvent],
     id: Uuid,
     tz: Tz,
     now: DateTime<Utc>,
 ) -> Option<EventStripView> {
-    upcoming
-        .iter()
-        .find(|event| event.id == id && event.on_strip(now))
+    live.iter()
+        .find(|event| event.id == id && event.timed() && event.live(now))
         .map(|event| EventStripView {
             event: event.clone(),
             tz,
@@ -88,10 +89,53 @@ pub(crate) fn glow(strip: &EventStripView) -> bool {
     strip.event.started(strip.now)
 }
 
+/// A timed post as the Live panel lists it: the start as a clock time in
+/// the viewer's zone, since the panel holds the row from an hour before
+/// until the end and a countdown would need a tick to stay true.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PanelEvent {
+    pub id: Uuid,
+    pub title: String,
+    /// `21:00`, in the viewer's zone.
+    pub time: String,
+    pub going: i64,
+}
+
+/// The panel's rows for the live posts, in the order given (soonest first).
+pub(crate) fn panel_events(live: &[CalendarEvent], tz: Tz) -> Vec<PanelEvent> {
+    live.iter()
+        .filter(|event| event.timed())
+        .map(|event| PanelEvent {
+            id: event.id,
+            title: event.title.clone(),
+            time: event
+                .starts_at
+                .with_timezone(&tz)
+                .format("%H:%M")
+                .to_string(),
+            going: event.going,
+        })
+        .collect()
+}
+
+/// The #lounge topic row on a day the board has all-day posts:
+/// `📅 today · Hackathon · Community call`. `None` on any other day.
+pub(crate) fn day_text(live: &[CalendarEvent], now: DateTime<Utc>) -> Option<String> {
+    let titles: Vec<&str> = live
+        .iter()
+        .filter(|event| !event.timed() && event.live(now))
+        .map(|event| event.title.as_str())
+        .collect();
+    if titles.is_empty() {
+        return None;
+    }
+    Some(format!("\u{1F4C5} today · {}", titles.join(" · ")))
+}
+
 /// `event mat · Movie night · in 58m`, after the rule label.
 pub(crate) fn compact_spans(rest: u16, strip: &EventStripView) -> Vec<Span<'static>> {
     let rest = usize::from(rest);
-    let lead = format!("event {} · ", poster(strip));
+    let lead = format!("event {} · ", strip.event.creator_name);
     let lead = truncate_chars(&lead, rest);
     let left = rest.saturating_sub(lead.chars().count());
     let tail = format!(" · {}", when(strip));
@@ -122,14 +166,6 @@ pub(crate) fn when_at(event: &CalendarEvent, now: DateTime<Utc>) -> String {
             "in {}",
             lead_time((event.starts_at - now).num_seconds().max(60))
         )
-    }
-}
-
-fn poster(strip: &EventStripView) -> String {
-    if strip.event.is_board() {
-        strip.event.creator_name.clone()
-    } else {
-        "you".to_string()
     }
 }
 
@@ -197,10 +233,9 @@ fn word_rows(budget: usize, strip: &EventStripView) -> Vec<Vec<Span<'static>>> {
             .fg(theme::TEXT())
             .add_modifier(Modifier::BOLD),
     )];
-    let going = match (strip.event.is_board(), strip.event.going) {
-        (false, _) => String::new(),
-        (true, 0) => " · nobody's in yet".to_string(),
-        (true, n) => format!(" · {n} in"),
+    let going = match strip.event.going {
+        0 => " · nobody's in yet".to_string(),
+        n => format!(" · {n} in"),
     };
     rows[2] = vec![
         Span::styled(
@@ -222,14 +257,8 @@ fn word_rows(budget: usize, strip: &EventStripView) -> Vec<Vec<Span<'static>>> {
     rows
 }
 
-/// `mat posted it`, the poster in amber; `your event` on a personal one.
+/// `mat posted it`, the poster in amber.
 fn poster_spans(budget: usize, strip: &EventStripView) -> Vec<Span<'static>> {
-    if !strip.event.is_board() {
-        return vec![Span::styled(
-            truncate_chars("your event", budget),
-            Style::default().fg(theme::TEXT_DIM()),
-        )];
-    }
     let name = truncate_chars(&strip.event.creator_name, budget);
     let left = budget.saturating_sub(name.chars().count());
     vec![

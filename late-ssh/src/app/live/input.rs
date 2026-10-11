@@ -181,7 +181,7 @@ fn open(app: &mut App, source: LiveSource, origin: Origin) -> bool {
         LiveSource::BoardEvent(event_id) => {
             let event = app
                 .calendar
-                .upcoming()
+                .live()
                 .into_iter()
                 .find(|event| event.id == event_id);
             match event {

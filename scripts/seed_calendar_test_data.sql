@@ -28,13 +28,23 @@ SELECT ids.id,
  CASE WHEN n=6 THEN (SELECT id FROM seed_calendar_users WHERE account='user') END,
  (SELECT id FROM seed_calendar_users WHERE account=CASE n WHEN 1 THEN 'mod' WHEN 2 THEN 'other' WHEN 3 THEN 'admin' WHEN 6 THEN 'user' ELSE 'user' END),
  CASE n WHEN 1 THEN 'Movie night · The Matrix' WHEN 2 THEN 'Minecraft raid on the nether' WHEN 3 THEN 'Chess tournament round 1 · 日本語 café' WHEN 4 THEN 'Late-night radio hour' WHEN 5 THEN 'Pool league' WHEN 6 THEN 'Dentist (private)' END,
- 'Development fixture. ' || CASE n WHEN 1 THEN 'Started ten minutes ago: the headline already fired, the strip reads on now.' WHEN 2 THEN 'Half an hour out: on the strip and the Live panel.' WHEN 3 THEN 'Tomorrow evening: on the Live panel only once it is inside 24 hours.' WHEN 6 THEN 'Only cal_user ever sees this one.' ELSE 'Tonight, overlapping the others.' END,
+ 'Development fixture. ' || CASE n WHEN 1 THEN 'Started ten minutes ago: the headline already fired, the strip reads on now.' WHEN 2 THEN 'Half an hour out: on the strip and the Live panel.' WHEN 3 THEN 'Tomorrow evening: on the board only until the hour before.' WHEN 6 THEN 'Only cal_user ever sees this one, and only on page 7.' ELSE 'Tonight, overlapping the others.' END,
  current_timestamp + CASE n WHEN 1 THEN interval '-10 minutes' WHEN 2 THEN interval '30 minutes' WHEN 3 THEN interval '26 hours' WHEN 4 THEN interval '3 hours' WHEN 5 THEN interval '3 hours 30 minutes' WHEN 6 THEN interval '5 hours' END,
  current_timestamp + CASE n WHEN 1 THEN interval '110 minutes' WHEN 2 THEN interval '150 minutes' WHEN 3 THEN interval '28 hours' WHEN 4 THEN interval '4 hours' WHEN 5 THEN interval '5 hours' WHEN 6 THEN interval '6 hours' END,
  'America/Denver',
  current_timestamp + CASE n WHEN 1 THEN interval '-10 minutes' WHEN 2 THEN interval '30 minutes' WHEN 3 THEN interval '26 hours' WHEN 4 THEN interval '3 hours' WHEN 5 THEN interval '3 hours 30 minutes' WHEN 6 THEN interval '5 hours' END,
  current_timestamp + CASE n WHEN 1 THEN interval '110 minutes' WHEN 2 THEN interval '150 minutes' WHEN 3 THEN interval '28 hours' WHEN 4 THEN interval '4 hours' WHEN 5 THEN interval '5 hours' WHEN 6 THEN interval '6 hours' END
 FROM seed_calendar_ids ids WHERE n<=6;
+-- An all-day board post today, which takes the #lounge topic row.
+INSERT INTO calendar_events(id,owner_id,creator_id,title,description,start_date,end_date,creator_timezone,starts_at,ends_at)
+SELECT ids.id,NULL,(SELECT id FROM seed_calendar_users WHERE account='other'),
+ 'Hackathon day','Development fixture: all day today, on the #lounge topic row.',
+ (current_timestamp AT TIME ZONE 'America/Denver')::date,
+ (current_timestamp AT TIME ZONE 'America/Denver')::date+1,
+ 'America/Denver',
+ (((current_timestamp AT TIME ZONE 'America/Denver')::date)::timestamp AT TIME ZONE 'America/Denver'),
+ (((current_timestamp AT TIME ZONE 'America/Denver')::date+1)::timestamp AT TIME ZONE 'America/Denver')
+FROM seed_calendar_ids ids WHERE n=7;
 -- A crowded all-day board day next week, to exercise the compact grid.
 INSERT INTO calendar_events(id,owner_id,creator_id,title,description,start_date,end_date,creator_timezone,starts_at,ends_at)
 SELECT ids.id,NULL,(SELECT id FROM seed_calendar_users WHERE account='other'),
@@ -44,7 +54,7 @@ SELECT ids.id,NULL,(SELECT id FROM seed_calendar_users WHERE account='other'),
  'America/Denver',
  (((current_timestamp AT TIME ZONE 'America/Denver')::date+7)::timestamp AT TIME ZONE 'America/Denver'),
  (((current_timestamp AT TIME ZONE 'America/Denver')::date+8)::timestamp AT TIME ZONE 'America/Denver')
-FROM seed_calendar_ids ids WHERE n>6;
+FROM seed_calendar_ids ids WHERE n>7;
 -- Who is in: the movie night has a crowd, the raid two, the tournament one.
 INSERT INTO calendar_rsvps(event_id,user_id)
 SELECT ids.id,u.id FROM seed_calendar_ids ids CROSS JOIN seed_calendar_users u

@@ -182,8 +182,8 @@ fn parse_clock(text: &str) -> Result<NaiveTime, chrono::ParseError> {
 }
 
 impl Editor {
-    /// A new event on `date`. A new draft goes to the board unless the
-    /// viewer flips it: the board is what the page is for.
+    /// A new event on `date`, aimed at `source`. The page opens new drafts
+    /// private; the target control flips one to the board on purpose.
     pub fn new(source: CalendarSource, date: NaiveDate) -> Self {
         let mut e = Self {
             existing: None,
