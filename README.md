@@ -28,6 +28,11 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 - Web frontend for landing, profiles, and the token-less `/listen` page
 - Companion CLI for local audio playback and synced visualizer data
 
+IRC uses `#name` for public rooms and `##name` for private rooms. `/LIST`
+shows both when you belong to the private room; `/join ##name` opens that
+private room using your existing late.sh membership. Create private rooms
+and invite members from the TUI. IRC JOIN only opens existing rooms.
+
 ## Workspace
 
 This is a Rust workspace with five crates:
