@@ -1360,6 +1360,20 @@ impl ChatService {
         )
     }
 
+    /// Awaited reply path for IRC room moderation, preserving the joined
+    /// room's identity instead of resolving its potentially shared slug.
+    pub(crate) async fn run_room_mod_command(
+        &self,
+        user_id: Uuid,
+        permissions: Permissions,
+        request: RoomModRequest,
+    ) -> Result<Vec<String>> {
+        self.moderation_service()
+            .room_command(user_id, permissions, request)
+            .await
+            .map(|done| done.messages)
+    }
+
     /// Rebuild the mention-autocomplete name list.
     ///
     /// This reads the process-wide `UsernameDirectory` rather than the DB. That
