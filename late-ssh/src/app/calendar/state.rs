@@ -4,7 +4,7 @@
 pub use super::editor::Editor;
 use super::{
     navigation::{ClickRecord, ContextMenu, NavigationFrame, Selection},
-    svc::{CalendarService, Query, Reply},
+    svc::{CalendarService, Query, Reply, SaveError},
 };
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Utc};
 use chrono_tz::Tz;
@@ -295,9 +295,9 @@ impl CalendarState {
         if self.pending {
             return;
         }
-        let today = self.today();
         if let Some(Modal::Editor(e)) = &mut self.modal {
-            match e.draft(today, self.tz) {
+            let today = e.today();
+            match e.draft(today) {
                 Ok(d) => {
                     self.pending = true;
                     self.service
@@ -451,6 +451,7 @@ impl CalendarState {
                         if self.reload_request {
                             if let Some(Modal::Editor(e)) = &mut self.modal {
                                 e.existing = Some((latest.id, latest.revision));
+                                e.conflict = false;
                                 e.error = Some(format!(
                                     "Reloaded revision {}: {}. Your draft is retained; review before saving.",
                                     latest.revision, latest.title
@@ -484,13 +485,19 @@ impl CalendarState {
                         self.replace_saved(e);
                         self.refresh();
                     }
-                    Err(err) => {
-                        if let Some(Modal::Editor(e)) = &mut self.modal {
-                            e.error = Some(err)
-                        } else {
-                            self.error = Some(err)
+                    Err(SaveError::Conflict(message)) => match &mut self.modal {
+                        Some(Modal::Editor(e)) => {
+                            e.error = Some(message);
+                            e.conflict = true;
                         }
-                    }
+                        _ => self.error = Some(message),
+                    },
+                    // Another refusal leaves a conflict standing: the
+                    // revision stays stale until a reload.
+                    Err(SaveError::Other(message)) => match &mut self.modal {
+                        Some(Modal::Editor(e)) => e.error = Some(message),
+                        _ => self.error = Some(message),
+                    },
                 }
                 true
             }

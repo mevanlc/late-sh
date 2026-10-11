@@ -7,6 +7,7 @@ use crate::{
         },
         common::primitives::Screen,
         live::pick::LiveSource,
+        profile::state::profile_params_from_profile,
         state::App,
     },
     pg_listener::Signal,
@@ -28,6 +29,38 @@ fn event_hit(app: &mut App, id: Uuid) -> Rect {
         .find(|hit| matches!(hit.action, Action::Event(event) | Action::EventAt(event, _) if event == id))
         .unwrap()
         .area
+}
+
+/// Save the account timezone the way Settings does and wait for the page
+/// to take it.
+async fn set_timezone(app: &mut App, user_id: Uuid, zone: &str) {
+    wait_for_app(app, "profile loaded", |a| {
+        !a.profile_state.profile().username.is_empty()
+    })
+    .await;
+    let mut params = profile_params_from_profile(app.profile_state.profile());
+    params.timezone = Some(zone.to_string());
+    app.profile_state.service().edit_profile(user_id, params);
+    let tz: chrono_tz::Tz = zone.parse().unwrap();
+    wait_for_app(app, "account timezone", |a| a.calendar.tz == tz).await;
+}
+
+/// Open `id` from the loaded page and press `e`.
+async fn edit(app: &mut App, id: Uuid) {
+    app.handle_input(b"7");
+    wait_for_app(app, "event loaded", |a| {
+        !a.calendar.loading && a.calendar.events.iter().any(|e| e.id == id)
+    })
+    .await;
+    act(&mut app.calendar, Action::Event(id));
+    wait_for_app(
+        app,
+        "details",
+        |a| matches!(&a.calendar.modal, Some(Modal::Details(e)) if e.id == id),
+    )
+    .await;
+    app.handle_input(b"e");
+    assert!(matches!(app.calendar.modal, Some(Modal::Editor(_))));
 }
 
 fn mouse_click(app: &mut App, rect: Rect, button: u8) {
@@ -252,4 +285,103 @@ async fn an_event_about_to_start_opens_from_the_live_strip() {
     assert!(matches!(&app.calendar.modal, Some(Modal::Details(e)) if e.id == event.id));
     let rendered = render_plain(&mut app);
     assert!(rendered.contains("On the board"), "{rendered}");
+}
+
+/// The editor reads its clock fields in the zone it opened in. Changing the
+/// account timezone in Settings while it is open, then saving a title-only
+/// change, leaves the event at the instant it was.
+#[tokio::test]
+async fn a_timezone_change_mid_edit_leaves_the_event_where_it_was() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_traveler").await;
+    let mut app = make_app(db.db.clone(), user.id, "calendar-tz-flow");
+    app.show_splash = false;
+    set_timezone(&mut app, user.id, "Europe/Warsaw").await;
+    let start = (Utc::now().date_naive() + Duration::days(3))
+        .and_hms_opt(18, 0, 0)
+        .unwrap()
+        .and_utc();
+    let store = CalendarStore::new(db.db.clone());
+    let event = store
+        .save(
+            user.id,
+            CalendarSource::Personal,
+            None,
+            &EventDraft {
+                title: "Dentist".into(),
+                description: String::new(),
+                timing: EventTiming::Timed {
+                    start,
+                    end: Some(start + Duration::hours(1)),
+                },
+            },
+        )
+        .await
+        .unwrap()
+        .event;
+    edit(&mut app, event.id).await;
+    set_timezone(&mut app, user.id, "America/New_York").await;
+    assert!(matches!(app.calendar.modal, Some(Modal::Editor(_))));
+    app.handle_input(b"!\x13");
+    wait_for_app(&mut app, "edit saved", |a| !a.calendar.pending).await;
+    let saved = store.event(user.id, event.id).await.unwrap();
+    assert_eq!(saved.title, "Dentist!");
+    assert_eq!(saved.timing, event.timing);
+}
+
+/// A save that lost to a newer revision recovers from the keyboard alone:
+/// Ctrl+L adopts the newer revision with the draft kept, and the next save
+/// lands.
+#[tokio::test]
+async fn a_conflicted_save_reloads_from_the_keyboard() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "calendar_two_terminals").await;
+    let mut app = make_app(db.db.clone(), user.id, "calendar-conflict-flow");
+    app.show_splash = false;
+    let day = Utc::now().date_naive() + Duration::days(1);
+    let draft = |title: &str| EventDraft {
+        title: title.into(),
+        description: String::new(),
+        timing: EventTiming::AllDay {
+            start: day,
+            end_exclusive: day.succ_opt().unwrap(),
+        },
+    };
+    let store = CalendarStore::new(db.db.clone());
+    let event = store
+        .save(user.id, CalendarSource::Personal, None, &draft("Dinner"))
+        .await
+        .unwrap()
+        .event;
+    edit(&mut app, event.id).await;
+    // The same account saves from another terminal first.
+    let newer = store
+        .save(
+            user.id,
+            CalendarSource::Personal,
+            Some((event.id, event.revision)),
+            &draft("Dinner at 8"),
+        )
+        .await
+        .unwrap()
+        .event;
+    app.handle_input(b"!\x13");
+    wait_for_app(&mut app, "save refused", |a| !a.calendar.pending).await;
+    let rendered = render_plain(&mut app);
+    assert!(rendered.contains("Event changed elsewhere"), "{rendered}");
+    assert!(rendered.contains("Ctrl+L reload"), "{rendered}");
+
+    app.handle_input(b"\x0c");
+    wait_for_app(&mut app, "newer revision adopted", |a| {
+        matches!(
+            &a.calendar.modal,
+            Some(Modal::Editor(e)) if e.error.as_deref().is_some_and(|m| m.starts_with("Reloaded revision"))
+        )
+    })
+    .await;
+    app.handle_input(b"\x13");
+    wait_for_app(&mut app, "save lands", |a| !a.calendar.pending).await;
+    let saved = store.event(user.id, event.id).await.unwrap();
+    assert_eq!(saved.title, "Dinner!");
+    assert_eq!(saved.revision, newer.revision + 1);
 }

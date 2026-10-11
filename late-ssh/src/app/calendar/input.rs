@@ -390,6 +390,7 @@ pub fn act(s: &mut CalendarState, action: Action) {
             s.push_modal(Modal::Editor(Box::new(Editor::new(
                 CalendarSource::Personal,
                 s.selected,
+                s.tz,
             ))));
         }
         Action::Rsvp => s.toggle_rsvp(),
@@ -472,15 +473,15 @@ pub(super) fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
     if s.pending {
         return;
     }
-    let today = s.today();
     if let Some(Modal::Editor(e)) = &mut s.modal {
+        let today = e.today();
         let command = if let ParsedInput::Mouse(m) = event {
             let (Some(x), Some(y)) = (m.x.checked_sub(1), m.y.checked_sub(1)) else {
                 return;
             };
             match m.kind {
                 MouseEventKind::Down if m.button == Some(MouseButton::Left) => {
-                    editor::click(e, x, y, today, s.tz).unwrap_or(EditorCommand::None)
+                    editor::click(e, x, y, today).unwrap_or(EditorCommand::None)
                 }
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                     editor::scroll(
@@ -498,7 +499,7 @@ pub(super) fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
                 _ => EditorCommand::None,
             }
         } else {
-            editor::handle_key(e, event, today, s.tz)
+            editor::handle_key(e, event, today)
         };
         editor_command(s, command);
         return;

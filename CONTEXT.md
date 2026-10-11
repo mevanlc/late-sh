@@ -1215,7 +1215,8 @@ Every published GitHub Release lands in `release.yml`, which parses the tag suff
 
 Calendars (`7`, in the Tab cycle) is the events board, in
 `late-ssh/src/app/calendar/`; read its `CONTEXT.md` before changing it. Anyone
-not banned posts to the board (five a day), everyone sees it, anyone says they
+not banned posts to the board (five a day; a deleted post still counts),
+everyone sees it, anyone says they
 are in; the poster edits and deletes their own post, staff delete any; a
 viewer's own events sit on the same grid and nobody else reads them. Tables and
 rules are in `late-core/src/models/calendar.rs`, bans in `calendar_ban.rs`. The
@@ -1225,8 +1226,9 @@ timed event heads the Home `now` strip from an hour before the start
 (`LiveSource::BoardEvent`) and holds a Live panel row until it ends; an
 all-day event takes the #lounge topic row for its day. Personal events reach
 none of these. There is no Home panel of its own.
-The central listener's `CalendarChanged` channel invalidates session reads and
-re-reads the replica's shared board snapshot. `/mod ban calendar @name` stops
+Row triggers send `calendar_changed` for board changes only; the central
+listener's `CalendarChanged` channel invalidates session reads and re-reads the
+replica's shared board snapshot. `/mod ban calendar @name` stops
 posting. See `CALENDAR.md` for controls, telemetry and the fixture.
 
 ### Screen overview

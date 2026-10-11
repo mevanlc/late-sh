@@ -1,5 +1,6 @@
 use super::calendar::*;
 use super::calendar_ban::CalendarBan;
+use crate::db::Db;
 use crate::test_utils::{create_test_user, test_db};
 use chrono::{Duration, NaiveDate, Utc};
 
@@ -230,6 +231,19 @@ async fn personal_events_are_private_even_from_staff() {
             .unwrap()
             .is_empty()
     );
+    // Every write answers exactly as a missing event does, so no answer
+    // tells a stranger the event exists.
+    for source in [CalendarSource::Personal, CalendarSource::Board] {
+        assert_eq!(
+            refusal(
+                store
+                    .save(admin.id, source, Some((own.id, own.revision)), &draft())
+                    .await
+                    .unwrap_err()
+            ),
+            CalendarRefusal::Gone
+        );
+    }
     assert_eq!(
         refusal(
             store
@@ -237,10 +251,15 @@ async fn personal_events_are_private_even_from_staff() {
                 .await
                 .unwrap_err()
         ),
-        CalendarRefusal::ReadOnly
+        CalendarRefusal::Gone
     );
     assert_eq!(
         refusal(store.set_rsvp(admin.id, own.id, true).await.unwrap_err()),
+        CalendarRefusal::Gone
+    );
+    // The owner's own personal event still takes no "I'm in".
+    assert_eq!(
+        refusal(store.set_rsvp(owner.id, own.id, true).await.unwrap_err()),
         CalendarRefusal::NoRsvp
     );
     // The owner sees it with the board hidden and with it shown.
@@ -300,6 +319,86 @@ async fn the_daily_cap_counts_board_posts_only() {
             .await
             .is_ok()
     );
+}
+
+/// Deleting a post does not give its slot back: post, delete, post again
+/// would otherwise put a line in #lounge every round.
+#[tokio::test]
+async fn a_deleted_post_still_counts_against_the_daily_cap() {
+    let db = test_db().await;
+    let user = create_test_user(&db.db, "cal_reposter").await;
+    let store = CalendarStore::new(db.db.clone());
+    let mut posts = Vec::new();
+    for _ in 0..BOARD_POSTS_PER_DAY {
+        posts.push(
+            store
+                .save(user.id, CalendarSource::Board, None, &draft())
+                .await
+                .unwrap()
+                .event,
+        );
+    }
+    let gone = posts.pop().unwrap();
+    store.delete(user.id, gone.id, gone.revision).await.unwrap();
+    assert_eq!(
+        refusal(
+            store
+                .save(user.id, CalendarSource::Board, None, &draft())
+                .await
+                .unwrap_err()
+        ),
+        CalendarRefusal::DailyCap
+    );
+}
+
+/// The cap's day is the UTC day whatever zone the database session runs
+/// in. Posts are moved halfway between UTC midnight and the session zone's
+/// midnight, so they sit on one day in UTC and on the other in the zone.
+#[tokio::test]
+async fn the_daily_cap_resets_at_utc_midnight_in_any_session_zone() {
+    let db = test_db().await;
+    let user = create_test_user(&db.db, "cal_zoned").await;
+    let c = db.db.get().await.unwrap();
+    let name: String = c
+        .query_one("SELECT current_database()", &[])
+        .await
+        .unwrap()
+        .get(0);
+    // Every new session on this test database runs an hour behind UTC.
+    c.execute(
+        &format!("ALTER DATABASE \"{name}\" SET TimeZone = 'Etc/GMT+1'"),
+        &[],
+    )
+    .await
+    .unwrap();
+    let zone = chrono_tz::Etc::GMTPlus1;
+    let store = CalendarStore::new(Db::new(db.db.config()).unwrap());
+    for _ in 0..BOARD_POSTS_PER_DAY {
+        store
+            .save(user.id, CalendarSource::Board, None, &draft())
+            .await
+            .unwrap();
+    }
+    let now = Utc::now();
+    let utc_midnight = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let zone_midnight = day_boundary(now.with_timezone(&zone).date_naive(), zone).unwrap();
+    let between = utc_midnight + (zone_midnight - utc_midnight) / 2;
+    c.execute(
+        "UPDATE calendar_posts SET created=$1 WHERE user_id=$2",
+        &[&between, &user.id],
+    )
+    .await
+    .unwrap();
+    let next = store
+        .save(user.id, CalendarSource::Board, None, &draft())
+        .await;
+    if between >= utc_midnight {
+        // Today in UTC: the five still count.
+        assert_eq!(refusal(next.unwrap_err()), CalendarRefusal::DailyCap);
+    } else {
+        // Yesterday in UTC: a new day, five new posts.
+        assert!(next.is_ok(), "{next:?}");
+    }
 }
 
 #[tokio::test]

@@ -1309,6 +1309,7 @@ fn overview_lines() -> Vec<String> {
         "Click selects; double-click opens; right-click offers what you may do.",
         "Editor: Tab fields, Post to picks the board or just me, Ctrl+S saves,",
         "Esc asks before discarding a changed draft. Dates take Oct 2, +2w, tomorrow.",
+        "If a save loses to a newer edit, Ctrl+L reloads it and keeps your draft.",
         "A post is a line in #lounge; an hour before a timed event it heads the now",
         "strip on Home and the Live panel (o or click opens it); the start is a headline.",
         "An all-day event takes the #lounge topic row for its day. Yours stay on page 7.",

@@ -125,6 +125,10 @@ pub(super) struct Geometry {
 pub struct Editor {
     pub existing: Option<(Uuid, i64)>,
     pub source: CalendarSource,
+    /// The zone the clock fields are shown and read in, fixed when the
+    /// editor opens: an account timezone change mid-edit must not move the
+    /// event on save.
+    tz: Tz,
     pub fields: Vec<TextArea<'static>>,
     pub focus: EditorControl,
     pub all_day: bool,
@@ -134,6 +138,9 @@ pub struct Editor {
     pub provisional: NaiveDate,
     pub initial: String,
     pub error: Option<String>,
+    /// A save lost to a newer revision and the draft has not adopted it
+    /// yet. Ctrl+L, or a click on the error row, reloads.
+    pub conflict: bool,
     pub discard_prompt: bool,
     pub access: EventAccess,
     scroll: Cell<usize>,
@@ -184,10 +191,11 @@ fn parse_clock(text: &str) -> Result<NaiveTime, chrono::ParseError> {
 impl Editor {
     /// A new event on `date`, aimed at `source`. The page opens new drafts
     /// private; the target control flips one to the board on purpose.
-    pub fn new(source: CalendarSource, date: NaiveDate) -> Self {
+    pub fn new(source: CalendarSource, date: NaiveDate, tz: Tz) -> Self {
         let mut e = Self {
             existing: None,
             source,
+            tz,
             fields: vec![
                 field(""),
                 field(""),
@@ -204,6 +212,7 @@ impl Editor {
             provisional: date,
             initial: String::new(),
             error: None,
+            conflict: false,
             discard_prompt: false,
             access: EventAccess {
                 edit: true,
@@ -223,12 +232,12 @@ impl Editor {
 
     pub fn from_event(event: &CalendarEvent, viewer: Uuid, staff: bool, tz: Tz) -> Self {
         let access = event_access(event, viewer, staff);
-        let mut e = Self::new(event.source(), event.timing.dates(tz).0);
+        let mut e = Self::new(event.source(), event.timing.dates(tz).0, tz);
         e.access = access;
         e.existing = Some((event.id, event.revision));
         e.fields[0] = field(&event.title);
         e.fields[1] = field(&event.description);
-        e.set_timing(&event.timing, tz);
+        e.set_timing(&event.timing);
         e.ever_assigned = true;
         e.initial = e.fingerprint();
         e
@@ -236,6 +245,11 @@ impl Editor {
 
     pub fn text(&self, n: usize) -> String {
         self.fields[n].lines().join("\n")
+    }
+
+    /// Today in the editor's zone: what `tomorrow` and `+2w` count from.
+    pub fn today(&self) -> NaiveDate {
+        Utc::now().with_timezone(&self.tz).date_naive()
     }
 
     pub fn fingerprint(&self) -> String {
@@ -257,7 +271,8 @@ impl Editor {
         *self.geometry.borrow_mut() = Geometry::default();
     }
 
-    pub fn set_timing(&mut self, t: &EventTiming, tz: Tz) {
+    pub fn set_timing(&mut self, t: &EventTiming) {
+        let tz = self.tz;
         self.occurrence = None;
         self.end_occurrence = None;
         match t {
@@ -286,20 +301,20 @@ impl Editor {
         }
     }
 
-    pub fn blur_title(&mut self, today: NaiveDate, tz: Tz) {
+    pub fn blur_title(&mut self, today: NaiveDate) {
         if self.ever_assigned {
             return;
         }
-        if let Some(i) = parser::infer(&self.text(0), self.provisional, today, tz) {
+        if let Some(i) = parser::infer(&self.text(0), self.provisional, today, self.tz) {
             self.fields[0] = field(i.title);
-            self.set_timing(&i.timing, tz);
+            self.set_timing(&i.timing);
             self.ever_assigned = true;
         }
     }
 
-    pub fn focus(&mut self, control: EditorControl, today: NaiveDate, tz: Tz) {
+    pub fn focus(&mut self, control: EditorControl, today: NaiveDate) {
         if self.focus == EditorControl::Title && control != self.focus {
-            self.blur_title(today, tz);
+            self.blur_title(today);
         }
         if matches!(
             self.focus,
@@ -317,7 +332,7 @@ impl Editor {
                 Err(error) => self.error = Some(error.to_string()),
             }
         }
-        let controls = self.visible_controls(today, tz);
+        let controls = self.visible_controls(today);
         self.focus = if controls.contains(&control) {
             control
         } else {
@@ -326,7 +341,7 @@ impl Editor {
         self.reveal_focus.set(true);
     }
 
-    pub fn visible_controls(&self, today: NaiveDate, tz: Tz) -> Vec<EditorControl> {
+    pub fn visible_controls(&self, today: NaiveDate) -> Vec<EditorControl> {
         use EditorControl::{
             AllDay, Cancel, Description, EndDate, EndOccurrence, EndTime, Save, StartDate,
             StartOccurrence, StartTime, Target, Title,
@@ -338,14 +353,14 @@ impl Editor {
         controls.extend([AllDay, StartDate]);
         if !self.all_day {
             controls.push(StartTime);
-            if self.time_repeats(false, today, tz) {
+            if self.time_repeats(false, today) {
                 controls.push(StartOccurrence);
             }
         }
         controls.push(EndDate);
         if !self.all_day {
             controls.push(EndTime);
-            if self.time_repeats(true, today, tz) {
+            if self.time_repeats(true, today) {
                 controls.push(EndOccurrence);
             }
         }
@@ -353,7 +368,7 @@ impl Editor {
         controls
     }
 
-    fn time_repeats(&self, end: bool, today: NaiveDate, tz: Tz) -> bool {
+    fn time_repeats(&self, end: bool, today: NaiveDate) -> bool {
         let date = if end && !self.text(4).trim().is_empty() {
             4
         } else {
@@ -366,23 +381,23 @@ impl Editor {
             return false;
         };
         matches!(
-            tz.from_local_datetime(&date.and_time(time)),
+            self.tz.from_local_datetime(&date.and_time(time)),
             LocalResult::Ambiguous(..)
         )
     }
 
-    fn advance(&mut self, backwards: bool, today: NaiveDate, tz: Tz) {
+    fn advance(&mut self, backwards: bool, today: NaiveDate) {
         if self.focus == EditorControl::Title {
-            self.blur_title(today, tz);
+            self.blur_title(today);
         }
-        let controls = self.visible_controls(today, tz);
+        let controls = self.visible_controls(today);
         let i = controls.iter().position(|c| *c == self.focus).unwrap_or(0);
         let next = if backwards {
             (i + controls.len() - 1) % controls.len()
         } else {
             (i + 1) % controls.len()
         };
-        self.focus(controls[next], today, tz);
+        self.focus(controls[next], today);
     }
 
     fn toggle(&mut self, control: EditorControl) {
@@ -418,8 +433,8 @@ impl Editor {
         Ok(Some(date))
     }
 
-    pub fn draft(&mut self, today: NaiveDate, tz: Tz) -> anyhow::Result<EventDraft> {
-        self.blur_title(today, tz);
+    pub fn draft(&mut self, today: NaiveDate) -> anyhow::Result<EventDraft> {
+        self.blur_title(today);
         let start = self.date_field(2, today)?.unwrap();
         let end_date = self.date_field(4, today)?;
         let end_time = self.text(5);
@@ -434,14 +449,14 @@ impl Editor {
         } else {
             let time = parse_clock(&self.text(3))
                 .map_err(|_| anyhow::anyhow!("Start time must be HH:MM or HH:MM:SS (24-hour)"))?;
-            let begin = local_instant(start.and_time(time), tz, self.occurrence)?;
+            let begin = local_instant(start.and_time(time), self.tz, self.occurrence)?;
             let end = if end_date.is_none() && end_time.trim().is_empty() {
                 None
             } else {
                 let d = end_date.unwrap_or(start);
                 let t = parse_clock(&end_time)
                     .map_err(|_| anyhow::anyhow!("End time must be HH:MM or HH:MM:SS"))?;
-                Some(local_instant(d.and_time(t), tz, self.end_occurrence)?)
+                Some(local_instant(d.and_time(t), self.tz, self.end_occurrence)?)
             };
             EventTiming::Timed { start: begin, end }
         };
@@ -463,8 +478,8 @@ fn next_occurrence(occurrence: Option<Occurrence>) -> Option<Occurrence> {
     }
 }
 
-pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz) -> EditorCommand {
-    use EditorCommand::{Cancel, Discard, Keep, None, Save};
+pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate) -> EditorCommand {
+    use EditorCommand::{Cancel, Discard, Keep, None, Reload, Save};
     // VTE reports printable ASCII as Char; direct callers can also provide Byte.
     let normalized = match event {
         ParsedInput::Char(ch) if ch.is_ascii() => Some(ParsedInput::Byte(*ch as u8)),
@@ -495,12 +510,13 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
             return Cancel;
         }
         ParsedInput::Byte(0x13) => return Save,
+        ParsedInput::Byte(0x0c) if e.conflict => return Reload,
         ParsedInput::Byte(b'\t') => {
-            e.advance(false, today, tz);
+            e.advance(false, today);
             return None;
         }
         ParsedInput::BackTab => {
-            e.advance(true, today, tz);
+            e.advance(true, today);
             return None;
         }
         ParsedInput::PageUp | ParsedInput::PageDown => {
@@ -529,7 +545,7 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
                     None
                 }
                 _ => {
-                    e.advance(false, today, tz);
+                    e.advance(false, today);
                     None
                 }
             };
@@ -569,7 +585,7 @@ pub fn handle_key(e: &mut Editor, event: &ParsedInput, today: NaiveDate, tz: Tz)
 }
 
 /// Coordinates are zero-based terminal cells, matching the recorded render.
-pub fn click(e: &mut Editor, x: u16, y: u16, today: NaiveDate, tz: Tz) -> Option<EditorCommand> {
+pub fn click(e: &mut Editor, x: u16, y: u16, today: NaiveDate) -> Option<EditorCommand> {
     let target = e
         .geometry
         .borrow()
@@ -579,9 +595,9 @@ pub fn click(e: &mut Editor, x: u16, y: u16, today: NaiveDate, tz: Tz) -> Option
         .find(|t| t.area.contains((x, y).into()))
         .copied()?;
     match target.action {
-        TargetAction::Focus(control) => e.focus(control, today, tz),
+        TargetAction::Focus(control) => e.focus(control, today),
         TargetAction::Toggle(control) => {
-            e.focus(control, today, tz);
+            e.focus(control, today);
             e.toggle(control);
         }
         TargetAction::Value(control, top, left) => {
@@ -592,7 +608,7 @@ pub fn click(e: &mut Editor, x: u16, y: u16, today: NaiveDate, tz: Tz) -> Option
                 &e.fields[n].lines()[row],
                 left + usize::from(x - target.area.x),
             );
-            e.focus(control, today, tz);
+            e.focus(control, today);
             e.fields[n].cancel_selection();
             e.fields[n].move_cursor(CursorMove::Jump(row as u16, col as u16));
         }
@@ -803,7 +819,7 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
     }
     let footer_height = inner.height.min(3);
     let viewport = Rect::new(inner.x, inner.y, inner.width, inner.height - footer_height);
-    let controls = e.visible_controls(s.today(), s.tz);
+    let controls = e.visible_controls(e.today());
     let mut row_offset = 0;
     let rows: Vec<_> = controls
         .into_iter()
@@ -926,7 +942,11 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
         ui::row(
             frame,
             Rect::new(inner.x, inner.bottom() - 3, inner.width, 1),
-            format!("{} · Tab fields · Ctrl+S save", s.tz),
+            if e.conflict {
+                format!("{} · Ctrl+L reload · Tab fields · Ctrl+S save", e.tz)
+            } else {
+                format!("{} · Tab fields · Ctrl+S save", e.tz)
+            },
             ui::dim(),
         );
     }
@@ -934,7 +954,7 @@ pub fn draw(frame: &mut Frame, inner: Rect, s: &CalendarState, e: &Editor) {
         let area = Rect::new(inner.x, inner.bottom() - 2, inner.width, 1);
         if let Some(error) = &e.error {
             ui::row(frame, area, error, ui::base().fg(theme::ERROR()));
-            if e.existing.is_some() {
+            if e.conflict {
                 record(e, area, TargetAction::Command(EditorCommand::Reload));
                 ui::hit(s, area, Action::Reload);
             }

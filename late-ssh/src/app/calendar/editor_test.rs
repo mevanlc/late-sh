@@ -19,7 +19,7 @@ fn today() -> NaiveDate {
 }
 
 fn editor() -> Editor {
-    Editor::new(CalendarSource::Board, today())
+    Editor::new(CalendarSource::Board, today(), chrono_tz::UTC)
 }
 
 fn state() -> CalendarState {
@@ -78,7 +78,7 @@ fn a_new_draft_picks_its_target_and_infers_its_timing_from_the_title() {
     let mut e = editor();
     assert_eq!(e.source, CalendarSource::Board, "the board is the default");
     assert_eq!(
-        e.visible_controls(today(), chrono_tz::UTC),
+        e.visible_controls(today()),
         vec![
             Title,
             Description,
@@ -90,19 +90,19 @@ fn a_new_draft_picks_its_target_and_infers_its_timing_from_the_title() {
             Cancel
         ]
     );
-    e.focus(Target, today(), chrono_tz::UTC);
-    handle_key(&mut e, &ParsedInput::Byte(b' '), today(), chrono_tz::UTC);
+    e.focus(Target, today());
+    handle_key(&mut e, &ParsedInput::Byte(b' '), today());
     assert_eq!(e.source, CalendarSource::Personal);
     assert!(e.dirty(), "flipping the target is a change worth keeping");
 
     e.fields[0].insert_str("Movie night tomorrow at 9pm");
-    e.blur_title(today(), chrono_tz::UTC);
+    e.blur_title(today());
     assert_eq!(e.text(0), "Movie night");
     assert_eq!(e.text(2), "2026-10-04");
     assert_eq!(e.text(3), "21:00");
     assert!(!e.all_day);
     assert_eq!(
-        e.visible_controls(today(), chrono_tz::UTC),
+        e.visible_controls(today()),
         vec![
             Title,
             Description,
@@ -116,7 +116,7 @@ fn a_new_draft_picks_its_target_and_infers_its_timing_from_the_title() {
             Cancel
         ]
     );
-    let draft = e.draft(today(), chrono_tz::UTC).unwrap();
+    let draft = e.draft(today()).unwrap();
     assert!(matches!(
         draft.timing,
         EventTiming::Timed { start, end: None } if start == Utc.with_ymd_and_hms(2026, 10, 4, 21, 0, 0).unwrap()
@@ -124,9 +124,7 @@ fn a_new_draft_picks_its_target_and_infers_its_timing_from_the_title() {
 
     let opened = Editor::from_event(&board_event(), Uuid::nil(), false, chrono_tz::UTC);
     assert!(
-        !opened
-            .visible_controls(today(), chrono_tz::UTC)
-            .contains(&Target),
+        !opened.visible_controls(today()).contains(&Target),
         "where a saved event lives is fixed"
     );
     assert_eq!(opened.existing, Some((Uuid::from_u128(7), 2)));
@@ -137,26 +135,22 @@ fn a_new_draft_picks_its_target_and_infers_its_timing_from_the_title() {
 
 #[test]
 fn dst_choices_only_appear_for_ambiguous_local_times() {
-    let tz = chrono_tz::America::New_York;
-    let mut e = editor();
+    let mut e = Editor::new(CalendarSource::Board, today(), chrono_tz::America::New_York);
     e.fields[0] = field("Fall back");
     e.all_day = false;
     e.fields[2] = field("2026-11-01");
     e.fields[3] = field("01:30");
     assert!(
-        e.visible_controls(today(), tz)
+        e.visible_controls(today())
             .contains(&EditorControl::StartOccurrence)
     );
-    assert!(
-        e.draft(today(), tz).is_err(),
-        "a repeated hour needs a choice"
-    );
-    e.focus(EditorControl::StartOccurrence, today(), tz);
-    handle_key(&mut e, &ParsedInput::Byte(b' '), today(), tz);
-    assert!(e.draft(today(), tz).is_ok());
+    assert!(e.draft(today()).is_err(), "a repeated hour needs a choice");
+    e.focus(EditorControl::StartOccurrence, today());
+    handle_key(&mut e, &ParsedInput::Byte(b' '), today());
+    assert!(e.draft(today()).is_ok());
     e.fields[3] = field("03:30");
     assert!(
-        !e.visible_controls(today(), tz)
+        !e.visible_controls(today())
             .contains(&EditorControl::StartOccurrence)
     );
 }
@@ -166,21 +160,21 @@ fn discard_confirmation_defaults_to_keep_and_escape_returns_to_editing() {
     let mut e = editor();
     e.fields[0].insert_str("Draft");
     assert_eq!(
-        handle_key(&mut e, &ParsedInput::Byte(0x1b), today(), chrono_tz::UTC),
+        handle_key(&mut e, &ParsedInput::Byte(0x1b), today()),
         EditorCommand::Cancel
     );
     e.discard_prompt = true;
     assert_eq!(
-        handle_key(&mut e, &ParsedInput::Byte(b'\r'), today(), chrono_tz::UTC),
+        handle_key(&mut e, &ParsedInput::Byte(b'\r'), today()),
         EditorCommand::Keep
     );
     assert_eq!(
-        handle_key(&mut e, &ParsedInput::Byte(0x1b), today(), chrono_tz::UTC),
+        handle_key(&mut e, &ParsedInput::Byte(0x1b), today()),
         EditorCommand::Keep
     );
-    handle_key(&mut e, &ParsedInput::Byte(b'\t'), today(), chrono_tz::UTC);
+    handle_key(&mut e, &ParsedInput::Byte(b'\t'), today());
     assert_eq!(
-        handle_key(&mut e, &ParsedInput::Byte(b'\r'), today(), chrono_tz::UTC),
+        handle_key(&mut e, &ParsedInput::Byte(b'\r'), today()),
         EditorCommand::Discard
     );
 }
@@ -191,8 +185,8 @@ async fn every_focused_control_is_visible_after_compact_resize() {
     let mut e = editor();
     e.all_day = false;
     for (width, height) in [(120, 40), (80, 24), (48, 16), (48, 14), (22, 9)] {
-        for control in e.visible_controls(today(), chrono_tz::UTC) {
-            e.focus(control, today(), chrono_tz::UTC);
+        for control in e.visible_controls(today()) {
+            e.focus(control, today());
             draw_editor(&e, &s, width, height);
             let geometry = e.geometry.borrow();
             assert!(
@@ -222,25 +216,13 @@ async fn click_places_caret_and_keeps_unicode_intact() {
     e.fields[0] = field("abcdef");
     draw_editor(&e, &s, 80, 24);
     let target = value_target(&e, EditorControl::Title);
-    click(
-        &mut e,
-        target.area.x,
-        target.area.y,
-        today(),
-        chrono_tz::UTC,
-    );
-    handle_key(&mut e, &ParsedInput::Char('X'), today(), chrono_tz::UTC);
+    click(&mut e, target.area.x, target.area.y, today());
+    handle_key(&mut e, &ParsedInput::Char('X'), today());
     assert_eq!(e.text(0), "Xabcdef");
     e.fields[0] = field("a界e\u{301}🙂z");
     draw_editor(&e, &s, 80, 24);
     let target = value_target(&e, EditorControl::Title);
-    click(
-        &mut e,
-        target.area.x + 2,
-        target.area.y,
-        today(),
-        chrono_tz::UTC,
-    );
-    handle_key(&mut e, &ParsedInput::Char('X'), today(), chrono_tz::UTC);
+    click(&mut e, target.area.x + 2, target.area.y, today());
+    handle_key(&mut e, &ParsedInput::Char('X'), today());
     assert_eq!(e.text(0), "aX界e\u{301}🙂z");
 }

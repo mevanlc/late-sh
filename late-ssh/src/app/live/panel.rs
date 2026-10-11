@@ -149,8 +149,8 @@ pub(crate) struct LivePanelProps<'a> {
 /// The panel's rows in panel order: the floor rule over the streams that
 /// have gone live (a pending one has no stamp and is not listed, so the
 /// panel never points at a black screen), the watchable doors' live games
-/// with the open-watch count on each, the board's next 24 hours plus the
-/// viewer's own events (`events`, soonest first), and the News shares
+/// with the open-watch count on each, the board's live timed posts
+/// (`events`, soonest first; never a viewer's own events), and the News shares
 /// younger than [`NEWS_LIFETIME`] (unread against `reads`), each other
 /// kind newest first, the kinds in `rank` order.
 pub(crate) fn rows(

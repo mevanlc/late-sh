@@ -1,8 +1,9 @@
 # Calendars: the events board
 
 Screen 7. `late-core/models/calendar` owns the tables, the three rules
-(`event_access`), the post guards (daily cap, ban) and every write under a
-row lock; `late-core/models/calendar_ban` the ban rows. Full design,
+(`event_access`), the post guards (daily cap over the `calendar_posts` log,
+ban) and every write under a row lock, with the owner scope inside every
+statement; `late-core/models/calendar_ban` the ban rows. Full design,
 controls and the fixture are in root `CALENDAR.md`.
 
 ## Files
@@ -11,12 +12,15 @@ controls and the fixture are in root `CALENDAR.md`.
   task owns its span and metrics; `settle` is the one match that turns a
   `CalendarError` into a metric and a message (a refusal is told in the
   user's words, a failure is logged and told in general terms). `save`
-  ships `EventPosted` on a new board post through the activity publisher;
+  ships `EventPosted` on a new board post through the activity publisher
+  and answers a revision refusal as `SaveError::Conflict`, the one refusal
+  the editor recovers from in place;
   `start_sweeper_task` claims started board events every minute
   (`CalendarStore::claim_started`) and ships `EventStarting` for each.
-  `start_notify_worker` turns `CalendarChanged` and a minute tick into an
-  epoch bump plus a re-read of the board's live events into the shared
-  `watch`.
+  `start_notify_worker` turns `CalendarChanged`, or the listener coming
+  back, into an epoch bump plus a re-read of the board's live events into
+  the shared `watch`; its minute tick re-reads the board alone. The board
+  already published stays up until a fresh read replaces it.
 - `state.rs`: the session's mirror. Events for the visible range, the ids
   they said they are in, the modal stack, the cursor. `tick` drains the
   epoch, the board watch and the private reply channel; `live_at` is the
@@ -27,7 +31,11 @@ controls and the fixture are in root `CALENDAR.md`.
   `finish_delete`, `replace_saved`.
 - `editor.rs`: the form. Six text fields; the `Target` control (board or
   just me) only on a new draft; DST occurrence controls only for a repeated
-  local hour; `parser.rs` fills the timing from a title suffix once.
+  local hour; `parser.rs` fills the timing from a title suffix once. The
+  editor keeps the zone it opened in, so an account timezone
+  change mid-edit moves nothing. A save that lost to a newer revision sets
+  `conflict`; Ctrl+L or a click on the error row reloads with the draft
+  kept.
 - `date_entry.rs`: `Oct 2`, `2026-10-02`, `+2w`, `tomorrow` for the date
   fields.
 - `toolbar.rs`: the two header rows, every control a hit target.
@@ -55,9 +63,12 @@ controls and the fixture are in root `CALENDAR.md`.
 - Timed events get the strip and the panel from `STRIP_LEAD` before the
   start and the start headline; all-day events get the topic row for their
   day and no headline.
-- An invalidation clears the mirror, re-reads when the page is visible,
-  and re-reads an open details modal; a post staff took down closes with
-  `Gone`.
+- An invalidation clears the mirror, re-reads when the page or a calendar
+  modal is open, and re-reads an open details modal; a post staff took down
+  closes with `Gone`. Home's strip and Live panel read only the shared
+  board, so Home never loads the session's own month.
+- `calendar_changed` fires for board changes only (row triggers): a
+  personal write or a statement that changes no row wakes nobody.
 - A new draft is private; the editor's target control flips it to the
   board. Board titles paint amber, the viewer's own green.
 - Rendering and the tick do no database I/O.

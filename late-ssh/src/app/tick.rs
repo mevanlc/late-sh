@@ -202,10 +202,10 @@ impl App {
         }
 
         // Services
+        // Only the page and its modals read the session's own month; Home's
+        // strip and Live panel read the replica's shared board snapshot.
         changed |= self.calendar.tick(
-            matches!(self.screen, Screen::Dashboard | Screen::Calendars)
-                || self.calendar.modal.is_some()
-                || self.show_profile_modal,
+            self.screen == Screen::Calendars || self.calendar.modal.is_some(),
             late_core::models::calendar::effective_timezone(
                 self.profile_state.profile().timezone.as_deref(),
             ),

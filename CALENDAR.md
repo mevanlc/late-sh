@@ -45,7 +45,8 @@ DST choices appearing only for a repeated local hour. A title like
 `movie night tomorrow at 9pm` fills the date and time in once; the editor
 never infers again after that. Date fields take `Oct 2`, `2026-10-02`,
 `+2w` or `tomorrow`. Escape offers to discard a changed draft and keeps it
-by default.
+by default. If a save loses to a newer edit made elsewhere, `Ctrl+L` (or a
+click on the error) reloads the newer revision and keeps the draft.
 
 ## The three rules
 
@@ -53,11 +54,14 @@ by default.
 - Moderators and admins delete any post. The delete dialog names the
   poster, so a mod reads what they are about to do.
 - Anyone says they are in on a board post. A personal event takes no
-  "I'm in", and nobody but its owner ever reads it, staff included.
+  "I'm in", and nobody but its owner ever reads it, staff included. To
+  anyone else every read and write answers as if it did not exist.
 
 Posting has two guards, both decided inside the post transaction:
 `BOARD_POSTS_PER_DAY` (5) board posts per account per UTC day, and a board
-ban. Edits and personal events never count against the cap.
+ban. Edits and personal events never count against the cap. A deleted
+post still does: the cap counts `calendar_posts`, a log of every board post
+made, which deletes never touch.
 
 Moderation: `/mod ban calendar @name [duration] [reason]`, `/mod unban
 calendar @name`, `/mod view bans calendar`. A ban stops new board posts and
@@ -96,6 +100,8 @@ by which surface brought the viewer.
 
 Account timezone or UTC governs every timed display and the editor's
 parsing; the effective zone is shown in the header and the editor footer.
+An open editor keeps the zone it opened in, so changing the account zone
+mid-edit moves nothing.
 All-day events store civil dates with an exclusive end, read in the zone
 captured when they were posted, so a later account change does not move
 them. Timed starts and optional ends store UTC instants; a start-only
@@ -103,20 +109,26 @@ event lasts an hour. Nonexistent local times are errors; repeated local
 times need Earlier or Later for the start and the end separately.
 
 Every event also carries `starts_at` and `ends_at` instants derived from
-the above. Upcoming is `starts_at <= now + 24h` and `now < ends_at`; the
-strip window is `starts_at - 1h <= now < ends_at`.
+the above. A timed post is live for `starts_at - 1h <= now < ends_at`, an
+all-day post for its day.
 
 ## Data and distribution
 
 PostgreSQL owns the truth: `calendar_events` (a board post has
 `owner_id` NULL, a personal event its owner), `calendar_rsvps` (one row per
-person per post), `calendar_bans`. Statement triggers on events and rsvps
-fire `calendar_changed`; the central listener's `CalendarChanged` channel
-bumps an epoch every session reads on its tick, so it drops what it
-loaded and reads again. The board's live events (`CalendarStore::live_board`:
-timed ones from `STRIP_LEAD` before the start, all-day ones on their day,
-none past its end) are one process-shared `watch` per replica, re-read on
-every notify and once a minute; the strip, the panel and the topic row all
+person per post), `calendar_posts` (one row per board post made, what the
+daily cap counts), `calendar_bans`. Row triggers fire `calendar_changed` for
+what another session can see: a board post's insert, edit or delete, and an
+"I'm in". A personal event and a statement that changes no row, such as the
+sweeper's claim on an empty minute, stay quiet. The central listener's
+`CalendarChanged` channel bumps an epoch every session reads on its tick, so
+it drops what it loaded; a session on the page or with a calendar modal open
+reads again at once, any other when it next opens the page. The board's live
+events (`CalendarStore::live_board`: timed ones from `STRIP_LEAD` before the
+start, all-day ones on their day, none past its end) are one process-shared
+`watch` per replica, re-read on every notify and once a minute. The minute's
+re-read invalidates no session, and the board already published stays up
+until a fresh read replaces it. The strip, the panel and the topic row all
 read it. A viewer's "I'm in" list returns on their session's channel and
 never enters a process-global watch. A session with a post's details open
 reads it again after an invalidation and closes it if staff took it down.

@@ -2,9 +2,12 @@
 //!
 //! A board event (`owner_id` NULL) is posted by anyone who is not banned,
 //! read by everyone, and anyone may say they are in. A personal event belongs
-//! to one account and nobody else ever reads it. Every write locks the actor
-//! and the event row, so a stale editor cannot overwrite a newer revision and
-//! two posts at once cannot beat the daily cap.
+//! to one account and nobody else ever reads it: the owner scope sits inside
+//! every statement that reads or locks an event, so another account's
+//! personal event answers `Gone` exactly as a missing one does. Every write
+//! locks the actor and the event row, so a stale editor cannot overwrite a
+//! newer revision and two posts at once cannot beat the daily cap. The cap
+//! counts `calendar_posts`, a log deletes never touch.
 use crate::db::Db;
 use anyhow::{Result, ensure};
 use chrono::{DateTime, Duration, LocalResult, NaiveDate, NaiveDateTime, TimeZone, Utc};
@@ -532,9 +535,9 @@ impl CalendarStore {
                     .query_opt(
                         &format!(
                             "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
-                             WHERE e.id=$1 FOR UPDATE OF e"
+                             WHERE e.id=$1 AND (e.owner_id IS NULL OR e.owner_id=$2) FOR UPDATE OF e"
                         ),
-                        &[&id],
+                        &[&id, &viewer],
                     )
                     .await?
                 else {
@@ -557,10 +560,13 @@ impl CalendarStore {
                     if Self::banned(&tx, viewer).await? {
                         return refuse(CalendarRefusal::Banned);
                     }
+                    // The post log, not the events: a deleted post still
+                    // used its slot. The day is UTC whatever the session's
+                    // TimeZone.
                     let today: i64 = tx
                         .query_one(
-                            "SELECT count(*) FROM calendar_events WHERE creator_id=$1 AND owner_id IS NULL \
-                             AND created >= date_trunc('day', CURRENT_TIMESTAMP)",
+                            "SELECT count(*) FROM calendar_posts WHERE user_id=$1 \
+                             AND created >= date_trunc('day', CURRENT_TIMESTAMP AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'",
                             &[&viewer],
                         )
                         .await?
@@ -568,6 +574,8 @@ impl CalendarStore {
                     if today >= BOARD_POSTS_PER_DAY {
                         return refuse(CalendarRefusal::DailyCap);
                     }
+                    tx.execute("INSERT INTO calendar_posts(user_id) VALUES($1)", &[&viewer])
+                        .await?;
                 }
                 None
             }
@@ -654,9 +662,9 @@ impl CalendarStore {
             .query_opt(
                 &format!(
                     "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
-                     WHERE e.id=$1 FOR UPDATE OF e"
+                     WHERE e.id=$1 AND (e.owner_id IS NULL OR e.owner_id=$2) FOR UPDATE OF e"
                 ),
-                &[&id],
+                &[&id, &viewer],
             )
             .await?
         else {
@@ -690,9 +698,9 @@ impl CalendarStore {
             .query_opt(
                 &format!(
                     "SELECT {EVENT_COLUMNS} FROM calendar_events e LEFT JOIN users u ON u.id=e.creator_id \
-                     WHERE e.id=$1 FOR UPDATE OF e"
+                     WHERE e.id=$1 AND (e.owner_id IS NULL OR e.owner_id=$2) FOR UPDATE OF e"
                 ),
-                &[&id],
+                &[&id, &viewer],
             )
             .await?
         else {

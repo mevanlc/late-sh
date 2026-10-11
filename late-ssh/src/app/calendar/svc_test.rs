@@ -62,6 +62,131 @@ async fn contains(rx: &mut watch::Receiver<Vec<CalendarEvent>>, id: uuid::Uuid, 
     .expect("board snapshot refreshed");
 }
 
+async fn next_payload(rx: &mut mpsc::UnboundedReceiver<Signal>) -> String {
+    match timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .unwrap()
+        .unwrap()
+    {
+        Signal::Notify { payload, .. } => payload,
+        Signal::Resync => panic!("the listener reconnected mid-test"),
+    }
+}
+
+/// `calendar_changed` wakes every session, so it fires only for what
+/// another session can see: a board post and an "I'm in". A personal
+/// event's whole life and a sweep that claims nothing stay quiet.
+#[tokio::test]
+async fn only_board_changes_wake_the_sessions() {
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "cal_quiet").await;
+    let store = CalendarStore::new(db.db.clone());
+    let mut listener = PgListener::new();
+    let mut observed = listener.subscribe(&[Channel::CalendarChanged]);
+    let connection = listener.start(db.db.config().clone());
+    assert_eq!(
+        timeout(std::time::Duration::from_secs(10), observed.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        Signal::Resync
+    );
+    let own = store
+        .save(
+            user.id,
+            CalendarSource::Personal,
+            None,
+            &timed(Duration::days(2)),
+        )
+        .await
+        .unwrap()
+        .event;
+    let own = store
+        .save(
+            user.id,
+            CalendarSource::Personal,
+            Some((own.id, own.revision)),
+            &timed(Duration::days(3)),
+        )
+        .await
+        .unwrap()
+        .event;
+    store.delete(user.id, own.id, own.revision).await.unwrap();
+    assert!(store.claim_started(Utc::now()).await.unwrap().is_empty());
+    // Notifications arrive in commit order: a marker sent after all of the
+    // above arrives first only if none of it notified.
+    db.db
+        .get()
+        .await
+        .unwrap()
+        .execute("SELECT pg_notify('calendar_changed', 'marker')", &[])
+        .await
+        .unwrap();
+    assert_eq!(next_payload(&mut observed).await, "marker");
+
+    let post = store
+        .save(
+            user.id,
+            CalendarSource::Board,
+            None,
+            &timed(Duration::days(2)),
+        )
+        .await
+        .unwrap()
+        .event;
+    assert_eq!(next_payload(&mut observed).await, "");
+    store.set_rsvp(user.id, post.id, true).await.unwrap();
+    assert_eq!(next_payload(&mut observed).await, "");
+    connection.abort();
+}
+
+/// The minute tick re-reads the board alone, without invalidating every
+/// session; a notify invalidates them and re-reads the board without
+/// blanking it first, so the strip and the panel keep what they show.
+#[tokio::test]
+async fn the_board_stays_up_and_the_minute_tick_stays_quiet() {
+    let db = new_test_db().await;
+    let poster = create_test_user(&db.db, "cal_steady").await;
+    let svc = CalendarService::new(db.db.clone());
+    let post = svc
+        .store
+        .save(
+            poster.id,
+            CalendarSource::Board,
+            None,
+            &timed(Duration::minutes(30)),
+        )
+        .await
+        .unwrap()
+        .event;
+    let mut epoch = svc.subscribe();
+    let mut board = svc.board_live();
+    let (signals, worker_signals) = mpsc::unbounded_channel();
+    // The worker's first minute tick fires at once.
+    let worker = svc.start_notify_worker(worker_signals);
+    contains(&mut board, post.id, true).await;
+    assert!(
+        !epoch.has_changed().unwrap(),
+        "the minute's re-read invalidated every session"
+    );
+
+    signals
+        .send(Signal::Notify {
+            channel: Channel::CalendarChanged,
+            payload: String::new(),
+        })
+        .unwrap();
+    timeout(std::time::Duration::from_secs(10), epoch.changed())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        board.borrow().iter().any(|e| e.id == post.id),
+        "the board blanked while the notify re-read it"
+    );
+    worker.abort();
+}
+
 /// The two lines the board ships into #lounge: a post, as the poster's own
 /// line with the title made mention-safe, and the start, claimed by the
 /// sweeper once with the count.
@@ -197,7 +322,7 @@ async fn refusals_are_told_and_a_load_carries_the_viewers_side() {
             .await
             .unwrap()
             .unwrap(),
-        Reply::Saved(Err(message)) if message == "Title is required"
+        Reply::Saved(Err(SaveError::Other(message))) if message == "Title is required"
     ));
     svc.store
         .save(

@@ -3,11 +3,12 @@
 //! owns the tables and the rules underneath; `state.rs` only reads replies.
 //!
 //! Private data (a viewer's own events, who they said they are in for)
-//! returns on the requesting session's channel. The board's next 24 hours
-//! are one process-shared `watch` every session reads, re-read on
-//! `calendar_changed` and once a minute as the clock moves events into and
-//! out of the horizon. The start announcement is a sweeper on every replica
-//! claiming rows (`CalendarStore::claim_started`), so one replica posts each.
+//! returns on the requesting session's channel. The board's live posts are
+//! one process-shared `watch` every session reads, re-read on
+//! `calendar_changed` and once a minute as the clock moves posts into and
+//! out of the live window. The start announcement is a sweeper on every
+//! replica claiming rows (`CalendarStore::claim_started`), so one replica
+//! posts each.
 use crate::{
     app::activity::publisher::ActivityPublisher,
     metrics,
@@ -18,8 +19,8 @@ use chrono_tz::Tz;
 use late_core::{
     db::Db,
     models::calendar::{
-        CalendarError, CalendarEvent, CalendarRefusalKind, CalendarSource, CalendarStore,
-        EventDraft,
+        CalendarError, CalendarEvent, CalendarRefusal, CalendarRefusalKind, CalendarSource,
+        CalendarStore, EventDraft,
     },
 };
 use std::{
@@ -35,8 +36,9 @@ use uuid::Uuid;
 
 /// How often every replica looks for board events that just started.
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
-/// How often the shared board snapshot is re-read without a notify, so an
-/// event crossing into the 24 hour horizon shows up on the Live panel.
+/// How often the shared board snapshot is re-read without a notify, so a
+/// post crossing into or out of the live window shows on the strip and the
+/// Live panel. The re-read invalidates no session.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(60);
 
 /// A settled write, for the metric.
@@ -90,13 +92,22 @@ pub struct Snapshot {
     pub staff: bool,
 }
 
+/// A save that did not land, worded for the viewer. A conflict is the one
+/// the editor recovers from in place: a reload adopts the newer revision
+/// and keeps the draft.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SaveError {
+    Conflict(String),
+    Other(String),
+}
+
 #[derive(Debug)]
 pub enum Reply {
     Loaded {
         generation: u64,
         result: Result<Snapshot, String>,
     },
-    Saved(Result<CalendarEvent, String>),
+    Saved(Result<CalendarEvent, SaveError>),
     Deleted(Result<(), String>),
     Rsvp(Result<CalendarEvent, String>),
     Opened {
@@ -163,6 +174,11 @@ impl CalendarService {
     pub fn board_live(&self) -> watch::Receiver<Vec<CalendarEvent>> {
         self.board.subscribe()
     }
+    /// The replica's board worker. A notify, or the listener coming back
+    /// after missing some, bumps the epoch so every session drops what it
+    /// loaded and reads again. The minute tick only moves posts into and out
+    /// of the live window, so it re-reads the board alone. Either way the
+    /// board already published stays up until the fresh read replaces it.
     pub fn start_notify_worker(
         &self,
         mut signals: mpsc::UnboundedReceiver<Signal>,
@@ -176,16 +192,13 @@ impl CalendarService {
                         if signal.is_none() {
                             break;
                         }
-                        // A burst collapses into one read.
+                        // A burst collapses into one invalidation and one read.
                         while signals.try_recv().is_ok() {}
+                        let epoch = svc.epoch.fetch_add(1, Ordering::Relaxed) + 1;
+                        svc.changed.send_replace(epoch);
                     }
                     _ = minute.tick() => {}
                 }
-                // Publish the invalidation first: sessions erase what they
-                // hold before they read again, including after a reconnect.
-                let epoch = svc.epoch.fetch_add(1, Ordering::Relaxed) + 1;
-                svc.publish_board(Vec::new());
-                svc.changed.send_replace(epoch);
                 read_until_ok(Refresh::CalendarNotices, || async {
                     let events = svc.store.live_board(Utc::now()).await?;
                     svc.publish_board(events);
@@ -195,7 +208,7 @@ impl CalendarService {
             }
         })
     }
-    /// Hand every session on this replica the board's next 24 hours.
+    /// Hand every session on this replica the board's live posts.
     pub fn publish_board(&self, events: Vec<CalendarEvent>) {
         self.board.send_replace(events);
     }
@@ -273,6 +286,10 @@ impl CalendarService {
         tokio::spawn(
             async move {
                 let result = svc.store.save(viewer, source, existing, &draft).await;
+                let conflict = matches!(
+                    result,
+                    Err(CalendarError::Refused(CalendarRefusal::Revision))
+                );
                 let reply = match settle(CalendarOp::Save, result) {
                     Ok(saved) => {
                         let write = match (saved.created, source) {
@@ -294,7 +311,8 @@ impl CalendarService {
                         }
                         Ok(saved.event)
                     }
-                    Err(message) => Err(message),
+                    Err(message) if conflict => Err(SaveError::Conflict(message)),
+                    Err(message) => Err(SaveError::Other(message)),
                 };
                 let _ = tx.send(Reply::Saved(reply));
             }
