@@ -1453,6 +1453,9 @@ async fn shift_tab_cycles_screens_backwards() {
     wait_for_render_contains(&mut app, " Clubhouse ").await;
 
     app.handle_input(b"\x1b[Z");
+    wait_for_render_contains(&mut app, " Calendars ").await;
+
+    app.handle_input(b"\x1b[Z");
     wait_for_render_contains(&mut app, " Leaderboards ").await;
 
     app.handle_input(b"\x1b[Z");
@@ -1502,6 +1505,9 @@ async fn tab_cycles_screens_forward_through_all_including_profiles() {
 
     app.handle_input(b"\t");
     wait_for_render_contains(&mut app, " Leaderboards ").await;
+
+    app.handle_input(b"\t");
+    wait_for_render_contains(&mut app, " Calendars ").await;
 
     app.handle_input(b"\t");
     wait_for_render_contains(&mut app, " Clubhouse ").await;
@@ -3155,13 +3161,12 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
         .expect("join lounge room");
     let mut app = make_app(test_db.db.clone(), user.id, "rails-flow-it");
     wait_for_render_contains(&mut app, " Home ").await;
-    // Both rails up to start with: the room rail's footer hints and the
-    // sidebar's music panel are both on screen. (The sidebar's pinned presence
-    // row sits under the banner popup, so the panel header is the stable
-    // marker once a banner is showing.)
+    // Both rails up to start with: use footer hints to detect each rail.
+    // A banner covers the sidebar's presence rows and music panel heading,
+    // but leaves the music source shortcut visible below it.
     wait_for_render_contains(&mut app, "sort/fold").await;
     let frame = render_plain(&mut app);
-    assert!(frame.contains("music"), "sidebar missing; frame={frame:?}");
+    assert!(frame.contains("v+x"), "sidebar missing; frame={frame:?}");
 
     // First press hides the room rail, and says which scope it changed.
     app.handle_input(b"\\");
@@ -3171,7 +3176,7 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
         "expected a per-device banner; frame={frame:?}"
     );
     assert!(
-        !frame.contains("sort/fold"),
+        !frame.contains("sort/fold") && frame.contains("v+x"),
         "expected the room rail to be hidden; frame={frame:?}"
     );
 
@@ -3183,7 +3188,7 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
         "expected the auto step in the cycle; frame={frame:?}"
     );
     assert!(
-        frame.contains("sort/fold") && frame.contains("music"),
+        frame.contains("sort/fold") && frame.contains("v+x"),
         "a 100-column terminal should keep both rails on auto; frame={frame:?}"
     );
 
@@ -3192,13 +3197,13 @@ async fn backslash_cycles_rails_for_this_device_only_and_auto_follows_width() {
     app.resize(50, 32).expect("resize narrow");
     let frame = render_plain(&mut app);
     assert!(
-        !frame.contains("sort/fold") && !frame.contains("music"),
+        !frame.contains("sort/fold") && !frame.contains("v+x"),
         "auto should fold both rails on a narrow terminal; frame={frame:?}"
     );
     app.resize(100, 32).expect("resize wide");
     let frame = render_plain(&mut app);
     assert!(
-        frame.contains("sort/fold"),
+        frame.contains("sort/fold") && frame.contains("v+x"),
         "auto should restore the rails when the terminal grows; frame={frame:?}"
     );
 
@@ -6769,6 +6774,234 @@ async fn the_road_and_the_hand_fit_an_80_by_24_terminal() {
             "expected {needle:?} on an 80 by 24 scene; frame={frame:?}"
         );
     }
+}
+
+fn screen5_click(app: &mut crate::app::state::App, rect: ratatui::layout::Rect) {
+    app.handle_input(format!("\x1b[<0;{};{}M", rect.x + 1, rect.y + 1).as_bytes());
+}
+
+#[tokio::test]
+async fn profiles_mouse_scroll_and_click_preserve_routing_and_narrow_back() {
+    use crate::app::{
+        common::primitives::Screen,
+        directory::{
+            mouse::{Pane, Target},
+            state::Shelf,
+        },
+    };
+    use late_core::models::user::InteractionMode;
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-jobs").await;
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-jobs");
+    app.resize(120, 24).unwrap();
+    app.set_screen(Screen::Profiles);
+    app.directory_state.set_shelf(Shelf::Jobs);
+    app.jobs.loaded = true;
+    app.jobs.items = (0..20)
+        .map(|index| crate::app::jobs::state_test::posting(&format!("Company{index}"), &["rust"]))
+        .collect();
+    app.render().unwrap();
+    let row = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Job(_)))
+        .unwrap()
+        .0;
+    let wheel = format!("\x1b[<65;{};{}M", row.x + 1, row.y + 1);
+    app.interaction_mode = InteractionMode::Keyboard;
+    app.handle_input(wheel.as_bytes());
+    assert_eq!(app.jobs.mouse.offset(Pane::JobsList), 0);
+    app.interaction_mode = InteractionMode::Hybrid;
+    app.handle_input(wheel.as_bytes());
+    assert_eq!(app.jobs.mouse.offset(Pane::JobsList), 3);
+    assert_eq!(app.jobs.selected(), 0);
+    app.render().unwrap();
+    let (rect, target) = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Job(_)))
+        .unwrap();
+    let Target::Job(id) = target else {
+        unreachable!()
+    };
+    let expected = app.jobs.items.iter().position(|job| job.id == id).unwrap();
+    app.handle_input(
+        format!(
+            "\x1b[<2;{};{}M\x1b[<0;{};{}m",
+            rect.x + 1,
+            rect.y + 1,
+            rect.x + 1,
+            rect.y + 1
+        )
+        .as_bytes(),
+    );
+    assert_eq!(app.jobs.selected(), 0, "right press and release ignored");
+    screen5_click(&mut app, rect);
+    assert_eq!(app.jobs.selected(), expected);
+    app.render().unwrap();
+    let copy = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Copy(_)))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, copy);
+    assert_eq!(
+        app.pending_clipboard,
+        Some(app.jobs.items[expected].url.clone())
+    );
+    app.resize(60, 20).unwrap();
+    app.render().unwrap();
+    let back = app
+        .jobs
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Back)
+        .unwrap()
+        .0;
+    screen5_click(&mut app, back);
+    assert!(!app.jobs.detail_open());
+    app.render().unwrap();
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(
+        app.screen,
+        Screen::Dashboard,
+        "global frame remains clickable"
+    );
+}
+
+#[tokio::test]
+async fn profiles_mouse_editor_retains_the_draft_on_a_click_outside() {
+    use crate::app::{
+        common::primitives::Screen,
+        directory::editor::state::{Field, MouseTarget, Page},
+    };
+    use late_core::models::user::InteractionMode;
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-editor").await;
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-editor");
+    app.resize(100, 30).unwrap();
+    app.set_screen(Screen::Profiles);
+    app.handle_input(b"w");
+    app.render().unwrap();
+    let about = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Page(Page::About))
+        .unwrap()
+        .0;
+    app.interaction_mode = InteractionMode::Keyboard;
+    screen5_click(&mut app, about);
+    assert_eq!(app.directory_editor.page(), Page::Card);
+    app.interaction_mode = InteractionMode::Hybrid;
+    screen5_click(&mut app, about);
+    app.render().unwrap();
+    let bio = app
+        .directory_editor
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == MouseTarget::Field(Field::Bio))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, bio);
+    app.handle_input(b"draft bio");
+    app.render().unwrap();
+    screen5_click(&mut app, ratatui::layout::Rect::new(0, 0, 1, 1));
+    assert!(app.directory_editor.is_open());
+    assert_eq!(app.directory_editor.field_text(Field::Bio), "draft bio");
+}
+
+#[tokio::test]
+async fn profiles_mouse_search_selects_person_and_profile_popup_owns_input() {
+    use crate::app::{common::primitives::Screen, directory::mouse::Target};
+    use late_core::models::{
+        showcase::{Showcase, ShowcaseParams},
+        user::InteractionMode,
+    };
+    let db = new_test_db().await;
+    let user = create_test_user(&db.db, "profiles-mouse-search").await;
+    let author = create_test_user(&db.db, "profiles-mouse-author").await;
+    let url = "https://example.com/mouse/project?full=value";
+    let client = db.db.get().await.unwrap();
+    Showcase::create_by_user_id(
+        &client,
+        author.id,
+        ShowcaseParams {
+            user_id: author.id,
+            title: "Mouse project".to_string(),
+            url: url.to_string(),
+            description: "A shared project".to_string(),
+            tags: vec!["rust".to_string()],
+        },
+    )
+    .await
+    .unwrap();
+    drop(client);
+    let mut app = make_app(db.db.clone(), user.id, "profiles-mouse-search");
+    app.resize(80, 24).unwrap();
+    app.set_screen(Screen::Profiles);
+    wait_for_render_contains(&mut app, "@profiles-mouse-author").await;
+    app.interaction_mode = InteractionMode::Hybrid;
+    app.render().unwrap();
+    let search = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Key(b's'))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, search);
+    app.handle_input(b"profiles-mouse-author");
+    app.render().unwrap();
+    let person = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Person(author.id))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, person);
+    assert!(!app.directory_state.search_mode());
+    assert!(app.directory_state.detail_open());
+    app.render().unwrap();
+    let copy = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| *target == Target::Copy(url.to_string()))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, copy);
+    assert_eq!(app.pending_clipboard, Some(url.to_string()));
+    app.render().unwrap();
+    let profile = app
+        .directory_state
+        .mouse
+        .hits()
+        .into_iter()
+        .find(|(_, target)| matches!(target, Target::Profile(id, _) if *id == author.id))
+        .unwrap()
+        .0;
+    screen5_click(&mut app, profile);
+    assert!(app.show_profile_modal);
+    wait_for_render_contains(&mut app, "profile · profiles-mouse-author").await;
+    app.render().unwrap();
+    app.handle_input(b"\x1b[<0;15;1M");
+    assert_eq!(app.screen, Screen::Profiles, "popup blocks page switches");
+    assert!(!app.show_profile_modal, "outside click dismisses the popup");
 }
 
 /// On Zen too, any key after `s` is swallowed, whichever tile has the

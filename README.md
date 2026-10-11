@@ -21,6 +21,8 @@ Read the details in [LICENSE](LICENSE), the plain-English policy in [LICENSING.m
 ## What It Includes
 
 - SSH TUI with dashboard, chat, profile, news, and arcade screens
+- Mouse controls on Profiles (screen 5): click people, jobs, links, and form controls; wheel scrolls the hovered pane
+- The events board on `7`: anyone posts an event, everyone sees it, `i` says I'm in; your own events sit beside it, private. A post is a line in #lounge, the hour before a timed event it heads the Home `now` strip and the Live panel, an all-day event takes the #lounge topic row for its day, the start is a headline
 - Real-time global chat and shared activity feed
 - Audio streaming via Icecast/Liquidsoap, played by the paired CLI or the public `/listen` page
 - Terminal games including 2048, Sudoku, Nonograms, Minesweeper, and Solitaire
@@ -221,6 +223,15 @@ is admin-only. Each account has one staff mark per piece; marking again
 replaces its mark and tier.
 
 ## Verification
+
+For events-board development, run `make seed-calendar` after starting the
+current stack. Fixture accounts are two ordinary users, a moderator and an
+admin, with a board of posts between them (one on now, one half an hour out),
+a few "I'm in"s and a private event; SSH keys live in
+`tmp/calendar-seed-keys/`. Press `1` to see the `now` strip and the Live
+panel, `7` for the board: `n` posts, `i` says I'm in, right-click offers what
+you may do. See [CALENDAR.md](CALENDAR.md) for the rules, the two #lounge
+lines, timing, telemetry and the fixture.
 
 Run the local gate before opening a PR:
 
