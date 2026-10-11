@@ -142,8 +142,11 @@ impl ChatRoom {
         Ok(row.map(Self::from))
     }
 
+    /// Resolve within the requested visibility namespace, never falling back
+    /// between public (`#slug`) and private (`##slug`) IRC channels.
     pub async fn find_irc_channel_by_slug_for_user(
         client: &Client,
+        visibility: &str,
         slug: &str,
         user_id: Uuid,
     ) -> Result<Option<Self>> {
@@ -152,6 +155,7 @@ impl ChatRoom {
                 "SELECT r.*
                  FROM chat_rooms r
                  WHERE r.slug = $1
+                   AND r.visibility = $3
                    AND (r.kind IN ('lounge', 'language')
                         OR (r.kind = 'topic' AND r.visibility = 'public')
                         OR (r.kind = 'topic' AND r.visibility = 'private' AND EXISTS (
@@ -165,7 +169,7 @@ impl ChatRoom {
                     ELSE 4
                  END
                  LIMIT 1",
-                &[&slug, &user_id],
+                &[&slug, &user_id, &visibility],
             )
             .await?;
         Ok(row.map(Self::from))
@@ -730,6 +734,7 @@ impl ChatRoom {
 
     /// Rooms visible to the user as IRC channels: the lounge, language rooms,
     /// public topic rooms, plus private topic rooms the user is a member of.
+    /// Same-slug public/private rooms are distinct IRC channel names.
     /// See devdocs/FRD-IRCD.md §6.
     pub async fn list_irc_channels(client: &Client, user_id: Uuid) -> Result<Vec<Self>> {
         let rows = client
@@ -737,7 +742,7 @@ impl ChatRoom {
                 "WITH visible AS (
                     SELECT r.*,
                            ROW_NUMBER() OVER (
-                               PARTITION BY r.slug
+                               PARTITION BY r.visibility, r.slug
                                ORDER BY CASE
                                    WHEN r.kind = 'lounge' THEN 0
                                    WHEN r.kind = 'language' THEN 1
@@ -773,7 +778,7 @@ impl ChatRoom {
                 "WITH visible AS (
                     SELECT r.*,
                            ROW_NUMBER() OVER (
-                               PARTITION BY r.slug
+                               PARTITION BY r.visibility, r.slug
                                ORDER BY CASE
                                    WHEN r.kind = 'lounge' THEN 0
                                    WHEN r.kind = 'language' THEN 1

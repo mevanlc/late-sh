@@ -139,6 +139,79 @@ async fn test_chat_room_topic_slug_normalization() {
 }
 
 #[tokio::test]
+async fn irc_channel_namespaces_preserve_same_slug_rooms_and_private_membership() {
+    let test_db = test_db().await;
+    let client = test_db.db.get().await.expect("db client");
+    let member = create_test_user(&test_db.db, "irc_member").await;
+    let outsider = create_test_user(&test_db.db, "irc_outsider").await;
+    let private = ChatRoom::create_private_room(&client, "compel", member.id)
+        .await
+        .unwrap();
+    ChatRoomMember::join(&client, private.id, member.id)
+        .await
+        .unwrap();
+
+    // A single hash must not fall back to a private room, even for a member.
+    assert!(
+        ChatRoom::find_irc_channel_by_slug_for_user(&client, "public", "compel", member.id)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let public = ChatRoom::get_or_create_public_room(&client, "compel")
+        .await
+        .unwrap();
+
+    for user in [&member, &outsider] {
+        let found =
+            ChatRoom::find_irc_channel_by_slug_for_user(&client, "public", "compel", user.id)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(found.id, public.id);
+        let found_private =
+            ChatRoom::find_irc_channel_by_slug_for_user(&client, "private", "compel", user.id)
+                .await
+                .unwrap();
+        assert_eq!(
+            found_private.map(|room| room.id),
+            (user.id == member.id).then_some(private.id)
+        );
+
+        let rooms = ChatRoom::list_irc_channels(&client, user.id).await.unwrap();
+        let summaries = ChatRoom::list_irc_channel_summaries(&client, user.id)
+            .await
+            .unwrap();
+        for ids in [
+            rooms
+                .iter()
+                .filter(|room| room.slug.as_deref() == Some("compel"))
+                .map(|room| room.id)
+                .collect::<Vec<_>>(),
+            summaries
+                .iter()
+                .filter(|(room, _)| room.slug.as_deref() == Some("compel"))
+                .map(|(room, _)| room.id)
+                .collect::<Vec<_>>(),
+        ] {
+            assert!(ids.contains(&public.id));
+            assert_eq!(ids.contains(&private.id), user.id == member.id);
+            assert_eq!(ids.len(), if user.id == member.id { 2 } else { 1 });
+        }
+        if user.id == member.id {
+            assert_eq!(
+                summaries
+                    .iter()
+                    .find(|(room, _)| room.id == private.id)
+                    .unwrap()
+                    .1,
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_chat_room_dm() {
     let test_db = test_db().await;
     let client = test_db.db.get().await.expect("db client");
