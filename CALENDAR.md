@@ -18,16 +18,23 @@ control: `n New event`, `t Today`, `[ Previous`, `] Next`, `v Month` or
 when there is one.
 
 Month is six Monday-start weeks; a day's events preview in its cell with
-the count of who is in (`·6 in`), and on a wide terminal the selected day's
+the count of who is in first (`·6 Movie night`), and on a wide terminal the selected day's
 agenda sits beside the grid. List is the month in day order. Board posts
 read amber, your own events read green. The header says `loading` while a
 month is fetched. Short terminals get a compact grid
 with `2+12` counts.
 
-Keys: `n` new, `e` edit, `i` I'm in or I'm out, Delete (confirmation),
+A foot row says what the keys do to what is selected: with a day, how to
+move and open it; with an event, `i`, `e` and `d` as the rules allow.
+
+Landing on a day marks its first event with an amber dot; `j`/`k` move
+the dot along the day's events. Enter opens the marked event, or starts a
+new event on an empty day. There is no fill: the dot is the cursor.
+
+Keys: `n` new, `e` edit, `i` I'm in or I'm out, `d` delete (confirmation),
 `[`/`]` month, `t` today, `v` view, `b` board, `j`/`k` events, arrows days
-(List: events), Enter opens the selected event or the day's agenda,
-PageUp/PageDown scroll. A single click selects, a double click opens,
+(List: events), Enter opens the marked event or starts one on an empty
+day, PageUp/PageDown scroll. A single click selects, a double click opens,
 right-click offers Open, I'm in or out, Edit and Delete as the rules allow.
 
 Details show the title, the timing in your zone, who posted it and who is
@@ -70,8 +77,8 @@ touches nothing else; posts already up stay until deleted.
   start as a clock time in your zone: `event   21:00 Movie night ·6`. `s`
   plus the row's digit, or a click, opens it.
 - **An all-day event** takes the #lounge topic row for its day, in the
-  board's amber: `📅 today · Hackathon · Community call`, with `7 board`
-  where `/rules` sits. The `now` strip still wins its five minutes. The
+  board's amber: `📅 Hackathon · Community call`, with `7 for the board`
+  where `/rules` sits. It never says when: the row exists only on the day. The `now` strip still wins its five minutes. The
   Live panel and the strip never show an all-day event, and it gets no
   start headline: its start is midnight somewhere.
 - **The start** of a timed event is a headline that stays in #lounge

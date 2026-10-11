@@ -32,7 +32,9 @@ controls and the fixture are in root `CALENDAR.md`.
   fields.
 - `toolbar.rs`: the two header rows, every control a hit target.
 - `ui.rs`: the month grid (compact under 14 rows), the agenda, the list,
-  the details, delete and agenda modals, the context menu. Styles resolve
+  the foot's hints for the selection, the details and delete modals, the
+  context menu. The cursor is an amber dot (`marked_line`), never a fill;
+  modals keep the filled `selected_line` for their focused control. Styles resolve
   in the active theme at draw time; hits and scroll panes are recorded at
   draw and cleared on resize.
 - `input.rs`: page keys and clicks on screen 7, everything while a

@@ -142,14 +142,30 @@ async fn the_page_shows_the_board_and_the_viewers_own_events_together() {
     assert!(text.contains("Board shown"));
     assert!(text.contains("Movie night"));
     assert!(
-        text.contains("·6 in"),
-        "the count rides the preview: {text}"
+        text.contains("21:00 ·6 日"),
+        "the count leads the preview: {text}"
     );
     assert!(text.contains("Dentist"));
     assert!(text.contains("by mat"), "the agenda names the poster");
     assert!(text.contains("just you"), "and marks the viewer's own");
     assert!(action_area(&s, Action::EventAt(post.id, s.selected)).is_some());
     assert!(action_area(&s, Action::Event(mine.id)).is_some());
+    // The foot says what the rules allow on the marked event: in or out on
+    // another's post, edit and delete on the viewer's own; an empty day
+    // offers a new event.
+    s.select_date(s.selected + Duration::days(20));
+    let text = whole(&render(&s, 160, 36));
+    assert!(text.contains("Enter new event here"), "{text}");
+    s.select_event(post.id, None);
+    let text = whole(&render(&s, 160, 36));
+    assert!(
+        text.contains("i I'm in") && !text.contains("e edit"),
+        "{text}"
+    );
+    s.select_event(mine.id, None);
+    let text = whole(&render(&s, 160, 36));
+    assert!(text.contains("e edit · d delete"), "{text}");
+    s.select_event(post.id, None);
 
     s.show_board = false;
     let text = whole(&render(&s, 160, 36));
@@ -246,9 +262,11 @@ async fn context_menu_clamps_to_content_and_replaces_underlying_hits() {
 async fn compact_month_keeps_crowded_day_count_intact() {
     let mut s = state();
     s.events = (1..=12).map(|n| event(n, 9, true, 0)).collect();
+    // Sixteen rows less the header and the foot is under the compact
+    // grid's fourteen: one row per week, the count on the day's cell.
     let buffer = render(&s, 48, 16);
     let text = whole(&buffer);
-    assert!(text.contains("2 +12"), "{text}");
+    assert!(text.contains("2+12"), "{text}");
     assert!(action_area(&s, Action::Date(s.selected)).is_some());
 }
 
@@ -264,7 +282,10 @@ async fn the_list_groups_the_month_by_day() {
     assert!(text.contains("Friday, October 02, 2026"), "{text}");
     assert!(text.contains("09:00 Dentist"));
     assert!(text.contains("21:00"), "{text}");
-    assert!(text.contains("Movie night ·3 in"), "{text}");
+    assert!(
+        text.contains("21:00 ·3 日"),
+        "the count leads the title: {text}"
+    );
     assert!(text.contains("by mat"));
     assert!(action_area(&s, Action::Event(post.id)).is_some());
 }

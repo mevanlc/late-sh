@@ -129,7 +129,11 @@ async fn show_event_lands_on_its_day_with_details_open() {
     let mut s = CalendarState::new(service(), Uuid::now_v7());
     s.loading = false;
     s.selected = date("2026-10-02");
-    s.modal = Some(Modal::Agenda);
+    s.modal = Some(Modal::Delete(event(
+        8,
+        Utc.with_ymd_and_hms(2026, 10, 2, 20, 0, 0).unwrap(),
+        true,
+    )));
     let e = event(
         9,
         Utc.with_ymd_and_hms(2026, 11, 14, 20, 0, 0).unwrap(),

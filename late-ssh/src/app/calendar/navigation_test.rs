@@ -60,16 +60,21 @@ fn state() -> CalendarState {
     state
 }
 
+/// Landing on a day marks its first event, so Enter and the action keys
+/// have a target; an empty day has none.
 #[tokio::test]
-async fn date_selection_never_targets_an_event() {
+async fn landing_on_a_day_marks_its_first_event() {
     let mut s = state();
-    let e = event(1, 2, 9);
-    s.events.push(e.clone());
+    let later = event(1, 2, 21);
+    let first = event(2, 2, 9);
+    s.events = vec![later.clone(), first.clone()];
     assert!(s.selected_target_event().is_none());
-    assert!(s.select_event(e.id, None));
-    assert_eq!(s.selected_target_event().unwrap().id, e.id);
     s.select_date(date(2));
+    assert_eq!(s.selected_target_event().unwrap().id, first.id);
+    assert_eq!(s.selection, Selection::Event(first.id));
+    s.select_date(date(3));
     assert!(s.selected_target_event().is_none());
+    assert_eq!(s.selection, Selection::Date);
 }
 
 #[tokio::test]
@@ -114,12 +119,11 @@ async fn nested_modals_restore_each_browser_cursor_and_scroll() {
     s.events = (1..=8).map(|n| event(n, n as u32, 9)).collect();
     s.select_event(Uuid::from_u128(6), None);
     let page_scroll = s.scroll;
-    s.push_modal(Modal::Agenda);
-    s.select_event(Uuid::from_u128(6), None);
     s.push_modal(Modal::Details(s.events[5].clone()));
+    s.push_modal(Modal::Delete(s.events[5].clone()));
     s.scroll = 3;
     s.pop_modal();
-    assert!(matches!(s.modal, Some(Modal::Agenda)));
+    assert!(matches!(s.modal, Some(Modal::Details(_))));
     assert_eq!(s.selection, Selection::Event(Uuid::from_u128(6)));
     s.pop_modal();
     assert!(s.modal.is_none());
@@ -216,7 +220,7 @@ async fn context_menus_follow_the_three_rules() {
     s.open_context_menu(ClickTarget::Date(date(4)), (0, 0));
     assert_eq!(
         s.context_menu.as_ref().unwrap().items,
-        vec![MenuAction::Agenda, MenuAction::New]
+        vec![MenuAction::New]
     );
     assert_eq!(s.selected, date(4));
     assert!(s.modal_parents.is_empty(), "a menu is not a modal frame");

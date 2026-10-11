@@ -25,7 +25,6 @@ pub enum ClickTarget {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ClickSurface {
     Page,
-    Agenda,
     Details(Uuid),
     Other,
 }
@@ -41,7 +40,6 @@ pub struct ClickRecord {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
     Open,
-    Agenda,
     New,
     Edit,
     Delete,
@@ -53,7 +51,6 @@ impl MenuAction {
     pub fn label(self) -> &'static str {
         match self {
             Self::Open => "Open",
-            Self::Agenda => "Agenda",
             Self::New => "New event",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
@@ -108,7 +105,6 @@ impl CalendarState {
     pub fn register_click(&self, target: ClickTarget, now: Instant) -> bool {
         let surface = match &self.modal {
             None => ClickSurface::Page,
-            Some(Modal::Agenda) => ClickSurface::Agenda,
             Some(Modal::Details(e)) => ClickSurface::Details(e.id),
             _ => ClickSurface::Other,
         };
@@ -129,6 +125,8 @@ impl CalendarState {
         double
     }
 
+    /// Land on a day. Its first event is selected with it, marked, so Enter
+    /// opens it and `e`, `d`, `i` act on it; an empty day selects itself.
     pub fn select_date(&mut self, date: NaiveDate) {
         self.cancel_open();
         self.selected = date;
@@ -138,10 +136,13 @@ impl CalendarState {
         self.reveal_selected.set(true);
         self.reveal_event.set(false);
         self.context_menu = None;
+        if let Some(first) = self.day_events(date).first().map(|e| e.id) {
+            self.select_event(first, Some(date));
+        }
     }
 
-    /// The active target is exact. A selected date must never silently
-    /// resolve to the first event, especially for Edit and Delete.
+    /// The active target is exact: the marked event, never a silent fallback
+    /// to a day's first event, so Edit and Delete act on what is marked.
     pub fn selected_target_event(&self) -> Option<CalendarEvent> {
         let Selection::Event(id) = self.selection else {
             return None;
@@ -188,7 +189,7 @@ impl CalendarState {
     }
 
     fn selection_events(&self) -> Vec<CalendarEvent> {
-        if self.view == CalendarView::List && !matches!(self.modal, Some(Modal::Agenda)) {
+        if self.view == CalendarView::List {
             self.ordered_events().into_iter().cloned().collect()
         } else {
             self.day_events(self.selected)
@@ -209,10 +210,17 @@ impl CalendarState {
         {
             return;
         }
+        let events = self.selection_events();
         if !matches!(self.selection, Selection::Event(_)) {
+            // A day landed on before its month loaded: mark its first event
+            // now that it is here.
+            if let Some(first) = events.first() {
+                self.selection = Selection::Event(first.id);
+                self.event_index = 0;
+                self.reveal_event.set(true);
+            }
             return;
         }
-        let events = self.selection_events();
         if let Selection::Event(id) = self.selection
             && let Some(index) = events.iter().position(|e| e.id == id)
         {
@@ -262,7 +270,7 @@ impl CalendarState {
     }
 
     fn reveal_event_row(&mut self) {
-        let list = self.view == CalendarView::List && !matches!(self.modal, Some(Modal::Agenda));
+        let list = self.view == CalendarView::List;
         let rows = if list {
             self.list_rows.get()
         } else {
@@ -401,10 +409,7 @@ impl CalendarState {
             .modal_parents
             .iter()
             .rev()
-            .find(|frame| {
-                matches!(frame.modal, None | Some(Modal::Agenda))
-                    && frame.selection == Selection::Event(id)
-            })
+            .find(|frame| frame.modal.is_none() && frame.selection == Selection::Event(id))
             .and_then(|frame| frame.neighbor);
         self.events.retain(|e| e.id != id);
         self.rsvps.retain(|going| *going != id);
@@ -470,7 +475,7 @@ impl CalendarState {
             }
             ClickTarget::Date(date) => {
                 self.select_date(date);
-                vec![MenuAction::Agenda, MenuAction::New]
+                vec![MenuAction::New]
             }
         };
         self.context_menu = Some(ContextMenu {

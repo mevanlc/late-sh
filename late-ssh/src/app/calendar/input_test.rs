@@ -1,5 +1,5 @@
 use super::{
-    input::{act, escape, handle_menu, handle_modal, handle_mouse},
+    input::{act, escape, handle_key, handle_menu, handle_modal, handle_mouse},
     navigation::{ClickTarget, Selection},
     state::{Action, CalendarState, Hit, Modal},
     svc::CalendarService,
@@ -99,18 +99,29 @@ async fn rsvp_needs_a_board_event() {
     assert!(s.pending, "a board event sends the write");
 }
 
+/// Enter on an empty day starts a new event there; on a day with one it
+/// opens the marked event.
 #[tokio::test]
-async fn empty_agenda_new_and_cancel_return_to_agenda() {
+async fn enter_starts_a_new_event_on_an_empty_day_and_opens_the_marked_one() {
     let mut s = state();
-    let date = s.selected;
-    act(&mut s, Action::Agenda(date));
-    assert!(matches!(s.modal, Some(Modal::Agenda)));
-    handle_modal(&mut s, &ParsedInput::Byte(b'n'));
-    assert!(matches!(s.modal, Some(Modal::Editor(_))));
-    escape(&mut s);
-    assert!(matches!(s.modal, Some(Modal::Agenda)));
+    let day = s.selected;
+    let date = day + Duration::days(3);
+    s.select_date(date);
+    handle_key(&mut s, &ParsedInput::Byte(b'\r'));
+    let Some(Modal::Editor(e)) = &s.modal else {
+        panic!("no editor");
+    };
+    assert_eq!(e.text(2), date.to_string());
     escape(&mut s);
     assert!(s.modal.is_none());
+
+    s.events.push(event(true));
+    s.select_date(day);
+    assert_eq!(s.selection, Selection::Event(Uuid::from_u128(1)));
+    let opens = s.open_generation;
+    handle_key(&mut s, &ParsedInput::Byte(b'\r'));
+    assert_eq!(s.open_generation, opens + 2, "Enter asks for the event");
+    assert!(s.modal.is_none(), "the details land with the reply");
 }
 
 #[tokio::test]

@@ -119,7 +119,8 @@ pub(crate) fn panel_events(live: &[CalendarEvent], tz: Tz) -> Vec<PanelEvent> {
 }
 
 /// The #lounge topic row on a day the board has all-day posts:
-/// `📅 today · Hackathon · Community call`. `None` on any other day.
+/// `📅 Hackathon · Community call`. The row exists only on the day, so it
+/// never says when. `None` on any other day.
 pub(crate) fn day_text(live: &[CalendarEvent], now: DateTime<Utc>) -> Option<String> {
     let titles: Vec<&str> = live
         .iter()
@@ -129,7 +130,7 @@ pub(crate) fn day_text(live: &[CalendarEvent], now: DateTime<Utc>) -> Option<Str
     if titles.is_empty() {
         return None;
     }
-    Some(format!("\u{1F4C5} today · {}", titles.join(" · ")))
+    Some(format!("\u{1F4C5} {}", titles.join(" · ")))
 }
 
 /// `event mat · Movie night · in 58m`, after the rule label.

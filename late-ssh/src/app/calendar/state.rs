@@ -34,7 +34,6 @@ pub enum Action {
     Delete,
     Rsvp,
     Date(NaiveDate),
-    Agenda(NaiveDate),
     MenuChoice(usize),
     Event(Uuid),
     EventAt(Uuid, NaiveDate),
@@ -58,7 +57,6 @@ pub enum Modal {
     Details(CalendarEvent),
     Editor(Box<Editor>),
     Delete(CalendarEvent),
-    Agenda,
 }
 pub fn month_start(d: NaiveDate) -> NaiveDate {
     d.with_day(1).unwrap()

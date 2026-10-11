@@ -3132,7 +3132,7 @@ fn room_header_gives_the_topic_row_to_the_boards_day() {
                 super::RoomHeader {
                     stream: None,
                     voice: None,
-                    row: Some(super::TopicRow::BoardDay("today · Hackathon")),
+                    row: Some(super::TopicRow::BoardDay("Hackathon")),
                     closing_rule: true,
                 },
             )
@@ -3140,7 +3140,7 @@ fn room_header_gives_the_topic_row_to_the_boards_day() {
         .unwrap();
     assert_eq!(remaining.y, 2);
     let row = row_text(terminal.backend().buffer(), 0, 40);
-    assert_eq!(row, format!(" today · Hackathon{}7 board ", " ".repeat(14)));
+    assert_eq!(row, format!(" Hackathon{}7 for the board ", " ".repeat(14)));
 }
 
 fn live_stream(title: &str, watch_url: &str) -> crate::app::stream::registry::LiveStreamView {

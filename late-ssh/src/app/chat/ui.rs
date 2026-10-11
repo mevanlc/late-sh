@@ -5313,15 +5313,18 @@ fn draw_room_header(frame: &mut Frame, area: Rect, header: RoomHeader<'_>) -> Re
             )));
         }
         // The board's day reads in amber, the board's colour, with the
-        // board's key where `/rules` would be.
+        // board's key where `/rules` would be, in the strip's key style.
         Some(TopicRow::BoardDay(text)) => {
-            let hint = vec![Span::styled(
-                "7 board",
-                Style::default().fg(theme::TEXT_FAINT()),
-            )];
+            let hint = crate::app::live::ui::key_hint_spans(
+                width,
+                &[
+                    crate::app::live::ui::HintPart::Key("7"),
+                    crate::app::live::ui::HintPart::Text(" for the board"),
+                ],
+            );
             lines.push(padded(row_with_hint(
                 vec![Span::styled(
-                    truncate_cells(text, width.saturating_sub(9)),
+                    truncate_cells(text, width.saturating_sub(17)),
                     Style::default()
                         .fg(theme::AMBER())
                         .add_modifier(Modifier::BOLD),

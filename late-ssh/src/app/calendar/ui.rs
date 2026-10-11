@@ -155,6 +155,25 @@ fn selected_line(mut line: Line<'static>, selected: bool) -> Line<'static> {
         line
     }
 }
+/// The page's cursor: an amber dot before the line and no fill, so the
+/// grid stays quiet and the eye still finds what Enter opens. Modals keep
+/// the filled `selected_line` for their focused control.
+fn marked_line(mut line: Line<'static>, marked: bool) -> Line<'static> {
+    if marked {
+        line.spans.insert(0, Span::styled("● ", accent()));
+    }
+    line
+}
+/// A row in a column of rows (the agenda, the list): the dot's two cells
+/// are kept on every row, so the text never shifts as the mark moves.
+fn marked_row(mut line: Line<'static>, marked: bool) -> Line<'static> {
+    if marked {
+        line.spans.insert(0, Span::styled("● ", accent()));
+    } else {
+        line.spans.insert(0, Span::raw("  "));
+    }
+    line
+}
 
 /// Keep the selection marker and as much title as fits; indicate omitted text
 /// without slicing a wide or combining grapheme in half.
@@ -195,11 +214,7 @@ fn button_line(label: &str) -> Line<'static> {
     } else {
         Line::from(vec![Span::styled(
             format!(" {label}"),
-            if label == "Delete" {
-                key_style()
-            } else {
-                bright().add_modifier(Modifier::BOLD)
-            },
+            bright().add_modifier(Modifier::BOLD),
         )])
     };
     line.spans.push(Span::raw(" "));
@@ -269,10 +284,11 @@ pub(super) fn local_time_label(instant: DateTime<Utc>, tz: chrono_tz::Tz, date: 
     };
     local.format(format).to_string()
 }
-/// `·6 in` after a board event's title, nothing while nobody said so.
+/// `·6 ` before a board event's title, so a narrow cell clips the title
+/// and never the count; nothing while nobody said so.
 fn going_span(e: &CalendarEvent) -> Option<Span<'static>> {
     (e.is_board() && e.going > 0)
-        .then(|| Span::styled(format!(" ·{} in", e.going), base().fg(theme::AMBER_DIM())))
+        .then(|| Span::styled(format!("·{} ", e.going), base().fg(theme::AMBER_DIM())))
 }
 /// Who the event is from: the poster's name on the board, `you` on a
 /// personal event.
@@ -318,12 +334,9 @@ fn event_line(e: &CalendarEvent, tz: chrono_tz::Tz) -> Line<'static> {
         EventTiming::AllDay { .. } => "all day".into(),
         EventTiming::Timed { start, .. } => local_time_label(start, tz, false),
     };
-    let mut spans = vec![
-        Span::styled(time, muted()),
-        Span::raw(" "),
-        Span::styled(e.title.clone(), title_style(e)),
-    ];
+    let mut spans = vec![Span::styled(time, muted()), Span::raw(" ")];
     spans.extend(going_span(e));
+    spans.push(Span::styled(e.title.clone(), title_style(e)));
     Line::from(spans)
 }
 pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
@@ -336,11 +349,18 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
     }
     frame.render_widget(Paragraph::new("").style(base()), area);
     let header_height = super::toolbar::draw(frame, area, s);
+    // The foot says what the keys do to what is selected; a short terminal
+    // keeps the row for the grid.
+    let footer = (area.height >= 14).then(|| Rect::new(area.x, area.bottom() - 1, area.width, 1));
+    if let Some(footer) = footer {
+        styled_row(frame, footer, hint_line(&footer_hints(s)));
+    }
     let body = Rect::new(
         area.x,
         area.y + header_height,
         area.width,
-        area.height.saturating_sub(header_height),
+        area.height
+            .saturating_sub(header_height + u16::from(footer.is_some())),
     );
     match s.view {
         CalendarView::Month => {
@@ -362,6 +382,32 @@ pub fn draw(frame: &mut Frame, area: Rect, s: &CalendarState) {
         CalendarView::List => draw_list(frame, body, s),
     }
 }
+/// The foot's hints for what is selected: moving, opening, and on an
+/// event the actions the three rules give the viewer.
+fn footer_hints(s: &CalendarState) -> Vec<(&'static str, &'static str)> {
+    let moving: (&str, &str) = match s.view {
+        CalendarView::Month => ("arrows", "days"),
+        CalendarView::List => ("arrows", "events"),
+    };
+    match s.selected_event() {
+        None => vec![moving, ("Enter", "new event here")],
+        Some(e) => {
+            let access = event_access(&e, s.viewer, s.staff);
+            let mut hints = vec![moving, ("j/k", "events"), ("Enter", "open")];
+            if access.rsvp {
+                hints.push(("i", if s.going(e.id) { "I'm out" } else { "I'm in" }));
+            }
+            if access.edit {
+                hints.push(("e", "edit"));
+            }
+            if access.delete {
+                hints.push(("d", "delete"));
+            }
+            hints.push(("right-click", "menu"));
+            hints
+        }
+    }
+}
 #[allow(clippy::too_many_arguments)]
 fn grid_rule(
     frame: &mut Frame,
@@ -381,8 +427,8 @@ fn grid_rule(
 }
 fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
     if area.width < 15 || area.height < 9 {
-        styled_row(frame, area, hint_line(&[("Enter:", "selected-day agenda")]));
-        hit(s, area, Action::Agenda(s.selected));
+        styled_row(frame, area, hint_line(&[("v", "List")]));
+        hit(s, area, Action::View);
         return;
     }
     let available = area.width - 1;
@@ -412,7 +458,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 let count = s.day_events(date).len();
                 let rect = Rect::new(x + 1, area.y + 2 + week as u16, w - 1, 1);
                 let style = if date == s.selected {
-                    selection_style()
+                    bright().add_modifier(Modifier::BOLD)
                 } else if date == s.today() {
                     accent()
                 } else if date.month() != s.selected.month() {
@@ -428,7 +474,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 // Keep counts intact before spending the remaining cells on markers.
                 let spare =
                     usize::from(rect.width).saturating_sub(Line::from(label.as_str()).width());
-                let marker = if date == s.today() && spare > usize::from(date == s.selected) {
+                let marker = if date == s.today() && date != s.selected && spare > 0 {
                     "•"
                 } else {
                     ""
@@ -442,12 +488,11 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                         muted().add_modifier(Modifier::BOLD),
                     ));
                 }
-                let line = if date == s.selected && spare == 0 {
-                    patch_line(line, selection_style())
-                } else {
-                    selected_line(line, date == s.selected)
-                };
-                styled_row(frame, rect, line);
+                styled_row(
+                    frame,
+                    rect,
+                    marked_line(line, date == s.selected && spare > 0),
+                );
                 shade_today(frame, rect, date, s);
                 hit(s, rect, Action::Date(date));
                 x += w;
@@ -498,7 +543,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
             );
             if cell.height > 0 {
                 let style = if date == s.selected {
-                    selection_style()
+                    bright().add_modifier(Modifier::BOLD)
                 } else if date == today {
                     accent()
                 } else if date.month() != s.selected.month() {
@@ -508,7 +553,15 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 };
                 let capacity = cell.height.saturating_sub(1) as usize;
                 let mut date_label = Line::styled(
-                    format!("{}{}", if date == today { "•" } else { "" }, date.day()),
+                    format!(
+                        "{}{}",
+                        if date == today && date != s.selected {
+                            "• "
+                        } else {
+                            ""
+                        },
+                        date.day()
+                    ),
                     style,
                 );
                 if capacity == 0 && !events.is_empty() {
@@ -520,7 +573,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 styled_row(
                     frame,
                     Rect::new(cell.x, cell.y, cell.width, 1),
-                    selected_line(date_label, date == s.selected),
+                    marked_line(date_label, date == s.selected),
                 );
                 hit(s, cell, Action::Date(date));
                 let previews = if events.len() > capacity {
@@ -530,8 +583,8 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 };
                 for (n, e) in events.iter().take(previews).enumerate() {
                     let rect = Rect::new(cell.x, cell.y + 1 + n as u16, cell.width, 1);
-                    let mut spans = vec![Span::styled(e.title.clone(), title_style(e))];
-                    spans.extend(going_span(e));
+                    let mut spans: Vec<Span<'static>> = going_span(e).into_iter().collect();
+                    spans.push(Span::styled(e.title.clone(), title_style(e)));
                     styled_row(frame, rect, clipped_title(Line::from(spans), rect.width));
                     hit(s, rect, Action::EventAt(e.id, date));
                 }
@@ -543,7 +596,7 @@ fn draw_month(frame: &mut Frame, area: Rect, s: &CalendarState) {
                         format!("+{} more", events.len() - previews),
                         dim(),
                     );
-                    hit(s, rect, Action::Agenda(date));
+                    hit(s, rect, Action::Date(date));
                 }
                 shade_today(frame, cell, date, s);
             }
@@ -617,18 +670,14 @@ fn draw_agenda(frame: &mut Frame, area: Rect, s: &CalendarState) {
             styled_row(
                 frame,
                 Rect::new(inner.x, inner.y + y as u16, inner.width, 1),
-                selected_line(event_line(e, s.tz), selected),
+                marked_row(event_line(e, s.tz), selected),
             );
         }
         if y + 1 < inner.height as isize {
             styled_row(
                 frame,
                 Rect::new(inner.x, inner.y + (y + 1) as u16, inner.width, 1),
-                if selected {
-                    patch_line(timing_line(e, s.tz), selection_style())
-                } else {
-                    timing_line(e, s.tz)
-                },
+                marked_row(timing_line(e, s.tz), false),
             );
         }
         let top = y.max(0) as u16;
@@ -689,8 +738,8 @@ fn draw_list(frame: &mut Frame, area: Rect, s: &CalendarState) {
         styled_row(
             frame,
             rect,
-            selected_line(
-                clipped_title(text.clone(), rect.width),
+            marked_row(
+                clipped_title(text.clone(), rect.width.saturating_sub(2)),
                 event.is_some_and(|e| s.selection == Selection::Event(e.id)),
             ),
         );
@@ -763,7 +812,6 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
             Modal::Editor(_) => 30,
             Modal::Details(_) => 24,
             Modal::Delete(_) => 8,
-            Modal::Agenda => 20,
         },
     );
     frame.render_widget(Clear, rect);
@@ -773,7 +821,6 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
         Modal::Details(e) if e.is_board() => " On the board ",
         Modal::Details(_) => " Your event ",
         Modal::Delete(_) => " Delete event? ",
-        Modal::Agenda => " Selected-day agenda ",
     };
     let block = border(title)
         .title_style(accent())
@@ -912,7 +959,7 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
                     &mut x,
                     y,
                     inner.right(),
-                    "Delete",
+                    "d Delete",
                     Action::Delete,
                     false,
                 );
@@ -924,37 +971,6 @@ fn draw_modal_content(frame: &mut Frame, area: Rect, s: &CalendarState) {
                 y,
                 inner.right(),
                 "Close",
-                Action::Cancel,
-                false,
-            );
-        }
-        Modal::Agenda => {
-            let content = Rect::new(
-                inner.x,
-                inner.y,
-                inner.width,
-                inner.height.saturating_sub(2),
-            );
-            draw_agenda(frame, content, s);
-            let mut x = inner.x;
-            let y = inner.bottom() - 1;
-            button(
-                frame,
-                s,
-                &mut x,
-                y,
-                inner.right(),
-                "n New",
-                Action::New,
-                false,
-            );
-            button(
-                frame,
-                s,
-                &mut x,
-                y,
-                inner.right(),
-                "Close (Esc)",
                 Action::Cancel,
                 false,
             );

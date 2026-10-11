@@ -55,6 +55,11 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
     if let ParsedInput::Mouse(m) = event {
         return handle_mouse(s, m);
     }
+    handle_key(s, event)
+}
+
+/// A key on the page itself: no modal, no menu up.
+pub(super) fn handle_key(s: &mut CalendarState, event: &ParsedInput) -> bool {
     s.clear_click();
     let action = match key(event) {
         Some('j') => {
@@ -72,11 +77,9 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
         Some('t' | 'T') => Some(Action::Today),
         Some('n' | 'N') => Some(Action::New),
         Some('e') => Some(Action::Edit),
+        Some('d') => Some(Action::Delete),
         Some('i' | 'I') => Some(Action::Rsvp),
-        Some('\r') => Some(match s.selection {
-            Selection::Event(id) => Action::Event(id),
-            Selection::Date => Action::Agenda(s.selected),
-        }),
+        Some('\r') => Some(enter(s)),
         _ => None,
     };
     if let Some(action) = action {
@@ -121,6 +124,14 @@ pub fn handle_event(app: &mut App, event: &ParsedInput) -> bool {
     true
 }
 
+/// What Enter and a double click do: open the marked event, or on an empty
+/// day start a new one there.
+fn enter(s: &CalendarState) -> Action {
+    match s.selection {
+        Selection::Event(id) => Action::Event(id),
+        Selection::Date => Action::New,
+    }
+}
 pub(super) fn scroll(s: &mut CalendarState, pane: Pane, delta: i32) {
     s.clear_click();
     match pane {
@@ -193,7 +204,7 @@ pub(super) fn handle_mouse(s: &mut CalendarState, m: &MouseEvent) -> bool {
                         select_target(s, &target);
                         if double {
                             match target {
-                                ClickTarget::Date(date) => act(s, Action::Agenda(date)),
+                                ClickTarget::Date(_) => act(s, enter(s)),
                                 ClickTarget::Event(id) => act(s, Action::Event(id)),
                                 ClickTarget::EventAt(id, date) => act(s, Action::EventAt(id, date)),
                             }
@@ -363,13 +374,6 @@ pub fn act(s: &mut CalendarState, action: Action) {
             s.select_date(date);
             s.refresh();
         }
-        Action::Agenda(date) => {
-            if date != s.selected {
-                s.select_date(date);
-                s.refresh();
-            }
-            s.push_modal(Modal::Agenda);
-        }
         Action::EventAt(id, date) => {
             s.select_event(id, Some(date));
             s.clear_click();
@@ -453,10 +457,6 @@ pub fn act(s: &mut CalendarState, action: Action) {
                     ClickTarget::EventAt(id, date) => act(s, Action::EventAt(id, date)),
                     ClickTarget::Date(_) => {}
                 },
-                MenuAction::Agenda => match menu.target {
-                    ClickTarget::Date(date) => act(s, Action::Agenda(date)),
-                    ClickTarget::Event(_) | ClickTarget::EventAt(_, _) => {}
-                },
                 MenuAction::New => act(s, Action::New),
                 MenuAction::Edit => act(s, Action::Edit),
                 MenuAction::Delete => act(s, Action::Delete),
@@ -515,9 +515,9 @@ pub(super) fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
     match &s.modal {
         Some(Modal::Details(_)) => match event {
             ParsedInput::Byte(b'e') => act(s, Action::Edit),
+            ParsedInput::Byte(b'd') | ParsedInput::Delete => act(s, Action::Delete),
             ParsedInput::Byte(b'i' | b'I') => act(s, Action::Rsvp),
             ParsedInput::Byte(b'q') => escape(s),
-            ParsedInput::Delete => act(s, Action::Delete),
             ParsedInput::PageDown | ParsedInput::Arrow(b'B') => scroll(s, Pane::List, 3),
             ParsedInput::PageUp | ParsedInput::Arrow(b'A') => scroll(s, Pane::List, -3),
             _ => {}
@@ -525,22 +525,6 @@ pub(super) fn handle_modal(s: &mut CalendarState, event: &ParsedInput) {
         Some(Modal::Delete(_)) => match key(event) {
             Some('y') => s.confirm_delete(),
             Some('n') => escape(s),
-            _ => {}
-        },
-        Some(Modal::Agenda) => match event {
-            ParsedInput::Arrow(b'A') | ParsedInput::Byte(b'k') => s.move_selected_event(-1),
-            ParsedInput::Arrow(b'B') | ParsedInput::Byte(b'j') => s.move_selected_event(1),
-            ParsedInput::PageUp => scroll(s, Pane::Agenda, -5),
-            ParsedInput::PageDown => scroll(s, Pane::Agenda, 5),
-            ParsedInput::Byte(b'\r') => {
-                if let Some(e) = s.selected_event() {
-                    act(s, Action::Event(e.id));
-                }
-            }
-            ParsedInput::Byte(b'n') => act(s, Action::New),
-            ParsedInput::Byte(b'e') => act(s, Action::Edit),
-            ParsedInput::Byte(b'i' | b'I') => act(s, Action::Rsvp),
-            ParsedInput::Delete => act(s, Action::Delete),
             _ => {}
         },
         Some(Modal::Editor(_)) | None => {}

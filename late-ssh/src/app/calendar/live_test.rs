@@ -101,11 +101,11 @@ fn the_days_all_day_posts_make_the_topic_row() {
     ];
     assert_eq!(
         day_text(&live, now).as_deref(),
-        Some("\u{1F4C5} today · Hackathon · Community call")
+        Some("\u{1F4C5} Hackathon · Community call")
     );
     assert_eq!(
         day_text(&live, now + Duration::days(1)).as_deref(),
-        Some("\u{1F4C5} today · Tomorrow")
+        Some("\u{1F4C5} Tomorrow")
     );
     assert_eq!(day_text(&live[..1], now), None);
 }

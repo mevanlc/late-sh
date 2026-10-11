@@ -585,9 +585,9 @@ impl RightSidebarComponent {
     /// `from_key`; the pet panel came back under a new key so an old stored
     /// "pet" entry cannot switch it on.
     pub const ALL: [RightSidebarComponent; RIGHT_SIDEBAR_COMPONENT_COUNT] = [
+        Self::Music,
         Self::Daily,
         Self::Live,
-        Self::Music,
         Self::Spacer,
         Self::Bonsai,
         Self::Pet,

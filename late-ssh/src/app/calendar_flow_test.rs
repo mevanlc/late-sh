@@ -169,10 +169,9 @@ async fn staff_take_a_post_down_from_its_details() {
         !a.calendar.loading && a.calendar.events.iter().any(|e| e.id == post.id) && a.calendar.staff
     })
     .await;
+    // Landing on the day marks its post; Enter opens it.
     app.calendar.select_date(date);
     app.handle_input(b"\r");
-    assert!(matches!(app.calendar.modal, Some(Modal::Agenda)));
-    app.handle_input(b"j\r");
     wait_for_app(
         &mut app,
         "details",
@@ -188,7 +187,7 @@ async fn staff_take_a_post_down_from_its_details() {
         app.calendar.error.as_deref(),
         Some("This event is not yours to change")
     );
-    app.handle_input(b"\x1b[3~");
+    app.handle_input(b"d");
     assert!(matches!(app.calendar.modal, Some(Modal::Delete(_))));
     let rendered = render_plain(&mut app);
     assert!(
@@ -197,7 +196,7 @@ async fn staff_take_a_post_down_from_its_details() {
     );
     app.handle_input(b"y");
     wait_for_app(&mut app, "post deleted", |a| !a.calendar.pending).await;
-    assert!(matches!(app.calendar.modal, Some(Modal::Agenda)));
+    assert!(app.calendar.modal.is_none());
     assert_ne!(app.calendar.selection, Selection::Event(post.id));
     assert_eq!(app.calendar.selected, date);
 }
