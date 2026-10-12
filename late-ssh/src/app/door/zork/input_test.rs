@@ -52,7 +52,10 @@ async fn a_state_without_a_live_game_does_not_outlive_the_visit() {
     assert_eq!(app.screen, Screen::Zork);
     assert!(app.zork_state.is_some());
     app.set_screen(Screen::Games);
-    assert!(app.zork_state.is_none(), "idle menus must not survive leaving");
+    assert!(
+        app.zork_state.is_none(),
+        "idle menus must not survive leaving"
+    );
 
     launch(&mut app);
     app.zork_state
