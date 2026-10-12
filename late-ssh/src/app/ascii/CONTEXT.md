@@ -68,8 +68,8 @@ Two surfaces draw them, both through `ui::draw_piece`:
   chunk boundary cuts in two is held (`App::presence_held`) and read whole
   with the next chunk. `/brb` syncs away at once, so the screensaver is up
   on the frame after the Enter.
-  `late_ssh_screensavers_total{trigger=idle|brb,piece}` counts each one
-  put up (`App::sync_away`).
+  `late_ssh_screensavers_total{trigger=idle|brb,selection=fixed|random|randomer,piece}`
+  counts each one put up (`App::sync_away`), labelled with the piece drawn.
 
 ## 2. File map
 

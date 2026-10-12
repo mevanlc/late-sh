@@ -1,6 +1,8 @@
 //! Keys on the picker, and its two doors: `open` from the focused Zen ascii
 //! tile, `pick` hands the piece under the cursor to that tile.
 
+use std::time::Instant;
+
 use super::state::{PiecePickerState, Target};
 use crate::app::input::{MouseButton, MouseEventKind, ParsedInput};
 use crate::app::state::App;
@@ -19,7 +21,10 @@ pub(crate) fn open(app: &mut App) {
 fn pick(app: &mut App) {
     let piece = app.piece_picker.selected();
     app.piece_picker.close();
-    if app.zen.set_focused_selection(piece) {
+    if app
+        .zen
+        .set_focused_selection(piece, Instant::now(), &mut rand::thread_rng())
+    {
         app.mark_zen_layout_dirty();
     }
 }

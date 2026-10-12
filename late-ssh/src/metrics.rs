@@ -532,7 +532,7 @@ pub enum VizWireBands {
 mod inner {
     use std::sync::{Arc, OnceLock};
 
-    use late_core::models::user::AsciiPiece;
+    use late_core::models::user::{AsciiPiece, AsciiSelection};
 
     use opentelemetry::{
         KeyValue, global,
@@ -2052,20 +2052,32 @@ mod inner {
         METRIC.get_or_init(|| {
             meter()
                 .u64_counter("late_ssh_screensavers_total")
-                .with_description("Away screensavers put up, by what put them up and the piece")
+                .with_description(
+                    "Away screensavers put up, by what put them up, the selection mode and the piece",
+                )
                 .build()
         })
     }
 
-    pub fn record_screensaver(trigger: ScreensaverTrigger, piece: AsciiPiece) {
+    pub fn record_screensaver(
+        trigger: ScreensaverTrigger,
+        selection: AsciiSelection,
+        piece: AsciiPiece,
+    ) {
         let trigger = match trigger {
             ScreensaverTrigger::Idle => "idle",
             ScreensaverTrigger::Brb => "brb",
+        };
+        let selection = match selection {
+            AsciiSelection::Piece(_) => "fixed",
+            AsciiSelection::Random => "random",
+            AsciiSelection::Randomer => "randomer",
         };
         screensavers_total().add(
             1,
             &[
                 KeyValue::new("trigger", trigger),
+                KeyValue::new("selection", selection),
                 KeyValue::new("piece", piece.as_str()),
             ],
         );
@@ -3057,7 +3069,7 @@ mod inner {
 
 #[cfg(not(feature = "otel"))]
 mod inner {
-    use late_core::models::user::AsciiPiece;
+    use late_core::models::user::{AsciiPiece, AsciiSelection};
 
     use super::ScreensaverTrigger;
     use super::ShareCardKind;
@@ -3123,7 +3135,12 @@ mod inner {
     }
     pub fn record_attention(_screen: Screen, _place: Place, _presence: Presence, _seconds: f64) {}
     pub fn record_place_visit(_screen: Screen, _place: Place) {}
-    pub fn record_screensaver(_trigger: ScreensaverTrigger, _piece: AsciiPiece) {}
+    pub fn record_screensaver(
+        _trigger: ScreensaverTrigger,
+        _selection: AsciiSelection,
+        _piece: AsciiPiece,
+    ) {
+    }
     pub fn record_share_card(_kind: ShareCardKind) {}
     pub fn record_sliding_puzzle_art(_load: SlidingPuzzleArtLoad) {}
     pub fn record_daily_win_payout(_payout: DailyWinPayout) {}

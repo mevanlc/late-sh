@@ -719,20 +719,10 @@ impl ZenState {
         self.rice.root.selection_at(self.focus)
     }
 
-    /// Read the resolved piece without generating randomness during rendering
-    /// or wake scheduling. Fixed selections need no runtime state.
+    /// The piece the tile at `ordinal` shows, when it is an ascii tile.
     pub fn piece_at(&self, ordinal: usize) -> Option<AsciiPiece> {
         let selection = self.rice.root.selection_at(ordinal)?;
-        match selection {
-            AsciiSelection::Piece(piece) => Some(piece),
-            AsciiSelection::Random | AsciiSelection::Randomer => self
-                .playback
-                .get(ordinal)
-                .copied()
-                .flatten()
-                .filter(|state| state.selection() == selection)
-                .map(Playback::piece),
-        }
+        Playback::resolve(self.playback.get(ordinal).copied().flatten(), selection)
     }
 
     pub fn focused_piece(&self) -> Option<AsciiPiece> {
@@ -760,21 +750,28 @@ impl ZenState {
         }
     }
 
-    pub fn set_focused_selection(&mut self, selection: AsciiSelection) -> bool {
+    /// Give the focused ascii tile `selection`, a random one drawn before the
+    /// next frame; `false` when it already plays it or is not an ascii tile.
+    pub fn set_focused_selection(
+        &mut self,
+        selection: AsciiSelection,
+        now: Instant,
+        rng: &mut impl Rng,
+    ) -> bool {
         if self.focused_selection() == Some(selection)
             || !self.rice.root.set_selection(self.focus, selection)
         {
             return false;
         }
-        self.sync_playback(Instant::now(), &mut rand::thread_rng());
+        self.sync_playback(now, rng);
         true
     }
 
-    pub fn cycle_focused_piece(&mut self, forward: bool) -> bool {
+    pub fn cycle_focused_piece(&mut self, forward: bool, now: Instant, rng: &mut impl Rng) -> bool {
         let Some(selection) = self.focused_selection() else {
             return false;
         };
-        self.set_focused_selection(selection.cycle(forward))
+        self.set_focused_selection(selection.cycle(forward), now, rng)
     }
 
     /// The page opening: the first time this session, the focus moves to
@@ -942,8 +939,9 @@ impl ZenState {
             return KindPick::Unchanged;
         }
         if self.rice.root.set_kind(self.focus, kind) {
+            // A tile that becomes ascii plays the fixed default (`set_kind`
+            // forgets the piece), which needs no draw.
             self.playback[self.focus] = None;
-            self.sync_playback(Instant::now(), &mut rand::thread_rng());
             KindPick::Changed
         } else {
             KindPick::Unchanged
@@ -983,8 +981,8 @@ impl ZenState {
     /// chat keys work at once, as on the first opening.
     pub fn reset(&mut self) {
         self.rice = RiceLayout::default();
+        // Default leaves carry no random selection, so nothing needs a draw.
         self.playback = vec![None; self.leaf_count()];
-        self.sync_playback(Instant::now(), &mut rand::thread_rng());
         self.zoomed = false;
         self.focus = self.first_tile_of(TileKind::Chat).unwrap_or(0);
     }

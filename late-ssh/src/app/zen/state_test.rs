@@ -322,6 +322,10 @@ fn a_placed_tile_shows_whatever_the_zoom_but_only_draws_while_on_show() {
 #[test]
 fn an_ascii_tile_keeps_its_piece_until_it_changes_kind() {
     use late_core::models::user::{AsciiPiece, AsciiSelection, Scene, SceneStyle, Screensaver};
+    use rand::{SeedableRng, rngs::StdRng};
+    use std::time::Instant;
+    let now = Instant::now();
+    let mut rng = StdRng::seed_from_u64(3);
     let earthrise = AsciiPiece {
         scene: Scene::Earthrise,
         style: SceneStyle::Dots,
@@ -340,7 +344,7 @@ fn an_ascii_tile_keeps_its_piece_until_it_changes_kind() {
         Screensaver::On(AsciiSelection::Piece(earthrise)),
         "the tile and the screensaver default to one piece"
     );
-    assert!(zen.cycle_focused_piece(true));
+    assert!(zen.cycle_focused_piece(true, now, &mut rng));
     assert_eq!(
         zen.focused_piece(),
         Some(AsciiPiece {
@@ -351,7 +355,7 @@ fn an_ascii_tile_keeps_its_piece_until_it_changes_kind() {
     // Back past earthrise and the random modes, off the front of the list
     // onto its end.
     for _ in 0..4 {
-        assert!(zen.cycle_focused_piece(false));
+        assert!(zen.cycle_focused_piece(false, now, &mut rng));
     }
     assert_eq!(zen.focused_piece(), Some(dawn), "it wraps");
 
@@ -370,9 +374,9 @@ fn an_ascii_tile_keeps_its_piece_until_it_changes_kind() {
         scene: Scene::AuroraFjord,
         style: SceneStyle::Dots,
     };
-    assert!(zen.set_focused_selection(AsciiSelection::Piece(aurora)));
+    assert!(zen.set_focused_selection(AsciiSelection::Piece(aurora), now, &mut rng));
     assert_eq!(zen.focused_piece(), Some(aurora));
-    assert!(zen.set_focused_selection(AsciiSelection::Piece(dawn)));
+    assert!(zen.set_focused_selection(AsciiSelection::Piece(dawn), now, &mut rng));
 
     assert!(zen.split_focused(true));
     assert_eq!(
@@ -381,7 +385,7 @@ fn an_ascii_tile_keeps_its_piece_until_it_changes_kind() {
     );
     assert_eq!(zen.rice.root.selection_at(1), None, "the new tile is blank");
     assert!(
-        !zen.cycle_focused_piece(true),
+        !zen.cycle_focused_piece(true, now, &mut rng),
         "`[ ]` on a blank tile is nothing"
     );
 
@@ -489,7 +493,11 @@ fn random_tiles_keep_runtime_separate_from_the_saved_layout() {
     assert_eq!(zen.drawn_pieces(), vec![zen.piece_at(0).unwrap()]);
     let rotated = zen.playback.clone();
     zen.focus = 1;
-    assert!(!zen.set_focused_selection(AsciiSelection::Randomer));
+    assert!(!zen.set_focused_selection(
+        AsciiSelection::Randomer,
+        now + Duration::from_secs(300),
+        &mut rng
+    ));
     assert_eq!(zen.playback, rotated, "reselecting preserves playback");
     assert_eq!(
         zen.rice.root.selection_at(1),

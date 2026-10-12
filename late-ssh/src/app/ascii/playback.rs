@@ -24,6 +24,18 @@ impl Playback {
         self.selection
     }
 
+    /// The piece a view shows for `selection`, without generating randomness,
+    /// so rendering and wake scheduling can read it. A fixed piece needs no
+    /// playback; a random one shows only once its own draw is in the slot.
+    pub(crate) fn resolve(slot: Option<Self>, selection: AsciiSelection) -> Option<AsciiPiece> {
+        match selection {
+            AsciiSelection::Piece(piece) => Some(piece),
+            AsciiSelection::Random | AsciiSelection::Randomer => slot
+                .filter(|state| state.selection == selection)
+                .map(Self::piece),
+        }
+    }
+
     /// Reconcile a view's selection and advance its clock. Reapplying the same
     /// selection preserves the instance. Returns whether its display changed.
     pub(crate) fn sync(

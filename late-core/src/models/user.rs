@@ -334,18 +334,6 @@ impl AsciiPiece {
     pub fn label(self) -> String {
         format!("{} · {}", self.scene.label(), self.style.label())
     }
-
-    pub fn cycle(self, forward: bool) -> Self {
-        let at = Self::ALL
-            .iter()
-            .position(|piece| *piece == self)
-            .expect("every piece is in ALL");
-        let len = Self::ALL.len();
-        match forward {
-            true => Self::ALL[(at + 1) % len],
-            false => Self::ALL[(at + len - 1) % len],
-        }
-    }
 }
 
 impl Serialize for AsciiPiece {

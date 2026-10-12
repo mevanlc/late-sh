@@ -174,3 +174,25 @@ fn views_started_at_different_times_have_independent_rotation_deadlines() {
     ));
     assert_eq!(first, first_rotated);
 }
+
+#[test]
+fn resolve_reads_a_fixed_piece_directly_and_a_random_one_only_from_its_own_draw() {
+    let now = Instant::now();
+    let mut rng = StdRng::seed_from_u64(31);
+    let dawn = AsciiSelection::Piece(AsciiPiece::ALL[AsciiPiece::ALL.len() - 1]);
+    assert_eq!(
+        Playback::resolve(None, dawn),
+        Some(AsciiPiece::ALL[AsciiPiece::ALL.len() - 1]),
+        "a fixed piece needs no playback"
+    );
+    assert_eq!(Playback::resolve(None, AsciiSelection::Random), None);
+    let mut slot = None;
+    Playback::sync(&mut slot, Some(AsciiSelection::Random), now, &mut rng);
+    let drawn = slot.unwrap().piece();
+    assert_eq!(Playback::resolve(slot, AsciiSelection::Random), Some(drawn));
+    assert_eq!(
+        Playback::resolve(slot, AsciiSelection::Randomer),
+        None,
+        "another mode's draw is never shown"
+    );
+}

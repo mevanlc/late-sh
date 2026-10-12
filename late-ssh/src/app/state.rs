@@ -1090,12 +1090,12 @@ impl App {
                 away,
             );
         }
-        if let Some(piece) = self.screensaver() {
+        if let Some(playback) = self.screensaver_playback {
             let trigger = match self.sent_away {
                 true => crate::metrics::ScreensaverTrigger::Brb,
                 false => crate::metrics::ScreensaverTrigger::Idle,
             };
-            crate::metrics::record_screensaver(trigger, piece);
+            crate::metrics::record_screensaver(trigger, playback.selection(), playback.piece());
         }
         true
     }
@@ -1108,14 +1108,7 @@ impl App {
             return None;
         }
         let selection = self.profile_state.profile().screensaver.selection()?;
-        match selection {
-            late_core::models::user::AsciiSelection::Piece(piece) => Some(piece),
-            late_core::models::user::AsciiSelection::Random
-            | late_core::models::user::AsciiSelection::Randomer => self
-                .screensaver_playback
-                .filter(|state| state.selection() == selection)
-                .map(super::ascii::playback::Playback::piece),
-        }
+        super::ascii::playback::Playback::resolve(self.screensaver_playback, selection)
     }
 
     pub(crate) fn sync_screensaver(&mut self, now: Instant, rng: &mut impl rand::Rng) -> bool {
