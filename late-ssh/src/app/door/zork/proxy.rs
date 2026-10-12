@@ -67,7 +67,7 @@ async fn connect(cfg: &Connection) -> Result<client::Handle<AcceptHost>> {
     let auth = session
         .authenticate_publickey(&session_label(cfg.user_id), key)
         .await?;
-    anyhow::ensure!(auth.success(), "Zork host rejected credentials");
+    anyhow::ensure!(auth.success(), "zork host rejected credentials");
     Ok(session)
 }
 /// Metadata travels on its own request, never through the terminal parser.
@@ -81,7 +81,7 @@ pub async fn catalogue(cfg: Connection) -> Result<Catalogue> {
         while let Some(msg) = channel.wait().await {
             match msg {
                 ChannelMsg::Data { data } => {
-                    anyhow::ensure!(bytes.len() + data.len() <= 8192, "Zork catalogue too large");
+                    anyhow::ensure!(bytes.len() + data.len() <= 8192, "zork catalogue too large");
                     bytes.extend_from_slice(&data);
                 }
                 ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
@@ -92,7 +92,7 @@ pub async fn catalogue(cfg: Connection) -> Result<Catalogue> {
         let _ = session
             .disconnect(Disconnect::ByApplication, "", "en")
             .await;
-        anyhow::ensure!(code == Some(0), "Zork catalogue unavailable");
+        anyhow::ensure!(code == Some(0), "zork catalogue unavailable");
         let catalogue: Catalogue = serde_json::from_slice(&bytes)?;
         anyhow::ensure!(
             catalogue.editions.len() == 3
@@ -102,12 +102,12 @@ pub async fn catalogue(cfg: Connection) -> Result<Catalogue> {
                     .filter(|s| s.edition == *edition)
                     .count()
                     == 1),
-            "Invalid Zork catalogue"
+            "invalid zork catalogue"
         );
         Ok(catalogue)
     })
     .await
-    .context("Zork catalogue timed out")?
+    .context("zork catalogue timed out")?
 }
 enum Command {
     Input(Vec<u8>),
@@ -154,7 +154,7 @@ impl Process {
             )
             .await
             {
-                tracing::warn!(?error, "Zork proxy ended with error");
+                tracing::warn!(?error, "zork proxy ended with error");
                 let mut outcome = task_outcome.lock().expect("outcome mutex");
                 match outcome.ending {
                     // An exit status that already arrived still decides it.
@@ -221,7 +221,7 @@ async fn run(
         Ok::<_, anyhow::Error>((session, channel))
     })
     .await
-    .context("Zork launch timed out")??;
+    .context("zork launch timed out")??;
     *status.lock().expect("status mutex") = ProxyStatus::Running;
     loop {
         tokio::select! {

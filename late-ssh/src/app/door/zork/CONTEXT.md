@@ -36,7 +36,10 @@ Changing editions or choosing manual/new waits for the old child's successful
 checkpoint exit before starting the next. Twenty minutes without forwarded
 gameplay input closes the proxy, including while detached. Continue then loads
 the last completed automatic checkpoint. Menu navigation, mouse noise, and
-metadata requests do not reset the gameplay timer.
+metadata requests do not reset the gameplay timer. Client state without a live
+game does not outlive the visit: leaving the menus drops it (`App::leave_zork`),
+and `App::tick` reaps a detached game that ended off-screen, so each visit
+starts from a fresh menu.
 
 ## Module map
 
@@ -124,7 +127,8 @@ launcher fixes volume ownership and uses `runuser` to execute the host as `late`
 Frotz refuses root, so both development gameplay and the production runtime must
 keep the host/interpreter under that unprivileged user.
 
-Rollout order, first production deploy:
+Rollout order, first production deploy (temporary: delete this list once
+`late-zork` is live in production):
 
 1. Publish the pinned `door-zork:2.56pre-r1` asset with the door workflow's
    Zork dispatch.
@@ -179,13 +183,15 @@ make check
 The interpreter suite uses real curses PTYs under tmux, on macOS and non-root
 Linux. Rust tests cover authentication, isolation/leases, failed spawns,
 disconnect cleanup, catalogue traffic, menu defaults, switches, timers, input
-fragmentation, and client errors. The opt-in runtime script creates and removes
-its own container/volume, exercises I → II → III → I with all six slots, then
-SIGTERMs/restarts the host with a live game and verifies persistent continuation.
-The local SSH TTY review exercised real gameplay, SAVE/RESTORE/QUIT, arrow editing,
-Ctrl+S routing, and backtick detach/resume at 140×40 and 80×24. Native menus and
-gameplay were raster-reviewed with GitHub Light and GitHub Dark; captures use the
-matching canvas because tmux's cell capture omits OSC 11 background changes.
-Default game foregrounds inherit `theme::TEXT()`, while explicit colors and
-reverse/bold/underline remain intact. Repeat the TTY review when changing this
-rendering/input boundary.
+fragmentation, client errors, and the client dropping an idle or ended state.
+The opt-in runtime script creates and removes its own container/volume,
+exercises I → II → III → I with all six slots, then SIGTERMs/restarts the host
+with a live game and verifies persistent continuation.
+
+The rendering/input boundary has no automated check: a change there needs a
+manual SSH TTY pass covering gameplay, SAVE/RESTORE/QUIT, arrow editing, Ctrl+S
+routing, and backtick detach/resume at 140×40 and 80×24, plus the native menus
+and gameplay under both GitHub Light and GitHub Dark (capture with the matching
+canvas: tmux's cell capture omits OSC 11 background changes). Default game
+foregrounds inherit `theme::TEXT()`; explicit colors and reverse/bold/underline
+pass through intact.

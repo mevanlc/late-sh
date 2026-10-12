@@ -90,7 +90,7 @@ impl PtyHost {
             let code = match result {
                 Ok(code) => code,
                 Err(e) => {
-                    tracing::warn!(error = ?e, "Zork host bridge ended with error");
+                    tracing::warn!(error = ?e, "zork host bridge ended with error");
                     let _ = cleanup
                         .extended_data(
                             channel,
@@ -254,7 +254,7 @@ async fn run_bridge(
     let status = match tokio::time::timeout(HANGUP_SAVE_GRACE, child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
-            tracing::warn!(account = %cfg.account, "Zork exit grace elapsed; killing child");
+            tracing::warn!(account = %cfg.account, "zork exit grace elapsed; killing child");
             child.kill().await?;
             child.wait().await?
         }

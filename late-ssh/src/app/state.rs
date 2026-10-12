@@ -2364,6 +2364,13 @@ impl App {
             ));
         }
     }
+
+    pub(crate) fn leave_zork(&mut self) {
+        // Dropping the State drops the proxy; the host then SIGHUP-saves a
+        // live child so Continue resumes it next launch.
+        self.zork_state = None;
+    }
+
     pub(crate) fn enter_codekeep(&mut self) {
         if self.codekeep_state.is_some() {
             return;
@@ -2625,6 +2632,14 @@ impl App {
                 .is_some_and(|state| state.is_running())
         {
             self.leave_brogue();
+        }
+        if self.screen == Screen::Zork
+            && !self
+                .zork_state
+                .as_ref()
+                .is_some_and(|state| state.is_running())
+        {
+            self.leave_zork();
         }
         if self.screen == Screen::Usurper {
             self.leave_usurper();

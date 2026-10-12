@@ -703,6 +703,17 @@ impl App {
         if let Some(state) = self.zork_state.as_mut() {
             changed |= state.tick();
         }
+        // Same reap as the roguelikes: a detached Zork game that ended
+        // (quit, crash, idle shutdown) leaves only its menus behind.
+        if self.screen != Screen::Zork
+            && self
+                .zork_state
+                .as_ref()
+                .is_some_and(|state| !state.is_running())
+        {
+            self.leave_zork();
+            changed = true;
+        }
         if let Some(state) = self.codekeep_state.as_mut() {
             state.tick();
         }

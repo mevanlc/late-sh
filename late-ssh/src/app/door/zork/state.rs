@@ -182,7 +182,7 @@ impl State {
                 }
                 error => {
                     metrics::record_zork_catalogue_read(ZorkCatalogueRead::Failed);
-                    tracing::warn!(?error, "Zork save catalogue unavailable");
+                    tracing::warn!(?error, "zork save catalogue unavailable");
                     self.catalogue = None;
                     self.message = "Unable to read saves. Press r to retry.".into();
                 }
@@ -369,6 +369,13 @@ impl State {
     pub fn forward_input(&mut self, data: &[u8]) {
         let bytes = self.input.feed(data);
         self.send_game_input(bytes);
+    }
+    /// Test-only: fabricate a live game around a proxy pointed at a dead
+    /// address, so detach and reap paths can be exercised without a host.
+    /// Needs a Tokio runtime (the proxy spawns its bridge task).
+    #[cfg(test)]
+    pub fn force_running_for_test(&mut self) {
+        self.start(Edition::Zork1, Action::New);
     }
     fn send_game_input(&mut self, bytes: Vec<u8>) {
         if let Some(proxy) = &self.proxy {

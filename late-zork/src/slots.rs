@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use tokio::process::Command;
 
 use crate::protocol::{Catalogue, Edition, EditionSlots, Slot};
@@ -16,17 +17,21 @@ pub(crate) async fn list(
     account: &str,
     active: Option<Edition>,
 ) -> Catalogue {
-    let mut editions = Vec::with_capacity(3);
-    for edition in Edition::ALL {
+    // All six inspections run at once: each is a bounded interpreter run
+    // (up to two seconds), and the client's catalogue budget is fifteen.
+    let editions = join_all(Edition::ALL.into_iter().map(|edition| async move {
         let home = directory(data_dir, account, edition);
-        let autosave = inspect(bin, story_dir, &home, edition, false).await;
-        let manual = inspect(bin, story_dir, &home, edition, true).await;
-        editions.push(EditionSlots {
+        let (autosave, manual) = tokio::join!(
+            inspect(bin, story_dir, &home, edition, false),
+            inspect(bin, story_dir, &home, edition, true),
+        );
+        EditionSlots {
             edition,
             autosave,
             manual,
-        });
-    }
+        }
+    }))
+    .await;
     Catalogue { editions, active }
 }
 
