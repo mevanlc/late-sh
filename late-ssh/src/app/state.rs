@@ -147,6 +147,12 @@ const CURSOR_SHAPE_STEADY_BLOCK: &[u8] = b"\x1b[2 q";
 const CURSOR_SHAPE_DEFAULT: &[u8] = b"\x1b[0 q";
 const CURSOR_SHAPE_STEADY_UNDERLINE: &[u8] = b"\x1b[4 q";
 
+/// Backtick, the workspace-cycle key, matched as a whole input chunk (like
+/// the doors' F1 remap): inside a running roguelike or Zork game it detaches
+/// instead of reaching the game. DCSS's own ` (repeat previous command) is the
+/// accepted casualty.
+pub(crate) const DOOR_DETACH_KEY: &[u8] = b"`";
+
 /// Name the window we're borrowing. `CSI 22;2t` pushes the title the user
 /// already had onto the terminal's own stack first, so [`POP_WINDOW_TITLE`]
 /// can hand it back on the way out: an `ssh late.sh` in one tab of ten should
@@ -353,6 +359,10 @@ pub struct SessionConfig {
     pub codekeep_host: String,
     pub codekeep_port: u16,
     pub codekeep_secret: String,
+    pub zork_enabled: bool,
+    pub zork_host: String,
+    pub zork_port: u16,
+    pub zork_secret: String,
     pub session_token: String,
     pub session_registry: Option<SessionRegistry>,
     pub paired_client_registry: Option<PairedClientRegistry>,
@@ -917,6 +927,12 @@ pub struct App {
     pub(crate) codekeep_host: String,
     pub(crate) codekeep_port: u16,
     pub(crate) codekeep_secret: String,
+    pub(crate) zork_state: Option<crate::app::door::zork::state::State>,
+    pub(crate) zork_term: String,
+    pub(crate) zork_enabled: bool,
+    pub(crate) zork_host: String,
+    pub(crate) zork_port: u16,
+    pub(crate) zork_secret: String,
     /// Render-loop wakeup, set by the active transport. Threaded into the rebels
     /// proxy so new remote output repaints promptly. `None` in headless/test
     /// paths (no render loop).
@@ -1864,6 +1880,12 @@ impl App {
             codekeep_host: config.codekeep_host,
             codekeep_port: config.codekeep_port,
             codekeep_secret: config.codekeep_secret,
+            zork_state: None,
+            zork_term: config.term.clone(),
+            zork_enabled: config.zork_enabled,
+            zork_host: config.zork_host,
+            zork_port: config.zork_port,
+            zork_secret: config.zork_secret,
             repaint_signal: None,
             lobby: crate::app::lobby::state::LobbyState::new(&daily),
             daily,
@@ -2347,6 +2369,28 @@ impl App {
         self.bashquest_state = None;
     }
 
+    pub(crate) fn enter_zork(&mut self) {
+        if self.zork_state.is_none() {
+            self.zork_state = Some(crate::app::door::zork::state::State::new(
+                crate::app::door::zork::state::StateConfig {
+                    user_id: self.user_id,
+                    host: self.zork_host.clone(),
+                    port: self.zork_port,
+                    secret: self.zork_secret.clone(),
+                    term: self.zork_term.clone(),
+                    enabled: self.zork_enabled,
+                    repaint: self.repaint_signal.clone(),
+                },
+            ));
+        }
+    }
+
+    pub(crate) fn leave_zork(&mut self) {
+        // Dropping the State drops the proxy; the host then SIGHUP-saves a
+        // live child so Continue resumes it next launch.
+        self.zork_state = None;
+    }
+
     pub(crate) fn enter_codekeep(&mut self) {
         if self.codekeep_state.is_some() {
             return;
@@ -2532,6 +2576,9 @@ impl App {
             if screen == Screen::Bashquest {
                 self.enter_bashquest();
             }
+            if screen == Screen::Zork {
+                self.enter_zork();
+            }
             if screen == Screen::Codekeep {
                 self.enter_codekeep();
             }
@@ -2605,6 +2652,14 @@ impl App {
                 .is_some_and(|state| state.is_running())
         {
             self.leave_brogue();
+        }
+        if self.screen == Screen::Zork
+            && !self
+                .zork_state
+                .as_ref()
+                .is_some_and(|state| state.is_running())
+        {
+            self.leave_zork();
         }
         if self.screen == Screen::Usurper {
             self.leave_usurper();
@@ -2722,6 +2777,9 @@ impl App {
         }
         if self.screen == Screen::Bashquest {
             self.enter_bashquest();
+        }
+        if self.screen == Screen::Zork {
+            self.enter_zork();
         }
         if self.screen == Screen::Codekeep {
             self.enter_codekeep();
@@ -2944,11 +3002,6 @@ impl App {
         if self.haunt.breakthrough_playing() {
             return;
         }
-        /// Backtick, the workspace-cycle key, matched as a whole input chunk
-        /// (like the doors' F1 remap): inside a running roguelike it detaches
-        /// instead of reaching the game. DCSS's own ` (repeat previous
-        /// command) is the accepted casualty.
-        const DOOR_DETACH_KEY: &[u8] = b"`";
         // While the proxied rebels game is running, every byte (keys + mouse)
         // goes straight to the remote; late.sh parses nothing. Exit is by
         // quitting rebels itself (Esc/Ctrl-C), which closes the channel.
@@ -3094,6 +3147,11 @@ impl App {
             && let Some(state) = self.bashquest_state.as_ref()
             && state.in_exit_grace()
         {
+            return;
+        }
+        // Zork: a visible game takes every byte, ` detaching it; the menus
+        // fall through to the parsed-key path (`door/zork/input.rs`).
+        if self.screen == Screen::Zork && crate::app::door::zork::input::handle_raw(self, data) {
             return;
         }
         // CodeKeep is another network PTY door. Ink owns every key while the

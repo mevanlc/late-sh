@@ -326,6 +326,16 @@ a version bump is a reviewed diff.
 | `S3_ENDPOINT`          | S3 endpoint URL (DB backups; the files endpoint is a prod-profile literal) |
 | `DB_BACKUPS_BUCKET`    | Bucket for CloudNativePG backups                                           |
 
+## Infrastructure Checks
+
+PRs touching `infra/` run `terraform fmt -check -recursive` and
+`terraform validate`, initialized with `terraform init -backend=false -input=false`
+so validation needs no cluster or state credentials. For same-repository PRs the
+`terraform_plan` workflow also plans against live production state and rejects
+planned destroys. It runs on PRs only, with no manual trigger. Fork PRs skip the
+live plan because GitHub withholds environment secrets; to plan a fork's infra
+change, push its branch to this repository and open the PR from there.
+
 ## Production Considerations
 
 - Increase CloudNativePG instances from 2 to 3
