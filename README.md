@@ -36,6 +36,13 @@ shows both when you belong to the private room; `/join ##name` opens that
 private room using your existing late.sh membership. Create private rooms
 and invite members from the TUI. IRC JOIN only opens existing rooms.
 
+IRC clients with `draft/chathistory` can retrieve joined-channel and existing
+DM history, including missed conversations through `CHATHISTORY TARGETS`.
+Requests support message IDs and timestamps, up to 300 stored messages per
+page. Clients with `batch` and `server-time` that do not request
+`draft/chathistory` receive the latest 25 messages after joining a channel.
+Private membership and room bans apply to history as well as live chat.
+
 ## Workspace
 
 The Rust workspace contains the main apps and standalone door hosts:
@@ -164,6 +171,19 @@ open `/paper` in the TUI. This replaces today's Reading and Outside sections
 with clearly marked sample text and enables the paper. Use
 `make seed-paper PAPER_PARAGRAPHS=5` for a shorter edition (default: 100;
 range: 1–1000). Close and reopen `/paper` after reseeding; no restart is needed.
+
+To test IRC history in Halloy, run `make seed-irc-history USERNAME=yourname`
+with your local TUI username. It adds 400 numbered messages to `#history-lab`,
+80 to `##history-lab`, two 80-message DM conversations with `history_ada` and
+`history^lin`, and 40 messages to `#lounge`. Samples include Unicode, replies,
+long and multiline bodies, and equal timestamps. Rerunning restores these
+fixture messages and preserves other chat and existing read markers.
+
+Connect Halloy to localhost port 6667 without TLS, using an IRC token from the
+local app's Settings. Reconnect after seeding, join `#history-lab` and
+`##history-lab`, and scroll upward to request older pages. Open the two peer
+queries to check DM history. These SQL fixtures populate stored history; they
+do not send live events. No server restart is needed after seeding.
 
 To test the Artboard gallery, run `make seed-artboard` after the current stack
 has applied its migrations. It creates 11 test accounts and 12 distinguishable,

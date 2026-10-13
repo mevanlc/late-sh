@@ -847,6 +847,10 @@ fn irc_help_lines() -> Vec<String> {
         "  Nick changes from IRC are refused; change your username in late.sh settings.",
         "  Long late.sh messages may appear as multiple IRC PRIVMSG lines.",
         "  Edited messages arrive with an [edit] prefix.",
+        "  Clients with draft/chathistory can fetch joined-channel and existing DM history, up to 300 messages per request.",
+        "  CHATHISTORY TARGETS discovers missed DMs and history in channels joined on this connection.",
+        "  Clients with batch + server-time but without draft/chathistory receive 25 recent messages on channel join.",
+        "  History follows private membership and bans; replay shows the latest stored version of edited messages.",
         "  Presence is bridged: TUI and IRC users both count as online.",
     ]
     .into_iter()
