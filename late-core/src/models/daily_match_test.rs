@@ -130,4 +130,76 @@ async fn open_challenges_list_newest_first() {
         .map(|challenge| challenge.id)
         .collect();
     assert_eq!(listed, vec![posted[2].id, posted[1].id, posted[0].id]);
+    let lobby: Vec<_> = DailyMatch::list_lobby(&client)
+        .await
+        .expect("list lobby")
+        .into_iter()
+        .map(|challenge| challenge.id)
+        .collect();
+    assert_eq!(lobby, listed);
+}
+
+#[tokio::test]
+async fn lobby_preserves_active_and_result_order_and_excludes_seen_old_and_cancelled() {
+    use crate::models::daily_match::DailyMatch;
+    use crate::test_utils::{create_test_user, test_db};
+
+    let test_db = test_db().await;
+    let challenger = create_test_user(&test_db.db, "daily-lobby-challenger").await;
+    let opponent = create_test_user(&test_db.db, "daily-lobby-opponent").await;
+    let client = test_db.db.get().await.expect("db client");
+    let rows = client
+        .query(
+            "INSERT INTO daily_matches (game_kind, status, challenger_id, opponent_id,
+                                        turn_deadline_at, updated,
+                                        challenger_result_seen_at, opponent_result_seen_at)
+             SELECT 'chess', status, $1, $2,
+                    CASE WHEN hours IS NULL THEN NULL ELSE now() + make_interval(hours => hours) END,
+                    now() - make_interval(days => days),
+                    CASE WHEN seen THEN now() END, CASE WHEN seen THEN now() END
+             FROM (VALUES ('active', 2, 0, false),
+                          ('active', 1, 0, false),
+                          ('active', NULL, 0, false),
+                          ('finished', NULL, 2, false),
+                          ('finished', NULL, 1, false),
+                          ('finished', NULL, 0, true),
+                          ('finished', NULL, 31, false),
+                          ('cancelled', NULL, 0, false)) AS fixtures(status, hours, days, seen)
+             RETURNING id",
+            &[&challenger.id, &opponent.id],
+        )
+        .await
+        .expect("lobby fixtures");
+    let ids: Vec<uuid::Uuid> = rows.iter().map(|row| row.get("id")).collect();
+    let lobby = DailyMatch::list_lobby(&client).await.expect("list lobby");
+    let active: Vec<_> = lobby
+        .iter()
+        .filter(|row| row.status == DailyMatch::STATUS_ACTIVE)
+        .map(|row| row.id)
+        .collect();
+    let finished: Vec<_> = lobby
+        .iter()
+        .filter(|row| row.status == DailyMatch::STATUS_FINISHED)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(active, vec![ids[1], ids[0], ids[2]]);
+    assert_eq!(finished, vec![ids[4], ids[3]]);
+    assert_eq!(lobby.len(), active.len() + finished.len());
+
+    // Seeing only one player's result must not hide it from the other player.
+    client
+        .execute(
+            "UPDATE daily_matches SET opponent_result_seen_at = NULL WHERE id = $1",
+            &[&ids[5]],
+        )
+        .await
+        .expect("one player has not seen the result");
+    let finished: Vec<_> = DailyMatch::list_lobby(&client)
+        .await
+        .expect("list lobby with one unseen result")
+        .into_iter()
+        .filter(|row| row.status == DailyMatch::STATUS_FINISHED)
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(finished, vec![ids[5], ids[4], ids[3]]);
 }

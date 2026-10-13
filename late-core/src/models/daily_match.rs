@@ -387,6 +387,30 @@ impl DailyMatch {
         Ok(rows.into_iter().map(Self::from).collect())
     }
 
+    /// Read the lobby in one statement so a concurrent claim or finish cannot
+    /// put a match in two lists, or make it disappear between status reads.
+    /// Each status retains its own list's ordering.
+    pub async fn list_lobby(client: &Client) -> Result<Vec<Self>> {
+        let rows = client
+            .query(
+                "SELECT * FROM daily_matches
+                 WHERE status IN ('open', 'active')
+                    OR (status = 'finished'
+                        AND (challenger_result_seen_at IS NULL
+                             OR (opponent_id IS NOT NULL AND opponent_result_seen_at IS NULL))
+                        AND updated > current_timestamp - INTERVAL '30 days')
+                 ORDER BY status,
+                          CASE WHEN status = 'open' THEN created END DESC,
+                          CASE WHEN status = 'active' THEN turn_deadline_at END ASC NULLS LAST,
+                          CASE WHEN status = 'finished' THEN updated END DESC,
+                          CASE WHEN status = 'open' THEN id END DESC,
+                          id ASC",
+                &[],
+            )
+            .await?;
+        Ok(rows.into_iter().map(Self::from).collect())
+    }
+
     /// Every open challenge, newest first: the lobby lists what just went up
     /// at the top.
     pub async fn list_open(client: &Client) -> Result<Vec<Self>> {
