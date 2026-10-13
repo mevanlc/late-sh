@@ -981,6 +981,16 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     }
 
     if app.artboard_disclaimer_visible() {
+        // Page shortcuts leave without granting consent or entering the board.
+        let byte = match event {
+            ParsedInput::Byte(byte) => Some(byte),
+            ParsedInput::Char(ch) if ch.is_ascii() => Some(ch as u8),
+            _ => None,
+        };
+        if byte.is_some_and(|byte| handle_numbered_page_switch(app, byte)) {
+            app.chat.clear_message_selection();
+            return;
+        }
         // Quit stays global on the prompt, as it is on the page behind it.
         if matches!(
             event,
@@ -4119,6 +4129,22 @@ fn handle_voice_global_chord(app: &mut App, ctx: InputContext, event: &ParsedInp
     true
 }
 
+fn handle_numbered_page_switch(app: &mut App, byte: u8) -> bool {
+    let screen = match byte {
+        b'1' => Screen::Dashboard,
+        b'2' => Screen::Arcade,
+        b'3' => Screen::Games,
+        b'4' => Screen::Artboard,
+        b'5' => Screen::Profiles,
+        b'6' => Screen::Leaderboard,
+        b'7' => Screen::Calendars,
+        _ => return false,
+    };
+    reset_composers_for_page_change(app);
+    app.set_screen(screen);
+    true
+}
+
 fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
     let artboard_blocks_page_switch = artboard_blocks_global_page_switch(app, ctx.screen);
 
@@ -4342,41 +4368,7 @@ fn handle_global_key(app: &mut App, ctx: InputContext, byte: u8) -> bool {
         {
             crate::app::live::input::reply_from_key(app)
         }
-        b'1' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Dashboard);
-            true
-        }
-        b'2' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Arcade);
-            true
-        }
-        b'3' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Games);
-            true
-        }
-        b'4' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Artboard);
-            true
-        }
-        b'5' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Profiles);
-            true
-        }
-        b'6' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Leaderboard);
-            true
-        }
-        b'7' if !artboard_blocks_page_switch => {
-            reset_composers_for_page_change(app);
-            app.set_screen(Screen::Calendars);
-            true
-        }
+        b'1'..=b'7' if !artboard_blocks_page_switch => handle_numbered_page_switch(app, byte),
         // `0` is the clubhouse. Pressed again on the clubhouse it goes
         // down to the undercity (deadchannel's street), runners only;
         // from the undercity it comes back up.

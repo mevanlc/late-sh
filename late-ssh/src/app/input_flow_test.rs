@@ -20,7 +20,7 @@ async fn artboard_disclaimer_hides_content_and_only_allows_the_current_visit() {
     assert!(!frame.contains("GALLERY"));
     assert!(!frame.contains("Mode       view"));
     assert!(!frame.contains("rail j/k"));
-    app.handle_input(b"i\r \t5?");
+    app.handle_input(b"i\r \t?");
     app.handle_input(b"\x1b[200~private drawing\x1b[201~");
     app.handle_input(b"\x1b[<0;15;1M");
     assert_eq!(app.screen, Screen::Artboard);
@@ -32,6 +32,8 @@ async fn artboard_disclaimer_hides_content_and_only_allows_the_current_visit() {
     app.handle_input(b"q");
     assert!(app.show_quit_confirm);
     assert!(!app.artboard_content_accepted);
+    app.handle_input(b"5");
+    assert_eq!(app.screen, Screen::Artboard, "quit dialog keeps priority");
     app.handle_input(b"\x1b");
     wait_for_esc_effect(&mut app, |app| !app.show_quit_confirm, "quit confirm").await;
     assert!(app.artboard_disclaimer_visible());
@@ -74,6 +76,45 @@ async fn artboard_disclaimer_hides_content_and_only_allows_the_current_visit() {
         "art disclaimer",
     )
     .await;
+}
+
+#[tokio::test]
+async fn artboard_disclaimer_allows_numbered_page_shortcuts_without_consent() {
+    use crate::app::common::primitives::Screen;
+
+    let test_db = new_test_db().await;
+    let user = create_test_user(&test_db.db, "art-pages-it").await;
+    let mut app = make_app(test_db.db.clone(), user.id, "art-pages-flow-it");
+    app.handle_input(b"4");
+    wait_for_render_contains(&mut app, "Artboard may contain NSFW content").await;
+
+    app.handle_input(b"4");
+    assert!(app.artboard_disclaimer_visible());
+    assert!(!app.artboard_content_accepted);
+    assert!(app.dartboard_state.is_none());
+
+    for (key, screen) in [
+        (b'1', Screen::Dashboard),
+        (b'2', Screen::Arcade),
+        (b'3', Screen::Games),
+        (b'5', Screen::Profiles),
+        (b'6', Screen::Leaderboard),
+        (b'7', Screen::Calendars),
+    ] {
+        app.handle_input(&[key]);
+        assert_eq!(app.screen, screen, "shortcut {}", key as char);
+        assert!(!app.artboard_content_accepted);
+        assert!(app.dartboard_state.is_none());
+        assert!(app.profile_state.profile().artboard_disclaimer);
+
+        app.handle_input(b"4");
+        assert!(app.artboard_disclaimer_visible());
+        assert!(app.dartboard_state.is_none());
+    }
+
+    let client = test_db.db.get().await.unwrap();
+    let stored = User::get(&client, user.id).await.unwrap().unwrap();
+    assert_eq!(stored.settings, user.settings);
 }
 
 #[tokio::test]

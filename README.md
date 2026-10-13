@@ -186,6 +186,8 @@ Artboard opens behind a content disclaimer because the art may be NSFW.
 Press `V` (**View**) for this visit, `A` (**Always View**) to turn off future
 reminders, or `B` (**Back to Chat**) to return to Home (screen `1`). The default-on **Artboard
 content disclaimer** toggle in Settings → Tweaks can turn reminders off or on.
+The page shortcuts `1`, `2`, `3`, `5`, `6`, and `7` also work from the disclaimer;
+leaving this way keeps the reminder enabled for the next visit.
 The same toggle gates the login splash: only with it off does the day's
 gallery piece replace the coffee cup, so newcomers always see the cup.
 During the newcomer tour the dialog does not appear: the tour box at the
