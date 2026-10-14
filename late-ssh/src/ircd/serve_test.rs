@@ -1884,12 +1884,9 @@ async fn history_private_namespace_revocation_and_targets_are_authorized() {
             .iter()
             .any(|line| line.contains("TARGETS ##shared "))
     );
-    db.execute(
-        "DELETE FROM chat_room_members WHERE room_id = $1 AND user_id = $2",
-        &[&private.id, &member.id],
-    )
-    .await
-    .unwrap();
+    ChatRoomMember::leave(&db, private.id, member.id)
+        .await
+        .unwrap();
     client
         .write_line("CHATHISTORY LATEST ##shared * 10")
         .await

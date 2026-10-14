@@ -67,7 +67,7 @@ async fn irc_history_paginates_ties_ranges_and_around_without_skips() {
         joined_channels: &joined,
         ignored_authors: &[],
     };
-    let ids = |page: super::irc_history::Page<super::irc_history::HistoryMessage>| {
+    let ids = |page: super::irc_history::Page<super::chat_message::IrcHistoryMessage>| {
         page.items
             .into_iter()
             .map(|m| m.message.id)
@@ -252,11 +252,7 @@ async fn irc_history_checks_access_and_anchor_scope_on_every_read() {
             .id,
         pub_msg.id
     );
-    client
-        .execute(
-            "DELETE FROM chat_room_members WHERE room_id = $1 AND user_id = $2",
-            &[&private.id, &user.id],
-        )
+    ChatRoomMember::leave(&client, private.id, user.id)
         .await
         .unwrap();
     assert!(matches!(
@@ -428,11 +424,7 @@ async fn irc_history_filters_before_limit_and_discovers_existing_dms() {
         .unwrap()
         .get(0);
     assert!(last_read.is_none());
-    client
-        .execute(
-            "DELETE FROM chat_room_members WHERE room_id = $1 AND user_id = $2",
-            &[&dm.id, &user.id],
-        )
+    ChatRoomMember::leave(&client, dm.id, user.id)
         .await
         .unwrap();
     assert!(matches!(

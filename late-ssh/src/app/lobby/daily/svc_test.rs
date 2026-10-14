@@ -166,17 +166,26 @@ async fn snapshots_keep_each_match_in_one_list_while_another_replica_finishes_th
     .expect("chess state");
     // Many distinct matches make a stream of real active -> finished commits,
     // without reverting finished rows or relying on sleeps between reads.
-    let rows = client
-        .query(
-            "INSERT INTO daily_matches (game_kind, status, challenger_id, opponent_id,
-                                        turn_user_id, turn_deadline_at, state)
-             SELECT 'chess', 'active', $1, $2, $1, now() + interval '24 hours', $3
-             FROM generate_series(1, 64) RETURNING id",
-            &[&challenger.id, &opponent.id, &state],
+    // Built through the model; the per-player entry cap lives in the service.
+    let deadline = chrono::Utc::now() + chrono::Duration::hours(24);
+    let mut ids = HashSet::new();
+    for _ in 0..64 {
+        let challenge = DailyMatch::create_challenge(&client, "chess", challenger.id)
+            .await
+            .expect("create challenge");
+        DailyMatch::claim(
+            &client,
+            challenge.id,
+            opponent.id,
+            challenger.id,
+            deadline,
+            &state,
         )
         .await
-        .expect("active matches");
-    let ids: HashSet<Uuid> = rows.iter().map(|row| row.get("id")).collect();
+        .expect("claim")
+        .expect("challenge was open");
+        ids.insert(challenge.id);
+    }
     let svc = daily_service(&test_db);
     let mut listener = crate::pg_listener::PgListener::new();
     let worker = svc.start_notify_worker(listener.subscribe(DailyService::CHANNELS));

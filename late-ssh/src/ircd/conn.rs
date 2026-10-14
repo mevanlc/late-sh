@@ -17,10 +17,10 @@ use irc_proto::{
 use late_core::{
     MutexRecover,
     models::{
-        chat_message::ChatMessage,
+        chat_message::{ChatMessage, IrcHistoryMessage},
         chat_room::ChatRoom,
         chat_room_member::ChatRoomMember,
-        irc_history::{HistoryMessage, HistoryReader, Page, ReadError, Selection},
+        irc_history::{HistoryReader, Page, ReadError, Selection},
         room_ban::RoomBan,
         user::User,
     },
@@ -43,6 +43,7 @@ use super::{
 use crate::{
     app::chat::svc::{ChatEvent, ChatReactionAction, ChatReactionDelta},
     authz::Permissions,
+    metrics,
     moderation::{
         command::{RoleAction, RoomModAction},
         event::ModerationEvent,
@@ -73,6 +74,42 @@ const SUPPORTED_CAPS: &[&str] = &[
     "batch",
     "draft/chathistory",
 ];
+
+/// Which path asked for history: a client `CHATHISTORY` command, or the
+/// server's own 25-message replay after a channel JOIN.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrcHistoryRequest {
+    Explicit,
+    JoinReplay,
+}
+
+/// How a history request resolved, one count per request. Counted where the
+/// request is answered (`handle_history`, the JOIN replay, the rate limiter)
+/// so no request is counted twice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IrcHistoryOutcome {
+    Served,
+    /// Refused by the shared expensive-command limiter before parsing.
+    RateLimited,
+    /// Malformed subcommand, selector, or limit.
+    InvalidRequest,
+    /// Not a joined channel, an existing DM, or a readable room.
+    InvalidTarget,
+    /// A `msgid=` anchor that is not a visible message of the target.
+    InvalidReference,
+    /// The database read failed; the client got a generic `FAIL`.
+    Failed,
+}
+
+impl IrcHistoryOutcome {
+    fn from_read_error(error: &ReadError) -> Self {
+        match error {
+            ReadError::InvalidTarget => Self::InvalidTarget,
+            ReadError::InvalidReference => Self::InvalidReference,
+            ReadError::Database(_) => Self::Failed,
+        }
+    }
+}
 
 pub trait IrcIo: AsyncRead + AsyncWrite + Unpin + Send {}
 
@@ -746,6 +783,10 @@ impl Session {
                 && cmd.eq_ignore_ascii_case("CHATHISTORY")
                 && self.caps.chathistory
             {
+                metrics::record_irc_history(
+                    IrcHistoryRequest::Explicit,
+                    IrcHistoryOutcome::RateLimited,
+                );
                 framed
                     .send(history::fail(
                         "MESSAGE_ERROR",
@@ -1076,6 +1117,10 @@ impl Session {
         let request = match history::parse(args) {
             Ok(request) => request,
             Err(error) => {
+                metrics::record_irc_history(
+                    IrcHistoryRequest::Explicit,
+                    IrcHistoryOutcome::InvalidRequest,
+                );
                 framed
                     .send(history::fail(error.code, context, error.description))
                     .await?;
@@ -1083,8 +1128,15 @@ impl Session {
             }
         };
         match self.history_response(request).await {
-            Ok((messages, _)) => send_all(framed, messages).await?,
+            Ok((messages, _)) => {
+                metrics::record_irc_history(IrcHistoryRequest::Explicit, IrcHistoryOutcome::Served);
+                send_all(framed, messages).await?;
+            }
             Err(error) => {
+                metrics::record_irc_history(
+                    IrcHistoryRequest::Explicit,
+                    IrcHistoryOutcome::from_read_error(&error),
+                );
                 let (code, description) = match error {
                     ReadError::InvalidTarget => {
                         ("INVALID_TARGET", "Messages could not be retrieved")
@@ -1217,26 +1269,22 @@ impl Session {
         &self,
         canonical: &str,
         is_dm: bool,
-        items: &[HistoryMessage],
+        items: &[IrcHistoryMessage],
     ) -> Vec<Message> {
         let directory = usernames::snapshot(&self.state.username_directory);
         let mut messages = Vec::new();
         for item in items {
-            let author = proj::nick_for_username(&item.username);
+            let author = proj::nick_for_username(&item.author_username);
             let target = if is_dm && item.message.user_id != self.user_id {
                 &self.nick
             } else {
                 canonical
             };
-            let mut body = proj::body_for_irc(&item.message.body, &author);
-            if !is_dm {
-                body = proj::rewrite_leading_mention_for_irc(&body, |username| {
-                    directory
-                        .values()
-                        .find(|candidate| candidate.eq_ignore_ascii_case(username))
-                        .cloned()
-                });
-            }
+            let body = if is_dm {
+                proj::body_for_irc(&item.message.body, &author)
+            } else {
+                proj::channel_body_for_irc(&item.message.body, &author, &directory)
+            };
             messages.extend(self.privmsg_lines(&author, target, &item.message, &body, false));
         }
         messages
@@ -1767,12 +1815,20 @@ impl Session {
             };
             match self.history_response(request).await {
                 Ok((messages, ids)) => {
+                    metrics::record_irc_history(
+                        IrcHistoryRequest::JoinReplay,
+                        IrcHistoryOutcome::Served,
+                    );
                     if let Some(channel) = self.joined.get_mut(&room.id) {
                         channel.replayed = ids.into_iter().collect();
                     }
                     send_all(framed, messages).await?;
                 }
                 Err(error) => {
+                    metrics::record_irc_history(
+                        IrcHistoryRequest::JoinReplay,
+                        IrcHistoryOutcome::from_read_error(&error),
+                    );
                     tracing::warn!(?error, "ircd: automatic history read failed");
                     framed
                         .send(replies::server_notice(
@@ -2633,13 +2689,7 @@ impl Session {
             };
             let author = proj::nick_for_username(&author);
             let channel_name = channel.name.clone();
-            let body = proj::body_for_irc(&message.body, &author);
-            let body = proj::rewrite_leading_mention_for_irc(&body, |username| {
-                directory
-                    .values()
-                    .find(|candidate| candidate.eq_ignore_ascii_case(username))
-                    .cloned()
-            });
+            let body = proj::channel_body_for_irc(&message.body, &author, &directory);
             self.deliver_privmsg(framed, &author, &channel_name, &message, &body, is_edit)
                 .await?;
             return Ok(());

@@ -1,11 +1,17 @@
-//! Read-only IRC history. Every query enforces the viewer's current access;
-//! the session supplies only the IDs of channels it has actually joined.
+//! Read-only IRC history: CHATHISTORY selections turned into bounded page
+//! reads. The queries live with their tables (`chat_message.rs` for pages
+//! and anchors, `chat_room.rs` for access and target discovery); every one
+//! enforces the viewer's current access, and the session supplies only the
+//! IDs of channels it has actually joined.
 
 use chrono::{DateTime, Duration, Utc};
 use tokio_postgres::Client;
 use uuid::Uuid;
 
-use super::{chat_message::ChatMessage, chat_room::ChatRoom};
+use super::{
+    chat_message::{ChatMessage, IrcHistoryBound, IrcHistoryMessage},
+    chat_room::{ChatRoom, IrcHistoryTarget},
+};
 
 pub const MAX_MESSAGES: usize = 300;
 
@@ -31,12 +37,6 @@ pub enum ReadError {
     Database(anyhow::Error),
 }
 
-impl From<tokio_postgres::Error> for ReadError {
-    fn from(error: tokio_postgres::Error) -> Self {
-        Self::Database(error.into())
-    }
-}
-
 impl From<anyhow::Error> for ReadError {
     fn from(error: anyhow::Error) -> Self {
         Self::Database(error)
@@ -44,17 +44,6 @@ impl From<anyhow::Error> for ReadError {
 }
 
 type Result<T> = std::result::Result<T, ReadError>;
-
-pub struct HistoryMessage {
-    pub message: ChatMessage,
-    pub username: String,
-}
-
-pub struct HistoryTarget {
-    pub room: ChatRoom,
-    pub peer_username: Option<String>,
-    pub latest: DateTime<Utc>,
-}
 
 pub struct Page<T> {
     pub items: Vec<T>,
@@ -68,64 +57,31 @@ pub struct HistoryReader<'a> {
     pub ignored_authors: &'a [Uuid],
 }
 
-// Parameters shared by every read: $1 viewer, $2 joined channel IDs.
-// Private and DM membership is checked in the query, including for anchors
-// and discovery; neither cached authorization nor an arbitrary room ID grants access.
-const ACCESSIBLE_ROOMS: &str = "
-    SELECT room.* FROM chat_rooms room
-    WHERE (
-        (room.id = ANY($2::uuid[]) AND room.slug IS NOT NULL
-         AND (room.kind IN ('lounge', 'language')
-              OR (room.kind = 'topic' AND room.visibility IN ('public', 'private')))
-         AND (room.visibility = 'public' OR
-              (room.visibility = 'private' AND EXISTS (
-                  SELECT 1 FROM chat_room_members mem
-                  WHERE mem.room_id = room.id AND mem.user_id = $1))))
-        OR (room.kind = 'dm' AND $1 IN (room.dm_user_a, room.dm_user_b)
-            AND EXISTS (SELECT 1 FROM chat_room_members mem
-                        WHERE mem.room_id = room.id AND mem.user_id = $1))
-    ) AND NOT EXISTS (
-        SELECT 1 FROM room_bans ban
-        WHERE ban.room_id = room.id AND ban.target_user_id = $1
-          AND (ban.expires_at IS NULL OR ban.expires_at > current_timestamp)
-    )";
-
-// IRC ignores authors in channels only, and includes the persisted system feed.
-const VISIBLE_MESSAGE: &str = "
-    (room.kind = 'dm' OR msg.user_id = $1 OR msg.user_id <> ALL($4::uuid[]))";
-
 #[derive(Clone, Copy)]
 struct Cursor {
     created: DateTime<Utc>,
     id: Option<Uuid>,
 }
 
-#[derive(Clone, Copy)]
-struct Bound {
-    created: DateTime<Utc>,
-    id: Uuid,
-    inclusive: bool,
-}
-
 impl Cursor {
-    fn pivot(self) -> Bound {
-        Bound {
+    fn pivot(self) -> IrcHistoryBound {
+        IrcHistoryBound {
             created: self.created,
             id: self.id.unwrap_or(Uuid::nil()),
             inclusive: true,
         }
     }
 
-    fn lower(self) -> Bound {
+    fn lower(self) -> IrcHistoryBound {
         match self.id {
-            Some(id) => Bound {
+            Some(id) => IrcHistoryBound {
                 created: self.created,
                 id,
                 inclusive: false,
             },
             // Timestamp selectors exclude the entire millisecond represented
             // by server-time, while UUID selectors retain full DB precision.
-            None => Bound {
+            None => IrcHistoryBound {
                 created: self.created + Duration::milliseconds(1),
                 id: Uuid::nil(),
                 inclusive: true,
@@ -133,8 +89,8 @@ impl Cursor {
         }
     }
 
-    fn upper(self) -> Bound {
-        Bound {
+    fn upper(self) -> IrcHistoryBound {
+        IrcHistoryBound {
             inclusive: false,
             ..self.pivot()
         }
@@ -150,30 +106,22 @@ impl HistoryReader<'_> {
         match reference {
             Reference::Timestamp(created) => Ok(Cursor { created, id: None }),
             Reference::MessageId(id) => {
-                let sql = format!(
-                    "WITH accessible AS ({ACCESSIBLE_ROOMS})
-                     SELECT msg.created FROM chat_messages msg
-                     JOIN accessible room ON room.id = msg.room_id
-                     WHERE msg.room_id = $3 AND {VISIBLE_MESSAGE} AND msg.id = $5"
-                );
-                let row = self
-                    .client
-                    .query_opt(
-                        &sql,
-                        &[
-                            &self.viewer,
-                            &self.joined_channels,
-                            &room_id,
-                            &self.ignored_authors,
-                            &id,
-                        ],
-                    )
-                    .await?
-                    .ok_or(ReadError::InvalidReference)?;
-                Ok(Cursor {
-                    created: row.get("created"),
-                    id: Some(id),
-                })
+                let created = ChatMessage::irc_history_anchor(
+                    self.client,
+                    self.viewer,
+                    self.joined_channels,
+                    self.ignored_authors,
+                    room_id,
+                    id,
+                )
+                .await?;
+                match created {
+                    Some(created) => Ok(Cursor {
+                        created,
+                        id: Some(id),
+                    }),
+                    None => Err(ReadError::InvalidReference),
+                }
             }
         }
     }
@@ -184,16 +132,15 @@ impl HistoryReader<'_> {
         room_id: Uuid,
         selection: Selection,
         limit: usize,
-    ) -> Result<Page<HistoryMessage>> {
-        let sql = format!(
-            "WITH accessible AS ({ACCESSIBLE_ROOMS}) SELECT id FROM accessible WHERE id = $3"
-        );
-        if self
-            .client
-            .query_opt(&sql, &[&self.viewer, &self.joined_channels, &room_id])
-            .await?
-            .is_none()
-        {
+    ) -> Result<Page<IrcHistoryMessage>> {
+        let accessible = ChatRoom::irc_history_accessible(
+            self.client,
+            self.viewer,
+            self.joined_channels,
+            room_id,
+        )
+        .await?;
+        if !accessible {
             return Err(ReadError::InvalidTarget);
         }
         let limit = limit.clamp(1, MAX_MESSAGES);
@@ -259,114 +206,55 @@ impl HistoryReader<'_> {
     async fn range(
         &self,
         room_id: Uuid,
-        lower: Option<Bound>,
-        upper: Option<Bound>,
+        lower: Option<IrcHistoryBound>,
+        upper: Option<IrcHistoryBound>,
         descending: bool,
         limit: usize,
-    ) -> Result<Vec<HistoryMessage>> {
-        let lower_op = if lower.is_some_and(|b| b.inclusive) {
-            ">="
-        } else {
-            ">"
-        };
-        let upper_op = if upper.is_some_and(|b| b.inclusive) {
-            "<="
-        } else {
-            "<"
-        };
-        let order = if descending { "DESC" } else { "ASC" };
-        // Only trusted SQL fragments are interpolated; every input is bound.
-        let sql = format!(
-            "WITH accessible AS ({ACCESSIBLE_ROOMS})
-             SELECT msg.*, author.username AS author_username FROM chat_messages msg
-             JOIN accessible room ON room.id = msg.room_id
-             JOIN users author ON author.id = msg.user_id
-             WHERE msg.room_id = $3 AND {VISIBLE_MESSAGE}
-               AND ($5::timestamptz IS NULL OR (msg.created, msg.id) {lower_op} ($5, $6::uuid))
-               AND ($7::timestamptz IS NULL OR (msg.created, msg.id) {upper_op} ($7, $8::uuid))
-             ORDER BY msg.created {order}, msg.id {order} LIMIT $9"
-        );
-        let rows = self
-            .client
-            .query(
-                &sql,
-                &[
-                    &self.viewer,
-                    &self.joined_channels,
-                    &room_id,
-                    &self.ignored_authors,
-                    &lower.map(|b| b.created),
-                    &lower.map(|b| b.id),
-                    &upper.map(|b| b.created),
-                    &upper.map(|b| b.id),
-                    &(limit as i64),
-                ],
-            )
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| HistoryMessage {
-                username: row.get("author_username"),
-                message: ChatMessage::from(row),
-            })
-            .collect())
+    ) -> Result<Vec<IrcHistoryMessage>> {
+        let items = ChatMessage::irc_history_range(
+            self.client,
+            self.viewer,
+            self.joined_channels,
+            self.ignored_authors,
+            room_id,
+            lower,
+            upper,
+            descending,
+            limit as i64,
+        )
+        .await?;
+        Ok(items)
     }
 
     /// Discover buffers by their latest visible message, not any message in
-    /// the interval. A lateral index lookup avoids scanning each room's history.
+    /// the interval. Both timestamps are exclusive, to the server-time
+    /// millisecond; `first > second` selects from the newer end.
     pub async fn targets(
         &self,
         first: DateTime<Utc>,
         second: DateTime<Utc>,
         limit: usize,
-    ) -> Result<Page<HistoryTarget>> {
+    ) -> Result<Page<IrcHistoryTarget>> {
         let descending = first > second;
         let (lower, upper) = if descending {
             (second, first)
         } else {
             (first, second)
         };
-        let order = if descending { "DESC" } else { "ASC" };
         let limit = limit.clamp(1, MAX_MESSAGES);
-        // $3 is the lower timestamp here; $4 remains the ignored-author array.
-        let sql = format!(
-            "WITH accessible AS ({ACCESSIBLE_ROOMS})
-             SELECT room.*, latest.created AS latest_message_at, peer.username AS peer_username
-             FROM accessible room
-             JOIN LATERAL (
-                 SELECT msg.created FROM chat_messages msg
-                 WHERE msg.room_id = room.id AND {VISIBLE_MESSAGE}
-                 ORDER BY msg.created DESC, msg.id DESC LIMIT 1
-             ) latest ON true
-             LEFT JOIN users peer ON peer.id = CASE WHEN room.dm_user_a = $1
-                                                    THEN room.dm_user_b ELSE room.dm_user_a END
-             WHERE latest.created >= $3 AND latest.created < $5
-             ORDER BY latest.created {order}, room.id {order} LIMIT $6"
-        );
-        let rows = self
-            .client
-            .query(
-                &sql,
-                &[
-                    &self.viewer,
-                    &self.joined_channels,
-                    &(lower + Duration::milliseconds(1)),
-                    &self.ignored_authors,
-                    &upper,
-                    &((limit + 1) as i64),
-                ],
-            )
-            .await?;
+        let rows = ChatRoom::irc_history_targets(
+            self.client,
+            self.viewer,
+            self.joined_channels,
+            self.ignored_authors,
+            lower + Duration::milliseconds(1),
+            upper,
+            descending,
+            (limit + 1) as i64,
+        )
+        .await?;
         let exhausted = rows.len() <= limit;
-        let items = rows
-            .into_iter()
-            .take(limit)
-            .map(|row| HistoryTarget {
-                latest: row.get("latest_message_at"),
-                peer_username: row.get("peer_username"),
-                room: ChatRoom::from(row),
-            })
-            .collect();
+        let items = rows.into_iter().take(limit).collect();
         Ok(Page { items, exhausted })
     }
 }

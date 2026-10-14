@@ -677,7 +677,7 @@ Pair WS also carries audio-source arbitration, clipboard-image transfer, YouTube
 - `#lounge` is force-joined and cannot be permanently parted from IRC. Public rooms use `#slug`; private topic rooms use `##slug` and are visible/joinable only to existing members. Both can share a slug without colliding in LIST, JOIN, messages, or room moderation. DMs bridge through IRC query/private-message semantics. Channel messages route through `ChatService`, so IRC clients share the same DB writes, broadcasts, permissions, ignores, and notifications as the TUI.
 - IRC moderation uses the existing moderation service path: channel ops map `KICK`, `MODE +b/-b`, and ban list requests to room moderation; admins can use `KILL` for server kicks. TUI/server kicks, bans, token resets, and token revokes call `IrcRegistry::disconnect_user` so live IRC clients close immediately with an IRC `ERROR`.
 - Keep protocol behavior aligned with `devdocs/FRD-IRCD.md` and implementation progress in `devdocs/TODO-IRCD.md`.
-- IRC history uses `batch`/`draft/chathistory`: joined channels and existing DMs, up to 300 stored messages per request; clients with `batch` + `server-time` but without `draft/chathistory` receive 25 messages after channel JOIN. The IRC history model rechecks read access and uses the shared message store; protocol and paging details live in the IRC context.
+- IRC history uses `batch`/`draft/chathistory`: joined channels and existing DMs, up to 300 stored messages per request; clients with `batch` + `server-time` but without `draft/chathistory` receive 25 messages after channel JOIN. History reads live with the chat room and message models and recheck access on every query; protocol and paging details live in the IRC context.
 
 ### 4.2 Auth and scope model
 
