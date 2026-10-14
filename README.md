@@ -204,8 +204,14 @@ ssh -o IdentitiesOnly=yes -i tmp/artboard-seed-keys/art_artist1 -p 2222 localhos
 
 Artboard opens behind a content disclaimer because the art may be NSFW.
 Press `V` (**View**) for this visit, `A` (**Always View**) to turn off future
-reminders, or `B` (**Back to Chat**) to return to Home (screen `1`). The default-on **Artboard
+reminders on this device, or `B` (**Back to Chat**) to return to Home (screen `1`). The default-on **Artboard
 content disclaimer** toggle in Settings → Tweaks can turn reminders off or on.
+The choice is per device (the SSH key you logged in with), so it can stay on
+at work and off at home. A device that has never chosen inherits the account's
+value: on for a new account, off if you pressed Always View before the setting
+became per device.
+The page shortcuts `1`, `2`, `3`, `5`, `6`, and `7` also work from the disclaimer;
+leaving this way keeps the reminder enabled for the next visit.
 The same toggle gates the login splash: only with it off does the day's
 gallery piece replace the coffee cup, so newcomers always see the cup.
 During the newcomer tour the dialog does not appear: the tour box at the
