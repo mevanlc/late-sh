@@ -43,8 +43,8 @@ pub const TRAILING_WINDOW_SECS: i64 = 5;
 const FORGET_WORDS: [&str; 2] = ["forget", "me"];
 /// The word that asks for an exchange to stick.
 const REMEMBER_WORD: &str = "remember";
-/// What `chat/slur.rs` drops into a drunk patron's line. It carries no
-/// meaning, so the forget matcher looks straight past it.
+/// What `chat/slur.rs` drops into a drunk patron's line. The forget matcher
+/// ignores it before or after the phrase.
 const HICCUP: &str = "*hic*";
 
 /// One stored exchange, newest first in the slice handed to [`evictions`].
@@ -86,10 +86,10 @@ pub fn evictions(newest_first: &[MemorySlot]) -> Vec<Uuid> {
 }
 
 /// Whether `text` (the message with its reply quote stripped) is exactly
-/// "forget me": any case, any spacing, the bartender's handle allowed once
-/// at either end (with a `,` or `:` after it), a hiccup ignored. Anything
-/// more is conversation, so "please forget me" or "forget me?" goes to the
-/// model like any other line.
+/// "forget me": any case, one or more ASCII spaces between the words, the
+/// bartender's handle allowed once at either end (with a `,` or `:` after
+/// it), a hiccup outside the phrase ignored. Anything more is conversation,
+/// so "please forget me" or "forget me?" goes to the model like any other line.
 pub fn is_forget_request(text: &str, bartender: &str) -> bool {
     let handle = bartender.trim().trim_start_matches('@');
     let mut words: Vec<&str> = text
@@ -106,6 +106,7 @@ pub fn is_forget_request(text: &str, bartender: &str) -> bool {
             .iter()
             .zip(FORGET_WORDS)
             .all(|(word, expected)| word.eq_ignore_ascii_case(expected))
+        && !forget_phrase_spans(text).is_empty()
 }
 
 fn is_handle(word: &str, handle: &str) -> bool {
@@ -126,21 +127,51 @@ pub fn mentions_remember(text: &str) -> bool {
 /// patron meant.
 pub fn memory_phrase_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = word_spans(text, REMEMBER_WORD);
-    for (start, end) in word_spans(text, FORGET_WORDS[0]) {
+    spans.extend(forget_phrase_spans(text));
+    spans.sort_unstable();
+    spans
+}
+
+/// Wording the patron-memory prompt reads literally when choosing an
+/// alcoholic or nonalcoholic variant. These spans only protect drunk text;
+/// the prompt still decides whether the patron positively requested alcohol.
+pub fn alcohol_phrase_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for word in [
+        "alcohol",
+        "alcoholic",
+        "intoxicating",
+        "nonalcoholic",
+        "nonintoxicating",
+    ] {
+        spans.extend(word_spans(text, word));
+    }
+    spans.extend(spaced_word_spans(text, "with", "alcohol"));
+    spans.sort_unstable();
+    spans
+}
+
+/// "forget" and "me" separated only by one or more literal ASCII spaces.
+fn forget_phrase_spans(text: &str) -> Vec<(usize, usize)> {
+    spaced_word_spans(text, FORGET_WORDS[0], FORGET_WORDS[1])
+}
+
+fn spaced_word_spans(text: &str, first: &str, second: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    for (start, end) in word_spans(text, first) {
         let rest = &text[end..];
-        let gap = rest.len() - rest.trim_start().len();
+        let gap = rest.len() - rest.trim_start_matches(' ').len();
         if gap == 0 {
             continue;
         }
-        let me_start = end + gap;
-        if let Some(&(_, me_end)) = word_spans(&text[me_start..], FORGET_WORDS[1])
+        let second_start = end + gap;
+        if let Some(&(_, second_end)) = word_spans(&text[second_start..], second)
             .first()
             .filter(|(at, _)| *at == 0)
         {
-            spans.push((start, me_start + me_end));
+            spans.push((start, second_start + second_end));
         }
     }
-    spans.sort_unstable();
     spans
 }
 

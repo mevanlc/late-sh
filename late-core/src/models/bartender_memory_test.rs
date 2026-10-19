@@ -73,10 +73,14 @@ fn unprotected_remembers_compete_on_recency() {
 fn forget_me_must_be_said_exactly() {
     for message in [
         "@bartender forget me",
+        "@bartender forget  me",
         "  @BARTENDER   Forget ME  ",
+        "@bartender\tforget me",
+        "@bartender\nforget me",
         "@bartender, forget me",
         "@bartender: forget me",
         "forget me @bartender",
+        "forget me\t@bartender",
         "@bartender *hic* forget me",
         "@bartender forget me *hic*",
         "forget me",
@@ -96,6 +100,15 @@ fn forget_me_must_be_said_exactly() {
         "@bartender",
     ] {
         assert!(!is_forget_request(message, "bartender"), "{message:?}");
+    }
+}
+
+#[test]
+fn forget_me_requires_ascii_spaces_between_the_words() {
+    for separator in ["\t", "\n", "\r\n", " \n ", "\u{a0}", "\u{2003}", " *hic* "] {
+        let message = format!("@bartender forget{separator}me");
+        assert!(!is_forget_request(&message, "bartender"), "{message:?}");
+        assert!(memory_phrase_spans(&message).is_empty(), "{message:?}");
     }
 }
 
@@ -147,15 +160,16 @@ async fn say(
     )
     .await
     .expect("message");
-    client
-        .execute(
-            "UPDATE chat_messages SET created = $2 WHERE id = $1",
+    // Use the persisted timestamp, which PostgreSQL truncates to microseconds.
+    let row = client
+        .query_one(
+            "UPDATE chat_messages SET created = $2 WHERE id = $1 RETURNING created",
             &[&message.id, &at],
         )
         .await
         .expect("backdate message");
     ChatMessage {
-        created: at,
+        created: row.get("created"),
         ..message
     }
 }
@@ -177,7 +191,7 @@ async fn an_exchange_keeps_what_the_patron_said_until_the_tail_closes() {
     let elsewhere = ChatRoom::get_or_create_public_room(&client, "memory-elsewhere")
         .await
         .expect("room");
-    let t0 = Utc::now() - Duration::hours(1);
+    let t0 = DateTime::from_timestamp(1_700_000_000, 123_456_789).expect("fixture timestamp");
 
     let order = say(
         &client,
@@ -205,7 +219,7 @@ async fn an_exchange_keeps_what_the_patron_said_until_the_tail_closes() {
     assert_eq!(memories.len(), 1);
     let memory = &memories[0];
     assert!(memory.remember);
-    assert_eq!(memory.ordered_at, t0);
+    assert_eq!(memory.ordered_at, order.created);
     assert_eq!(memory.order_body, "@memory-keep remember stouts");
     assert_eq!(memory.reply_body, "one stout");
     assert_eq!(memory.trailing_bodies, vec!["while I wait", "cheers"]);

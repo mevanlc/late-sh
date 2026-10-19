@@ -14,13 +14,15 @@
 //! Instructions to the bar are never touched at any level: the phrases in
 //! [`spending_phrase_spans`] that buy the house a round or put one drink on
 //! a named patron's tab, and the [`memory_phrase_spans`] that ask the
-//! bartender to remember or to forget. He matches these literally, so
-//! slurring them would silently lose an order or a wipe. The matchers live
+//! bartender to remember or to forget. Alcohol preference and opt-in wording
+//! is protected too, so literal requests and preferences keep their wording.
+//! Slurring these would silently lose an order or a wipe. The matchers live
 //! in `late_core::models::drink_round` and `bartender_memory` and are
 //! shared here.
 
 use late_core::models::{
-    bartender_memory::memory_phrase_spans, drink_round::spending_phrase_spans,
+    bartender_memory::{alcohol_phrase_spans, memory_phrase_spans},
+    drink_round::spending_phrase_spans,
 };
 
 /// Shortest word that can take a typo. Below this there is no interior left
@@ -128,6 +130,7 @@ pub(crate) fn slur(body: &str, level: u8, seed: u64) -> String {
 fn protected_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = spending_phrase_spans(text);
     spans.extend(memory_phrase_spans(text));
+    spans.extend(alcohol_phrase_spans(text));
     spans
 }
 

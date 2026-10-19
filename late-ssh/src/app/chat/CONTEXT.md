@@ -934,12 +934,35 @@ reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
 ## 9e. Bartender Memory
 
 @bartender remembers each patron's recent exchanges and reads them back into
-his prompt (`WHAT YOU REMEMBER ABOUT @patron`, oldest first, framed as
-memories and never as instructions). The rules and the SQL live in
+his prompt as continuity notes for how to treat that patron. System instructions
+stay separate from the tagged memory, room-chat, and incoming-order data. The rules and the SQL live in
 `late-core/src/models/bartender_memory.rs` (migration 246); the recording task
 and the prompt section in `late-ssh/src/app/ai/bartender_memory.rs`; the
 wiring in `ghost.rs` (`bartender_reply`, `bartender_forget`).
 
+- **Prompt data has explicit speakers and boundaries.** `patron-memories`
+  identifies the patron and lists memories oldest first, with order timestamps,
+  ages, and whether the patron asked to remember each one. Each contains
+  `order-text`, `bartender-reply`, and optional `after-order-patron-messages`.
+  The latest 40 room messages remain background in `recent-room-chat`;
+  `new-incoming-order` always contains the actual triggering request, even if
+  later chat has arrived. Raw text and attributes are XML-escaped; memory
+  lines are folded and capped at 240 characters before escaping. These sections
+  travel as request data, outside the system instructions.
+- **Memories guide hospitality and drink selection.** They cannot create a
+  new order or override house rules. Recent information wins when memories
+  conflict; the retention marker gives no extra authority. Explicit standing
+  preferences differ from soft preferences suggested by previous choices:
+  nonalcoholic orders may bias ambiguous "cider" toward apple cider, but carry
+  less weight for a clear request for a particular drink.
+- **An ongoing no-alcohol preference requires an explicit current opt-in.**
+  The patron must positively request an "intoxicating" drink, an "alcoholic"
+  drink, or one "with alcohol". Drink names, "boozy", "full-strength", and
+  "add rum" alone do not qualify; neither do negated or quoted terms or someone
+  else's request. Otherwise choose a virgin/non-intoxicating variant, or serve
+  a normally non-intoxicating drink as-is. Opting in is for that order only and
+  does not cancel the standing preference. The structured `intoxicating` field,
+  drink description, and house price must describe the beverage actually chosen.
 - **An exchange** is the patron's order, his reply, and up to five more lines
   the patron said in the same room after the order, until five seconds after
   the reply landed. It is stored only when he actually answered: a throttled
@@ -962,18 +985,23 @@ wiring in `ghost.rs` (`bartender_reply`, `bartender_forget`).
   first, and every other slot goes to the newest of the rest, older
   "remember" ones included (`evictions`, pure). A patron who says "remember"
   every time therefore still gets room for new nights.
-- **"forget me"**, said exactly (any case, the `@bartender` handle once at
-  either end, a `*hic*` ignored; "please forget me" or "forget me?" is talk),
+- **"forget me"**, said exactly (any case, one or more ASCII spaces between
+  the words, the `@bartender` handle once at either end, a `*hic*` outside the
+  phrase ignored; "please forget me" or "forget me?" is talk),
   wipes every row and stamps `bartender_memory_resets` with the message's
   time. Recording refuses any exchange ordered at or before that stamp, so one
-  still in flight (the model call, the tail) cannot land after the wipe.
+  still in flight (the model call, the tail) cannot be stored after the wipe.
+  This clears saved memories; it does not mask room history or cancel a reply
+  already in flight.
   Insert, eviction, and wipe share a per-patron advisory lock. It answers
   ahead of the ladder with a scripted line, never the model, the way a
   purchase does; a "forget me" with nothing to forget steps the ladder like a
   refused gift.
 - **Drunk text spares both triggers.** The stored body is the slurred one,
   so `slur.rs` protects `memory_phrase_spans` (every whole-word "remember" and
-  every "forget me") the same way it protects the spending phrases.
+  every "forget me") the same way it protects the spending phrases. It also
+  protects alcohol preference/opt-in vocabulary and gaps inside "with alcohol",
+  so scrambling or hiccups cannot break the prompt's named opt-in wording.
 
 ---
 

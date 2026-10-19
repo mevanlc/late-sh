@@ -222,11 +222,18 @@ fn non_ascii_text_is_left_alone() {
 fn asking_the_bar_to_forget_or_remember_survives_any_amount_of_drink() {
     for level in 1..=DRUNK_MAX_LEVEL {
         for seed in 1..200 {
-            let wipe = slur("@bartender forget me", level, seed);
-            assert!(
-                is_forget_request(&wipe, "bartender"),
-                "level {level} seed {seed} lost the wipe: {wipe}"
-            );
+            for request in [
+                "@bartender forget me",
+                "@bartender forget  me",
+                "@bartender\nforget me",
+                "forget   me @bartender",
+            ] {
+                let wipe = slur(request, level, seed);
+                assert!(
+                    is_forget_request(&wipe, "bartender"),
+                    "level {level} seed {seed} lost the wipe: {wipe}"
+                );
+            }
             let order = slur(
                 &format!("@bartender {CORPUS}, remember I drink stouts"),
                 level,
@@ -236,6 +243,31 @@ fn asking_the_bar_to_forget_or_remember_survives_any_amount_of_drink() {
                 mentions_remember(&order),
                 "level {level} seed {seed} lost the remember: {order}"
             );
+        }
+    }
+}
+
+#[test]
+fn alcohol_preferences_and_literal_opt_ins_survive_drunk_typing() {
+    for level in 1..=DRUNK_MAX_LEVEL {
+        for seed in 1..100 {
+            for phrase in [
+                "intoxicating",
+                "ALCOHOLIC",
+                "with alcohol",
+                "with   alcohol",
+                "non-intoxicating",
+                "non-alcoholic",
+                "nonintoxicating",
+                "nonalcoholic",
+            ] {
+                let body = format!("@bartender {phrase}, {CORPUS}");
+                let slurred = slur(&body, level, seed);
+                assert!(
+                    slurred.contains(phrase),
+                    "level {level} seed {seed} lost {phrase:?}: {slurred}"
+                );
+            }
         }
     }
 }
