@@ -36,7 +36,7 @@ late-ssh/src/app/chat/
 |-- ui.rs                        # Home room rail/chat center, dashboard-lounge view, embedded room chat, composer, row cache
 |-- ui_text.rs                   # Message/news/reaction wrapping into ratatui Lines
 |-- list_ui.rs                   # Shared "mine only" filtered-list layout and status line for the synthetic entries
-|-- slur.rs                      # Pure drunk-text transform applied to outgoing public-room messages (never touches a spending phrase, §9d)
+|-- slur.rs                      # Pure drunk-text transform applied to outgoing public-room messages (never touches a spending phrase, §9d, or a memory trigger, §9e)
 |-- special_badges.rs            # Hardcoded per-username badges in author labels (allowlist, edit and redeploy)
 |-- cyberspace/                  # Cyberspace rail section: personal client for cyberspace.online, incl. their chat (cIRC)
 |-- discover/                    # Synthetic Discover entry: public rooms not yet joined
@@ -931,6 +931,52 @@ reads a chat message, and `chat/slur.rs` has to leave that phrase alone.
 
 ---
 
+## 9e. Bartender Memory
+
+@bartender remembers each patron's recent exchanges and reads them back into
+his prompt (`WHAT YOU REMEMBER ABOUT @patron`, oldest first, framed as
+memories and never as instructions). The rules and the SQL live in
+`late-core/src/models/bartender_memory.rs` (migration 246); the recording task
+and the prompt section in `late-ssh/src/app/ai/bartender_memory.rs`; the
+wiring in `ghost.rs` (`bartender_reply`, `bartender_forget`).
+
+- **An exchange** is the patron's order, his reply, and up to five more lines
+  the patron said in the same room after the order, until five seconds after
+  the reply landed. It is stored only when he actually answered: a throttled
+  or skipped mention keeps nothing, while a talk reply, a pour, an offer, a
+  bounced tab, and a gift's or a round's receipt or refusal all count. Every
+  bartender answer goes through `GhostService::bartender_reply`, which awaits
+  `ChatService::send_bot_reply` for the reply row and, once the tail has
+  closed (plus a second's grace for sends still committing), stores the
+  exchange from a spawned task. A restart inside that window loses the one
+  exchange; the unique `order_message_id` makes a repeat a no-op.
+- **Public rooms only.** A memory reaches the prompt in whatever room he
+  answers next, so an exchange in a DM or a private room is never kept.
+- **Copied, not referenced.** The words are copied into the row when it is
+  stored, so a memory lives by these rules alone: a chat message pruned,
+  aged out, or deleted afterwards (by its author or a moderator) leaves the
+  memory that quoted it untouched. Only the cap, "forget me", and the account
+  going away (FK cascade on `users`) end one.
+- **Sixteen per patron.** An order with "remember" in it as a whole word, any
+  case, asks for its exchange to stick: the newest eight of those are kept
+  first, and every other slot goes to the newest of the rest, older
+  "remember" ones included (`evictions`, pure). A patron who says "remember"
+  every time therefore still gets room for new nights.
+- **"forget me"**, said exactly (any case, the `@bartender` handle once at
+  either end, a `*hic*` ignored; "please forget me" or "forget me?" is talk),
+  wipes every row and stamps `bartender_memory_resets` with the message's
+  time. Recording refuses any exchange ordered at or before that stamp, so one
+  still in flight (the model call, the tail) cannot land after the wipe.
+  Insert, eviction, and wipe share a per-patron advisory lock. It answers
+  ahead of the ladder with a scripted line, never the model, the way a
+  purchase does; a "forget me" with nothing to forget steps the ladder like a
+  refused gift.
+- **Drunk text spares both triggers.** The stored body is the slurred one,
+  so `slur.rs` protects `memory_phrase_spans` (every whole-word "remember" and
+  every "forget me") the same way it protects the spending phrases.
+
+---
+
 ## 10. Reactions, Ignores
 
 Reactions:
@@ -945,7 +991,7 @@ Ignores:
 - `users.settings.ignored_user_ids` stores UUIDs, not usernames.
 - `users.settings.friend_user_ids` stores private one-way friend marks as UUIDs.
 - `/ignore @user` and `/unignore @user` resolve usernames at command time.
-- A message is hidden if its author is ignored, OR if `chat_messages.reply_to_user_id` is an ignored user. The latter hides bot/automated replies directed at an ignored user so they cannot be heard by proxy through `@bot`/`@graybeard`/`@bartender`. Only bots set `reply_to_user_id` (via `ChatService::send_bot_reply_task`); human replies use `reply_to_message_id`. The shared filter helper is `state::message_is_ignored_in`.
+- A message is hidden if its author is ignored, OR if `chat_messages.reply_to_user_id` is an ignored user. The latter hides bot/automated replies directed at an ignored user so they cannot be heard by proxy through `@bot`/`@graybeard`/`@bartender`. Only bots set `reply_to_user_id` (via `ChatService::send_bot_reply_task` or its awaited `send_bot_reply`); human replies use `reply_to_message_id`. The shared filter helper is `state::message_is_ignored_in`.
 - Ignore filtering applies to DMs too. An ignored peer's DM messages are filtered, and the DM room is hidden from the room rail/navigation while the peer is ignored (both mirrors skip DMs whose `dm_peer_id` is ignored: `visual_order_for_rooms` and the rail's own DM filter, via the shared `dm_peer_is_ignored`), so a new DM from the ignored user can't resurface the room or its unread badge. Unignoring restores the DM on the next render/snapshot.
 - `IgnoreListUpdated` refilters local messages in place (all rooms, including DMs and `reply_to_user_id` matches) with no DB refetch, then refreshes the Mentions list/unread count.
 - `unignore` does not retroactively restore already-filtered local messages until a future tail/snapshot naturally reloads them.
@@ -1191,7 +1237,7 @@ A patron deep enough into the tavern's drinks types like it. `ChatService::slurr
 - **Runs last**, so report markers, `contains_link` cooldown, and slow mode all judged the sober text. `create_mentions_task` gets the slurred body so the notification preview matches the room.
 - **Readability rests on one rule:** a word's first and last character never move. Only interior letters are reordered (never added or dropped), which is the typoglycemia effect and is why level 4 stays legible at all. Two dials climb per level: what share of words get scrambled (6/32/60/85%) and how far each goes (one swap, one swap, one-or-two swaps, full interior shuffle). Tipsy and buzzed deliberately share a depth: the same fumble, just far more often. The change in *kind* lands at sloshed. Measured over ordinary prose that is roughly 3/21/34/54% of *all* words visibly changed, since short words are ineligible; `each_drink_reads_harder_than_the_last` pins those bands.
 - **The hiccup belongs to the top of the ladder.** A single `*hic*` is dropped into an existing gap in 33% of a wasted patron's messages and 10% of a sloshed one's; tipsy and buzzed never hiccup, so the stammer marks the top of the ladder rather than drinking as such. One roll per message at every level: two hiccups in one line is the joke repeating itself. `only_the_top_of_the_ladder_hiccups` pins the bands.
-- **Protected tokens are never touched:** `@mentions` (they drive notifications and the mention wash), `#slugs`, URLs, backtick code spans, `---BUG---`-family markers, the leading `> ` reply quote line (someone else's words), and anything non-ASCII (so CJK and emoji pass through whole). The `*hic*` only widens an existing gap and respects the same exclusions.
+- **Protected tokens are never touched:** `@mentions` (they drive notifications and the mention wash), `#slugs`, URLs, backtick code spans, `---BUG---`-family markers, the leading `> ` reply quote line (someone else's words), the phrases @bartender reads literally (the spending phrases of §9d, and "remember" / "forget me" of §9e), and anything non-ASCII (so CJK and emoji pass through whole). The `*hic*` only widens an existing gap and respects the same exclusions.
 - `slur(body, level, seed)` is pure with a caller-supplied seed; `svc.rs::slur_seed` supplies a fresh one per message. Tests live in `slur_test.rs`.
 
 ### Translation
