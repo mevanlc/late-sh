@@ -1614,7 +1614,6 @@ impl App {
             LandingPage::Zen => Screen::Zen,
         };
         let haunt = crate::app::deadchannel::haunt::svc::arm(
-            config.permissions.can_moderate(),
             config.user_id,
             &config.username,
             config.first_contact,

@@ -88,7 +88,9 @@ no face; every other room renders without runner chrome.
     `unpaid_mark` standing (chips the house still owes).
 
   `deadchannel_nuke_runners()` puts every sheet back to a fresh one for a
-  balance test (the row, the look, and the leave and guide stamps stay).
+  balance test (the row, the look, and the leave and guide stamps stay),
+  and first closes every crossing still being fought as dropped, since the
+  fight `settle_day` would close it from is gone (`fight/CROSSING.md`).
   To nuke, ship a migration holding only `SELECT
   deadchannel_nuke_runners();`. A migration that adds a sheet column adds
   it to that function, and a column whose stored values the new code

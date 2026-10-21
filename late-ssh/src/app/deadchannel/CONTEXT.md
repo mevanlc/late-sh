@@ -1,7 +1,7 @@
 # deadchannel Context (late-ssh/src/app/deadchannel)
 
 ## Metadata
-- Domain: the deadchannel game (`GAME.md`). Staff only (admins and moderators) by decision in code (`haunt::svc::arm` and `bootstrap_gate`): only staff are haunted, and only they can finish the ladder and join. Built for several replicas (root `CONTEXT.md`, multi-replica rule).
+- Domain: the deadchannel game (`GAME.md`). Open to everyone: every session can be haunted, and the gate in `haunt::svc::bootstrap_gate` decides who climbs past the clock and gets the invitation that opens #deadchannel. Built for several replicas (root `CONTEXT.md`, multi-replica rule).
 - Subdomains and their docs:
   - `haunt/`: the first-contact haunting ladder (`haunt/CONTEXT.md`).
   - `runner/`: the character layer, the runner and its look (`runner/CONTEXT.md`).
@@ -9,7 +9,7 @@
   - `fight/`: the runner's sheet, the day's road, the round of cards, the wire's news, the shops, crystals, Dead Air (`fight/CONTEXT.md`, with `fight/MONEY.md`, `fight/BALANCE.md`, `fight/CRYSTALS.md`, `fight/CROSSING.md`).
   - `lounge/`: the spawns above #lounge's composer (`lounge/CONTEXT.md`).
 - Design sources in this directory: `GAME.md` (the game: thesis, first contact, the runner) and `DIGEST.md` (the feed budget and the welcome-back paper).
-- Status: Active, staff only. Parent context: `../../../../CONTEXT.md`.
+- Status: Active. Parent context: `../../../../CONTEXT.md`.
 
 ## 1. Summary
 
@@ -19,8 +19,8 @@ tutorial, `haunt/`), the **runner** a person becomes on joining
 #deadchannel (`runner/`), the **night city** under the clubhouse
 (`city/`), the **road and the round** at the end of its street (`fight/`),
 and the **lounge spawns** runners put down together above #lounge's composer
-(`lounge/`). Who is haunted (staff, then a gate of hours, touched settings
-and a screened bio) and how the ladder paces itself are in
+(`lounge/`). Who is haunted (everyone sees the clock; a gate of hours,
+touched settings and a screened bio picks who climbs further) and how the ladder paces itself are in
 `haunt/CONTEXT.md`.
 
 **Replica rule.** Nothing in this domain is a process-local source of
@@ -84,11 +84,9 @@ The haunting's own gotchas are in `haunt/CONTEXT.md`, the runner's in `runner/CO
 
 - Where to look when the ladder seems dead (per person, in the logs, all
   keyed by `user_id` and `username`, the two fields every deadchannel line
-  carries): `first contact gate evaluated` at every staff connect
-  with each leg's number, the bio standing, and the `GateVerdict`
-  (nobody else gets a line: the gate is shut before any read); `first
-  contact armed` for every session that can fire stage 1, with `chosen`
-  and `whisper_armed`; then one line per hit, whisper, breakthrough, invitation, bio
+  carries): `first contact gate evaluated` at every connect
+  with each leg's number, the bio standing, and the `GateVerdict`; `first
+  contact armed` for every session, with `chosen` and `whisper_armed`; then one line per hit, whisper, breakthrough, invitation, bio
   screen, and runner. How many the gate turns away, and on which leg, is
   `late_ssh_first_contact_gate_total{verdict}` (one count per
   connect, not per person); bio screens by outcome are
