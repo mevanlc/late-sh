@@ -14,14 +14,16 @@
 //! Instructions to the bar are never touched at any level: the phrases in
 //! [`spending_phrase_spans`] that buy the house a round or put one drink on
 //! a named patron's tab, and the [`memory_phrase_spans`] that ask the
-//! bartender to remember or to forget. Alcohol preference and opt-in wording
+//! bartender to remember or to forget. A remember request is kept whole, every
+//! line of it, since what the patron asks him to remember outlives the drink.
+//! Alcohol preference and opt-in wording
 //! is protected too, so literal requests and preferences keep their wording.
 //! Slurring these would silently lose an order or a wipe. The matchers live
 //! in `late_core::models::drink_round` and `bartender_memory` and are
 //! shared here.
 
 use late_core::models::{
-    bartender_memory::{alcohol_phrase_spans, memory_phrase_spans},
+    bartender_memory::{alcohol_phrase_spans, memory_phrase_spans, remember_request_span},
     drink_round::spending_phrase_spans,
 };
 
@@ -102,6 +104,12 @@ pub(crate) fn slur(body: &str, level: u8, seed: u64) -> String {
 
     let mut rng = SlurRng::new(seed);
     let mut out = String::with_capacity(body.len());
+    // Spans are otherwise worked out line by line, and a remember request's
+    // later lines carry no "remember" of their own.
+    let (body, kept) = match remember_request_span(body) {
+        Some((start, _)) => body.split_at(start),
+        None => (body, ""),
+    };
     // Everything before this offset is the untouchable quote line, so the
     // hiccup has to land after it too.
     let mut quoted_len = 0;
@@ -118,6 +126,7 @@ pub(crate) fn slur(body: &str, level: u8, seed: u64) -> String {
         }
         out.push_str(&slur_line(line, &intensity, &mut rng));
     }
+    out.push_str(kept);
 
     if rng.percent(intensity.hiccup_percent) {
         out = with_hiccup(&out, quoted_len, &mut rng);

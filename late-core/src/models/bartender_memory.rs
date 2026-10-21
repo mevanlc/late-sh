@@ -1,21 +1,23 @@
 //! What @bartender remembers about a patron.
 //!
-//! One row per exchange he answered: the patron's order, his reply, and up
-//! to [`TRAILING_MESSAGE_CAP`] more lines the patron said in that room from
-//! the order until [`TRAILING_WINDOW_SECS`] after the reply landed. The
-//! words are copied when the exchange is stored, so a memory lives by the
-//! rules below and nothing else: pruning or deleting the chat log it came
-//! from leaves it alone.
+//! Two kinds of memory ([`MemoryKind`]). An exchange memory is one order
+//! he answered, kept on his own: the patron's order, his reply, and up to
+//! [`TRAILING_MESSAGE_CAP`] more lines the patron said in that room from
+//! the order until [`TRAILING_WINDOW_SECS`] after the reply landed. A
+//! requested memory is what a patron asked him to remember with
+//! "@bartender remember ..." ([`remember_request`]): never an order, only
+//! the words to keep. The words are copied when a memory is stored, so it
+//! lives by the rules below and nothing else: pruning or deleting the chat
+//! log it came from leaves it alone.
 //!
-//! A patron keeps at most [`MEMORY_CAP`]. An order that says "remember"
-//! ([`mentions_remember`]) asks for its exchange to stick: the newest
-//! [`REMEMBER_KEEP`] of those are kept ahead of everything else, and every
-//! other slot goes to the newest of the rest ([`evictions`]). The cap on
-//! the protected ones is what keeps a patron who says "remember" every time
-//! from crowding out tonight.
+//! A patron keeps at most [`MEMORY_CAP`]. The newest [`REQUESTED_KEEP`]
+//! requested memories are kept ahead of everything else, and every other
+//! slot goes to the newest of the rest ([`evictions`]). The cap on the
+//! protected ones is what keeps a patron who asks him to remember
+//! everything from crowding out tonight.
 //!
 //! "forget me", said exactly ([`is_forget_request`]), wipes the lot and
-//! stamps `bartender_memory_resets`, so an exchange still in flight when it
+//! stamps `bartender_memory_resets`, so a memory still in flight when it
 //! was said cannot land after the wipe.
 //!
 //! The two triggers are matched literally on the stored body, which is the
@@ -24,16 +26,16 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use tokio_postgres::{Client, Transaction};
+use tokio_postgres::{Client, Row, Transaction};
 use uuid::Uuid;
 
 use super::chat_message::ChatMessage;
 
-/// Most exchanges one patron keeps.
+/// Most memories one patron keeps.
 pub const MEMORY_CAP: usize = 16;
-/// Most "remember" exchanges kept ahead of the plain ones. The rest of the
-/// cap always goes to recency.
-pub const REMEMBER_KEEP: usize = 8;
+/// Most requested memories kept ahead of the exchange memories. The rest
+/// of the cap always goes to recency.
+pub const REQUESTED_KEEP: usize = 8;
 /// Most lines kept from what the patron said after ordering.
 pub const TRAILING_MESSAGE_CAP: i64 = 5;
 /// How long after the reply lands the patron's lines still count.
@@ -41,36 +43,37 @@ pub const TRAILING_WINDOW_SECS: i64 = 5;
 
 /// The whole of a wipe request, once the bartender's handle is set aside.
 const FORGET_WORDS: [&str; 2] = ["forget", "me"];
-/// The word that asks for an exchange to stick.
+/// The word, right after the bartender's handle, that requests a memory.
 const REMEMBER_WORD: &str = "remember";
 /// What `chat/slur.rs` drops into a drunk patron's line. The forget matcher
-/// ignores it before or after the phrase.
+/// ignores it before or after the phrase, the remember matcher between the
+/// handle and "remember" or at the very end.
 const HICCUP: &str = "*hic*";
 
-/// One stored exchange, newest first in the slice handed to [`evictions`].
+/// One stored memory, newest first in the slice handed to [`evictions`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MemorySlot {
     pub id: Uuid,
-    pub remember: bool,
+    pub requested: bool,
 }
 
-/// Which of a patron's exchanges go, given all of them newest first: the
-/// newest [`REMEMBER_KEEP`] "remember" ones stay, then the newest of the
-/// rest fill what is left of [`MEMORY_CAP`]. Older "remember" ones beyond
-/// the protected few compete on recency like any other.
+/// Which of a patron's memories go, given all of them newest first: the
+/// newest [`REQUESTED_KEEP`] requested memories stay, then the newest of
+/// the rest fill what is left of [`MEMORY_CAP`]. Older requested memories
+/// beyond the protected few compete on recency like any exchange memory.
 pub fn evictions(newest_first: &[MemorySlot]) -> Vec<Uuid> {
-    let mut protected_left = REMEMBER_KEEP;
+    let mut protected_left = REQUESTED_KEEP;
     let protected: Vec<bool> = newest_first
         .iter()
         .map(|slot| {
-            let protect = slot.remember && protected_left > 0;
+            let protect = slot.requested && protected_left > 0;
             if protect {
                 protected_left -= 1;
             }
             protect
         })
         .collect();
-    let mut open = MEMORY_CAP - (REMEMBER_KEEP - protected_left);
+    let mut open = MEMORY_CAP - (REQUESTED_KEEP - protected_left);
     newest_first
         .iter()
         .zip(protected)
@@ -109,25 +112,63 @@ pub fn is_forget_request(text: &str, bartender: &str) -> bool {
         && !forget_phrase_spans(text).is_empty()
 }
 
+/// What to remember, when `text` (the message with its reply quote
+/// stripped) requests a memory: the bartender's handle first (with a `,`
+/// or `:` after it), then "remember" as the very next word (any case, a
+/// `,` or `:` after it allowed), then the words to keep, trimmed. A hiccup
+/// between the handle and "remember", or at the very end, is ignored. Only
+/// the opening counts, so "@bartender please remember ..." or "remember
+/// this @bartender" is talk. `Some("")` asks him to remember nothing.
+pub fn remember_request<'a>(text: &'a str, bartender: &str) -> Option<&'a str> {
+    let handle = bartender.trim().trim_start_matches('@');
+    let (_, words) = remember_split(text, |word| is_handle(word, handle))?;
+    let words = words.strip_suffix(HICCUP).map_or(words, str::trim_end);
+    Some(words)
+}
+
+/// Where "remember" starts in `text` and the words after it, when `text`
+/// opens with a word `is_bartender` accepts and then "remember".
+fn remember_split(text: &str, is_bartender: impl Fn(&str) -> bool) -> Option<(usize, &str)> {
+    let (handle, rest) = next_word(text)?;
+    if !is_bartender(handle) {
+        return None;
+    }
+    let (mut word, mut after) = next_word(rest)?;
+    if word == HICCUP {
+        (word, after) = next_word(after)?;
+    }
+    if !word
+        .trim_end_matches([',', ':'])
+        .eq_ignore_ascii_case(REMEMBER_WORD)
+    {
+        return None;
+    }
+    // `word` sits directly in front of `after`, and both are tails of `text`.
+    Some((text.len() - after.len() - word.len(), after.trim()))
+}
+
+/// The first whitespace-delimited word of `text` and everything after it.
+fn next_word(text: &str) -> Option<(&str, &str)> {
+    let text = text.trim_start();
+    let end = text.find(char::is_whitespace).unwrap_or(text.len());
+    (end > 0).then(|| text.split_at(end))
+}
+
 fn is_handle(word: &str, handle: &str) -> bool {
     word.trim_end_matches([',', ':'])
         .strip_prefix('@')
         .is_some_and(|name| name.eq_ignore_ascii_case(handle))
 }
 
-/// Whether an order asks for its exchange to stick: "remember" as a whole
-/// word, any case. "remembered" and "remembering" are talk about the past,
-/// not a request.
-pub fn mentions_remember(text: &str) -> bool {
-    !word_spans(text, REMEMBER_WORD).is_empty()
-}
-
-/// Byte ranges in `text` that drunk text must leave alone: every whole-word
-/// "remember" and every "forget me", so the bar still reads what the
-/// patron meant.
+/// Byte ranges in `text` that drunk text must leave alone: every "forget
+/// me", and a remember request from its "remember" to the end of the
+/// message, so the bar still reads what the patron meant and keeps the
+/// words as they typed them. The slur pass does not know the bartender's
+/// handle, so here a request opens with any @mention; protecting a line
+/// meant for someone else costs nothing but a few typos.
 pub fn memory_phrase_spans(text: &str) -> Vec<(usize, usize)> {
-    let mut spans = word_spans(text, REMEMBER_WORD);
-    spans.extend(forget_phrase_spans(text));
+    let mut spans = forget_phrase_spans(text);
+    spans.extend(remember_request_span(text));
     spans.sort_unstable();
     spans
 }
@@ -154,6 +195,25 @@ pub fn alcohol_phrase_spans(text: &str) -> Vec<(usize, usize)> {
 /// "forget" and "me" separated only by one or more literal ASCII spaces.
 fn forget_phrase_spans(text: &str) -> Vec<(usize, usize)> {
     spaced_word_spans(text, FORGET_WORDS[0], FORGET_WORDS[1])
+}
+
+/// A remember request's "remember" through the end of `text`, past a
+/// leading reply quote line the way the bartender reads it. A request can
+/// run over several lines, so the slur pass, which otherwise protects line
+/// by line, sets this span aside whole.
+pub fn remember_request_span(text: &str) -> Option<(usize, usize)> {
+    let start = match text.split_once('\n') {
+        Some((first, rest)) if first.trim().starts_with("> ") && !rest.trim().is_empty() => {
+            first.len() + 1
+        }
+        _ => 0,
+    };
+    let is_mention = |word: &str| {
+        word.trim_end_matches([',', ':'])
+            .strip_prefix('@')
+            .is_some_and(|name| !name.is_empty())
+    };
+    remember_split(&text[start..], is_mention).map(|(at, _)| (start + at, text.len()))
 }
 
 fn spaced_word_spans(text: &str, first: &str, second: &str) -> Vec<(usize, usize)> {
@@ -194,28 +254,41 @@ fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// Whether [`BartenderMemory::record`] kept the exchange.
+/// Whether [`BartenderMemory::record_exchange`] or
+/// [`BartenderMemory::record_requested`] kept the memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Recorded {
-    /// Stored, and this many older exchanges made room for it.
+    /// Stored, and this many older memories made room for it.
     Stored { evicted: usize },
-    /// The patron said "forget me" after ordering this one.
+    /// The patron said "forget me" after saying this one.
     Forgotten,
-    /// This order's exchange was already stored.
+    /// This message's memory was already stored.
     AlreadyStored,
 }
 
-/// One remembered exchange as the bartender's prompt reads it.
+/// One memory as the bartender's prompt reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BartenderMemory {
     pub id: Uuid,
+    /// When the patron said it.
     pub ordered_at: DateTime<Utc>,
-    pub remember: bool,
+    /// The order's whole body, or for a requested memory just what to
+    /// remember.
     pub order_body: String,
-    pub replied_at: DateTime<Utc>,
-    pub reply_body: String,
-    /// What the patron said after ordering, oldest first.
-    pub trailing_bodies: Vec<String>,
+    pub kind: MemoryKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MemoryKind {
+    /// An order he answered, kept on his own.
+    Exchange {
+        replied_at: DateTime<Utc>,
+        reply_body: String,
+        /// What the patron said after ordering, oldest first.
+        trailing_bodies: Vec<String>,
+    },
+    /// "@bartender remember ...".
+    Requested,
 }
 
 impl BartenderMemory {
@@ -226,37 +299,24 @@ impl BartenderMemory {
     /// nothing to the chat log afterwards.
     ///
     /// One transaction under the patron's lock, shared with
-    /// [`Self::forget`]: the reset check, the insert and the eviction all
-    /// read the same rows, so two exchanges settling together cannot both
-    /// see fifteen and leave seventeen.
-    pub async fn record(
+    /// [`Self::record_requested`] and [`Self::forget`]: the reset check, the
+    /// insert and the eviction all read the same rows, so two memories
+    /// settling together cannot both see fifteen and leave seventeen.
+    pub async fn record_exchange(
         client: &mut Client,
         order: &ChatMessage,
         reply: &ChatMessage,
-        remember: bool,
     ) -> Result<Recorded> {
         let user_id = order.user_id;
-        let tx = client.transaction().await?;
-        lock_patron(&tx, user_id).await?;
-
-        let forgotten = tx
-            .query_opt(
-                "SELECT 1 FROM bartender_memory_resets
-                 WHERE user_id = $1 AND reset_at >= $2",
-                &[&user_id, &order.created],
-            )
-            .await?
-            .is_some();
-        if forgotten {
+        let Some(tx) = open_unless_forgotten(client, user_id, order.created).await? else {
             return Ok(Recorded::Forgotten);
-        }
-
+        };
         let inserted = tx
             .execute(
                 "INSERT INTO bartender_memories
                      (user_id, order_message_id, ordered_at, order_body,
-                      replied_at, reply_body, trailing_bodies, remember)
-                 VALUES ($1, $2, $3, $4, $5, $6,
+                      requested, replied_at, reply_body, trailing_bodies)
+                 VALUES ($1, $2, $3, $4, false, $5, $6,
                      ARRAY(
                          SELECT t.body FROM chat_messages t
                          WHERE t.user_id = $1
@@ -265,8 +325,7 @@ impl BartenderMemory {
                            AND t.created <= $5::timestamptz + make_interval(secs => $8::double precision)
                          ORDER BY t.created, t.id
                          LIMIT $9
-                     ),
-                     $10)
+                     ))
                  ON CONFLICT (order_message_id) DO NOTHING",
                 &[
                     &user_id,
@@ -278,46 +337,40 @@ impl BartenderMemory {
                     &order.room_id,
                     &(TRAILING_WINDOW_SECS as f64),
                     &TRAILING_MESSAGE_CAP,
-                    &remember,
                 ],
             )
             .await?;
-        if inserted == 0 {
-            return Ok(Recorded::AlreadyStored);
-        }
+        settle(tx, user_id, inserted).await
+    }
 
-        let slots: Vec<MemorySlot> = tx
-            .query(
-                "SELECT id, remember FROM bartender_memories
-                 WHERE user_id = $1
-                 ORDER BY ordered_at DESC, id DESC",
-                &[&user_id],
-            )
-            .await?
-            .into_iter()
-            .map(|row| MemorySlot {
-                id: row.get("id"),
-                remember: row.get("remember"),
-            })
-            .collect();
-        let evicted = evictions(&slots);
-        if !evicted.is_empty() {
-            tx.execute(
-                "DELETE FROM bartender_memories WHERE id = ANY($1)",
-                &[&evicted],
+    /// Store `words`, what the patron asked to be remembered in `message`
+    /// (see [`remember_request`]). Under the same lock and reset check as
+    /// [`Self::record_exchange`].
+    pub async fn record_requested(
+        client: &mut Client,
+        message: &ChatMessage,
+        words: &str,
+    ) -> Result<Recorded> {
+        let user_id = message.user_id;
+        let Some(tx) = open_unless_forgotten(client, user_id, message.created).await? else {
+            return Ok(Recorded::Forgotten);
+        };
+        let inserted = tx
+            .execute(
+                "INSERT INTO bartender_memories
+                     (user_id, order_message_id, ordered_at, order_body, requested)
+                 VALUES ($1, $2, $3, $4, true)
+                 ON CONFLICT (order_message_id) DO NOTHING",
+                &[&user_id, &message.id, &message.created, &words],
             )
             .await?;
-        }
-        tx.commit().await?;
-        Ok(Recorded::Stored {
-            evicted: evicted.len(),
-        })
+        settle(tx, user_id, inserted).await
     }
 
     /// Wipe everything the bartender remembers about `user_id`, and refuse
-    /// any exchange ordered at or before `said_at` (the "forget me"
-    /// message's own time) that is still on its way in. Returns how many
-    /// exchanges were forgotten.
+    /// any memory said at or before `said_at` (the "forget me" message's
+    /// own time) that is still on its way in. Returns how many memories
+    /// were forgotten.
     pub async fn forget(client: &mut Client, user_id: Uuid, said_at: DateTime<Utc>) -> Result<u64> {
         let tx = client.transaction().await?;
         lock_patron(&tx, user_id).await?;
@@ -343,7 +396,7 @@ impl BartenderMemory {
     pub async fn list_for_user(client: &Client, user_id: Uuid) -> Result<Vec<Self>> {
         let rows = client
             .query(
-                "SELECT id, ordered_at, remember, order_body,
+                "SELECT id, ordered_at, order_body, requested,
                         replied_at, reply_body, trailing_bodies
                  FROM bartender_memories
                  WHERE user_id = $1
@@ -351,19 +404,80 @@ impl BartenderMemory {
                 &[&user_id],
             )
             .await?;
-        Ok(rows
-            .into_iter()
-            .map(|row| Self {
-                id: row.get("id"),
-                ordered_at: row.get("ordered_at"),
-                remember: row.get("remember"),
-                order_body: row.get("order_body"),
+        Ok(rows.iter().map(Self::from_row).collect())
+    }
+
+    fn from_row(row: &Row) -> Self {
+        let kind = if row.get("requested") {
+            MemoryKind::Requested
+        } else {
+            // The table's check guarantees an exchange memory its reply.
+            MemoryKind::Exchange {
                 replied_at: row.get("replied_at"),
                 reply_body: row.get("reply_body"),
                 trailing_bodies: row.get("trailing_bodies"),
-            })
-            .collect())
+            }
+        };
+        Self {
+            id: row.get("id"),
+            ordered_at: row.get("ordered_at"),
+            order_body: row.get("order_body"),
+            kind,
+        }
     }
+}
+
+/// The patron's transaction, under their lock, unless they said "forget
+/// me" at or after `said_at`.
+async fn open_unless_forgotten(
+    client: &mut Client,
+    user_id: Uuid,
+    said_at: DateTime<Utc>,
+) -> Result<Option<Transaction<'_>>> {
+    let tx = client.transaction().await?;
+    lock_patron(&tx, user_id).await?;
+    let forgotten = tx
+        .query_opt(
+            "SELECT 1 FROM bartender_memory_resets
+             WHERE user_id = $1 AND reset_at >= $2",
+            &[&user_id, &said_at],
+        )
+        .await?
+        .is_some();
+    Ok((!forgotten).then_some(tx))
+}
+
+/// After an insert of `inserted` rows: make room under the cap and commit.
+async fn settle(tx: Transaction<'_>, user_id: Uuid, inserted: u64) -> Result<Recorded> {
+    if inserted == 0 {
+        return Ok(Recorded::AlreadyStored);
+    }
+    let slots: Vec<MemorySlot> = tx
+        .query(
+            "SELECT id, requested FROM bartender_memories
+             WHERE user_id = $1
+             ORDER BY ordered_at DESC, id DESC",
+            &[&user_id],
+        )
+        .await?
+        .into_iter()
+        .map(|row| MemorySlot {
+            id: row.get("id"),
+            requested: row.get("requested"),
+        })
+        .collect();
+    let evicted = evictions(&slots);
+    if !evicted.is_empty() {
+        tx.execute(
+            "DELETE FROM bartender_memories WHERE id = ANY($1)",
+            &[&evicted],
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Recorded::Stored {
+        evicted: evicted.len(),
+    })
 }
 
 async fn lock_patron(tx: &Transaction<'_>, user_id: Uuid) -> Result<()> {
