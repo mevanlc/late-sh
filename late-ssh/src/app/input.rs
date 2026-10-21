@@ -993,12 +993,24 @@ fn handle_parsed_input_inner(app: &mut App, event: ParsedInput) {
     }
 
     if app.artboard_disclaimer_visible() {
-        // Page shortcuts leave without granting consent or entering the board.
+        // Page shortcuts and the Tab cycle leave without granting consent or
+        // entering the board.
         let byte = match event {
             ParsedInput::Byte(byte) => Some(byte),
             ParsedInput::Char(ch) if ch.is_ascii() => Some(ch as u8),
             _ => None,
         };
+        let cycled = match event {
+            ParsedInput::BackTab => Some(app.screen.prev()),
+            _ if byte == Some(b'\t') => Some(app.screen.next()),
+            _ => None,
+        };
+        if let Some(screen) = cycled {
+            reset_composers_for_page_change(app);
+            app.set_screen(screen);
+            app.chat.clear_message_selection();
+            return;
+        }
         if byte.is_some_and(|byte| handle_numbered_page_switch(app, byte)) {
             app.chat.clear_message_selection();
             return;
