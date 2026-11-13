@@ -16,6 +16,7 @@ pub mod readline;
 pub(crate) mod scroll_view;
 pub mod splash_tips;
 pub(crate) mod spoiler;
+pub(crate) mod text_layout;
 pub mod textarea_input;
 pub mod theme;
 pub mod time;
@@ -35,6 +36,9 @@ mod markdown_test;
 mod marquee_test;
 
 #[cfg(test)]
+mod overlay_test;
+
+#[cfg(test)]
 mod mentions_test;
 
 #[cfg(test)]
@@ -51,6 +55,9 @@ mod readline_test;
 
 #[cfg(test)]
 mod textarea_input_test;
+
+#[cfg(test)]
+mod text_layout_test;
 
 #[cfg(test)]
 mod time_test;

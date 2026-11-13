@@ -3,6 +3,8 @@
 //! row is laid out first (`lay_out`, pure) and the draw paints the window
 //! of rows that keeps the selected story in view.
 
+use crate::app::common::text_layout;
+
 use crate::app::chat::list_ui::{draw_mine_only_status, filtered_list_areas};
 use crate::app::chat::news::reader::state::domain_label;
 use crate::app::chat::news::state::is_unread;
@@ -22,7 +24,6 @@ use ratatui::{
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use unicode_width::UnicodeWidthStr;
 use uuid::Uuid;
 
 use late_core::models::article::{Article, ArticleFeedItem, NEWS_SHARE_REWARD_CHIPS};
@@ -287,7 +288,7 @@ fn compact_row(
         domain_label(&article.url),
         format_relative_time_short(article.created)
     );
-    let title_width = width.saturating_sub(GUTTER + UnicodeWidthStr::width(tail.as_str()));
+    let title_width = width.saturating_sub(GUTTER + text_layout::width(tail.as_str()));
     Line::from(vec![
         dot,
         Span::styled(
@@ -398,7 +399,7 @@ fn story_rows(
 /// News list's own colours (a bold dim amber label on `BORDER`).
 fn section_rule(label: &str, width: usize) -> ListRow {
     let lead = "━━ ";
-    let used = UnicodeWidthStr::width(lead) + UnicodeWidthStr::width(label) + 1;
+    let used = text_layout::width(lead) + text_layout::width(label) + 1;
     let tail = "━".repeat(width.saturating_sub(used));
     ListRow {
         line: Line::from(vec![
@@ -584,7 +585,7 @@ fn ascii_preview_if_fit(ascii_art: &str, target_width: usize, max_lines: usize) 
 
     let max_line_width = lines
         .iter()
-        .map(|line| UnicodeWidthStr::width(line.as_str()))
+        .map(|line| text_layout::width(line.as_str()))
         .max()
         .unwrap_or(0);
     if max_line_width > target_width {

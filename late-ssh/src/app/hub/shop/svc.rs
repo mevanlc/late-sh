@@ -845,7 +845,7 @@ impl ShopService {
                 {
                     format!(
                         "Rented {} ({})",
-                        result.item.name,
+                        crate::app::common::emoji::badge_presentation(&result.item.name),
                         duration_tag(rental_duration_secs(&result.item))
                     )
                 }
